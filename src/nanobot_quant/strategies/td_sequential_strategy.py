@@ -16,7 +16,6 @@ Usage::
 
 from __future__ import annotations
 
-import pandas as pd
 from lumibot.strategies.strategy import Strategy
 
 from nanobot_quant.strategies.td_sequential import calculate
@@ -43,9 +42,9 @@ class TdSequentialStrategy(Strategy):
         """Called once before the backtest starts (lumibot lifecycle)."""
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
         self.quantity = quantity or self.parameters.get("quantity", 10)
-        self._bars_consumed = 0       # count of bars processed
-        self._min_history = 50        # minimum bars TD Seq needs for meaningful signal
-        self.sleeptime = "1D"         # run once per trading day
+        self._bars_consumed = 0  # count of bars processed
+        self._min_history = 50  # minimum bars TD Seq needs for meaningful signal
+        self.sleeptime = "1D"  # run once per trading day
 
     def on_trading_iteration(self):
         """Called for each bar (trading day) during the backtest.
@@ -73,10 +72,12 @@ class TdSequentialStrategy(Strategy):
         self._bars_consumed += 1
 
         # ── 2. Ensure OHLCV columns ──
-        # lumibot returns columns like: open, high, low, close, volume (lowercase)
         col_map = {
-            "open": "Open", "high": "High", "low": "Low",
-            "close": "Close", "volume": "Volume",
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
         }
         for src, dst in col_map.items():
             if src in df.columns and dst not in df.columns:
@@ -94,7 +95,6 @@ class TdSequentialStrategy(Strategy):
         signal = calculate(df)
 
         # ── 4. Evaluate signals ──
-        recommendation = signal.get("recommendation", "HOLD")
         setup_buy = signal.get("setup_buy", 0) or 0
         setup_sell = signal.get("setup_sell", 0) or 0
         cd_buy = signal.get("cd_buy", 0) or 0
@@ -121,56 +121,3 @@ class TdSequentialStrategy(Strategy):
                 f"TD EXIT  | price={price:.2f} setup_sell={setup_sell} "
                 f"cd_sell={cd_sell}"
             )
-
-    # ── backtest entry point ──────────────────────────────────────
-
-    @classmethod
-    def run_backtest(
-        cls,
-        backtesting_data_source,
-        start,
-        end,
-        parameters: dict | None = None,
-        **kwargs,
-    ):
-        """Run a backtest and return the lumibot result object.
-
-        The result object has attributes like ``portfolio_value``,
-        ``cash``, ``cagr``, ``sharpe_ratio``, ``max_drawdown``, etc.
-        """
-        from lumibot.backtesting import BacktestingBroker
-
-        params = dict(cls.parameters)
-        if parameters:
-            params.update(parameters)
-
-        broker = BacktestingBroker(data_source=backtesting_data_source)
-        strategy = cls(
-            broker=broker,
-            parameters=params,
-            **kwargs,
-        )
-
-        result = strategy.backtest(
-            backtesting_data_source,
-            start,
-            end,
-            **kwargs,
-        )
-
-        # Print key metrics
-        print("\n" + "=" * 60)
-        print(f"  TD Sequential Backtest: {params.get('symbol', '?')}")
-        print(f"  Period: {start.date()} — {end.date()}")
-        print("=" * 60)
-        print(f"  Initial portfolio : ${strategy.initial_budget:,.2f}")
-        print(f"  Final portfolio   : ${result.portfolio_value:,.2f}")
-        print(f"  Total return      : {result.total_return * 100:+.2f}%")
-        print(f"  CAGR              : {result.cagr * 100:+.2f}%")
-        print(f"  Sharpe ratio      : {result.sharpe_ratio:.2f}")
-        print(f"  Max drawdown      : {result.max_drawdown.percentage * 100:.2f}%")
-        print(f"  Win rate          : {result.win_rate * 100:.1f}%")
-        print(f"  Total trades      : {result.total_trades}")
-        print("=" * 60 + "\n")
-
-        return result
