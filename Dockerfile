@@ -53,18 +53,19 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && echo "✅ whatsapp bridge"
 
 # ── 6. Quant dependencies ─────────────────────────────────
-ENV DEMARK_USE_RUST=false
-RUN echo "[bust=1]" && pip install --break-system-packages \
-        git+https://github.com/ggoni/demark-patterns.git \
-        lumibot \
+# NOTE: lumibot removed temporarily — heavy dependency tree takes ~15 min.
+#       demark-patterns needs Rust toolchain (not available on slim image).
+#       TD Sequential implemented in pure Python at nanobot_quant/strategies/.
+#       Will add back lumibot in Phase B1 strategy step.
+RUN echo "[bust=3]" && pip install --break-system-packages \
         yfinance \
         pandas \
         plotly \
-    && echo "✅ quant deps"
+    && echo "✅ quant deps (yfinance+pandas+plotly)"
 
 # ── 6b. nanobot-quant (strategies + risk + portfolio) ───
 RUN echo "[bust=1]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@main \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@main \
     && echo "✅ nanobot-quant"
 
 # ── 7. Reset marker ───────────────────────────────────────
