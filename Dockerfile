@@ -62,9 +62,9 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && echo "✅ whatsapp bridge"
 
 # ── 6. nanobot-quant (strategies + risk + portfolio + backtest) ──
-RUN echo "[bust=2]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@main \
-    && echo "✅ nanobot-quant"
+RUN echo "[bust=3]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@cb14a95 \
+    && echo "✅ nanobot-quant @cb14a95 (CD fork)"
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
