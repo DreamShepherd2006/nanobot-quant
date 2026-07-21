@@ -9,7 +9,7 @@ Usage::
     from nanobot_quant.strategies.td_sequential import calculate
 
     df = yf.download("AAPL", start="2025-01-01")
-    result = calculate(df)  # Returns DataFrame with all columns
+    result = calculate(df)  # Returns summary dict for latest bar
 """
 
 from __future__ import annotations
@@ -18,14 +18,47 @@ import numpy as np
 import pandas as pd
 
 
-def calculate(df: pd.DataFrame, news_count: int = 0) -> pd.DataFrame:
-    """Run all DeMark calculations on an OHLCV DataFrame.
+def calculate(df: pd.DataFrame, news_count: int = 0) -> dict:
+    """Run all DeMark calculations and return a summary for the latest bar.
 
     The input DataFrame must have columns: Open, High, Low, Close, Volume.
-    Returns the DataFrame with additional columns added in-place.
+    Handles yfinance MultiIndex columns (e.g., ('Close', 'AAPL')) by
+    flattening to single-level ('Close').
+
+    Returns a JSON-serializable dict with keys:
+    timestamp, price, recommendation, setup_buy, setup_sell,
+    cd_buy, cd_sell, tdst_support, tdst_resistance, rvol, score.
     """
+    # Flatten MultiIndex columns (yfinance returns ('Close','AAPL') etc.)
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.droplevel(1)
     engine = _DeMarkEngine(df)
-    return engine.run_all(news_count)
+    engine.run_all(news_count)
+
+    last = engine.df.iloc[-1]
+
+    def _scalar(val):
+        """Convert numpy/pandas scalar to Python native, NaN → None."""
+        try:
+            v = float(val)
+            return round(v, 2) if not np.isnan(v) else None
+        except (ValueError, TypeError):
+            return str(val)
+
+    return {
+        "timestamp": str(last.name),
+        "price": _scalar(last["Close"]),
+        "recommendation": str(last["recommendation"]),
+        "setup_buy": int(last["buy_setup_count"]),
+        "setup_sell": int(last["sell_setup_count"]),
+        "cd_buy": int(last["buy_countdown_count"]),
+        "cd_sell": int(last["sell_countdown_count"]),
+        "tdst_support": _scalar(last["tdst_support"]),
+        "tdst_resistance": _scalar(last["tdst_resistance"]),
+        "rvol": _scalar(last.get("rvol")),
+        "score": _scalar(last.get("combined_score")),
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
