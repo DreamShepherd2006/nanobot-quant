@@ -33,39 +33,35 @@ def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
     print("  Running... (this may take 30–60s for 1 year of daily data)")
     sys.stdout.flush()
 
-    result = TdSequentialStrategy.run_backtest(
+    out = TdSequentialStrategy.run_backtest(
         YahooDataBacktesting,
         start_dt,
         end_dt,
         parameters={"symbol": symbol, "quantity": quantity},
     )
 
-    # ── Extract metrics ──
-    total_return = float(result.total_return)
-    cagr = float(result.cagr)
-    try:
-        sharpe = float(result.sharpe_ratio)
-    except (AttributeError, TypeError):
-        sharpe = 0.0
-    try:
-        max_dd_pct = float(result.max_drawdown.percentage)
-    except (AttributeError, TypeError):
-        max_dd_pct = 0.0
-    try:
-        win_rate = float(result.win_rate)
-    except (AttributeError, TypeError):
-        win_rate = 0.0
+    # ── Unpack: lumibot returns (metrics_dict, strategy_instance) ──
+    if isinstance(out, tuple):
+        result, _strategy = out
+    else:
+        result = out
 
+    if not isinstance(result, dict):
+        print(f"ERROR: unexpected result type: {type(result)}")
+        print(f"Content: {result}")
+        return {"error": f"unexpected result type: {type(result)}"}
+
+    # ── Extract metrics from dict ──
     metrics = {
         "symbol": symbol,
         "start": start,
         "end": end,
-        "total_return_pct": round(total_return * 100, 2),
-        "cagr_pct": round(cagr * 100, 2),
-        "sharpe_ratio": round(sharpe, 2),
-        "max_drawdown_pct": round(max_dd_pct, 2),
-        "win_rate_pct": round(win_rate, 2),
-        "total_trades": int(getattr(result, "total_trades", 0)),
+        "total_return_pct": round(float(result.get("total_return", 0)) * 100, 2),
+        "cagr_pct": round(float(result.get("cagr", 0)) * 100, 2),
+        "sharpe_ratio": round(float(result.get("sharpe", 0)), 2),
+        "max_drawdown_pct": round(float(result.get("max_drawdown", {}).get("percentage", 0) if isinstance(result.get("max_drawdown"), dict) else 0), 2),
+        "win_rate_pct": round(float(result.get("win_rate", 0)), 2),
+        "total_trades": int(result.get("total_trades", 0)),
     }
 
     # ── Print ──
