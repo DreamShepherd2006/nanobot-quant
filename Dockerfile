@@ -2,7 +2,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 # ── 1. System: Node 20 + git ──────────────────────────────
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg git bubblewrap openssh-client && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg git bubblewrap openssh-client gcc g++ python3-dev && \
     mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
@@ -53,13 +53,11 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && echo "✅ whatsapp bridge"
 
 # ── 6. Quant dependencies ─────────────────────────────────
-# lumibot deferred due to pip resolver timeout on slim images;
-# TD Sequential uses pure-Python engine (no Rust toolchain needed).
-RUN echo "[bust=2]" && pip install --break-system-packages \
-        yfinance \
-        pandas \
-        plotly \
-    && echo "✅ quant deps"
+# ibapi (Interactive Brokers API) needs gcc/g++ to build from source.
+# lumibot pulls: yfinance, pandas, matplotlib, scipy, polars, plotly, etc.
+RUN echo "[bust=3]" && pip install --break-system-packages \
+        lumibot \
+    && echo "✅ lumibot + quant deps"
 
 # ── 6b. nanobot-quant (strategies + risk + portfolio) ───
 RUN echo "[bust=2]" && pip install --break-system-packages \
