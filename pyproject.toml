@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanobot-quant"
+version = "0.1.0"
+description = "AI 量化交易 Squad agent 部署层"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,8 @@
+sessions/
+memory/
+logs/
+cron/
+docs/
+__pycache__/
+*.egg-info/
+dist/
