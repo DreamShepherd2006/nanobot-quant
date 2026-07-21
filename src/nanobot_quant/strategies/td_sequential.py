@@ -22,8 +22,14 @@ def calculate(df: pd.DataFrame, news_count: int = 0) -> pd.DataFrame:
     """Run all DeMark calculations on an OHLCV DataFrame.
 
     The input DataFrame must have columns: Open, High, Low, Close, Volume.
+    Handles yfinance MultiIndex columns (e.g., ('Close', 'AAPL')) by
+    flattening to single-level ('Close').
     Returns the DataFrame with additional columns added in-place.
     """
+    # Flatten MultiIndex columns (yfinance returns ('Close','AAPL') etc.)
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.droplevel(1)
     engine = _DeMarkEngine(df)
     return engine.run_all(news_count)
 
