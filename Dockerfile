@@ -12,9 +12,18 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# ── 2. nanobot (Python only, webui from legion) ───────────
+# ── 2a. Quant: lumibot first (to pin deps before nanobot) ──
+# ibapi (Interactive Brokers API) needs gcc/g++ to build from source.
+# lumibot pulls: yfinance, pandas, matplotlib, scipy, polars, plotly, etc.
+RUN echo "[bust=4]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/lumibot.git@v4.5.78 \
+    && echo "✅ lumibot v4.5.78"
+
+# ── 2b. nanobot (force-reinstall to override lumibot conflicts) ──
+# lumibot downgrades pypdf→6.14.2 and websockets→15.0.1;
+# --force-reinstall restores nanobot's version constraints.
 ENV NANOBOT_SKIP_WEBUI_BUILD=1
-RUN pip install --break-system-packages \
+RUN pip install --break-system-packages --force-reinstall \
         git+https://github.com/DreamShepherd2006/nanobot.git@dbdb146f \
     && echo "✅ nanobot @dbdb146f"
 
@@ -52,14 +61,7 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && cd /app && rm -rf /app/bridge/node_modules \
     && echo "✅ whatsapp bridge"
 
-# ── 6. Quant dependencies ─────────────────────────────────
-# ibapi (Interactive Brokers API) needs gcc/g++ to build from source.
-# lumibot pulls: yfinance, pandas, matplotlib, scipy, polars, plotly, etc.
-RUN echo "[bust=3]" && pip install --break-system-packages \
-        lumibot \
-    && echo "✅ lumibot + quant deps"
-
-# ── 6b. nanobot-quant (strategies + risk + portfolio) ───
+# ── 6. nanobot-quant (strategies + risk + portfolio + backtest) ──
 RUN echo "[bust=2]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherd2006/nanobot-quant.git@main \
     && echo "✅ nanobot-quant"
