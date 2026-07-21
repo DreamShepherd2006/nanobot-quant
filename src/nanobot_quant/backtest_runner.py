@@ -51,7 +51,10 @@ def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
         print(f"Content: {result}")
         return {"error": f"unexpected result type: {type(result)}"}
 
-    # ── Extract metrics from dict ──
+    # ── Extract metrics from dict (lumibot v4.5.78 keys) ──
+    md = result.get("max_drawdown", {})
+    max_dd = float(md.get("drawdown", 0)) if isinstance(md, dict) else 0.0
+
     metrics = {
         "symbol": symbol,
         "start": start,
@@ -59,9 +62,10 @@ def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
         "total_return_pct": round(float(result.get("total_return", 0)) * 100, 2),
         "cagr_pct": round(float(result.get("cagr", 0)) * 100, 2),
         "sharpe_ratio": round(float(result.get("sharpe", 0)), 2),
-        "max_drawdown_pct": round(float(result.get("max_drawdown", {}).get("percentage", 0) if isinstance(result.get("max_drawdown"), dict) else 0), 2),
-        "win_rate_pct": round(float(result.get("win_rate", 0)), 2),
-        "total_trades": int(result.get("total_trades", 0)),
+        "volatility_pct": round(float(result.get("volatility", 0)) * 100, 2),
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "romad": round(float(result.get("romad", 0)), 2),
+        "_raw_keys": sorted(result.keys()),
     }
 
     # ── Print ──
@@ -70,10 +74,10 @@ def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
     print(f"{'='*60}")
     print(f"  Total Return      : {metrics['total_return_pct']:+.2f}%")
     print(f"  CAGR              : {metrics['cagr_pct']:+.2f}%")
-    print(f"  Sharpe Ratio      : {metrics['sharpe_ratio']:.2f}")
+    print(f"  Sharpe            : {metrics['sharpe_ratio']:.2f}")
+    print(f"  Volatility        : {metrics['volatility_pct']:.2f}%")
     print(f"  Max Drawdown      : {metrics['max_drawdown_pct']:.2f}%")
-    print(f"  Win Rate          : {metrics['win_rate_pct']:.1f}%")
-    print(f"  Total Trades      : {metrics['total_trades']}")
+    print(f"  RoMaD             : {metrics['romad']:.2f}")
     print(f"{'='*60}\n")
 
     # ── Save JSON ──
