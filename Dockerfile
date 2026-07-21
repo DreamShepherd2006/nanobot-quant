@@ -53,17 +53,16 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && echo "✅ whatsapp bridge"
 
 # ── 6. Quant dependencies ─────────────────────────────────
-ENV DEMARK_USE_RUST=false
-RUN echo "[bust=1]" && pip install --break-system-packages \
-        git+https://github.com/ggoni/demark-patterns.git \
-        lumibot \
+# lumibot deferred due to pip resolver timeout on slim images;
+# TD Sequential uses pure-Python engine (no Rust toolchain needed).
+RUN echo "[bust=2]" && pip install --break-system-packages \
         yfinance \
         pandas \
         plotly \
     && echo "✅ quant deps"
 
 # ── 6b. nanobot-quant (strategies + risk + portfolio) ───
-RUN echo "[bust=1]" && pip install --break-system-packages \
+RUN echo "[bust=2]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherd2006/nanobot-quant.git@main \
     && echo "✅ nanobot-quant"
 
