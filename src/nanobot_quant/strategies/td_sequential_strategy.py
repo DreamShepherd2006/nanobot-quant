@@ -34,16 +34,27 @@ class TdSequentialStrategy(Strategy):
     parameters = {
         "symbol": "AAPL",
         "quantity": 10,
+        "max_position_pct": 0.20,   # max % of portfolio in one position
+        "max_drawdown_pct": 0.15,   # skip new entries when drawdown > 15%
     }
 
     # ── lifecycle hooks ───────────────────────────────────────────
 
-    def initialize(self, symbol: str | None = None, quantity: int | None = None):
+    def initialize(
+        self,
+        symbol: str | None = None,
+        quantity: int | None = None,
+        max_position_pct: float | None = None,
+        max_drawdown_pct: float | None = None,
+    ):
         """Called once before the backtest starts (lumibot lifecycle)."""
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
         self.quantity = quantity or self.parameters.get("quantity", 10)
+        self._max_position_pct = max_position_pct or self.parameters.get("max_position_pct", 0.20)
+        self._max_drawdown_pct = max_drawdown_pct or self.parameters.get("max_drawdown_pct", 0.15)
         self._bars_consumed = 0  # count of bars processed
         self._min_history = 50  # minimum bars TD Seq needs for meaningful signal
+        self._peak_portfolio = None  # track peak for drawdown calc
         self.sleeptime = "1D"  # run once per trading day
 
     def on_trading_iteration(self):
@@ -104,13 +115,20 @@ class TdSequentialStrategy(Strategy):
 
         has_position = self.get_position(self.symbol) is not None
 
+        # ── Update peak portfolio for drawdown tracking ──
+        pv = self.portfolio_value
+        if self._peak_portfolio is None or pv > self._peak_portfolio:
+            self._peak_portfolio = pv
+
         # ── BUY signal: setup_buy >= 9, positive score, no position ──
         if setup_buy >= 9 and score > 0 and not has_position:
+            if not self._can_trade(price):
+                return
             order = self.create_order(self.symbol, self.quantity, "buy")
             self.submit_order(order)
             self.logger.info(
                 f"TD LONG  | price={price:.2f} setup_buy={setup_buy} "
-                f"score={score:.1f}"
+                f"score={score:.1f} peak={self._peak_portfolio:.0f}"
             )
 
         # ── SELL signal: setup_sell >= 9 OR cd_sell >= 13 ──
@@ -121,3 +139,30 @@ class TdSequentialStrategy(Strategy):
                 f"TD EXIT  | price={price:.2f} setup_sell={setup_sell} "
                 f"cd_sell={cd_sell}"
             )
+
+    # ── Risk & Portfolio Helpers ──────────────────────────────────
+
+    def _can_trade(self, price: float) -> bool:
+        """Risk guard: returns True if both position sizing and drawdown pass."""
+        pv = self.portfolio_value
+
+        # 1. Position sizing: new position <= max_position_pct% of portfolio
+        position_value = self.quantity * price
+        if position_value > pv * self._max_position_pct:
+            self.logger.info(
+                f"TD BLOCK (size) | pos=${position_value:.0f} > "
+                f"{self._max_position_pct*100:.0f}% of pv=${pv:.0f}"
+            )
+            return False
+
+        # 2. Max drawdown: skip entries when underwater by too much
+        peak = self._peak_portfolio or pv
+        dd = (peak - pv) / peak if peak > 0 else 0
+        if dd > self._max_drawdown_pct:
+            self.logger.info(
+                f"TD BLOCK (dd)   | drawdown={dd*100:.1f}% > "
+                f"{self._max_drawdown_pct*100:.0f}% peak={peak:.0f}"
+            )
+            return False
+
+        return True

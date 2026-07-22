@@ -21,7 +21,14 @@ from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 RESULTS_DIR = Path("/tmp/nanobot_quant_backtests")
 
 
-def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
+def run(
+    symbol: str,
+    start: str,
+    end: str,
+    quantity: int = 10,
+    max_position_pct: float = 0.20,
+    max_drawdown_pct: float = 0.15,
+) -> dict:
     """Run TD Sequential backtest and return metrics dict."""
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
@@ -29,6 +36,7 @@ def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
     print(f"\n{'='*60}")
     print(f"  TD Sequential Backtest")
     print(f"  Symbol: {symbol}  |  Period: {start} → {end}")
+    print(f"  Risk: max_pos={max_position_pct*100:.0f}% max_dd={max_drawdown_pct*100:.0f}%")
     print(f"{'='*60}")
     print("  Running... (this may take 30–60s for 1 year of daily data)")
     sys.stdout.flush()
@@ -37,7 +45,12 @@ def run(symbol: str, start: str, end: str, quantity: int = 10) -> dict:
         YahooDataBacktesting,
         start_dt,
         end_dt,
-        parameters={"symbol": symbol, "quantity": quantity},
+        parameters={
+            "symbol": symbol,
+            "quantity": quantity,
+            "max_position_pct": max_position_pct,
+            "max_drawdown_pct": max_drawdown_pct,
+        },
     )
 
     # ── Unpack: lumibot returns (metrics_dict, strategy_instance) ──
@@ -102,8 +115,10 @@ def main():
     start = sys.argv[2]
     end = sys.argv[3]
     quantity = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+    max_pos = float(sys.argv[5]) if len(sys.argv) > 5 else 0.20
+    max_dd = float(sys.argv[6]) if len(sys.argv) > 6 else 0.15
 
-    run(symbol, start, end, quantity)
+    run(symbol, start, end, quantity, max_pos, max_dd)
 
 
 if __name__ == "__main__":
