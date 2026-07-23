@@ -14,6 +14,7 @@ from typing import Any
 
 from nanobot_quant.aggregator import (
     AggregationResult,
+    AggregationStats,
     RoutedSignal,
     SignalAggregator,
 )
