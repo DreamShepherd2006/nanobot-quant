@@ -81,18 +81,21 @@ class RiskEngine:
     def check_stop_loss(
         self, current_price: float, entry_price: float
     ) -> RiskResult:
-        """Signal exit when unrealised loss exceeds ``stop_loss_pct``."""
+        """Signal exit when unrealised loss exceeds ``stop_loss_pct``.
+
+        Returns ``approved=False`` when stop-loss is triggered (danger).
+        """
         if entry_price <= 0:
             return RiskResult(False, "invalid entry price", "stop_loss")
         loss_pct = (entry_price - current_price) / entry_price
         if loss_pct >= self.stop_loss_pct:
             return RiskResult(
-                True,
+                False,
                 f"loss={loss_pct*100:.1f}% >= {self.stop_loss_pct*100:.0f}% "
                 f"(entry={entry_price:.2f} current={current_price:.2f})",
                 "stop_loss",
             )
-        return RiskResult(False, check_name="stop_loss")
+        return RiskResult(True, check_name="stop_loss")
 
     # ── composite gates ────────────────────────────────────────────
 
@@ -115,5 +118,10 @@ class RiskEngine:
     def should_exit(
         self, current_price: float, entry_price: float
     ) -> RiskResult:
-        """Run all exit guards. Returns the *first* trigger, or a pass result."""
-        return self.check_stop_loss(current_price, entry_price)
+        """Run all exit guards. Returns approved=True when an exit is required."""
+        result = self.check_stop_loss(current_price, entry_price)
+        if not result.approved:
+            return RiskResult(
+                True, result.reason, "should_exit",
+            )
+        return RiskResult(False, check_name="should_exit")
