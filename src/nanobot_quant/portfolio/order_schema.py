@@ -25,7 +25,18 @@ class OrderRequest:
     order_type: Literal["market", "limit", "stop"] = "market"
     price: float | None = None       # signal-price anchor (not limit price)
     reason: str = ""                  # human-readable rationale
+    id: str = ""                      # optional external ID (set by caller)
     metadata: dict = field(default_factory=dict)
+
+    def validate(self) -> bool:
+        """Basic sanity checks: valid symbol, positive qty, known action."""
+        if not self.asset or not self.asset.strip():
+            return False
+        if self.quantity <= 0:
+            return False
+        if self.action not in ("buy", "sell"):
+            return False
+        return True
 
     def to_dict(self) -> dict:
         d = {
@@ -51,5 +62,21 @@ class OrderResponse:
     action: str = ""
     status: Literal["pending", "filled", "cancelled", "rejected"] = "pending"
     filled_quantity: int = 0
-    avg_fill_price: float = 0.0
-    reason: str = ""
+    filled_price: float = 0.0
+    message: str = ""
+
+    @property
+    def success(self) -> bool:
+        return self.status == "filled"
+
+    @classmethod
+    def ok(cls, order_id: str, **kw) -> OrderResponse:
+        """Create a success response. Extra kwargs are silently dropped."""
+        fields = {"order_id", "asset", "action", "status", "filled_quantity",
+                  "filled_price", "message"}
+        filtered = {k: v for k, v in kw.items() if k in fields}
+        return cls(order_id=order_id, status="filled", **filtered)
+
+    @classmethod
+    def failure(cls, order_id: str, message: str) -> OrderResponse:
+        return cls(order_id=order_id, status="rejected", message=message)
