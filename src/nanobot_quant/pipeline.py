@@ -1,6 +1,7 @@
 """Analysis Pipeline — end-to-end Neo → Quant integration.
 
-Chains: yfinance data → TD Sequential → Risk checks → suggested Order.
+Chains: yfinance data → TD Sequential → Aggregator → Risk checks →
+suggested Order.
 
 Designed to be called as a quant-agent tool (no live strategy needed).
 """
@@ -11,6 +12,12 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
 
+from nanobot_quant.aggregator import (
+    AggregationResult,
+    AggregationStats,
+    RoutedSignal,
+    SignalAggregator,
+)
 from nanobot_quant.portfolio.order_schema import OrderRequest
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.signal_schema import SignalRequest, SignalResponse, TickerSignal
@@ -29,7 +36,7 @@ class AnalysisResult:
 
 
 class AnalysisPipeline:
-    """End-to-end analysis: Data → TD → Risk → Portfolio → Result.
+    """End-to-end analysis: Data → TD → Aggregator → Risk → Portfolio → Result.
 
     Example:
 
@@ -37,6 +44,11 @@ class AnalysisPipeline:
         results = pipeline.run(["AAPL", "TSLA"], period="6mo")
         for r in results:
             print(f"{r.ticker}: {'✅' if r.risk_passed else '❌'} {r.signal.recommendation}")
+
+        # With aggregation stats:
+        pipeline = AnalysisPipeline(use_aggregator=True)
+        results, agg = pipeline.run(["AAPL", "TSLA"], return_aggregation=True)
+        print(f"Signals: {agg.stats.total_input} → {agg.stats.routed} routed")
     """
 
     def __init__(
@@ -44,6 +56,7 @@ class AnalysisPipeline:
         max_position_pct: float = 0.20,
         max_drawdown_pct: float = 0.15,
         stop_loss_pct: float = 0.10,
+        use_aggregator: bool = False,
     ) -> None:
         self._risk = RiskEngine(
             max_position_pct=max_position_pct,
@@ -51,6 +64,7 @@ class AnalysisPipeline:
             stop_loss_pct=stop_loss_pct,
         )
         self.max_position_pct = max_position_pct
+        self._aggregator = SignalAggregator() if use_aggregator else None
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -59,17 +73,27 @@ class AnalysisPipeline:
         tickers: list[str],
         period: str = "6mo",
         portfolio_value: float = 100000.0,
-    ) -> list[AnalysisResult]:
+        return_aggregation: bool = False,
+    ) -> list[AnalysisResult] | tuple[list[AnalysisResult], AggregationResult]:
         """Run full pipeline for a list of tickers.
 
         Args:
             tickers: Stock symbols, e.g. ``["AAPL", "TSLA"]``.
             period: yfinance period string.
             portfolio_value: Hypothetical portfolio value for position-sizing.
+            return_aggregation: If ``True``, return ``(results, aggregation)`` tuple.
+
+        Returns:
+            ``list[AnalysisResult]`` by default, or ``(results, aggregation)``
+            when ``return_aggregation=True``.
         """
         import yfinance as yf
 
+        raw_signals: list[TickerSignal] = []
         results: list[AnalysisResult] = []
+        agg_result: AggregationResult | None = None
+
+        # ── Phase 1: collect raw signals ──
         for ticker in tickers:
             try:
                 df = yf.download(ticker, period=period, auto_adjust=True,
@@ -85,64 +109,96 @@ class AnalysisPipeline:
                     continue
 
                 signal = TickerSignal.from_calculate_result(ticker, td)
-                avg_price = signal.price or price
-
-                # ── Risk checks ──
-                risk_details: dict[str, str] = {}
-                risk_passed = True
-
-                # position limit via quantity calculation
-                if price > 0:
-                    qty = self._calculate_quantity(portfolio_value, price)
-                    position_value = price * qty
-                    pos_check = self._risk.check_position_limit(
-                        position_value=position_value,
-                        portfolio_value=portfolio_value,
-                    )
-                    risk_details["position_limit"] = "ok" if pos_check.approved else pos_check.reason
-                    if not pos_check.approved:
-                        risk_passed = False
-
-                # drawdown (always check — no position = no drawdown)
-                dd_check = self._risk.check_max_drawdown(
-                    portfolio_value=portfolio_value, peak_portfolio=portfolio_value,
-                )
-                risk_details["max_drawdown"] = "ok" if dd_check.approved else dd_check.reason
-                if not dd_check.approved:
-                    risk_passed = False
-
-                # stop-loss (no position → no trigger)
-                sl_check = self._risk.check_stop_loss(
-                    current_price=avg_price, entry_price=avg_price,
-                )
-                risk_details["stop_loss"] = "ok" if sl_check.approved else sl_check.reason
-                if not sl_check.approved:
-                    risk_passed = False
-
-                # ── Suggested order (only if all checks passed) ──
-                order: dict | None = None
-                if risk_passed and signal.recommendation in ("BUY", "SELL"):
-                    req = OrderRequest(
-                        asset=ticker,
-                        action="buy" if signal.recommendation == "BUY" else "sell",
-                        quantity=qty,
-                        order_type="market",
-                        price=price,
-                        reason=f"TD {signal.recommendation} setup_buy={signal.setup_buy} score={signal.score}",
-                    )
-                    order = req.to_dict()
-
-                results.append(AnalysisResult(
-                    ticker=ticker,
-                    signal=signal,
-                    risk_passed=risk_passed,
-                    risk_details=risk_details,
-                    suggested_order=order,
-                ))
+                raw_signals.append(signal)
             except Exception as exc:
                 results.append(self._empty(ticker, f"error: {exc}"))
 
-        return results
+        # ── Phase 2: aggregate (deduplicate, detect conflicts, sort) ──
+        if self._aggregator is not None and raw_signals:
+            agg_result = self._aggregator.aggregate(raw_signals)
+            to_check = agg_result.routed
+        elif raw_signals:
+            # No aggregator: wrap each signal as a clean RoutedSignal
+            to_check = [
+                RoutedSignal(ticker=s.ticker, signal=s)
+                for s in raw_signals
+            ]
+            agg_result = AggregationResult(
+                routed=to_check,
+                stats=AggregationStats(
+                    total_input=len(raw_signals), routed=len(raw_signals),
+                ),
+                conflicts=[],
+            )
+        else:
+            to_check = []
+            agg_result = AggregationResult(
+                routed=[],
+                stats=AggregationStats(total_input=0, routed=0),
+                conflicts=[],
+            )
+
+        # ── Phase 3: risk checks + order generation ──
+        for rt in to_check:
+            signal = rt.signal
+            avg_price = signal.price or 0.0
+            if not avg_price:
+                results.append(self._empty(rt.ticker, "no price"))
+                continue
+
+            risk_details: dict[str, str] = {}
+            risk_passed = True
+
+            if avg_price > 0:
+                qty = self._calculate_quantity(portfolio_value, avg_price)
+                position_value = avg_price * qty
+                pos_check = self._risk.check_position_limit(
+                    position_value=position_value,
+                    portfolio_value=portfolio_value,
+                )
+                risk_details["position_limit"] = "ok" if pos_check.approved else pos_check.reason
+                if not pos_check.approved:
+                    risk_passed = False
+
+            dd_check = self._risk.check_max_drawdown(
+                portfolio_value=portfolio_value, peak_portfolio=portfolio_value,
+            )
+            risk_details["max_drawdown"] = "ok" if dd_check.approved else dd_check.reason
+            if not dd_check.approved:
+                risk_passed = False
+
+            sl_check = self._risk.check_stop_loss(
+                current_price=avg_price, entry_price=avg_price,
+            )
+            risk_details["stop_loss"] = "ok" if sl_check.approved else sl_check.reason
+            if not sl_check.approved:
+                risk_passed = False
+
+            # ── Suggested order ──
+            order: dict | None = None
+            if risk_passed and signal.recommendation in ("BUY", "SELL"):
+                req = OrderRequest(
+                    asset=rt.ticker,
+                    action="buy" if signal.recommendation == "BUY" else "sell",
+                    quantity=qty,
+                    order_type="market",
+                    price=avg_price,
+                    reason=f"TD {signal.recommendation} setup_buy={signal.setup_buy} score={signal.score}",
+                )
+                if rt.conflict:
+                    req.reason += " ⚠️ CONFLICT"
+                order = req.to_dict()
+
+            results.append(AnalysisResult(
+                ticker=rt.ticker,
+                signal=signal,
+                risk_passed=risk_passed,
+                risk_details=risk_details,
+                suggested_order=order,
+            ))
+
+        if return_aggregation:
+            return results, agg_result
 
     def run_to_response(
         self, tickers: list[str], period: str = "6mo",
