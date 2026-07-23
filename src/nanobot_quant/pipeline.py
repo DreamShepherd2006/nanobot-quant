@@ -18,6 +18,14 @@ from nanobot_quant.aggregator import (
     RoutedSignal,
     SignalAggregator,
 )
+from nanobot_quant.event_bus import (
+    AllocationDecidedEvent,
+    EventBus,
+    OrderSubmittedEvent,
+    RiskCheckedEvent,
+    SignalCreatedEvent,
+    SignalRoutedEvent,
+)
 from nanobot_quant.portfolio.order_schema import OrderRequest
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.signal_schema import SignalRequest, SignalResponse, TickerSignal
@@ -57,6 +65,7 @@ class AnalysisPipeline:
         max_drawdown_pct: float = 0.15,
         stop_loss_pct: float = 0.10,
         use_aggregator: bool = False,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._risk = RiskEngine(
             max_position_pct=max_position_pct,
@@ -65,6 +74,7 @@ class AnalysisPipeline:
         )
         self.max_position_pct = max_position_pct
         self._aggregator = SignalAggregator() if use_aggregator else None
+        self._bus = event_bus
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -110,6 +120,8 @@ class AnalysisPipeline:
 
                 signal = TickerSignal.from_calculate_result(ticker, td)
                 raw_signals.append(signal)
+                if self._bus:
+                    self._bus.publish(SignalCreatedEvent(ticker=ticker, signal=signal))
             except Exception as exc:
                 results.append(self._empty(ticker, f"error: {exc}"))
 
@@ -142,16 +154,38 @@ class AnalysisPipeline:
         for rt in to_check:
             signal = rt.signal
             avg_price = signal.price or 0.0
+
+            # emit signal.routed event (after aggregation)
+            if self._bus:
+                score = signal.score or 0.0
+                self._bus.publish(SignalRoutedEvent(
+                    routed=rt, ticker=rt.ticker,
+                    recommendation=signal.recommendation,
+                    score=score, conflict=rt.conflict,
+                ))
+
             if not avg_price:
                 results.append(self._empty(rt.ticker, "no price"))
                 continue
 
             risk_details: dict[str, str] = {}
             risk_passed = True
+            qty = 0
 
             if avg_price > 0:
                 qty = self._calculate_quantity(portfolio_value, avg_price)
                 position_value = avg_price * qty
+
+                # emit allocation event
+                if self._bus:
+                    alloc_pct = (position_value / portfolio_value * 100) if portfolio_value else 0.0
+                    self._bus.publish(AllocationDecidedEvent(
+                        ticker=rt.ticker, quantity=qty,
+                        position_value=position_value,
+                        portfolio_value=portfolio_value,
+                        allocation_pct=round(alloc_pct, 2),
+                    ))
+
                 pos_check = self._risk.check_position_limit(
                     position_value=position_value,
                     portfolio_value=portfolio_value,
@@ -174,6 +208,13 @@ class AnalysisPipeline:
             if not sl_check.approved:
                 risk_passed = False
 
+            # emit risk event
+            if self._bus:
+                self._bus.publish(RiskCheckedEvent(
+                    ticker=rt.ticker, passed=risk_passed,
+                    details=risk_details,
+                ))
+
             # ── Suggested order ──
             order: dict | None = None
             if risk_passed and signal.recommendation in ("BUY", "SELL"):
@@ -189,6 +230,12 @@ class AnalysisPipeline:
                     req.reason += " ⚠️ CONFLICT"
                 order = req.to_dict()
 
+                if self._bus:
+                    self._bus.publish(OrderSubmittedEvent(
+                        order=req, ticker=rt.ticker,
+                        action=req.action, quantity=qty,
+                    ))
+
             results.append(AnalysisResult(
                 ticker=rt.ticker,
                 signal=signal,
@@ -199,6 +246,7 @@ class AnalysisPipeline:
 
         if return_aggregation:
             return results, agg_result
+        return results
 
     def run_to_response(
         self, tickers: list[str], period: str = "6mo",
@@ -206,6 +254,9 @@ class AnalysisPipeline:
     ) -> SignalResponse:
         """Run pipeline and return a :class:`SignalResponse` for Neo."""
         results = self.run(tickers, period, portfolio_value)
+        # handle both plain results and (results, agg) tuple
+        if isinstance(results, tuple):
+            results = results[0]
         signals = [r.signal for r in results]
         return SignalResponse(
             request_id="",
