@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from lumibot.strategies.strategy import Strategy
 
+from nanobot_quant.portfolio import PortfolioEngine
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.strategies.td_sequential import calculate
 
@@ -64,6 +65,13 @@ class TdSequentialStrategy(Strategy):
             max_drawdown_pct=max_drawdown_pct
             or self.parameters.get("max_drawdown_pct", 0.15),
             stop_loss_pct=self.parameters.get("stop_loss_pct", 0.10),
+        )
+
+        # Build PortfolioEngine for position sizing & order construction
+        self._portfolio = PortfolioEngine(
+            strategy=self,
+            max_position_pct=self._risk.max_position_pct,
+            default_quantity=self.quantity,
         )
 
     def on_trading_iteration(self):
@@ -139,11 +147,15 @@ class TdSequentialStrategy(Strategy):
             if not result.approved:
                 self.logger.info(f"TD BLOCK ({result.check_name}) | {result.reason}")
                 return
-            order = self.create_order(self.symbol, self.quantity, "buy")
-            self.submit_order(order)
+
+            req = self._portfolio.build_buy_order(
+                self.symbol, price,
+                f"TD LONG setup_buy={setup_buy} score={score:.1f}",
+            )
+            self._portfolio.submit_order(req)
             self.logger.info(
-                f"TD LONG  | price={price:.2f} setup_buy={setup_buy} "
-                f"score={score:.1f} peak={self._peak_portfolio:.0f}"
+                f"TD LONG  | price={price:.2f} qty={req.quantity} "
+                f"setup_buy={setup_buy} score={score:.1f}"
             )
 
         # ── SELL signal: setup_sell >= 9 OR cd_sell >= 13 OR stop-loss ──
@@ -164,10 +176,12 @@ class TdSequentialStrategy(Strategy):
                     exit_reason = f"stop_loss: {sl.reason}"
 
             if exit_reason:
-                order = self.create_order(self.symbol, self.quantity, "sell")
-                self.submit_order(order)
+                req = self._portfolio.build_sell_order(
+                    self.symbol, price, exit_reason,
+                )
+                self._portfolio.submit_order(req)
                 self.logger.info(
-                    f"TD EXIT  | price={price:.2f} {exit_reason}"
+                    f"TD EXIT  | price={price:.2f} qty={req.quantity} {exit_reason}"
                 )
 
 
