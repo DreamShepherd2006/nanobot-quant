@@ -131,6 +131,11 @@ class AnalysisPipeline:
             )
         else:
             to_check = []
+            agg_result = AggregationResult(
+                routed=[],
+                stats=AggregationStats(total_input=0, routed=0),
+                conflicts=[],
+            )
 
         # ── Phase 3: risk checks + order generation ──
         for rt in to_check:
@@ -191,9 +196,8 @@ class AnalysisPipeline:
                 suggested_order=order,
             ))
 
-        if return_aggregation and agg_result is not None:
+        if return_aggregation:
             return results, agg_result
-        return results
 
     def run_to_response(
         self, tickers: list[str], period: str = "6mo",
