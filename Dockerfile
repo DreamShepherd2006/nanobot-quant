@@ -37,10 +37,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=17]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@v0.1.0 \
+RUN echo "[bust=18]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-legion.git@accf18b \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion v0.1.0"
+    && echo "✅ nanobot-legion @accf18b (upstream staging)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
@@ -73,9 +73,9 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant (strategies + risk + portfolio + backtest) ──
-RUN echo "[bust=9]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@b199fa0 \
-    && echo "✅ nanobot-quant @b199fa0 (upstream main)"
+RUN echo "[bust=10]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@7ec8634 \
+    && echo "✅ nanobot-quant @7ec8634 (upstream main)"
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
