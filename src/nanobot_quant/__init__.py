@@ -11,3 +11,9 @@ __all__ = [
     "SignalResponse",
     "TickerSignal",
 ]
+
+# ── Trigger credential spec registration at import time ──────
+try:
+    from . import okx_spec  # noqa: F401
+except ImportError:
+    pass

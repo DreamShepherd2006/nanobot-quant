@@ -9,7 +9,9 @@ from typing import Optional
 
 # ── Default paths (checked in order) ──────────────────────────────
 _CREDENTIAL_PATHS = [
-    Path("/data/okx_credentials.json"),
+    Path("/data/credentials/okx.json"),  # preferred: credential_registry path
+    Path("/mnt/workspace/credentials/okx.json"),
+    Path("/data/okx_credentials.json"),  # legacy
     Path("/mnt/workspace/okx_credentials.json"),
 ]
 
