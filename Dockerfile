@@ -37,10 +37,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=17]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@v0.1.0 \
+RUN echo "[bust=18]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-legion.git@accf18b \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion v0.1.0"
+    && echo "✅ nanobot-legion @accf18b (upstream staging)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
@@ -62,20 +62,20 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && echo "✅ whatsapp bridge"
 
 # ── 5b. OnchainOS (OKX) CLI — MCP server for crypto market data ──
-# Binary from DreamShepherdCD fork (mirrors OKX official v4.3.1).
+# Mirror of OKX official v4.3.1.
 # SHA256: 31214c9bdeff283df66493c6391a01ddd57c67ee5167c8fd8f7db949e632e773
 RUN ONCHAINOS_VERSION="v4.3.1" \
     && ONCHAINOS_CHECKSUM="31214c9bdeff283df66493c6391a01ddd57c67ee5167c8fd8f7db949e632e773" \
-    && ONCHAINOS_URL="https://github.com/DreamShepherdCD/onchainos-skills/releases/download/${ONCHAINOS_VERSION}/onchainos-x86_64-unknown-linux-gnu" \
+    && ONCHAINOS_URL="https://github.com/DreamShepherd2006/onchainos-skills/releases/download/${ONCHAINOS_VERSION}/onchainos-x86_64-unknown-linux-gnu" \
     && curl -sSL "${ONCHAINOS_URL}" -o /usr/local/bin/onchainos \
     && echo "${ONCHAINOS_CHECKSUM}  /usr/local/bin/onchainos" | sha256sum -c - \
     && chmod +x /usr/local/bin/onchainos \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant (strategies + risk + portfolio + backtest) ──
-RUN echo "[bust=9]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@b199fa0 \
-    && echo "✅ nanobot-quant @b199fa0 (upstream main)"
+RUN echo "[bust=10]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@7ec8634 \
+    && echo "✅ nanobot-quant @7ec8634 (upstream main)"
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
