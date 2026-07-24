@@ -61,6 +61,17 @@ RUN NANOBOT_DIR=$(python3 -c "import nanobot, os; print(os.path.dirname(nanobot.
     && cd /app && rm -rf /app/bridge/node_modules \
     && echo "✅ whatsapp bridge"
 
+# ── 5b. OnchainOS (OKX) CLI — MCP server for crypto market data ──
+# Binary from DreamShepherdCD fork (mirrors OKX official v4.3.1).
+# SHA256: 31214c9bdeff283df66493c6391a01ddd57c67ee5167c8fd8f7db949e632e773
+RUN ONCHAINOS_VERSION="v4.3.1" \
+    && ONCHAINOS_CHECKSUM="31214c9bdeff283df66493c6391a01ddd57c67ee5167c8fd8f7db949e632e773" \
+    && ONCHAINOS_URL="https://github.com/DreamShepherdCD/onchainos-skills/releases/download/${ONCHAINOS_VERSION}/onchainos-x86_64-unknown-linux-gnu" \
+    && curl -sSL "${ONCHAINOS_URL}" -o /usr/local/bin/onchainos \
+    && echo "${ONCHAINOS_CHECKSUM}  /usr/local/bin/onchainos" | sha256sum -c - \
+    && chmod +x /usr/local/bin/onchainos \
+    && echo "✅ onchainos ${ONCHAINOS_VERSION}"
+
 # ── 6. nanobot-quant (strategies + risk + portfolio + backtest) ──
 RUN echo "[bust=9]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherd2006/nanobot-quant.git@b199fa0 \
