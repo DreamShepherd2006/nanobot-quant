@@ -2,8 +2,13 @@
 
 Usage::
 
+    # Yahoo Finance (stocks)
     python -m nanobot_quant.backtest_runner AAPL 2024-07-01 2025-07-01
     python -m nanobot_quant.backtest_runner --batch AAPL,TSLA,NVDA 2024-01-01 2025-01-01
+
+    # OnchainOS (crypto)
+    python -m nanobot_quant.backtest_runner --source onchainos WETH/USDC 2024-07-01 2025-07-01
+    python -m nanobot_quant.backtest_runner --source onchainos --batch WETH/USDC,WBTC/WETH 2024-01-01 2025-01-01
 
 Results are printed to stdout and saved as JSON.
 """
@@ -18,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lumibot.backtesting import YahooDataBacktesting
+from nanobot_quant.backtest_adapters import create_onchainos_backtesting
 from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 
 RESULTS_DIR = Path("/tmp/nanobot_quant_backtests")
@@ -30,20 +36,29 @@ def run(
     quantity: int = 10,
     max_position_pct: float = 0.20,
     max_drawdown_pct: float = 0.15,
+    source: str = "yahoo",
 ) -> dict:
     """Run TD Sequential backtest and return metrics dict."""
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
 
     print(f"\n{'='*60}")
-    print(f"  {symbol} | {start} → {end}")
+    print(f"  {symbol} | {start} → {end}  (source: {source})")
     print(f"{'='*60}")
     sys.stdout.flush()
 
+    if source == "onchainos":
+        data_source = create_onchainos_backtesting(symbol, start, end)
+        # Strategy needs base token (e.g. "WETH"), not pair ("WETH/USDC")
+        strategy_symbol = symbol.split("/")[0].strip()
+    else:
+        data_source = YahooDataBacktesting
+        strategy_symbol = symbol
+
     out = TdSequentialStrategy.run_backtest(
-        YahooDataBacktesting, start_dt, end_dt,
+        data_source, start_dt, end_dt,
         parameters={
-            "symbol": symbol, "quantity": quantity,
+            "symbol": strategy_symbol, "quantity": quantity,
             "max_position_pct": max_position_pct,
             "max_drawdown_pct": max_drawdown_pct,
         },
@@ -98,12 +113,13 @@ def batch_run(
     quantity: int = 10,
     max_position_pct: float = 0.20,
     max_drawdown_pct: float = 0.15,
+    source: str = "yahoo",
 ) -> list[dict]:
     """Run backtest for multiple symbols and return ranked results."""
     results: list[dict] = []
     for sym in symbols:
         try:
-            m = run(sym, start, end, quantity, max_position_pct, max_drawdown_pct)
+            m = run(sym, start, end, quantity, max_position_pct, max_drawdown_pct, source)
             results.append(m)
         except Exception as exc:
             results.append({"symbol": sym, "error": str(exc)})
@@ -206,15 +222,24 @@ def _extract_trade_stats(symbol: str) -> dict:
 # ── CLI ────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 4:
-        print("Usage: python -m nanobot_quant.backtest_runner SYMBOL START END [QUANTITY]")
-        print("       python -m nanobot_quant.backtest_runner --batch SYM1,SYM2,... START END")
+    source = "yahoo"
+    args = sys.argv[1:]
+
+    # Parse --source flag
+    if "--source" in args:
+        idx = args.index("--source")
+        source = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
+    if len(args) < 3:
+        print("Usage: python -m nanobot_quant.backtest_runner [--source yahoo|onchainos] SYMBOL START END [QUANTITY]")
+        print("       python -m nanobot_quant.backtest_runner [--source yahoo|onchainos] --batch SYM1,SYM2,... START END")
         sys.exit(1)
 
-    if sys.argv[1] == "--batch":
-        symbols = [s.strip().upper() for s in sys.argv[2].split(",")]
-        start, end = sys.argv[3], sys.argv[4]
-        results = batch_run(symbols, start, end)
+    if args[0] == "--batch":
+        symbols = [s.strip().upper() if source == "yahoo" else s.strip() for s in args[1].split(",")]
+        start, end = args[2], args[3]
+        results = batch_run(symbols, start, end, source=source)
         print(f"\n{format_report(results)}")
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         batch_path = RESULTS_DIR / "batch_{}_{}.json".format(
@@ -224,10 +249,10 @@ def main():
             json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"\nSaved: {batch_path}")
     else:
-        symbol = sys.argv[1].upper()
-        start, end = sys.argv[2], sys.argv[3]
-        quantity = int(sys.argv[4]) if len(sys.argv) > 4 else 10
-        result = run(symbol, start, end, quantity)
+        symbol = args[0].upper() if source == "yahoo" else args[0]
+        start, end = args[1], args[2]
+        quantity = int(args[3]) if len(args) > 3 else 10
+        result = run(symbol, start, end, quantity, source=source)
         if "error" not in result:
             print(f"\n{format_report(result)}")
 
