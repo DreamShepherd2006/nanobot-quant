@@ -15,4 +15,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-nanobot_quant = ["skills/**/*"]
+nanobot_quant = ["skills/**/*", "*.html"]
