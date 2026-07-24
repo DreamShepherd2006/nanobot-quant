@@ -7,13 +7,28 @@ import os
 from pathlib import Path
 from typing import Optional
 
-# ── Default paths (checked in order) ──────────────────────────────
-_CREDENTIAL_PATHS = [
-    Path("/data/credentials/okx.json"),  # preferred: credential_registry path
-    Path("/mnt/workspace/credentials/okx.json"),
-    Path("/data/okx_credentials.json"),  # legacy
-    Path("/mnt/workspace/okx_credentials.json"),
-]
+
+# ── Preferred credential path (delegates to credential_registry) ─
+def _get_credential_path() -> Path:
+    """Return the primary credential file path for OKX."""
+    from .credential_registry import _get_storage_dir
+    return Path(_get_storage_dir()) / "okx.json"
+
+
+# ── Discovery: preferred path + legacy fallbacks ──────────────────
+def _find_credential_file() -> Optional[Path]:
+    """Return the first existing credential file, or the preferred path."""
+    primary = _get_credential_path()
+    if primary.exists():
+        return primary
+    # Legacy fallbacks
+    for legacy in (
+        Path("/data/okx_credentials.json"),
+        Path("/mnt/workspace/okx_credentials.json"),
+    ):
+        if legacy.exists():
+            return legacy
+    return primary  # preferred path for writes
 
 
 def _find_credential_file() -> Optional[Path]:

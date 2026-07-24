@@ -15,8 +15,32 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # ── Storage path ────────────────────────────────────────────────
-# Override via CREDENTIAL_STORAGE_DIR env var for different platforms.
-CREDENTIAL_STORAGE_DIR = os.environ.get("CREDENTIAL_STORAGE_DIR", "/data/credentials")
+# Set via init_storage() at startup (called by gatekeeper with platform data_root).
+# Fallback path for non-gatekeeper contexts.
+_initialized_dir: Optional[str] = None
+
+
+def init_storage(data_root: str) -> None:
+    """Set credential storage directory. Called by gatekeeper at startup.
+
+    credentials live at ``{data_root}/credentials/`` (e.g. /data/legion/credentials/).
+    """
+    global _initialized_dir
+    _initialized_dir = os.path.join(data_root, "credentials")
+
+
+def _get_storage_dir() -> str:
+    """Return the active credential storage directory."""
+    if _initialized_dir:
+        return _initialized_dir
+    # Fallback: env override or platform-agnostic default
+    if d := os.environ.get("CREDENTIAL_STORAGE_DIR"):
+        return d
+    # Try known data roots
+    for root in ("/data/legion", "/mnt/workspace/legion"):
+        if os.path.isdir(root):
+            return os.path.join(root, "credentials")
+    return "/data/credentials"
 
 
 # ── Spec dataclasses ─────────────────────────────────────────────
@@ -77,8 +101,9 @@ def discover() -> dict[str, CredentialSpec]:
 
 def _credential_path(name: str) -> str:
     """Return the JSON file path for a named credential."""
-    os.makedirs(CREDENTIAL_STORAGE_DIR, exist_ok=True)
-    return os.path.join(CREDENTIAL_STORAGE_DIR, f"{name}.json")
+    d = _get_storage_dir()
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{name}.json")
 
 
 def read_credential(name: str) -> dict:
@@ -118,9 +143,10 @@ def is_configured(name: str) -> bool:
 def all_configured() -> dict[str, dict]:
     """Return all configured credentials as {name: data}."""
     result = {}
-    if not os.path.isdir(CREDENTIAL_STORAGE_DIR):
+    d = _get_storage_dir()
+    if not os.path.isdir(d):
         return result
-    for fname in os.listdir(CREDENTIAL_STORAGE_DIR):
+    for fname in os.listdir(d):
         if fname.endswith(".json"):
             name = fname[:-5]
             data = read_credential(name)

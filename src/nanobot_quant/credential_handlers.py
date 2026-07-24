@@ -149,9 +149,13 @@ async def credential_delete(request: Request) -> JSONResponse:
 
 def register_credential_routes(app, gatekeeper) -> None:
     """Register all credential management routes on the FastAPI app.
-    
+
     Called by gatekeeper_routes.py during app creation.
     """
+    # Initialize credential storage at platform data_root
+    from .credential_registry import init_storage
+    init_storage(gatekeeper._platform.data_root)
+
     try:
         specs = discover()
     except Exception:
