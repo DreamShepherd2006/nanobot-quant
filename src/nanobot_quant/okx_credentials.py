@@ -31,14 +31,6 @@ def _find_credential_file() -> Optional[Path]:
     return primary  # preferred path for writes
 
 
-def _find_credential_file() -> Optional[Path]:
-    """Return the first existing credential file, or the preferred path."""
-    for p in _CREDENTIAL_PATHS:
-        if p.exists():
-            return p
-    return _CREDENTIAL_PATHS[0]  # preferred path for writes
-
-
 def _read_credentials() -> dict:
     """Read OKX credentials from persistent file.  Returns empty dict on failure."""
     path = _find_credential_file()
@@ -58,7 +50,6 @@ def _write_credentials(data: dict) -> None:
     path = _find_credential_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
     tmp.replace(path)
     tmp.chmod(0o600)
