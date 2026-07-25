@@ -73,10 +73,25 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=11]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-quant.git@a25edb9 \
+RUN echo "[bust=12]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@bb7d93d \
         git+https://github.com/DreamShepherdCD/Vibe-Trading.git@v0.1.10 \
-    && echo "✅ nanobot-quant @a25edb9 (CD feat/vt-mcp) + vibe-trading @v0.1.10"
+    && echo "✅ nanobot-quant @bb7d93d (CD feat/vt-mcp) + vibe-trading @v0.1.10"
+
+# ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
+# backtest engines/base.py writes validation.json without mkdir,
+# causing FileNotFoundError on first swarm run.
+RUN python3 -c "
+import backtest, os
+p = os.path.join(os.path.dirname(backtest.__file__), 'engines', 'base.py')
+c = open(p).read()
+c = c.replace(
+    'v_path = run_dir / \"artifacts\" / \"validation.json\"\n            v_path.write_text',
+    'v_path = run_dir / \"artifacts\" / \"validation.json\"\n            v_path.parent.mkdir(parents=True, exist_ok=True)\n            v_path.write_text',
+)
+open(p, 'w').write(c)
+print('✅ patched backtest/engines/base.py')
+"
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
