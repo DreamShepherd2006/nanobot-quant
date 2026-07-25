@@ -38,9 +38,9 @@ RUN pip install --break-system-packages \
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
 RUN echo "[bust=18]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-legion.git@42deed8f \
+        git+https://github.com/DreamShepherdCD/nanobot-legion.git@912dbabf \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @42deed8f (CD staging)"
+    && echo "✅ nanobot-legion @912dbabf (CD staging)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
