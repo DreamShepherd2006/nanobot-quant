@@ -81,17 +81,7 @@ RUN echo "[bust=12]" && pip install --break-system-packages \
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
 # causing FileNotFoundError on first swarm run.
-RUN python3 -c "
-import backtest, os
-p = os.path.join(os.path.dirname(backtest.__file__), 'engines', 'base.py')
-c = open(p).read()
-c = c.replace(
-    'v_path = run_dir / \"artifacts\" / \"validation.json\"\n            v_path.write_text',
-    'v_path = run_dir / \"artifacts\" / \"validation.json\"\n            v_path.parent.mkdir(parents=True, exist_ok=True)\n            v_path.write_text',
-)
-open(p, 'w').write(c)
-print('✅ patched backtest/engines/base.py')
-"
+RUN python3 -c "import backtest,os; p=os.path.join(os.path.dirname(backtest.__file__),'engines','base.py'); c=open(p).read(); c=c.replace(\"v_path.write_text\",\"v_path.parent.mkdir(parents=True,exist_ok=True)\\n            v_path.write_text\"); open(p,'w').write(c); print('patched backtest/engines/base.py')"
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
