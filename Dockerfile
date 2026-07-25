@@ -78,18 +78,15 @@ RUN echo "[bust=11]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherdCD/Vibe-Trading.git@v0.1.10 \
     && echo "✅ nanobot-quant @a25edb9 (CD feat/vt-mcp) + vibe-trading @v0.1.10"
 
-# ── 6b. Pre-create .swarm dir (vibe-trading writes runs here, needs nanobot write access) ──
-RUN mkdir -p /usr/local/lib/python3.12/site-packages/.swarm/runs \
-    && chown -R nanobot:nanobot /usr/local/lib/python3.12/site-packages/.swarm \
-    && echo "✅ .swarm dir ready for nanobot"
-
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
 
-# ── 8. User ───────────────────────────────────────────────
+# ── 8. User + .swarm dir ──────────────────────────────────
 RUN useradd -m -u 1000 -s /bin/bash nanobot \
     && mkdir -p /home/nanobot/.nanobot \
-    && chown -R nanobot:nanobot /home/nanobot /app
+    && mkdir -p /usr/local/lib/python3.12/site-packages/.swarm/runs \
+    && chown -R nanobot:nanobot /home/nanobot /app /usr/local/lib/python3.12/site-packages/.swarm \
+    && echo "✅ .swarm dir ready for nanobot"
 
 USER nanobot
 ENV HOME=/home/nanobot \
