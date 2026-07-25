@@ -72,10 +72,11 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && chmod +x /usr/local/bin/onchainos \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
-# ── 6. nanobot-quant (strategies + risk + portfolio + backtest) ──
-RUN echo "[bust=10]" && pip install --break-system-packages \
+# ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
+RUN echo "[bust=11]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherd2006/nanobot-quant.git@7ec8634 \
-    && echo "✅ nanobot-quant @7ec8634 (upstream main)"
+        vibe-trading-ai \
+    && echo "✅ nanobot-quant @7ec8634 + vibe-trading-ai"
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini

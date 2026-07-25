@@ -47,3 +47,15 @@ okx_mcp = MCPSpec(
     env_from_credential="okx",
 )
 register(okx_mcp)
+
+
+# ── Vibe-Trading MCP server ────────────────────────────────────
+
+vt_mcp = MCPSpec(
+    name="vibe-trading",
+    display="Vibe-Trading",
+    command="vibe-trading-mcp",
+    args=[],
+    env_from_credential=None,
+)
+register(vt_mcp)
