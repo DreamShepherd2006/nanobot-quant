@@ -17,6 +17,12 @@ class MCPSpec:
     """Declares an MCP server to inject into agent configs.
 
     command + args form the `type: stdio` MCP server config.
+
+    env: static env vars passed to the MCP server process.
+    env_provider_keys: {ENV_VAR: provider_name} — resolved at sync
+        time by reading the target agent's provider config and
+        extracting apiKey, then injected into the MCP server env.
+
     env_from_credential points to a credential name registered via
     credential_registry; launch.sh reads that credential and exports
     the necessary environment variables before starting agents.
@@ -27,6 +33,8 @@ class MCPSpec:
     command: str
     args: list[str]
     env_from_credential: str | None = None
+    env: dict[str, str] | None = None
+    env_provider_keys: dict[str, str] | None = None
 
 
 def register(spec: MCPSpec) -> None:
@@ -56,6 +64,13 @@ vt_mcp = MCPSpec(
     display="Vibe-Trading",
     command="vibe-trading-mcp",
     args=[],
-    env_from_credential=None,
+    env={
+        "LANGCHAIN_PROVIDER": "deepseek",
+        "LANGCHAIN_MODEL_NAME": "deepseek-v4-pro",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+    },
+    env_provider_keys={
+        "DEEPSEEK_API_KEY": "deepseek",
+    },
 )
 register(vt_mcp)
