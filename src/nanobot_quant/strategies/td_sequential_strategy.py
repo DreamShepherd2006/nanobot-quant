@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from lumibot.strategies.strategy import Strategy
 
+from nanobot_quant.order_tracker import OrderTracker
 from nanobot_quant.portfolio import PortfolioEngine
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.strategies.td_sequential import calculate
@@ -73,6 +74,9 @@ class TdSequentialStrategy(Strategy):
             max_position_pct=self._risk.max_position_pct,
             default_quantity=self.quantity,
         )
+
+        # OrderTracker — links Signals to lumibot Orders
+        self.tracker = OrderTracker()
 
     def on_trading_iteration(self):
         """Called for each bar (trading day) during the backtest.
@@ -148,11 +152,21 @@ class TdSequentialStrategy(Strategy):
                 self.logger.info(f"TD BLOCK ({result.check_name}) | {result.reason}")
                 return
 
+            reason = f"TD LONG setup_buy={setup_buy} score={score:.1f}"
             req = self._portfolio.build_buy_order(
-                self.symbol, price,
-                f"TD LONG setup_buy={setup_buy} score={score:.1f}",
+                self.symbol, price, reason,
             )
-            self._portfolio.submit_order(req)
+            order = self._portfolio.submit_order(req)
+            if order is not None:
+                self.tracker.track(
+                    order_id=order.identifier,
+                    symbol=self.symbol,
+                    action="buy",
+                    quantity=req.quantity,
+                    tag=f"signal:td-buy:{setup_buy}:{score:.1f}",
+                    signal=signal,
+                    reason=reason,
+                )
             self.logger.info(
                 f"TD LONG  | price={price:.2f} qty={req.quantity} "
                 f"setup_buy={setup_buy} score={score:.1f}"
@@ -179,9 +193,47 @@ class TdSequentialStrategy(Strategy):
                 req = self._portfolio.build_sell_order(
                     self.symbol, price, exit_reason,
                 )
-                self._portfolio.submit_order(req)
+                order = self._portfolio.submit_order(req)
+                if order is not None:
+                    self.tracker.track(
+                        order_id=order.identifier,
+                        symbol=self.symbol,
+                        action="sell",
+                        quantity=req.quantity,
+                        tag=f"signal:td-sell:{exit_reason}",
+                        signal=signal,
+                        reason=exit_reason,
+                    )
                 self.logger.info(
                     f"TD EXIT  | price={price:.2f} qty={req.quantity} {exit_reason}"
                 )
+
+    # ── lumibot lifecycle hooks (delegated to tracker) ──
+
+    def on_new_order(self, order):
+        """Called by lumibot when a new order is created."""
+        super().on_new_order(order)
+        asset = order.asset if hasattr(order, 'asset') else getattr(order, 'symbol', '?')
+        self.tracker.track(
+            order_id=order.identifier,
+            symbol=str(asset),
+            action=str(order.side),
+            quantity=int(order.quantity),
+            status=str(getattr(order, 'status', 'new')),
+        )
+
+    def on_filled_order(self, position, order, price, quantity, multiplier):
+        """Called by lumibot when an order fills."""
+        super().on_filled_order(position, order, price, quantity, multiplier)
+        self.tracker.on_fill(
+            order_id=order.identifier,
+            filled_quantity=int(quantity),
+            filled_price=float(price),
+        )
+
+    def on_canceled_order(self, order):
+        """Called by lumibot when an order is cancelled."""
+        super().on_canceled_order(order)
+        self.tracker.on_cancel(order_id=order.identifier)
 
 
