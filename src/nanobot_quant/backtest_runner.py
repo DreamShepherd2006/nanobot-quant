@@ -75,8 +75,10 @@ def run(
     md = result.get("max_drawdown", {})
     max_dd = float(md.get("drawdown", 0)) if isinstance(md, dict) else 0.0
 
-    # ── Trade stats from CSV ──
-    trade_stats = _extract_trade_stats(symbol)
+    # ── Trade stats from tracker (preferred) or CSV fallback ──
+    trade_stats = _extract_trade_stats_from_tracker(_strategy)
+    if not trade_stats or trade_stats.get("total_trades", 0) == 0:
+        trade_stats = _extract_trade_stats(symbol)
 
     metrics = {
         "symbol": symbol,
@@ -259,3 +261,45 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ── trade stats from OrderTracker ─────────────────────────────────
+
+def _extract_trade_stats_from_tracker(strategy) -> dict:
+    """Extract trade stats from the strategy's OrderTracker."""
+    tracker = getattr(strategy, 'tracker', None)
+    if tracker is None:
+        return {}
+    trades = tracker.get_trades()
+    if not trades:
+        return {}
+
+    wins = [t.pnl for t in trades if t.pnl > 0]
+    losses = [t.pnl for t in trades if t.pnl <= 0]
+    total = len(trades)
+    return {
+        "total_trades": total,
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate_pct": round(len(wins) / total * 100, 1) if total else 0.0,
+        "total_pnl": round(sum(t.pnl for t in trades), 2),
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0.0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0.0,
+        "trades": [
+            {
+                "symbol": t.symbol,
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "entry_price": t.entry_price,
+                "exit_price": t.exit_price,
+                "quantity": t.quantity,
+                "pnl": t.pnl,
+                "pnl_pct": t.pnl_pct,
+                "entry_reason": t.entry_reason,
+                "exit_reason": t.exit_reason,
+            }
+            for t in trades
+        ],
+    }
+
+
+# ── helpers ────────────────────────────────────────────────────────
