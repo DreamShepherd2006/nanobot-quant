@@ -74,3 +74,18 @@ vt_mcp = MCPSpec(
     },
 )
 register(vt_mcp)
+
+
+# ── Signal Structurizer MCP server ──────────────────────────────
+
+signal_mcp = MCPSpec(
+    name="signal-structurizer",
+    display="Signal Structurizer",
+    command="python3",
+    args=["-m", "nanobot_quant.signal_mcp_server"],
+    env={},
+    env_provider_keys={
+        "DEEPSEEK_API_KEY": "deepseek",
+    },
+)
+register(signal_mcp)
