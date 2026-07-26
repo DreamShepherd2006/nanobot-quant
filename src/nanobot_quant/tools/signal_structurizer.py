@@ -28,17 +28,24 @@ Return ONLY a JSON object (no markdown, no code fences, no explanation):
 {{
   "ticker": "{ticker}",
   "recommendation": "BUY" | "SELL" | "HOLD",
-  "confidence": "brief label like 'Swarm Consensus' or 'Mixed'",
+  "confidence": "brief label, e.g. 'Strong Consensus', 'Mixed', 'Weak Signal'",
   "setup_buy": 0,
   "setup_sell": 0,
   "cd_buy": 0,
   "cd_sell": 0,
   "score": null,
-  "price": float or null,
-  "tdst_support": float or null,
-  "tdst_resistance": float or null,
+  "price": "the PM's recommended entry price as a float, or null if not stated",
+  "tdst_support": "the nearest support level mentioned as a float, or null",
+  "tdst_resistance": "the nearest resistance level mentioned as a float, or null",
   "rvol": null
 }}
+
+RULES:
+- recommendation MUST be exactly "BUY", "SELL", or "HOLD" (uppercase).
+- price: extract the final recommended entry price from the PM/consensus. If multiple prices are discussed, use the PM's final number. If no specific entry is given, use null.
+- tdst_support / tdst_resistance: map debate mentions of support/resistance levels. Use null if not discussed.
+- All TD fields (setup_buy, setup_sell, cd_buy, cd_sell, score, rvol) are ALWAYS 0 or null — these do not apply to swarm signals.
+- Output ONLY the JSON object, no surrounding text.
 """
 
 
