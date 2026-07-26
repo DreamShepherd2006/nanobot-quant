@@ -74,9 +74,9 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
 RUN echo "[bust=12]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-quant.git@bb7d93d \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@cacb916 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.10 \
-    && echo "✅ nanobot-quant @bb7d93d (CD feat/vt-mcp) + vibe-trading @v0.1.10 (upstream)"
+    && echo "✅ nanobot-quant @cacb916 (main, PR #16 merged) + vibe-trading @v0.1.10"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
