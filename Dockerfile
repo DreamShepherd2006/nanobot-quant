@@ -74,7 +74,7 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
 RUN echo "[bust=16]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-quant.git@d653ddf \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@52e8a3e \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.10 \
     && echo "✅ nanobot-quant @9943f8b (main, mcp-target-agents + squad-delegate spec) + vibe-trading @v0.1.10"
 
