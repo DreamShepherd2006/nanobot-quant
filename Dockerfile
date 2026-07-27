@@ -83,6 +83,13 @@ RUN echo "[bust=16]" && pip install --break-system-packages \
 # causing FileNotFoundError on first swarm run.
 RUN python3 -c "import backtest,os; p=os.path.join(os.path.dirname(backtest.__file__),'engines','base.py'); c=open(p).read(); c=c.replace(\"v_path.write_text\",\"v_path.parent.mkdir(parents=True,exist_ok=True)\\n            v_path.write_text\"); open(p,'w').write(c); print('patched backtest/engines/base.py')"
 
+# ── 6c. Patch Vibe-Trading: inject OnchainOS enrichment into grounding ──
+# Adds chain-level data (real-time price, holder distribution, token risk)
+# to the grounding block that VT injects into every swarm worker's system
+# prompt. OnchainOS failures are swallowed gracefully — swarm runs proceed
+# with OHLCV-only + warning.
+RUN python3 -m nanobot_quant.patches.patch_vt_grounding
+
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
 
