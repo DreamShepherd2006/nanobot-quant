@@ -32,6 +32,7 @@ class MCPSpec:
     display: str
     command: str
     args: list[str]
+    target_agents: list[str] | None = None
     env_from_credential: str | None = None
     env: dict[str, str] | None = None
     env_provider_keys: dict[str, str] | None = None
@@ -52,6 +53,7 @@ okx_mcp = MCPSpec(
     display="OnchainOS (OKX)",
     command="/usr/local/bin/onchainos",
     args=["mcp"],
+    target_agents=["neo", "quant", "vt_research"],
     env_from_credential="okx",
 )
 register(okx_mcp)
@@ -64,6 +66,7 @@ vt_mcp = MCPSpec(
     display="Vibe-Trading",
     command="vibe-trading-mcp",
     args=[],
+    target_agents=["vt_research"],
     env={
         "LANGCHAIN_PROVIDER": "deepseek",
         "LANGCHAIN_MODEL_NAME": "deepseek-v4-pro",
@@ -83,6 +86,7 @@ signal_mcp = MCPSpec(
     display="Signal Structurizer",
     command="python3",
     args=["-m", "nanobot_quant.tools.signal_structurizer"],
+    target_agents=["vt_research"],
     env_provider_keys={
         "DEEPSEEK_API_KEY": "deepseek",
     },
