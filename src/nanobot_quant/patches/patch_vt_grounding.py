@@ -32,8 +32,11 @@ ENRICHMENT_CODE = '''
 # -- OnchainOS enrichment (added by nanobot-quant patch_vt_grounding) --
 
 import json as _json
-import subprocess as _subprocess
+import logging as _logging
 import os as _os
+import subprocess as _subprocess
+
+_enrich_log = _logging.getLogger("vt.enrich.onchainos")
 
 def _onchainos(*args, timeout=15):
     try:
@@ -70,10 +73,13 @@ def _extract_symbols(user_vars):
 
 def _fetch_onchainos_data(user_vars):
     symbols = _extract_symbols(user_vars)
+    _enrich_log.info("onchainos enrich: extracted symbols=%s", symbols)
     if not symbols:
+        _enrich_log.info("onchainos enrich: no symbols, skipping")
         return {}
 
     onchainos_avail = _os.path.exists("/usr/local/bin/onchainos")
+    _enrich_log.info("onchainos enrich: CLI available=%s", onchainos_avail)
     result = {}
 
     for sym in symbols:
@@ -82,12 +88,14 @@ def _fetch_onchainos_data(user_vars):
 
         if not onchainos_avail:
             entry["error"] = "onchainos CLI not found"
+            _enrich_log.warning("onchainos enrich: %s -> %s", base, entry["error"])
             result[base] = entry
             continue
 
         addr = _token_address(base)
         if not addr:
             entry["error"] = "token not found on chain"
+            _enrich_log.warning("onchainos enrich: %s -> %s", base, entry["error"])
             result[base] = entry
             continue
         entry["address"] = addr
@@ -108,9 +116,17 @@ def _fetch_onchainos_data(user_vars):
         if data:
             entry["ok"] = True
             entry["data"] = data
+            _enrich_log.info(
+                "onchainos enrich: %s ok price=%s holders=%s risk=%s",
+                base,
+                data.get("price", "?"),
+                "yes" if data.get("holders") else "no",
+                "yes" if data.get("risk") else "no",
+            )
         else:
             entry["error"] = "no data returned"
             entry["data"] = {}
+            _enrich_log.warning("onchainos enrich: %s -> %s", base, entry["error"])
 
         result[base] = entry
 
@@ -119,9 +135,14 @@ def _fetch_onchainos_data(user_vars):
 
 def _format_onchainos_block(onchainos_data):
     if not onchainos_data:
+        _enrich_log.info("onchainos enrich: format skipped (empty data)")
         return ""
 
     all_failed = all(not v["ok"] for v in onchainos_data.values())
+    _enrich_log.info(
+        "onchainos enrich: formatting block symbols=%d all_failed=%s",
+        len(onchainos_data), all_failed,
+    )
     sections = []
 
     header = (
@@ -183,7 +204,12 @@ def _format_onchainos_block(onchainos_data):
             "on-chain context."
         )
 
-    return "\\n\\n".join(sections)
+    block = "\\n\\n".join(sections)
+    _enrich_log.info(
+        "onchainos enrich: formatted block len=%d preview=%.150r",
+        len(block), block,
+    )
+    return block
 '''
 
 
@@ -229,7 +255,15 @@ def _patch_runtime() -> None:
         '                "OnchainOS enrichment failed for run %s", run_id, exc_info=True\n'
         "            )\n"
         "        if _onchainos_block:\n"
-        '            grounding_block = grounding_block + "\\n\\n" + _onchainos_block'
+        "            logger.info(\n"
+        "                'onchainos enrich: appended %d chars to grounding block for run %s',\n"
+        "                len(_onchainos_block), run_id,\n"
+        "            )\n"
+        '            grounding_block = grounding_block + "\\n\\n" + _onchainos_block\n'
+        "        else:\n"
+        "            logger.info(\n"
+        "                'onchainos enrich: no block generated for run %s', run_id\n"
+        "            )"
     )
 
     content = content.replace(old, new)
