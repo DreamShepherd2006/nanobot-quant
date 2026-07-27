@@ -41,7 +41,7 @@ _enrich_log = _logging.getLogger("vt.enrich.onchainos")
 def _onchainos(*args, timeout=15):
     try:
         r = _subprocess.run(
-            ["/usr/local/bin/onchainos", *args],
+            ["/usr/local/bin/onchainos", "--format", "json", *args],
             capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode != 0:
@@ -52,22 +52,31 @@ def _onchainos(*args, timeout=15):
 
 
 def _token_address(symbol):
-    result = _onchainos("token", "search", symbol, "--limit", "1")
+    result = _onchainos("token", "search", "--query", symbol, "--limit", "1")
     if result:
-        items = result.get("items") or result.get("data") or []
+        items = result if isinstance(result, list) else result.get("items") or result.get("data") or []
         if isinstance(items, list) and items:
-            addr = items[0].get("address") or items[0].get("token_address")
+            addr = items[0].get("tokenContractAddress") or items[0].get("address")
             if addr:
                 return addr
     return None
 
 
 def _extract_symbols(user_vars):
-    """Extract symbols from user_vars dict (keys: target, market)."""
+    """Extract bare token names from user_vars dict, stripping trading pair suffixes."""
     symbols = []
-    target = user_vars.get("target", "").strip()
-    if target:
-        symbols.append(target.upper())
+    target = user_vars.get("target", "").strip().upper()
+    if not target:
+        return symbols
+    # Strip trading pair suffixes: BTC-USDT → BTC, ETH-USD → ETH
+    for suffix in ("-USDT", "-USD", "-USDC"):
+        if target.endswith(suffix):
+            target = target[:-len(suffix)]
+            break
+    # Strip stock suffix: SPCX.US → SPCX
+    base = target.split(".")[0]
+    if base:
+        symbols.append(base)
     return symbols
 
 
@@ -103,15 +112,24 @@ def _fetch_onchainos_data(user_vars):
         data = {}
         price = _onchainos("market", "price", "--address", addr)
         if price:
-            data["price"] = price.get("price") or price.get("usdPrice")
+            data["price"] = price.get("price", "?")
 
         holders = _onchainos("token", "holders", "--address", addr)
         if holders:
             data["holders"] = holders
 
-        risk = _onchainos("token", "risk", "--address", addr)
+        risk = _onchainos("token", "advanced-info", "--address", addr)
         if risk:
-            data["risk"] = risk
+            data["risk"] = {
+                "risk_level": risk.get("riskControlLevel", "?"),
+                "top10_pct": risk.get("top10HoldPercent", "?"),
+                "dev_pct": risk.get("devHoldingPercent", "?"),
+                "bundle_pct": risk.get("bundleHoldingPercent", "?"),
+                "suspicious_pct": risk.get("suspiciousHoldingPercent", "?"),
+                "snipers": risk.get("snipersTotal", "?"),
+                "creator_rugs": risk.get("devRugPullTokenCount", "?"),
+                "creator_tokens": risk.get("devCreateTokenCount", "?"),
+            }
 
         if data:
             entry["ok"] = True
@@ -173,27 +191,32 @@ def _format_onchainos_block(onchainos_data):
                 lines.append(f"- **Real-time price:** {price}")
 
         holders = d.get("holders")
-        if isinstance(holders, dict):
-            total = (holders.get("total") or holders.get("holderCount")
-                     or holders.get("holders"))
-            if total is not None:
-                lines.append(f"- **Holder addresses:** {total}")
-            top10 = holders.get("top10Ratio") or holders.get("top10Percent")
-            if top10 is not None:
-                try:
-                    lines.append(f"- **Top-10 concentration:** {float(top10) * 100:.1f}%")
-                except (TypeError, ValueError):
-                    lines.append(f"- **Top-10 concentration:** {top10}")
+        if isinstance(holders, list) and holders:
+            # Holders response is an array of individual holder entries
+            lines.append(f"- **Holder entries tracked:** {len(holders)}")
+            top_hold = sum(
+                float(h.get("holdPercent", 0)) for h in holders[:10]
+                if isinstance(h, dict)
+            )
+            if top_hold:
+                lines.append(f"- **Top-10 hold%:** {top_hold:.1f}%")
 
         risk = d.get("risk")
         if isinstance(risk, dict):
-            level = (risk.get("level") or risk.get("riskLevel")
-                     or risk.get("result"))
-            if level is not None:
-                lines.append(f"- **Safety scan:** {level}")
-            flags = risk.get("flags") or risk.get("warnings") or []
-            if isinstance(flags, list) and flags:
-                lines.append(f"- **Risk flags:** {', '.join(str(f) for f in flags)}")
+            levels = {"0": "Unknown", "1": "Low", "2": "Medium", "3": "Med-High", "4": "High"}
+            rl = risk.get("risk_level", "?")
+            lines.append(f"- **Risk level:** {levels.get(str(rl), rl)}")
+            for key, label in [
+                ("top10_pct", "Top-10 hold"), ("dev_pct", "Dev hold"),
+                ("bundle_pct", "Bundle hold"), ("suspicious_pct", "Suspicious hold"),
+            ]:
+                val = risk.get(key)
+                if val and val != "?":
+                    lines.append(f"- **{label}:** {val}%")
+            if risk.get("snipers", "?") != "?":
+                lines.append(f"- **Snipers:** {risk['snipers']}")
+            if risk.get("creator_rugs", "?") != "?":
+                lines.append(f"- **Creator rug-pulls:** {risk['creator_rugs']}/{risk.get('creator_tokens', '?')}")
 
         sections.append("\\n".join(lines))
 
