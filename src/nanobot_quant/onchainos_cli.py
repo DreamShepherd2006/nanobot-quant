@@ -35,12 +35,12 @@ def _run(*args, timeout: int = 15) -> Optional[dict | list]:
 
 # ── Token ─────────────────────────────────────────────────────────
 
-def search_token(query: str, *, limit: int = 1) -> Optional[str]:
+def search_token(query: str) -> Optional[str]:
     """Search for a token by name/symbol and return its contract address.
 
     Returns None if not found or CLI unavailable.
     """
-    result = _run("token", "search", "--query", query, "--limit", str(limit))
+    result = _run("token", "search", "--query", query)
     if not result:
         return None
     items = result if isinstance(result, list) else result.get("items") or []
@@ -60,12 +60,15 @@ def get_advanced_info(address: str) -> Optional[dict]:
     return _run("token", "advanced-info", "--address", address)
 
 
-def get_holders(address: str, *, limit: int = 100) -> Optional[list]:
+def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
     """Get top token holders with amounts and PnL.
 
-    Returns list of holder dicts or None on failure.
+    Returns list of holder dicts (top 100 by default) or None on failure.
     """
-    return _run("token", "holders", "--address", address, "--limit", str(limit))
+    args: list[str] = ["--address", address]
+    if include_pnl:
+        args.append("--pnl")
+    return _run("token", "holders", *args)
 
 
 # ── Market ────────────────────────────────────────────────────────
