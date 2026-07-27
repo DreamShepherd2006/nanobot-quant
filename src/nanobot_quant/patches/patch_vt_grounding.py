@@ -59,8 +59,17 @@ def _token_address(symbol):
     return None
 
 
+def _extract_symbols(user_vars):
+    """Extract symbols from user_vars dict (keys: target, market)."""
+    symbols = []
+    target = user_vars.get("target", "").strip()
+    if target:
+        symbols.append(target.upper())
+    return symbols
+
+
 def _fetch_onchainos_data(user_vars):
-    symbols = extract_symbols(user_vars)
+    symbols = _extract_symbols(user_vars)
     if not symbols:
         return {}
 
