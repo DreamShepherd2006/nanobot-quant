@@ -31,124 +31,73 @@ def _find_vt_file(relative: str) -> str:
 ENRICHMENT_CODE = '''
 # -- OnchainOS enrichment (added by nanobot-quant patch_vt_grounding) --
 
-import json as _json
 import logging as _logging
 import os as _os
-import subprocess as _subprocess
 
 _enrich_log = _logging.getLogger("vt.enrich.onchainos")
 
-def _onchainos(*args, timeout=15):
-    try:
-        r = _subprocess.run(
-            ["/usr/local/bin/onchainos", "--format", "json", *args],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        if r.returncode != 0:
-            return None
-        return _json.loads(r.stdout) if r.stdout.strip() else None
-    except Exception:
-        return None
-
-
-def _token_address(symbol):
-    result = _onchainos("token", "search", "--query", symbol, "--limit", "1")
-    if result:
-        items = result if isinstance(result, list) else result.get("items") or result.get("data") or []
-        if isinstance(items, list) and items:
-            addr = items[0].get("tokenContractAddress") or items[0].get("address")
-            if addr:
-                return addr
-    return None
-
-
-def _extract_symbols(user_vars):
-    """Extract bare token names from user_vars dict, stripping trading pair suffixes."""
-    symbols = []
-    target = user_vars.get("target", "").strip().upper()
-    if not target:
-        return symbols
-    # Strip trading pair suffixes: BTC-USDT → BTC, ETH-USD → ETH
-    for suffix in ("-USDT", "-USD", "-USDC"):
-        if target.endswith(suffix):
-            target = target[:-len(suffix)]
-            break
-    # Strip stock suffix: SPCX.US → SPCX
-    base = target.split(".")[0]
-    if base:
-        symbols.append(base)
-    return symbols
+try:
+    from nanobot_quant.onchainos_cli import (
+        extract_symbol as _extract_symbol,
+        format_risk_level as _format_risk_level,
+        get_advanced_info as _get_advanced_info,
+        get_holders as _get_holders,
+        get_price as _get_price,
+        search_token as _search_token,
+    )
+    _HAS_SHARED = True
+except ImportError:
+    _enrich_log.warning("onchainos enrich: nanobot_quant.onchainos_cli not available")
+    _HAS_SHARED = False
 
 
 def _fetch_onchainos_data(user_vars):
-    symbols = _extract_symbols(user_vars)
-    _enrich_log.info("onchainos enrich: extracted symbols=%s", symbols)
-    if not symbols:
-        _enrich_log.info("onchainos enrich: no symbols, skipping")
+    """Enrich swarm run with onchain data from the shared CLI module."""
+    if not _HAS_SHARED:
+        return {}
+
+    symbol = _extract_symbol(user_vars)
+    _enrich_log.info("onchainos enrich: extracted symbol=%s", symbol)
+    if not symbol:
+        _enrich_log.info("onchainos enrich: no symbol, skipping")
         return {}
 
     onchainos_avail = _os.path.exists("/usr/local/bin/onchainos")
     _enrich_log.info("onchainos enrich: CLI available=%s", onchainos_avail)
-    result = {}
+    if not onchainos_avail:
+        return {symbol: {"ok": False, "error": "onchainos CLI not found",
+                         "address": "", "data": {}}}
 
-    for sym in symbols:
-        base = sym.split(".")[0] if "." in sym else sym
-        entry = {"ok": False, "error": "", "address": "", "data": {}}
+    addr = _search_token(symbol)
+    if not addr:
+        _enrich_log.warning("onchainos enrich: %s -> token not found on chain", symbol)
+        return {symbol: {"ok": False, "error": "token not found on chain",
+                         "address": "", "data": {}}}
 
-        if not onchainos_avail:
-            entry["error"] = "onchainos CLI not found"
-            _enrich_log.warning("onchainos enrich: %s -> %s", base, entry["error"])
-            result[base] = entry
-            continue
+    data = {}
+    price_val = _get_price(addr)
+    if price_val:
+        data["price"] = price_val
+        _enrich_log.info("onchainos enrich: %s price=%s", symbol, price_val)
 
-        addr = _token_address(base)
-        if not addr:
-            entry["error"] = "token not found on chain"
-            _enrich_log.warning("onchainos enrich: %s -> %s", base, entry["error"])
-            result[base] = entry
-            continue
-        entry["address"] = addr
+    holders = _get_holders(addr)
+    if holders:
+        data["holders"] = holders
+        _enrich_log.info("onchainos enrich: %s holders=%d", symbol, len(holders))
 
-        data = {}
-        price = _onchainos("market", "price", "--address", addr)
-        if price:
-            data["price"] = price.get("price", "?")
+    risk_raw = _get_advanced_info(addr)
+    if risk_raw:
+        data["risk"] = _format_risk_level(risk_raw)
+        _enrich_log.info("onchainos enrich: %s risk=ok", symbol)
 
-        holders = _onchainos("token", "holders", "--address", addr)
-        if holders:
-            data["holders"] = holders
+    ok = bool(data)
+    if ok:
+        _enrich_log.info("onchainos enrich: %s complete", symbol)
+    else:
+        _enrich_log.warning("onchainos enrich: %s -> no data returned", symbol)
 
-        risk = _onchainos("token", "advanced-info", "--address", addr)
-        if risk:
-            data["risk"] = {
-                "risk_level": risk.get("riskControlLevel", "?"),
-                "top10_pct": risk.get("top10HoldPercent", "?"),
-                "dev_pct": risk.get("devHoldingPercent", "?"),
-                "bundle_pct": risk.get("bundleHoldingPercent", "?"),
-                "suspicious_pct": risk.get("suspiciousHoldingPercent", "?"),
-                "snipers": risk.get("snipersTotal", "?"),
-                "creator_rugs": risk.get("devRugPullTokenCount", "?"),
-                "creator_tokens": risk.get("devCreateTokenCount", "?"),
-            }
-
-        if data:
-            entry["ok"] = True
-            entry["data"] = data
-            _enrich_log.info(
-                "onchainos enrich: %s ok price=%s holders=%s risk=%s",
-                base,
-                data.get("price", "?"),
-                "yes" if data.get("holders") else "no",
-                "yes" if data.get("risk") else "no",
-            )
-        else:
-            entry["error"] = "no data returned"
-            entry["data"] = {}
-            _enrich_log.warning("onchainos enrich: %s -> %s", base, entry["error"])
-
-        result[base] = entry
-
-    return result
+    return {symbol: {"ok": ok, "error": "" if ok else "no data returned",
+                     "address": addr, "data": data}}
 
 
 def _format_onchainos_block(onchainos_data):
