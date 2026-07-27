@@ -92,3 +92,15 @@ signal_mcp = MCPSpec(
     },
 )
 register(signal_mcp)
+
+
+# ── Squad Delegate MCP server ────────────────────────────────────
+
+squad_del_mcp = MCPSpec(
+    name="squad-delegate",
+    display="Squad Delegate",
+    command="python3",
+    args=["-m", "nanobot_legion.tools.squad_delegate"],
+    target_agents=["neo"],
+)
+register(squad_del_mcp)
