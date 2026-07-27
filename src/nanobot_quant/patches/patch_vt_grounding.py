@@ -20,8 +20,10 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 def _find_vt_file(relative: str) -> str:
     """Locate a VT source file under site-packages."""
-    grounding_mod = __import__("src.swarm.grounding")
-    base = os.path.dirname(os.path.dirname(os.path.abspath(grounding_mod.__file__)))
+    import importlib as _importlib
+    grounding_mod = _importlib.import_module("src.swarm.grounding")
+    # grounding_mod.__file__ → .../site-packages/src/swarm/grounding.py
+    base = os.path.dirname(os.path.abspath(grounding_mod.__file__))
     return os.path.join(base, relative)
 
 
@@ -177,7 +179,7 @@ def _format_onchainos_block(onchainos_data):
 
 
 def _patch_grounding() -> None:
-    grounding_path = _find_vt_file("swarm/grounding.py")
+    grounding_path = _find_vt_file("grounding.py")
 
     with open(grounding_path, "r") as f:
         content = f.read()
@@ -195,7 +197,7 @@ def _patch_grounding() -> None:
 
 
 def _patch_runtime() -> None:
-    runtime_path = _find_vt_file("swarm/runtime.py")
+    runtime_path = _find_vt_file("runtime.py")
 
     with open(runtime_path, "r") as f:
         content = f.read()
