@@ -248,3 +248,125 @@ def fetch_ticker(ticker: str, *, session: Optional[requests.Session] = None) -> 
         "low24h": float(d.get("low24h", 0)),
         "vol24h": float(d.get("vol24h", 0)),
     }
+
+
+def fetch_kline_range(
+    ticker: str,
+    start: str,
+    end: str,
+    bar: str = "1D",
+    *,
+    session: Optional[requests.Session] = None,
+) -> pd.DataFrame:
+    """Fetch OHLCV data for a date range via pagination.
+
+    OKX returns at most 300 candles per request.  This function paginates
+    backwards from ``end`` to ``start`` to build a continuous range.
+
+    Parameters
+    ----------
+    ticker:
+        Ticker symbol (auto-prefixed for stocks, e.g. ``"AAPL"`` → ``"XAAPL-USDT"``).
+    start:
+        Start date as ISO string (``"2024-01-01"``).
+    end:
+        End date as ISO string (``"2024-12-31"``).
+    bar:
+        Bar size.  Default ``"1D"``.
+    session:
+        Optional ``requests.Session``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Same format as :func:`fetch_kline`.  Sorted oldest→newest.
+    """
+    bar_okx = _BAR_MAP.get(bar)
+    if bar_okx is None:
+        raise ValueError(f"Unsupported bar size: {bar!r}")
+
+    inst_id = _to_inst_id(ticker)
+    start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
+    end_ms = int(end_dt.timestamp() * 1000)
+
+    _sess = session or requests
+    url = f"{_BASE_URL}{_CANDLES_PATH}"
+
+    frames: list[pd.DataFrame] = []
+    before = end_ms
+
+    while True:
+        time.sleep(_RATE_DELAY)
+        params: dict = {
+            "instId": inst_id,
+            "bar": bar_okx,
+            "limit": 300,
+            "before": before,
+        }
+        resp = _sess.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        if payload.get("code") != "0":
+            msg = payload.get("msg", "unknown error")
+            raise requests.RequestException(
+                f"OKX API error (code={payload.get('code')}): {msg}"
+            )
+
+        batch = payload.get("data", [])
+        if not batch:
+            break
+
+        rows: list[dict] = []
+        earliest_ts: Optional[int] = None
+        for entry in batch:
+            try:
+                ts_ms = int(entry[0])
+                ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                if ts < start_dt:
+                    # Reached the start — collect partial batch then stop
+                    continue
+                rows.append({
+                    "ts": ts,
+                    "Open": float(entry[1]),
+                    "High": float(entry[2]),
+                    "Low": float(entry[3]),
+                    "Close": float(entry[4]),
+                    "Volume": float(entry[5]),
+                })
+                if earliest_ts is None or ts_ms < earliest_ts:
+                    earliest_ts = ts_ms
+            except (IndexError, ValueError, TypeError) as exc:
+                logger.debug("Skipping malformed candle: %s — %s", entry, exc)
+                continue
+
+        if rows:
+            df = pd.DataFrame(rows).set_index("ts")
+            frames.append(df)
+
+        if batch and len(batch) < 300:
+            # Fewer than max — no more data available
+            break
+
+        if earliest_ts is None or earliest_ts <= int(start_dt.timestamp() * 1000):
+            break
+
+        before = earliest_ts
+
+    if not frames:
+        logger.warning("fetch_kline_range(%s): no data %s→%s", inst_id, start, end)
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+    result = pd.concat(frames)
+    result.sort_index(inplace=True)
+    result = result[~result.index.duplicated(keep="first")]
+
+    logger.info(
+        "fetch_kline_range(%s, %s): %d bars, %s → %s",
+        inst_id, bar, len(result),
+        result.index[0].strftime("%Y-%m-%d") if len(result) else "N/A",
+        result.index[-1].strftime("%Y-%m-%d") if len(result) else "N/A",
+    )
+
+    return result

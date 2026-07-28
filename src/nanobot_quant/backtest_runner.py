@@ -10,6 +10,10 @@ Usage::
     python -m nanobot_quant.backtest_runner --source onchainos WETH/USDC 2024-07-01 2025-07-01
     python -m nanobot_quant.backtest_runner --source onchainos --batch WETH/USDC,WBTC/WETH 2024-01-01 2025-01-01
 
+    # OKX CEX (tokenized stocks & crypto)
+    python -m nanobot_quant.backtest_runner --source okx_cex XSPCX 2025-07-01 2026-07-01
+    python -m nanobot_quant.backtest_runner --source okx_cex --batch XSPCX,XMETA,XAAPL 2025-07-01 2026-07-01
+
 Results are printed to stdout and saved as JSON.
 """
 
@@ -23,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lumibot.backtesting import YahooDataBacktesting
-from nanobot_quant.backtest_adapters import create_onchainos_backtesting
+from nanobot_quant.backtest_adapters import create_onchainos_backtesting, create_okx_cex_backtesting
 from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 
 RESULTS_DIR = Path("/tmp/nanobot_quant_backtests")
@@ -51,6 +55,9 @@ def run(
         data_source = create_onchainos_backtesting(symbol, start, end)
         # Strategy needs base token (e.g. "WETH"), not pair ("WETH/USDC")
         strategy_symbol = symbol.split("/")[0].strip()
+    elif source == "okx_cex":
+        data_source = create_okx_cex_backtesting(symbol, start, end)
+        strategy_symbol = symbol
     else:
         data_source = YahooDataBacktesting
         strategy_symbol = symbol
@@ -234,8 +241,8 @@ def main():
         args = args[:idx] + args[idx + 2:]
 
     if len(args) < 3:
-        print("Usage: python -m nanobot_quant.backtest_runner [--source yahoo|onchainos] SYMBOL START END [QUANTITY]")
-        print("       python -m nanobot_quant.backtest_runner [--source yahoo|onchainos] --batch SYM1,SYM2,... START END")
+        print("Usage: python -m nanobot_quant.backtest_runner [--source yahoo|onchainos|okx_cex] SYMBOL START END [QUANTITY]")
+        print("       python -m nanobot_quant.backtest_runner [--source yahoo|onchainos|okx_cex] --batch SYM1,SYM2,... START END")
         sys.exit(1)
 
     if args[0] == "--batch":
