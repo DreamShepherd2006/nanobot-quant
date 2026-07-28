@@ -37,10 +37,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=22]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@a10d1ad \
+RUN echo "[bust=23]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-legion.git@9f9def1e \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @a10d1ad (upstream staging, squad_delegate MCP + enforce_mode)"
+    && echo "✅ nanobot-legion @9f9def1e (CD fork staging, run_research_swarm MCP tool)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
@@ -73,15 +73,22 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=16]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@9943f8b \
-        git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.10 \
-    && echo "✅ nanobot-quant @9943f8b (main, mcp-target-agents + squad-delegate spec) + vibe-trading @v0.1.10"
+RUN echo "[bust=17]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@f9938a2 \
+        git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.11 \
+    && echo "✅ nanobot-quant @f9938a2 (CD feat/mcp-target-agents, onchainos CLI fix) + vibe-trading @v0.1.11"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
 # causing FileNotFoundError on first swarm run.
 RUN python3 -c "import backtest,os; p=os.path.join(os.path.dirname(backtest.__file__),'engines','base.py'); c=open(p).read(); c=c.replace(\"v_path.write_text\",\"v_path.parent.mkdir(parents=True,exist_ok=True)\\n            v_path.write_text\"); open(p,'w').write(c); print('patched backtest/engines/base.py')"
+
+# ── 6c. Patch Vibe-Trading: inject OnchainOS enrichment into grounding ──
+# Adds chain-level data (real-time price, holder distribution, token risk)
+# to the grounding block that VT injects into every swarm worker's system
+# prompt. OnchainOS failures are swallowed gracefully — swarm runs proceed
+# with OHLCV-only + warning.
+RUN python3 -m nanobot_quant.patches.patch_vt_grounding
 
 # ── 7. Reset marker ───────────────────────────────────────
 RUN echo "PURGE_OAUTH=0" > /app/reset-setup.ini
