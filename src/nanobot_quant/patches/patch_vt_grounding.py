@@ -182,6 +182,122 @@ def _format_onchainos_block(onchainos_data):
         len(block), block,
     )
     return block
+
+
+# -- OKX CEX enrichment (added by nanobot-quant patch_vt_grounding) --
+
+import logging as _cex_log
+
+_cex_logger = _cex_log.getLogger("vt.enrich.okx_cex")
+
+
+def _fetch_okx_cex_data(user_vars):
+    """Enrich swarm run with OKX CEX market data."""
+    try:
+        from nanobot_quant.okx_cex_data import fetch_order_book as _fetch_ob, fetch_ticker as _fetch_t
+    except ImportError:
+        _cex_logger.warning("OKX CEX enrich: nanobot_quant.okx_cex_data not available")
+        return {}
+
+    sym = user_vars.get("symbol", "").upper()
+    if not sym:
+        return {}
+
+    result = {}
+    try:
+        ticker = _fetch_t(sym, timeout=10)
+        if ticker:
+            result["ticker"] = {
+                "last": ticker.get("last"),
+                "bid": ticker.get("bid"),
+                "ask": ticker.get("ask"),
+                "high24h": ticker.get("high24h"),
+                "low24h": ticker.get("low24h"),
+                "vol24h": ticker.get("vol24h"),
+            }
+            _cex_logger.info("OKX CEX enrich: %s ticker ok", sym)
+    except Exception as exc:
+        _cex_logger.warning("OKX CEX enrich: %s ticker failed — %s", sym, exc)
+
+    try:
+        ob = _fetch_ob(sym, depth=5)
+        if ob:
+            result["order_book"] = {
+                "best_bid": ob["best_bid"],
+                "best_ask": ob["best_ask"],
+                "spread_pct": ob["spread_pct"],
+                "bid_depth": ob["bid_depth"],
+                "ask_depth": ob["ask_depth"],
+            }
+            _cex_logger.info("OKX CEX enrich: %s order book ok spread=%.4f%%", sym, ob["spread_pct"])
+    except Exception as exc:
+        _cex_logger.warning("OKX CEX enrich: %s order book failed — %s", sym, exc)
+
+    return {sym: {"ok": bool(result), "data": result}} if result else {}
+
+
+def _format_okx_cex_block(cex_data):
+    """Format OKX CEX data as a Markdown block for the grounding prompt."""
+    if not cex_data:
+        return ""
+
+    all_failed = all(not v["ok"] for v in cex_data.values())
+    sections = []
+
+    header = (
+        "## OKX CEX Market Data\\n\\n"
+        "**Live order book & ticker data from OKX CEX (USDT pair).** "
+        "Reflects real traded prices with unified order book depth. "
+        "Use this to assess liquidity, spread, and intraday range "
+        "alongside the OHLCV table above."
+    )
+    sections.append(header)
+
+    for sym, entry in cex_data.items():
+        if not entry["ok"]:
+            sections.append(
+                f"### {sym}\\n"
+                f"\\u26a0\\ufe0f **OKX CEX data unavailable.** "
+                f"Liquidity analysis limited to OHLCV only."
+            )
+            continue
+
+        d = entry["data"]
+        lines = [f"### {sym}"]
+
+        ticker = d.get("ticker", {})
+        if ticker:
+            last = ticker.get("last")
+            if last:
+                lines.append(f"- **Last price:** ${last:,.2f}")
+            vol = ticker.get("vol24h", 0)
+            if vol:
+                lines.append(f"- **24h volume:** {vol:,.0f} USDT")
+            hi, lo = ticker.get("high24h"), ticker.get("low24h")
+            if hi and lo:
+                rng = ((hi - lo) / lo * 100) if lo else 0
+                lines.append(f"- **24h range:** ${lo:,.2f} – ${hi:,.2f} ({rng:+.1f}%)")
+
+        ob = d.get("order_book", {})
+        if ob:
+            spread = ob.get("spread_pct")
+            if spread is not None:
+                lines.append(f"- **Bid/Ask spread:** {spread:.3f}%")
+            bid_d = ob.get("bid_depth")
+            ask_d = ob.get("ask_depth")
+            if bid_d and ask_d:
+                lines.append(f"- **Depth (5 levels):** Bid {bid_d:,.0f} USDT / Ask {ask_d:,.0f} USDT")
+
+        sections.append("\\n".join(lines))
+
+    if all_failed:
+        sections.append(
+            "\\n\\u26a0\\ufe0f **OKX CEX data temporarily unavailable.** "
+            "Analysis based on OHLCV only."
+        )
+
+    block = "\\n\\n".join(sections)
+    return block
 '''
 
 
@@ -192,7 +308,16 @@ def _patch_grounding() -> None:
         content = f.read()
 
     if "_fetch_onchainos_data" in content:
-        logger.info("grounding.py: already patched, skipping")
+        if "_fetch_okx_cex_data" in content:
+            logger.info("grounding.py: already patched (onchainos + cex), skipping")
+            return
+        # onchainos exists but CEX is missing — full re-append
+        # (duplicate onchainos definitions are harmless — last wins)
+        logger.info("grounding.py: onchainos found, CEX missing — re-appending full patch")
+        content = content.rstrip("\n") + "\n" + ENRICHMENT_CODE
+        with open(grounding_path, "w") as f:
+            f.write(content)
+        logger.info("grounding.py: patched (okx cex enrichment functions added)")
         return
 
     content = content.rstrip("\n") + "\n" + ENRICHMENT_CODE
@@ -209,15 +334,28 @@ def _patch_runtime() -> None:
     with open(runtime_path, "r") as f:
         content = f.read()
 
-    if "_onchainos_block" in content:
-        logger.info("runtime.py: already patched, skipping")
+    if "_onchainos_block" in content and "_cex_block" in content:
+        logger.info("runtime.py: already patched (onchainos + cex), skipping")
         return
 
+    # Remove any partial onchainos-only block, then inject combined block
+    if "_onchainos_block" in content:
+        # Strip the old onchainos-only block (find and remove it)
+        old_flag = "# OnchainOS enrichment: fetch chain-level data and append to prompt"
+        new_flag = "# OnchainOS + OKX CEX enrichment: fetch data and append to prompt"
+        content = content.replace(old_flag, new_flag)
+        logger.info("runtime.py: updated flag to combined enrichment")
+
+    # Always re-apply the full combined block at the anchor point
     old = "        grounding_block = grounding.format_grounding_block(run.grounding_data or {})"
+    if old not in content:
+        logger.warning("runtime.py: anchor not found — may already be fully patched")
+        return
+
     new = (
         "        grounding_block = grounding.format_grounding_block(run.grounding_data or {})\n"
         "\n"
-        "        # OnchainOS enrichment: fetch chain-level data and append to prompt\n"
+        "        # OnchainOS + OKX CEX enrichment: fetch data and append to prompt\n"
         '        _onchainos_block = ""\n'
         "        try:\n"
         "            _onchainos_data = grounding._fetch_onchainos_data(run.user_vars)\n"
@@ -235,15 +373,39 @@ def _patch_runtime() -> None:
         "        else:\n"
         "            logger.info(\n"
         "                'onchainos enrich: no block generated for run %s', run_id\n"
+        "            )\n"
+        "\n"
+        "        # OKX CEX enrichment: fetch order book & ticker data\n"
+        '        _cex_block = ""\n'
+        "        try:\n"
+        "            _cex_data = grounding._fetch_okx_cex_data(run.user_vars)\n"
+        "            _cex_block = grounding._format_okx_cex_block(_cex_data)\n"
+        "        except Exception:\n"
+        "            logger.warning(\n"
+        '                "OKX CEX enrichment failed for run %s", run_id, exc_info=True\n'
+        "            )\n"
+        "        if _cex_block:\n"
+        "            logger.info(\n"
+        "                'okx cex enrich: appended %d chars to grounding block for run %s',\n"
+        "                len(_cex_block), run_id,\n"
+        "            )\n"
+        '            grounding_block = grounding_block + "\\n\\n" + _cex_block\n'
+        "        else:\n"
+        "            logger.info(\n"
+        "                'okx cex enrich: no block generated for run %s', run_id\n"
         "            )"
     )
 
-    content = content.replace(old, new)
+    # Remove the old anchor line + any trailing content that was previously injected
+    # (but only if the new text isn't already there)
+    if new not in content:
+        content = content.replace(old, new)
+        logger.info("runtime.py: patched (combined onchainos + cex enrichment call site)")
+    else:
+        logger.info("runtime.py: already contains combined enrichment block")
 
     with open(runtime_path, "w") as f:
         f.write(content)
-
-    logger.info("runtime.py: patched (onchainos enrichment call site)")
 
 
 def apply() -> None:

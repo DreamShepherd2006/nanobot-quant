@@ -173,11 +173,92 @@ def create_onchainos_backtesting(
         SOURCE = "ONCHAINOS"
 
         def __init__(self, datetime_start, datetime_end, **kwargs):
+            pd_data = {(asset_obj, quote_obj): data_obj}
+            if "pandas_data" in kwargs:
+                extra = kwargs.pop("pandas_data")
+                if extra:
+                    pd_data.update(extra)
             super().__init__(
                 datetime_start=datetime_start,
                 datetime_end=datetime_end,
-                pandas_data={(asset_obj, quote_obj): data_obj},
+                pandas_data=pd_data,
                 **kwargs,
             )
 
     return OnchainOSBacktesting
+
+
+def create_okx_cex_backtesting(
+    symbol: str,
+    start: str | datetime,
+    end: str | datetime,
+    bar: str = "1D",
+) -> type:
+    """Create a Lumibot PandasDataBacktesting subclass backed by OKX CEX.
+
+    Returns a *class* (not an instance) so it can be passed directly
+    to ``Strategy.run_backtest()``.
+
+    Example::
+
+        ds = create_okx_cex_backtesting("XSPCX", "2024-07-01", "2025-07-01")
+        TdSequentialStrategy.run_backtest(ds, start_dt, end_dt, ...)
+    """
+    from lumibot.backtesting import PandasDataBacktesting
+    from lumibot.entities import Asset, Data
+
+    from nanobot_quant.okx_cex_data import fetch_kline_range
+
+    if isinstance(start, datetime):
+        start = start.strftime("%Y-%m-%d")
+    if isinstance(end, datetime):
+        end = end.strftime("%Y-%m-%d")
+
+    df = fetch_kline_range(symbol, start, end, bar=bar)
+    if df.empty:
+        raise RuntimeError(f"No kline data for {symbol}")
+
+    # Detect asset type: tokenised stocks start with "X" (e.g. "XAAPL"),
+    # crypto tickers do not (e.g. "BTC", "ETH")
+    asset_type = "stock" if symbol.upper().startswith("X") else "crypto"
+
+    # Build a DataFrame in Lumibot's expected format
+    df_lumibot = df.copy()
+    df_lumibot.index = pd.DatetimeIndex(df_lumibot.index).tz_localize(None)
+    if "dividend" not in df_lumibot.columns:
+        df_lumibot["dividend"] = 0.0
+
+    # Normalize column names: lower case
+    col_map = {}
+    for c in df_lumibot.columns:
+        if c.lower() in ("open", "high", "low", "close", "volume"):
+            col_map[c] = c.lower()
+    df_lumibot = df_lumibot.rename(columns=col_map)
+
+    asset_obj = Asset(symbol=symbol, asset_type=asset_type)
+    quote_obj = Asset(symbol="USDT", asset_type=asset_type)
+
+    data_obj = Data(
+        asset=asset_obj,
+        quote=quote_obj,
+        df=df_lumibot,
+        timestep="day" if bar.endswith("D") else "minute",
+    )
+
+    class OKXCexBacktesting(PandasDataBacktesting):
+        SOURCE = "OKX_CEX"
+
+        def __init__(self, datetime_start, datetime_end, **kwargs):
+            pd_data = {(asset_obj, quote_obj): data_obj}
+            if "pandas_data" in kwargs:
+                extra = kwargs.pop("pandas_data")
+                if extra:
+                    pd_data.update(extra)
+            super().__init__(
+                datetime_start=datetime_start,
+                datetime_end=datetime_end,
+                pandas_data=pd_data,
+                **kwargs,
+            )
+
+    return OKXCexBacktesting
