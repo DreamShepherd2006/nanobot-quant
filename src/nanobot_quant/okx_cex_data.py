@@ -324,8 +324,7 @@ def fetch_kline_range(
             try:
                 ts_ms = int(entry[0])
                 ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-                if ts < start_dt:
-                    # Reached the start — collect partial batch then stop
+                if ts < start_dt or ts > end_dt:
                     continue
                 rows.append({
                     "ts": ts,
@@ -361,6 +360,9 @@ def fetch_kline_range(
     result = pd.concat(frames)
     result.sort_index(inplace=True)
     result = result[~result.index.duplicated(keep="first")]
+
+    # Clip to requested date range
+    result = result[(result.index >= start_dt) & (result.index <= end_dt)]
 
     logger.info(
         "fetch_kline_range(%s, %s): %d bars, %s → %s",
