@@ -288,13 +288,13 @@ def fetch_kline_range(
     inst_id = _to_inst_id(ticker)
     start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
-    end_ms = int(end_dt.timestamp() * 1000)
+    start_ms = int(start_dt.timestamp() * 1000)
 
     _sess = session or requests
     url = f"{_BASE_URL}{_CANDLES_PATH}"
 
     frames: list[pd.DataFrame] = []
-    before = end_ms
+    before: int | None = None  # None on first call → latest candles
 
     while True:
         time.sleep(_RATE_DELAY)
@@ -302,8 +302,9 @@ def fetch_kline_range(
             "instId": inst_id,
             "bar": bar_okx,
             "limit": 300,
-            "before": before,
         }
+        if before is not None:
+            params["before"] = before
         resp = _sess.get(url, params=params, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
@@ -348,7 +349,7 @@ def fetch_kline_range(
             # Fewer than max — no more data available
             break
 
-        if earliest_ts is None or earliest_ts <= int(start_dt.timestamp() * 1000):
+        if earliest_ts is None or earliest_ts <= start_ms:
             break
 
         before = earliest_ts
