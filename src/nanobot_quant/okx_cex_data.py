@@ -262,7 +262,7 @@ def fetch_order_book(
 ) -> dict | None:
     """Fetch current order book depth from OKX.
 
-    Uses the public books-lite endpoint (no auth).  Returns a dict with
+    Uses the public market/books endpoint (no auth).  Returns a dict with
     *best_bid* / *best_ask* / *spread_pct* / *bids* / *asks* or ``None``
     on failure.
 
@@ -271,16 +271,18 @@ def fetch_order_book(
     ticker:
         Ticker symbol (e.g. ``"BTC"`` → ``"BTC-USDT"``).
     depth:
-        Number of bid/ask levels to return (max 25 for books-lite).
+        Number of bid/ask levels to return (max 400, default 5).
     session:
         Optional ``requests.Session``.
     """
     inst_id = _to_inst_id(ticker)
     _sess = session or requests
-    url = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
+    url = f"{_BASE_URL}{_ORDER_BOOK_PATH}"
+    url_lite = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
 
     try:
         time.sleep(_RATE_DELAY)
+        # Try full books endpoint first; fall back to books-lite
         resp = _sess.get(
             url,
             params={"instId": inst_id, "sz": depth},
@@ -288,9 +290,19 @@ def fetch_order_book(
         )
         resp.raise_for_status()
         payload = resp.json()
-    except requests.RequestException as exc:
-        logger.warning("fetch_order_book(%s): request failed — %s", inst_id, exc)
-        return None
+    except requests.RequestException:
+        try:
+            time.sleep(_RATE_DELAY)
+            resp = _sess.get(
+                url_lite,
+                params={"instId": inst_id, "sz": depth},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except requests.RequestException as exc:
+            logger.warning("fetch_order_book(%s): request failed — %s", inst_id, exc)
+            return None
 
     if payload.get("code") != "0":
         logger.warning(
