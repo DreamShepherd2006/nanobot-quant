@@ -265,12 +265,6 @@ def main():
         if "error" not in result:
             print(f"\n{format_report(result)}")
 
-
-if __name__ == "__main__":
-    main()
-
-# ── trade stats from OrderTracker ─────────────────────────────────
-
 def _extract_trade_stats_from_tracker(strategy) -> dict:
     """Extract trade stats from the strategy's OrderTracker."""
     tracker = getattr(strategy, 'tracker', None)
@@ -309,4 +303,5 @@ def _extract_trade_stats_from_tracker(strategy) -> dict:
     }
 
 
-# ── helpers ────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    main()
