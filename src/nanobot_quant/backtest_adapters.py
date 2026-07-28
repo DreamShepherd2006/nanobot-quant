@@ -173,10 +173,15 @@ def create_onchainos_backtesting(
         SOURCE = "ONCHAINOS"
 
         def __init__(self, datetime_start, datetime_end, **kwargs):
+            pd_data = {(asset_obj, quote_obj): data_obj}
+            if "pandas_data" in kwargs:
+                extra = kwargs.pop("pandas_data")
+                if extra:
+                    pd_data.update(extra)
             super().__init__(
                 datetime_start=datetime_start,
                 datetime_end=datetime_end,
-                pandas_data={(asset_obj, quote_obj): data_obj},
+                pandas_data=pd_data,
                 **kwargs,
             )
 
@@ -240,10 +245,15 @@ def create_okx_cex_backtesting(
         SOURCE = "OKX_CEX"
 
         def __init__(self, datetime_start, datetime_end, **kwargs):
+            pd_data = {(asset_obj, quote_obj): data_obj}
+            if "pandas_data" in kwargs:
+                extra = kwargs.pop("pandas_data")
+                if extra:
+                    pd_data.update(extra)
             super().__init__(
                 datetime_start=datetime_start,
                 datetime_end=datetime_end,
-                pandas_data={(asset_obj, quote_obj): data_obj},
+                pandas_data=pd_data,
                 **kwargs,
             )
 
