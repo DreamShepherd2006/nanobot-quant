@@ -218,6 +218,10 @@ def create_okx_cex_backtesting(
     if df.empty:
         raise RuntimeError(f"No kline data for {symbol}")
 
+    # Detect asset type: tokenised stocks start with "X" (e.g. "XAAPL"),
+    # crypto tickers do not (e.g. "BTC", "ETH")
+    asset_type = "stock" if symbol.upper().startswith("X") else "crypto"
+
     # Build a DataFrame in Lumibot's expected format
     df_lumibot = df.copy()
     df_lumibot.index = pd.DatetimeIndex(df_lumibot.index).tz_localize(None)
@@ -231,8 +235,8 @@ def create_okx_cex_backtesting(
             col_map[c] = c.lower()
     df_lumibot = df_lumibot.rename(columns=col_map)
 
-    asset_obj = Asset(symbol=symbol, asset_type="stock")
-    quote_obj = Asset(symbol="USDT", asset_type="crypto")
+    asset_obj = Asset(symbol=symbol, asset_type=asset_type)
+    quote_obj = Asset(symbol="USDT", asset_type=asset_type)
 
     data_obj = Data(
         asset=asset_obj,
