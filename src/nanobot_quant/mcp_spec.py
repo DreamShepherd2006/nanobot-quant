@@ -109,3 +109,23 @@ squad_del_mcp = MCPSpec(
     target_agents=["neo"],
 )
 register(squad_del_mcp)
+
+
+
+# ── Signal Structurizer MCP server ───────────────────────────
+# Converts VT Swarm debate → TickerSignal JSON for the Aggregator.
+
+signal_mcp = MCPSpec(
+    name="signal-structurizer",
+    display="Signal Structurizer",
+    command="python3",
+    args=["-m", "nanobot_quant.signal_mcp_server"],
+    target_agents=["vt_research"],
+    env={
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    },
+    env_provider_keys={
+        "DEEPSEEK_API_KEY": "deepseek",
+    },
+)
+register(signal_mcp)
