@@ -308,7 +308,16 @@ def _patch_grounding() -> None:
         content = f.read()
 
     if "_fetch_onchainos_data" in content:
-        logger.info("grounding.py: already patched, skipping")
+        if "_fetch_okx_cex_data" in content:
+            logger.info("grounding.py: already patched (onchainos + cex), skipping")
+            return
+        # onchainos exists but CEX is missing — full re-append
+        # (duplicate onchainos definitions are harmless — last wins)
+        logger.info("grounding.py: onchainos found, CEX missing — re-appending full patch")
+        content = content.rstrip("\n") + "\n" + ENRICHMENT_CODE
+        with open(grounding_path, "w") as f:
+            f.write(content)
+        logger.info("grounding.py: patched (okx cex enrichment functions added)")
         return
 
     content = content.rstrip("\n") + "\n" + ENRICHMENT_CODE
@@ -329,69 +338,71 @@ def _patch_runtime() -> None:
         logger.info("runtime.py: already patched (onchainos + cex), skipping")
         return
 
-    if "_onchainos_block" not in content:
-        # Apply onchainos enrichment patch (base anchor)
-        old = "        grounding_block = grounding.format_grounding_block(run.grounding_data or {})"
-        new = (
-            "        grounding_block = grounding.format_grounding_block(run.grounding_data or {})\n"
-            "\n"
-            "        # OnchainOS enrichment: fetch chain-level data and append to prompt\n"
-            '        _onchainos_block = ""\n'
-            "        try:\n"
-            "            _onchainos_data = grounding._fetch_onchainos_data(run.user_vars)\n"
-            "            _onchainos_block = grounding._format_onchainos_block(_onchainos_data)\n"
-            "        except Exception:\n"
-            "            logger.warning(\n"
-            '                "OnchainOS enrichment failed for run %s", run_id, exc_info=True\n'
-            "            )\n"
-            "        if _onchainos_block:\n"
-            "            logger.info(\n"
-            "                'onchainos enrich: appended %d chars to grounding block for run %s',\n"
-            "                len(_onchainos_block), run_id,\n"
-            "            )\n"
-            '            grounding_block = grounding_block + "\\n\\n" + _onchainos_block\n'
-            "        else:\n"
-            "            logger.info(\n"
-            "                'onchainos enrich: no block generated for run %s', run_id\n"
-            "            )"
-        )
-        content = content.replace(old, new)
-        logger.info("runtime.py: patched (onchainos enrichment call site)")
+    # Remove any partial onchainos-only block, then inject combined block
+    if "_onchainos_block" in content:
+        # Strip the old onchainos-only block (find and remove it)
+        old_flag = "# OnchainOS enrichment: fetch chain-level data and append to prompt"
+        new_flag = "# OnchainOS + OKX CEX enrichment: fetch data and append to prompt"
+        content = content.replace(old_flag, new_flag)
+        logger.info("runtime.py: updated flag to combined enrichment")
 
-    if "_cex_block" not in content:
-        # Append CEX enrichment after onchainos block
-        old = (
-            "            logger.info(\n"
-            "                'onchainos enrich: no block generated for run %s', run_id\n"
-            "            )"
-        )
-        new = (
-            "            logger.info(\n"
-            "                'onchainos enrich: no block generated for run %s', run_id\n"
-            "            )\n"
-            "\n"
-            "        # OKX CEX enrichment: fetch order book & ticker data\n"
-            '        _cex_block = ""\n'
-            "        try:\n"
-            "            _cex_data = grounding._fetch_okx_cex_data(run.user_vars)\n"
-            "            _cex_block = grounding._format_okx_cex_block(_cex_data)\n"
-            "        except Exception:\n"
-            "            logger.warning(\n"
-            '                "OKX CEX enrichment failed for run %s", run_id, exc_info=True\n'
-            "            )\n"
-            "        if _cex_block:\n"
-            "            logger.info(\n"
-            "                'okx cex enrich: appended %d chars to grounding block for run %s',\n"
-            "                len(_cex_block), run_id,\n"
-            "            )\n"
-            '            grounding_block = grounding_block + "\\n\\n" + _cex_block\n'
-            "        else:\n"
-            "            logger.info(\n"
-            "                'okx cex enrich: no block generated for run %s', run_id\n"
-            "            )"
-        )
+    # Always re-apply the full combined block at the anchor point
+    old = "        grounding_block = grounding.format_grounding_block(run.grounding_data or {})"
+    if old not in content:
+        logger.warning("runtime.py: anchor not found — may already be fully patched")
+        return
+
+    new = (
+        "        grounding_block = grounding.format_grounding_block(run.grounding_data or {})\n"
+        "\n"
+        "        # OnchainOS + OKX CEX enrichment: fetch data and append to prompt\n"
+        '        _onchainos_block = ""\n'
+        "        try:\n"
+        "            _onchainos_data = grounding._fetch_onchainos_data(run.user_vars)\n"
+        "            _onchainos_block = grounding._format_onchainos_block(_onchainos_data)\n"
+        "        except Exception:\n"
+        "            logger.warning(\n"
+        '                "OnchainOS enrichment failed for run %s", run_id, exc_info=True\n'
+        "            )\n"
+        "        if _onchainos_block:\n"
+        "            logger.info(\n"
+        "                'onchainos enrich: appended %d chars to grounding block for run %s',\n"
+        "                len(_onchainos_block), run_id,\n"
+        "            )\n"
+        '            grounding_block = grounding_block + "\\n\\n" + _onchainos_block\n'
+        "        else:\n"
+        "            logger.info(\n"
+        "                'onchainos enrich: no block generated for run %s', run_id\n"
+        "            )\n"
+        "\n"
+        "        # OKX CEX enrichment: fetch order book & ticker data\n"
+        '        _cex_block = ""\n'
+        "        try:\n"
+        "            _cex_data = grounding._fetch_okx_cex_data(run.user_vars)\n"
+        "            _cex_block = grounding._format_okx_cex_block(_cex_data)\n"
+        "        except Exception:\n"
+        "            logger.warning(\n"
+        '                "OKX CEX enrichment failed for run %s", run_id, exc_info=True\n'
+        "            )\n"
+        "        if _cex_block:\n"
+        "            logger.info(\n"
+        "                'okx cex enrich: appended %d chars to grounding block for run %s',\n"
+        "                len(_cex_block), run_id,\n"
+        "            )\n"
+        '            grounding_block = grounding_block + "\\n\\n" + _cex_block\n'
+        "        else:\n"
+        "            logger.info(\n"
+        "                'okx cex enrich: no block generated for run %s', run_id\n"
+        "            )"
+    )
+
+    # Remove the old anchor line + any trailing content that was previously injected
+    # (but only if the new text isn't already there)
+    if new not in content:
         content = content.replace(old, new)
-        logger.info("runtime.py: patched (okx cex enrichment call site)")
+        logger.info("runtime.py: patched (combined onchainos + cex enrichment call site)")
+    else:
+        logger.info("runtime.py: already contains combined enrichment block")
 
     with open(runtime_path, "w") as f:
         f.write(content)
