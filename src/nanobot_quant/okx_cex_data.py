@@ -250,6 +250,93 @@ def fetch_ticker(ticker: str, *, session: Optional[requests.Session] = None) -> 
     }
 
 
+_ORDER_BOOK_PATH = "/api/v5/market/books"
+_ORDER_BOOK_LITE_PATH = "/api/v5/market/books-lite"
+
+
+def fetch_order_book(
+    ticker: str,
+    *,
+    depth: int = 5,
+    session: Optional[requests.Session] = None,
+) -> dict | None:
+    """Fetch current order book depth from OKX.
+
+    Uses the public books-lite endpoint (no auth).  Returns a dict with
+    *best_bid* / *best_ask* / *spread_pct* / *bids* / *asks* or ``None``
+    on failure.
+
+    Parameters
+    ----------
+    ticker:
+        Ticker symbol (e.g. ``"BTC"`` → ``"BTC-USDT"``).
+    depth:
+        Number of bid/ask levels to return (max 25 for books-lite).
+    session:
+        Optional ``requests.Session``.
+    """
+    inst_id = _to_inst_id(ticker)
+    _sess = session or requests
+    url = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
+
+    try:
+        time.sleep(_RATE_DELAY)
+        resp = _sess.get(
+            url,
+            params={"instId": inst_id, "sz": depth},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except requests.RequestException as exc:
+        logger.warning("fetch_order_book(%s): request failed — %s", inst_id, exc)
+        return None
+
+    if payload.get("code") != "0":
+        logger.warning(
+            "fetch_order_book(%s): API error %s — %s",
+            inst_id, payload.get("code"), payload.get("msg", "?"),
+        )
+        return None
+
+    data_list = payload.get("data", [])
+    if not data_list:
+        return None
+
+    book = data_list[0]  # single book entry for the instId
+    bids = []
+    asks = []
+    for entry in book.get("bids", []):
+        try:
+            bids.append((float(entry[0]), float(entry[1])))
+        except (IndexError, ValueError, TypeError):
+            continue
+    for entry in book.get("asks", []):
+        try:
+            asks.append((float(entry[0]), float(entry[1])))
+        except (IndexError, ValueError, TypeError):
+            continue
+
+    if not bids or not asks:
+        logger.warning("fetch_order_book(%s): empty book", inst_id)
+        return None
+
+    best_bid = bids[0][0]
+    best_ask = asks[0][0]
+    mid = (best_bid + best_ask) / 2
+    spread_pct = ((best_ask - best_bid) / mid) * 100 if mid > 0 else 0.0
+
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread_pct": round(spread_pct, 4),
+        "bid_depth": round(sum(q for _, q in bids), 2),
+        "ask_depth": round(sum(q for _, q in asks), 2),
+        "bids": bids[:depth],
+        "asks": asks[:depth],
+    }
+
+
 def fetch_kline_range(
     ticker: str,
     start: str,
