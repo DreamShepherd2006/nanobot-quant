@@ -1,7 +1,12 @@
 """Analysis Pipeline — end-to-end Neo → Quant integration.
 
-Chains: yfinance data → TD Sequential → Aggregator → Risk checks →
+Chains: data source → TD Sequential → Aggregator → Risk checks →
 suggested Order.
+
+Supported data sources:
+  - ``"yahoo"`` (default): yfinance, period-based
+  - ``"onchainos"``: OnchainOS DEX K-lines (bar + limit)
+  - ``"okx_cex"``: OKX CEX K-lines (bar + limit)
 
 Designed to be called as a quant-agent tool (no live strategy needed).
 """
@@ -10,7 +15,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
+
+import pandas as pd
 
 from nanobot_quant.aggregator import (
     AggregationResult,
@@ -30,6 +37,8 @@ from nanobot_quant.portfolio.order_schema import OrderRequest
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.signal_schema import SignalRequest, SignalResponse, TickerSignal
 from nanobot_quant.strategies.td_sequential import calculate
+
+DataSource = Literal["yahoo", "onchainos", "okx_cex"]
 
 
 @dataclass
@@ -81,7 +90,11 @@ class AnalysisPipeline:
     def run(
         self,
         tickers: list[str],
+        *,
+        source: DataSource = "yahoo",
         period: str = "6mo",
+        bar: str = "1D",
+        limit: int = 200,
         portfolio_value: float = 100000.0,
         return_aggregation: bool = False,
     ) -> list[AnalysisResult] | tuple[list[AnalysisResult], AggregationResult]:
@@ -89,7 +102,11 @@ class AnalysisPipeline:
 
         Args:
             tickers: Stock symbols, e.g. ``["AAPL", "TSLA"]``.
-            period: yfinance period string.
+            source: Data source — ``"yahoo"`` (default), ``"onchainos"``,
+                    or ``"okx_cex"``.
+            period: yfinance period string (used only when ``source="yahoo"``).
+            bar: Bar size for non-yahoo sources (``"1D"``, ``"4H"``, etc.).
+            limit: Max bars for non-yahoo sources (default 200).
             portfolio_value: Hypothetical portfolio value for position-sizing.
             return_aggregation: If ``True``, return ``(results, aggregation)`` tuple.
 
@@ -97,8 +114,6 @@ class AnalysisPipeline:
             ``list[AnalysisResult]`` by default, or ``(results, aggregation)``
             when ``return_aggregation=True``.
         """
-        import yfinance as yf
-
         raw_signals: list[TickerSignal] = []
         results: list[AnalysisResult] = []
         agg_result: AggregationResult | None = None
@@ -106,8 +121,8 @@ class AnalysisPipeline:
         # ── Phase 1: collect raw signals ──
         for ticker in tickers:
             try:
-                df = yf.download(ticker, period=period, auto_adjust=True,
-                                 progress=False)
+                df = self._fetch_data(ticker, source=source,
+                                      period=period, bar=bar, limit=limit)
                 if df.empty:
                     results.append(self._empty(ticker, "no data"))
                     continue
@@ -249,11 +264,23 @@ class AnalysisPipeline:
         return results
 
     def run_to_response(
-        self, tickers: list[str], period: str = "6mo",
+        self, tickers: list[str],
+        *,
+        source: DataSource = "yahoo",
+        period: str = "6mo",
+        bar: str = "1D",
+        limit: int = 200,
         portfolio_value: float = 100000.0,
     ) -> SignalResponse:
         """Run pipeline and return a :class:`SignalResponse` for Neo."""
-        results = self.run(tickers, period, portfolio_value)
+        results = self.run(
+            tickers,
+            source=source,
+            period=period,
+            bar=bar,
+            limit=limit,
+            portfolio_value=portfolio_value,
+        )
         # handle both plain results and (results, agg) tuple
         if isinstance(results, tuple):
             results = results[0]
@@ -263,6 +290,39 @@ class AnalysisPipeline:
             signals=signals,
             generated_at=datetime.now(timezone.utc).isoformat(),
         )
+
+    # ── data fetching ────────────────────────────────────────────────
+
+    @staticmethod
+    def _fetch_data(
+        ticker: str,
+        *,
+        source: DataSource,
+        period: str,
+        bar: str,
+        limit: int,
+    ) -> pd.DataFrame:
+        """Fetch OHLCV data from the selected source."""
+        if source == "yahoo":
+            import yfinance as yf
+
+            df = yf.download(ticker, period=period, auto_adjust=True,
+                             progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            return df
+
+        if source == "onchainos":
+            from nanobot_quant.onchainos_data import fetch_kline
+
+            return fetch_kline(ticker, timeframe=bar, limit=limit)
+
+        if source == "okx_cex":
+            from nanobot_quant.okx_cex_data import fetch_kline
+
+            return fetch_kline(ticker, bar=bar, limit=limit)
+
+        raise ValueError(f"Unknown data source: {source!r}")
 
     # ── helpers ─────────────────────────────────────────────────────
 
