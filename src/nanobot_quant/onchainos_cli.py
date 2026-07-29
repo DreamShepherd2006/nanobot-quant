@@ -51,13 +51,13 @@ def search_token(query: str) -> Optional[str]:
     return None
 
 
-def get_advanced_info(address: str) -> Optional[dict]:
+def get_advanced_info(address: str, chain: str = "solana") -> Optional[dict]:
     """Get token security/risk info: risk level, holder concentration, creator stats.
 
     Returns raw dict from CLI or None on failure.
     Keys: riskControlLevel, top10HoldPercent, devHoldingPercent, etc.
     """
-    return _run("token", "advanced-info", "--address", address)
+    return _run("token", "advanced-info", "--address", address, "--chain", chain)
 
 
 def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
@@ -73,14 +73,16 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 
 # ── Market ────────────────────────────────────────────────────────
 
-def get_price(address: str) -> Optional[str]:
+def get_price(address: str, chain: str = "solana") -> Optional[str]:
     """Get real-time token price in USD.
 
     Returns price as string or None.
     """
-    result = _run("market", "price", "--address", address)
+    result = _run("market", "price", "--address", address, "--chain", chain)
     if isinstance(result, dict):
-        return result.get("price")
+        data = result.get("data")
+        if isinstance(data, list) and data:
+            return data[0].get("price")
     return None
 
 
@@ -88,13 +90,19 @@ def get_kline(
     address: str,
     bar: str = "1D",
     limit: int = 100,
+    chain: str = "solana",
 ) -> Optional[list]:
     """Get K-line/candlestick data.
 
     Returns list of candle dicts ({ts, o, h, l, c, vol, volUsd, confirm})
     or None on failure. Max 299 candles.
     """
-    return _run("market", "kline", "--address", address, "--bar", bar, "--limit", str(limit))
+    result = _run("market", "kline", "--address", address, "--bar", bar, "--limit", str(limit), "--chain", chain)
+    if isinstance(result, dict):
+        data = result.get("data")
+        if isinstance(data, list):
+            return data
+    return None
 
 
 # ── Swap ───────────────────────────────────────────────────────────
