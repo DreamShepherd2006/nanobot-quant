@@ -33,6 +33,11 @@ def calculate(df: pd.DataFrame, news_count: int = 0) -> dict:
     if isinstance(df.columns, pd.MultiIndex):
         df = df.copy()
         df.columns = df.columns.droplevel(1)
+    # Normalise column names to title-case (onchainos/some sources use lowercase)
+    df = df.rename(columns=lambda c: {
+        "open": "Open", "high": "High", "low": "Low",
+        "close": "Close", "volume": "Volume",
+    }.get(c, c))
     engine = _DeMarkEngine(df)
     engine.run_all(news_count)
 
@@ -309,44 +314,82 @@ class _DeMarkEngine:
     # ── Volume / News scoring ─────────────────────────────────────────
 
     def calculate_buy_scoring(self, news_count: int = 0) -> float:
-        """Volume (RVOL) + news intensity combined score for the latest bar."""
+        """5-factor composite score (0–100) computed for every bar.
+
+        Weights: Setup direction 40% | Countdown proximity 30%
+                 TDST support      15% | Volume confirmation 10%
+                 Bollinger regime   5%
+        """
         if self.df.empty:
             return 0.0
 
+        # ── Volume (0–10) ────────────────────────────────────────────────
         if "Volume" not in self.df.columns:
             self.df["vol_sma20"] = np.nan
             self.df["rvol"] = 0.0
-            self.df["volume_score"] = 0.0
-            self.df["news_score"] = 0.0
-            self.df["combined_score"] = 0.0
-            return 0.0
+            self.df["volume_score"] = 5.0  # neutral when missing
+        else:
+            self.df["vol_sma20"] = self.df["Volume"].rolling(
+                window=20, min_periods=1
+            ).mean()
+            self.df["rvol"] = np.where(
+                self.df["vol_sma20"] > 0,
+                self.df["Volume"] / self.df["vol_sma20"],
+                0.0,
+            )
+            self.df["volume_score"] = np.where(
+                self.df["rvol"] < 1.0,
+                5.0 * self.df["rvol"],
+                np.minimum(10.0, 5.0 + 2.5 * (self.df["rvol"] - 1.0)),
+            )
 
-        self.df["vol_sma20"] = self.df["Volume"].rolling(window=20, min_periods=1).mean()
-        self.df["rvol"] = np.where(
-            self.df["vol_sma20"] > 0,
-            self.df["Volume"] / self.df["vol_sma20"],
+        # ── Setup direction (0–40) ──────────────────────────────────────
+        self.df["setup_score"] = np.where(
+            self.df["buy_setup_count"] > 0,
+            np.minimum(40.0, self.df["buy_setup_count"] / 9.0 * 40.0),
             0.0,
         )
-        self.df["volume_score"] = np.where(
-            self.df["rvol"] < 1.0,
-            5.0 * self.df["rvol"],
-            np.minimum(10.0, 5.0 + 2.5 * (self.df["rvol"] - 1.0)),
-        )
-        self.df["news_score"] = 0.0
-        self.df["combined_score"] = 0.0
 
-        if news_count == 0:
-            news_score = 0.0
-        elif 1 <= news_count <= 20:
-            news_score = 0.5 * news_count
-        else:
-            news_score = 10.0
+        # ── Countdown proximity (0–30) ───────────────────────────────────
+        self.df["countdown_score"] = np.where(
+            self.df["buy_countdown_count"] > 0,
+            np.minimum(30.0, self.df["buy_countdown_count"] / 13.0 * 30.0),
+            0.0,
+        )
+
+        # ── TDST support above price (0–15) ─────────────────────────────
+        self.df["tdst_score"] = 0.0
+        has_tsup = ~self.df["tdst_support"].isna() & (self.df["tdst_support"] > 0)
+        self.df.loc[
+            has_tsup & (self.df["Close"] > self.df["tdst_support"]), "tdst_score"
+        ] = 15.0
+
+        # ── Bollinger regime (0–5) — oversold = bullish ──────────────────
+        self.df["bb_score"] = 0.0
+        has_bl = ~self.df["bb_lower"].isna() & (self.df["bb_lower"] > 0)
+        self.df.loc[
+            has_bl & (self.df["Close"] < self.df["bb_lower"]), "bb_score"
+        ] = 5.0
+
+        # ── Composite (0–100) ────────────────────────────────────────────
+        self.df["combined_score"] = (
+            self.df["volume_score"] * 0.10
+            + self.df["setup_score"] * 0.40
+            + self.df["countdown_score"] * 0.30
+            + self.df["tdst_score"] * 0.15
+            + self.df["bb_score"] * 0.05
+        )
+
+        # ── News bump (only for latest bar; news_count is per-call) ──────
+        self.df["news_score"] = 0.0
+        if news_count > 0:
+            last_idx = self.df.index[-1]
+            ns = min(10.0, 0.5 * news_count)
+            self.df.at[last_idx, "news_score"] = ns
+            old = self.df.at[last_idx, "combined_score"]
+            self.df.at[last_idx, "combined_score"] = old * 0.9 + ns * 0.1
 
         last_idx = self.df.index[-1]
-        self.df.at[last_idx, "news_score"] = news_score
-        self.df.at[last_idx, "combined_score"] = (
-            self.df.at[last_idx, "volume_score"] * 0.6 + news_score * 0.4
-        )
         return float(self.df.at[last_idx, "combined_score"])
 
     # ── Run everything ────────────────────────────────────────────────

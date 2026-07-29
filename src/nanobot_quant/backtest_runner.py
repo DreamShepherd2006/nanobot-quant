@@ -108,7 +108,8 @@ def run(
 
     # ── Save ──
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"{symbol}_{start}_{end}.json"
+    safe_symbol = symbol.replace("/", "-")
+    out_path = RESULTS_DIR / f"{safe_symbol}_{start}_{end}.json"
     with open(out_path, "w") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
 
