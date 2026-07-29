@@ -25,11 +25,15 @@ logger = logging.getLogger(__name__)
 
 # ── Crypto pair → (chain, base_token, quote_token) mapping ─────────
 CRYPTO_PAIRS: dict[str, tuple[str, str, str]] = {
+    # EVM chains (Arbitrum, Ethereum)
     "WETH/USDC": ("arbitrum", "WETH", "USDC"),
     "WBTC/WETH": ("arbitrum", "WBTC", "WETH"),
     "WBTC/USDC": ("arbitrum", "WBTC", "USDC"),
     "WETH/USDT": ("ethereum", "WETH", "USDT"),
     "WBTC/USDT": ("ethereum", "WBTC", "USDT"),
+    # Solana SPL pairs
+    "SOL/USDC": ("solana", "SOL", "USDC"),
+    "CRCLx/USDC": ("solana", "CRCLx", "USDC"),
 }
 
 
@@ -143,7 +147,15 @@ def create_onchainos_backtesting(
     # columns: [open, high, low, close, volume, dividend]
     # index must be datetime64[ns] (no tz)
     df_lumibot = df.copy()
-    df_lumibot.index = pd.DatetimeIndex(df_lumibot.index).tz_localize(None)
+    # Make index tz-naive: if tz-aware, convert to UTC then drop tz
+    idx = pd.DatetimeIndex(df_lumibot.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    df_lumibot.index = idx
+    # Normalize to midnight so daily bars align with Lumibot's backtest
+    # session (opens at 09:30 ET / 13:30 UTC). OnchainOS bars land at
+    # 16:00 UTC — shifting to 00:00 prevents a 16 h gap.
+    df_lumibot.index = df_lumibot.index.normalize()
     if "dividend" not in df_lumibot.columns:
         df_lumibot["dividend"] = 0.0
 
@@ -154,12 +166,15 @@ def create_onchainos_backtesting(
             col_map[c] = c.lower()
     df_lumibot = df_lumibot.rename(columns=col_map)
 
+    # Add synthetic bid/ask for Lumibot broker fill simulation
+    df_lumibot = _add_synthetic_quotes(df_lumibot)
+
     base, quote = pair.split("/")
     base_sym = base.strip()
     quote_sym = quote.strip()
 
-    asset_obj = Asset(symbol=base_sym, asset_type="crypto")
-    quote_obj = Asset(symbol=quote_sym, asset_type="crypto")
+    asset_obj = Asset(symbol=base_sym, asset_type="stock")
+    quote_obj = Asset(symbol=quote_sym, asset_type="stock")
 
     data_obj = Data(
         asset=asset_obj,
@@ -173,7 +188,7 @@ def create_onchainos_backtesting(
         SOURCE = "ONCHAINOS"
 
         def __init__(self, datetime_start, datetime_end, **kwargs):
-            pd_data = {(asset_obj, quote_obj): data_obj}
+            pd_data = {asset_obj: data_obj}
             if "pandas_data" in kwargs:
                 extra = kwargs.pop("pandas_data")
                 if extra:
@@ -184,6 +199,12 @@ def create_onchainos_backtesting(
                 pandas_data=pd_data,
                 **kwargs,
             )
+            # Also register under (asset, forex-quote) tuple for
+            # _pull_source_symbol_bars lookups that use the 2-tuple key form.
+            _usd = Asset(symbol="USD", asset_type="forex")
+            _base_stock = Asset(symbol=base_sym, asset_type="stock")
+            self._data_store[(_base_stock, _usd)] = data_obj
+            self._data_store[(asset_obj, quote_obj)] = data_obj
 
     return OnchainOSBacktesting
 
@@ -224,7 +245,14 @@ def create_okx_cex_backtesting(
 
     # Build a DataFrame in Lumibot's expected format
     df_lumibot = df.copy()
-    df_lumibot.index = pd.DatetimeIndex(df_lumibot.index).tz_localize(None)
+    idx = pd.DatetimeIndex(df_lumibot.index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    df_lumibot.index = idx
+    # Normalize to midnight so daily bars align with Lumibot's backtest
+    # session (opens at 09:30 ET / 13:30 UTC). OnchainOS bars land at
+    # 16:00 UTC — shifting to 00:00 prevents a 16 h gap.
+    df_lumibot.index = df_lumibot.index.normalize()
     if "dividend" not in df_lumibot.columns:
         df_lumibot["dividend"] = 0.0
 
@@ -234,6 +262,9 @@ def create_okx_cex_backtesting(
         if c.lower() in ("open", "high", "low", "close", "volume"):
             col_map[c] = c.lower()
     df_lumibot = df_lumibot.rename(columns=col_map)
+
+    # Add synthetic bid/ask for Lumibot broker fill simulation
+    df_lumibot = _add_synthetic_quotes(df_lumibot)
 
     asset_obj = Asset(symbol=symbol, asset_type=asset_type)
     quote_obj = Asset(symbol="USDT", asset_type=asset_type)
@@ -249,7 +280,7 @@ def create_okx_cex_backtesting(
         SOURCE = "OKX_CEX"
 
         def __init__(self, datetime_start, datetime_end, **kwargs):
-            pd_data = {(asset_obj, quote_obj): data_obj}
+            pd_data = {asset_obj: data_obj}
             if "pandas_data" in kwargs:
                 extra = kwargs.pop("pandas_data")
                 if extra:
@@ -260,5 +291,33 @@ def create_okx_cex_backtesting(
                 pandas_data=pd_data,
                 **kwargs,
             )
+            _usd = Asset(symbol="USD", asset_type="forex")
+            _base_stock = Asset(symbol=symbol, asset_type="stock")
+            self._data_store[(_base_stock, _usd)] = data_obj
+            self._data_store[(asset_obj, quote_obj)] = data_obj
 
     return OKXCexBacktesting
+
+def _add_synthetic_quotes(df: pd.DataFrame, spread_pct: float = 0.001) -> pd.DataFrame:
+    """Add synthetic bid/ask columns for Lumibot broker fill simulation.
+
+    OnchainOS kline data only provides OHLCV. Lumibot's backtesting broker
+    requires bid/ask/bid_size/ask_size columns to fill market orders.
+    This generates them from close price with a configurable spread.
+
+    Args:
+        df: DataFrame with at least a 'close' column.
+        spread_pct: Half-spread as fraction (default 0.001 = 0.1%).
+            bid = close × (1 - spread_pct)
+            ask = close × (1 + spread_pct)
+
+    Returns:
+        DataFrame with added 'bid', 'ask', 'bid_size', 'ask_size' columns.
+    """
+    df = df.copy()
+    df["bid"] = df["close"] * (1 - spread_pct)
+    df["ask"] = df["close"] * (1 + spread_pct)
+    # Large sizes so backtesting broker never rejects for low liquidity
+    df["bid_size"] = 1_000_000
+    df["ask_size"] = 1_000_000
+    return df
