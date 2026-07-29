@@ -20,13 +20,16 @@ from nanobot_quant.onchainos_swap import (
 
 logger = logging.getLogger("nanobot_quant.data.onchainos")
 
+try:
+    from lumibot.data_sources import DataSource
+except ImportError:  # pragma: no cover
+    class DataSource:  # type: ignore[no-redef]
+        """Fallback when lumibot is not installed (local dev / CI)."""
+        pass
 
-class OnchainOSDataSource:
+
+class OnchainOSDataSource(DataSource):
     """Lumibot DataSource that fetches OHLCV and prices from onchainos.
-
-    This is NOT a subclass of ``lumibot.data_sources.DataSource`` at module
-    level (to avoid ImportError when lumibot is not installed).  The subclass
-    relationship is patched at runtime when the strategy engine imports it.
 
     Parameters:
         tokens_json: Optional user-configured token list from tokens.json.
@@ -36,16 +39,16 @@ class OnchainOSDataSource:
     SOURCE = "onchainos"
 
     def __init__(self, tokens_json: list[dict] | None = None, **kwargs):
-        super().__init__(**kwargs)  # type: ignore[misc]
+        super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
 
     # ── abstract methods ──────────────────────────────────────────
 
-    def get_chains(self, asset, quote=None) -> dict:  # type: ignore[override]
+    def get_chains(self, asset, quote=None) -> dict:
         """Solana SPL tokens don't have option chains. Return empty."""
         return {}
 
-    def get_historical_prices(  # type: ignore[override]
+    def get_historical_prices(
         self,
         asset,
         length: int,
@@ -54,11 +57,7 @@ class OnchainOSDataSource:
         quote=None,
         include_after_hours: bool = True,
     ):
-        """Fetch OHLCV kline data for *asset* and return a ``Bars`` object.
-
-        Calls ``onchainos market kline``, converts the candle list to a
-        DataFrame, wraps it in ``Bars``.
-        """
+        """Fetch OHLCV kline data for *asset* and return a ``Bars`` object."""
         symbol = asset.symbol
         addr = resolve_token_address(symbol, self._tokens_json)
         if not addr:
@@ -70,7 +69,6 @@ class OnchainOSDataSource:
         if not candles:
             raise RuntimeError(f"No kline data returned for {symbol} ({addr})")
 
-        # Convert to DataFrame
         df = pd.DataFrame(candles)
         df.rename(
             columns={
@@ -83,11 +81,10 @@ class OnchainOSDataSource:
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
 
-        # Lumibot Bars wrapper
         from lumibot.entities import Bars
         return Bars(df, self.SOURCE)
 
-    def get_last_price(  # type: ignore[override]
+    def get_last_price(
         self, asset, quote=None, exchange=None
     ) -> Optional[float]:
         """Get real-time price for *asset* from onchainos."""
@@ -111,22 +108,3 @@ class OnchainOSDataSource:
             "day": "1D",
             "week": "1W",
         }.get(timestep.lower(), "1D")
-
-
-# ── Runtime patch ─────────────────────────────────────────────────
-
-def _patch_for_lumibot():
-    """Monkey-patch OnchainOSDataSource to inherit from lumibot DataSource.
-
-    We avoid a hard import of lumibot at module level so the package remains
-    importable even when lumibot is not installed (e.g. local dev or CI).
-    """
-    try:
-        from lumibot.data_sources import DataSource
-
-        # Only patch if not already a subclass
-        if DataSource not in OnchainOSDataSource.__mro__:  # type: ignore[attr-defined]
-            OnchainOSDataSource.__bases__ = (DataSource,)
-            logger.debug("OnchainOSDataSource patched to inherit from lumibot DataSource")
-    except ImportError:
-        logger.debug("lumibot not installed — DataSource patch skipped")

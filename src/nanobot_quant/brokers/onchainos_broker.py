@@ -1,8 +1,6 @@
 """Lumibot Broker that executes trades via onchainos DEX aggregator.
 
 Implements all 13 abstract methods of ``lumibot.brokers.Broker``.
-The subclass relationship is patched at runtime to avoid a hard import
-of lumibot at module level.
 """
 
 from __future__ import annotations
@@ -22,12 +20,16 @@ from nanobot_quant.onchainos_swap import (
 
 logger = logging.getLogger("nanobot_quant.brokers.onchainos")
 
+try:
+    from lumibot.brokers import Broker
+except ImportError:  # pragma: no cover
+    class Broker:  # type: ignore[no-redef]
+        """Fallback when lumibot is not installed (local dev / CI)."""
+        pass
 
-class OnchainOSBroker:
+
+class OnchainOSBroker(Broker):
     """Lumibot Broker that routes orders through onchainos DEX aggregator.
-
-    Not a hard subclass of ``lumibot.brokers.Broker`` — the inheritance is
-    patched at runtime by :func:`_patch_for_lumibot`.
 
     Parameters:
         tokens_json: User-configured token mappings from tokens.json.
@@ -44,7 +46,7 @@ class OnchainOSBroker:
         sol_buffer_pct: float = 0.05,
         **kwargs,
     ):
-        super().__init__(**kwargs)  # type: ignore[misc]
+        super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
         self._slippage = slippage
         self._sol_buffer_pct = sol_buffer_pct
@@ -54,7 +56,7 @@ class OnchainOSBroker:
     #  Order Execution
     # ═══════════════════════════════════════════════════════════════
 
-    def _submit_order(self, order) -> Any:  # type: ignore[override]
+    def _submit_order(self, order) -> Any:
         """Submit a market order via onchainos swap.
 
         Flow:
@@ -164,7 +166,7 @@ class OnchainOSBroker:
 
         return (cash, positions_val, cash + positions_val)
 
-    def _pull_positions(self, strategy) -> list:  # type: ignore[override]
+    def _pull_positions(self, strategy) -> list:
         """Return current positions from onchainos wallet."""
         balances = get_wallet_balance()
         if not balances:
@@ -191,7 +193,7 @@ class OnchainOSBroker:
             )
         return positions
 
-    def _pull_position(self, strategy, asset) -> Any:  # type: ignore[override]
+    def _pull_position(self, strategy, asset) -> Any:
         """Return position for a specific asset, or None."""
         for pos in self._pull_positions(strategy):
             if pos.asset.symbol.upper() == asset.symbol.upper():
@@ -202,7 +204,7 @@ class OnchainOSBroker:
     #  Order Tracking
     # ═══════════════════════════════════════════════════════════════
 
-    def _pull_broker_order(self, identifier: str) -> Any:  # type: ignore[override]
+    def _pull_broker_order(self, identifier: str) -> Any:
         """Look up order status by txHash."""
         from lumibot.entities import Asset, Order
 
@@ -226,7 +228,7 @@ class OnchainOSBroker:
             status=status,
         )
 
-    def _parse_broker_order(  # type: ignore[override]
+    def _parse_broker_order(
         self, response, strategy_name: str, strategy_object
     ) -> Any:
         """Parse swap result dict into a Lumibot Order."""
@@ -244,7 +246,7 @@ class OnchainOSBroker:
             status="filled",
         )
 
-    def _pull_broker_all_orders(self) -> list:  # type: ignore[override]
+    def _pull_broker_all_orders(self) -> list:
         """On-chain DEX has no open order book — swaps are atomic."""
         return []
 
@@ -252,12 +254,12 @@ class OnchainOSBroker:
     #  No-ops (chain constraints)
     # ═══════════════════════════════════════════════════════════════
 
-    def cancel_order(self, order) -> None:  # type: ignore[override]
+    def cancel_order(self, order) -> None:
         """Solana swaps are atomic — cannot cancel once submitted."""
         logger.debug("cancel_order no-op for onchainos")
         return None
 
-    def _modify_order(  # type: ignore[override]
+    def _modify_order(
         self,
         order,
         limit_price: Optional[float] = None,
@@ -272,36 +274,18 @@ class OnchainOSBroker:
     #  Streaming (not used — strategy uses timer/sleep loop)
     # ═══════════════════════════════════════════════════════════════
 
-    def _get_stream_object(self):  # type: ignore[override]
+    def _get_stream_object(self):
         return None
 
-    def _register_stream_events(self):  # type: ignore[override]
+    def _register_stream_events(self):
         pass
 
-    def _run_stream(self):  # type: ignore[override]
+    def _run_stream(self):
         pass
 
     # ═══════════════════════════════════════════════════════════════
     #  Historical (not applicable)
     # ═══════════════════════════════════════════════════════════════
 
-    def get_historical_account_value(self) -> dict:  # type: ignore[override]
+    def get_historical_account_value(self) -> dict:
         return {}
-
-
-# ── Runtime patch ─────────────────────────────────────────────────
-
-def _patch_for_lumibot():
-    """Monkey-patch OnchainOSBroker to inherit from lumibot Broker.
-
-    We avoid a hard import of lumibot at module level so the package remains
-    importable even when lumibot is not installed.
-    """
-    try:
-        from lumibot.brokers import Broker
-
-        if Broker not in OnchainOSBroker.__mro__:  # type: ignore[attr-defined]
-            OnchainOSBroker.__bases__ = (Broker,)
-            logger.debug("OnchainOSBroker patched to inherit from lumibot Broker")
-    except ImportError:
-        logger.debug("lumibot not installed — Broker patch skipped")
