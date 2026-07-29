@@ -19,10 +19,10 @@ logger = logging.getLogger("nanobot_quant.onchainos_cli")
 
 
 def _run(*args, timeout: int = 15) -> Optional[dict | list]:
-    """Run onchainos CLI with --format json and return parsed output."""
+    """Run onchainos CLI and return parsed JSON output."""
     try:
         r = subprocess.run(
-            [ONCHAINOS_BIN, "--format", "json", *args],
+            [ONCHAINOS_BIN, *args],
             capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode != 0:
@@ -95,6 +95,89 @@ def get_kline(
     or None on failure. Max 299 candles.
     """
     return _run("market", "kline", "--address", address, "--bar", bar, "--limit", str(limit))
+
+
+# ── Swap ───────────────────────────────────────────────────────────
+
+WSOL_ADDR = "So11111111111111111111111111111111111111112"
+
+
+def resolve_token_address(
+    symbol: str,
+    tokens_json: list[dict] | None = None,
+) -> Optional[str]:
+    """Resolve a token symbol to its contract address.
+
+    1. Check ``tokens_json`` (user-configured in WebUI).
+    2. Query onchainos CLI ``token search``.
+    3. Return WSOL address for "SOL".
+    """
+    symbol_upper = symbol.upper()
+    if symbol_upper == "SOL":
+        return WSOL_ADDR
+
+    # 1) User-configured list
+    for entry in (tokens_json or []):
+        if entry.get("symbol", "").upper() == symbol_upper:
+            return entry.get("address")
+
+    # 2) CLI query
+    return search_token(symbol)
+
+
+def get_token_price(address: str) -> Optional[float]:
+    """Get real-time token price as float (USD)."""
+    raw = get_price(address)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_wallet_balance() -> Optional[list]:
+    """Get wallet balance from onchainos. Returns list of token dicts."""
+    return _run("wallet", "balance")
+
+
+def swap_quote(
+    from_addr: str,
+    to_addr: str,
+    amount: str,
+    slippage: str = "0.01",
+) -> Optional[dict]:
+    """Get a swap quote. Returns dict with toAmount, routes, etc."""
+    return _run(
+        "swap", "quote",
+        "--from", from_addr,
+        "--to", to_addr,
+        "--amount", amount,
+        "--slippage", slippage,
+        timeout=15,
+    )
+
+
+def swap_execute(
+    from_addr: str,
+    to_addr: str,
+    amount: str,
+    slippage: str = "0.01",
+) -> Optional[dict]:
+    """Execute a swap. Returns dict with swapTxHash / txHash and status."""
+    return _run(
+        "swap", "execute",
+        "--from", from_addr,
+        "--to", to_addr,
+        "--amount", amount,
+        "--slippage", slippage,
+        timeout=30,
+    )
+
+
+def swap_status(tx_hash: str) -> Optional[dict]:
+    """Check swap transaction status."""
+    return _run("swap", "status", "--tx-hash", tx_hash)
 
 
 # ── Extraction helpers ────────────────────────────────────────────

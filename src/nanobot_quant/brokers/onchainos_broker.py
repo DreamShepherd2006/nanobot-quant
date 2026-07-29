@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from nanobot_quant.onchainos_swap import (
+from nanobot_quant.onchainos_cli import (
     resolve_token_address,
     swap_execute,
     swap_status,

@@ -13,7 +13,7 @@ from typing import Optional
 import pandas as pd
 from lumibot.data_sources import DataSource
 
-from nanobot_quant.onchainos_swap import (
+from nanobot_quant.onchainos_cli import (
     resolve_token_address,
     get_kline,
     get_token_price,
