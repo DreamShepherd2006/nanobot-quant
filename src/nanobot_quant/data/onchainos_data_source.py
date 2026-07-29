@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Optional
 
 import pandas as pd
+from lumibot.data_sources import DataSource
 
 from nanobot_quant.onchainos_swap import (
     resolve_token_address,
@@ -19,13 +20,6 @@ from nanobot_quant.onchainos_swap import (
 )
 
 logger = logging.getLogger("nanobot_quant.data.onchainos")
-
-try:
-    from lumibot.data_sources import DataSource
-except ImportError:  # pragma: no cover
-    class DataSource:  # type: ignore[no-redef]
-        """Fallback when lumibot is not installed (local dev / CI)."""
-        pass
 
 
 class OnchainOSDataSource(DataSource):

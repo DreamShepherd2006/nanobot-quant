@@ -17,15 +17,9 @@ from nanobot_quant.onchainos_swap import (
     get_token_price,
     WSOL_ADDR,
 )
+from lumibot.brokers import Broker
 
 logger = logging.getLogger("nanobot_quant.brokers.onchainos")
-
-try:
-    from lumibot.brokers import Broker
-except ImportError:  # pragma: no cover
-    class Broker:  # type: ignore[no-redef]
-        """Fallback when lumibot is not installed (local dev / CI)."""
-        pass
 
 
 class OnchainOSBroker(Broker):
