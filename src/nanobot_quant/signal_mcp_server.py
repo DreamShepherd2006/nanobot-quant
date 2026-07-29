@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 SERVER_NAME = "signal-structurizer"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 
 # ── DeepSeek API helpers ──────────────────────────────────────────
 
@@ -168,7 +168,30 @@ def _handle_request(msg: dict) -> dict | None:
                             },
                             "required": ["debate_text", "ticker"],
                         },
-                    }
+                    },
+                    {
+                        "name": "execute_signal",
+                        "description": (
+                            "Execute the trading pipeline on structured signal(s). "
+                            "Passes signal through Risk → Position Sizing → Order "
+                            "generation. Accepts a JSON signal string (single object "
+                            "or list), returns risk checks and suggested orders."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "ticker_signal_json": {
+                                    "type": "string",
+                                    "description": (
+                                        "JSON string of signal(s) — a single TickerSignal "
+                                        "object or list of them. Expected fields: ticker, "
+                                        "recommendation, score, price."
+                                    ),
+                                },
+                            },
+                            "required": ["ticker_signal_json"],
+                        },
+                    },
                 ]
             },
         }
@@ -180,6 +203,17 @@ def _handle_request(msg: dict) -> dict | None:
             result = structurize_signal(
                 debate_text=arguments.get("debate_text", ""),
                 ticker=arguments.get("ticker", ""),
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
+        if tool_name == "execute_signal":
+            result = execute_signal(
+                ticker_signal_json=arguments.get("ticker_signal_json", ""),
             )
             return {
                 "jsonrpc": "2.0",
@@ -220,3 +254,38 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ── execute_signal tool ─────────────────────────────────────────
+
+def execute_signal(ticker_signal_json: str) -> dict:
+    """Execute the trading pipeline on structured signal(s).
+
+    Takes a JSON signal (from structurize_signal) and passes it
+    through Risk → Position Sizing → Order generation.
+
+    Accepts either a single signal object or a list of signals.
+
+    Returns pipeline execution results with risk checks and
+    suggested orders.
+    """
+    from nanobot_quant.pipeline import run_from_signals
+
+    try:
+        raw = json.loads(ticker_signal_json)
+    except json.JSONDecodeError:
+        return {"error": "Invalid JSON input"}
+
+    # Normalise to list of dicts
+    signal_list: list[dict] = raw if isinstance(raw, list) else [raw]
+
+    # Validate each dict has required fields
+    for s in signal_list:
+        if "ticker" not in s:
+            return {"error": f"Missing 'ticker' in signal: {s}"}
+
+    try:
+        results = run_from_signals(signal_list)
+        return {"results": results, "count": len(results)}
+    except Exception as exc:
+        return {"error": f"Pipeline execution failed: {exc}"}

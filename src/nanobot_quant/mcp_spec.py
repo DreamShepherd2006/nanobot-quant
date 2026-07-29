@@ -56,7 +56,7 @@ okx_mcp = MCPSpec(
     display="OnchainOS (OKX)",
     command="/usr/local/bin/onchainos",
     args=["mcp"],
-    target_agents=["neo", "quant", "vt_research"],
+    target_agents=["quant"],
     env_from_credential="okx",
 )
 register(okx_mcp)
