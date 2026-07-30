@@ -589,25 +589,52 @@ def wallet_login_poll(session_id: str = "") -> dict:
         "status": "error",
         "message": "all poll attempts failed — check quant stderr logs for details",
     }
-def wallet_payment_set(tier: str = "basic") -> dict:
-    """Set onchainos payment default tier (requires prior wallet login)."""
+def wallet_payment_set(tier: str, asset: str = "", chain: str = "", name: str = "") -> dict:
+    """Set default payment asset and tier. Uses known USDG on X Layer as defaults."""
+    if not asset:
+        asset = "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"  # USDG
+    if not chain:
+        chain = "196"  # X Layer
+    if not name:
+        name = "USDG"
+
+    args = [
+        ONCHAINOS_BIN, "payment", "default", "set",
+        "--asset", asset,
+        "--chain", chain,
+        "--tier", tier,
+        "--name", name,
+    ]
     try:
         proc = subprocess.run(
-            [ONCHAINOS_BIN, "payment", "default", "set", "--tier", tier],
-            capture_output=True, text=True, timeout=30,
+            args, capture_output=True, text=True, timeout=30,
         )
+    except subprocess.TimeoutExpired:
+        return {"error": "payment default set timed out"}
     except FileNotFoundError:
         return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
-    except subprocess.TimeoutExpired:
-        return {"error": "payment default set timed out (30s)"}
 
-    combined = proc.stdout.strip() + proc.stderr.strip()
+    print(
+        f"[DIAG] wallet_payment_set tier={tier} rc={proc.returncode} "
+        f"stdout={proc.stdout.strip()[:300]!r} "
+        f"stderr={proc.stderr.strip()[:300]!r}",
+        file=sys.stderr, flush=True,
+    )
+
     if proc.returncode != 0:
-        return {"error": f"payment default set failed (rc={proc.returncode}): {combined[:1000]}"}
+        return {
+            "error": f"payment default set failed (rc={proc.returncode})",
+            "stdout": proc.stdout.strip()[:1000],
+            "stderr": proc.stderr.strip()[:1000],
+        }
 
-    return {"status": "ok", "tier": tier, "output": combined[:500]}
-
-
+    return {
+        "status": "ok",
+        "tier": tier,
+        "asset": asset,
+        "chain": chain,
+        "name": name,
+    }
 def wallet_login_status() -> dict:
     """Check onchainos login / payment status without side effects."""
     status = {"logged_in": False, "payment_basic": False, "payment_premium": False}
