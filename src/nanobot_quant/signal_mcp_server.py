@@ -18,11 +18,14 @@ import sys
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-# ── Redirect root logger to stderr ───────────────────────────────
+# ── Suppress library stdout during imports ──────────────────────
 # lumibot (and other libs) configure StreamHandler→stdout at import
 # time.  stdout is the MCP JSON‑RPC channel — any stray log line
-# breaks the protocol.  Move everything to stderr before first import.
+# breaks the protocol.  Silence the lumibot logger and redirect
+# stdout→stderr for the duration of nanobot_quant imports.
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
+logging.getLogger("lumibot").handlers.clear()
+logging.getLogger("lumibot").propagate = True
 
 SERVER_NAME = "signal-structurizer"
 SERVER_VERSION = "1.1.0"
@@ -313,8 +316,14 @@ def run_td_sequential(
     Fetches K-line data via OnchainOS CLI, calculates TD Sequential
     and returns a TickerSignal dict.
     """
-    from nanobot_quant.onchainos_data import fetch_kline as _fetch_kline
-    from nanobot_quant.strategies.td_sequential import calculate as _calculate
+    # ── Guard MCP stdio from library import-time logging ─────────
+    _saved_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        from nanobot_quant.onchainos_data import fetch_kline as _fetch_kline
+        from nanobot_quant.strategies.td_sequential import calculate as _calculate
+    finally:
+        sys.stdout = _saved_stdout
 
     chain_name = chain if chain in ("solana", "arbitrum", "ethereum", "base", "bnb", "optimism", "polygon", "xdai") else "solana"
 
@@ -388,7 +397,13 @@ def execute_signal(ticker_signal_json: str) -> dict:
     Returns pipeline execution results with risk checks and
     suggested orders.
     """
-    from nanobot_quant.pipeline import run_from_signals
+    # ── Guard MCP stdio from library import-time logging ─────────
+    _saved_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        from nanobot_quant.pipeline import run_from_signals
+    finally:
+        sys.stdout = _saved_stdout
 
     try:
         raw = json.loads(ticker_signal_json)
