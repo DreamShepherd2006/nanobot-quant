@@ -293,6 +293,64 @@ def _handle_request(msg: dict) -> dict | None:
     }
 
 
+# ── run_td_sequential tool ──────────────────────────────────────
+
+def run_td_sequential(
+    address: str,
+    chain: str = "solana",
+    bar: str = "1D",
+    limit: int = 299,
+) -> dict:
+    """Run TD Sequential analysis on an OnchainOS token.
+
+    Fetches K-line data via OnchainOS CLI, calculates TD Sequential
+    and returns a TickerSignal dict.
+    """
+    from nanobot_quant.onchainos_data import fetch_kline as _fetch_kline
+    from nanobot_quant.strategies.td_sequential import calculate as _calculate
+
+    chain_name = chain if chain in ("solana", "arbitrum", "ethereum", "base", "bnb", "optimism", "polygon", "xdai") else "solana"
+
+    print(
+        f"[DIAG] run_td_sequential: address={address[:12]}... chain={chain_name} bar={bar} limit={limit}",
+        file=sys.stderr, flush=True,
+    )
+
+    try:
+        df = _fetch_kline(
+            chain=chain_name,
+            token_address=address,
+            bar=bar,
+            limit=limit,
+        )
+    except Exception as exc:
+        return {"error": f"Failed to fetch kline data: {exc}"}
+
+    if df is None or df.empty:
+        return {"error": "No kline data returned from OnchainOS"}
+
+    print(
+        f"[DIAG] run_td_sequential: fetched {len(df)} candles ({df.index[0]} → {df.index[-1]})",
+        file=sys.stderr, flush=True,
+    )
+
+    try:
+        result = _calculate(df)
+    except Exception as exc:
+        return {"error": f"TD Sequential calculation failed: {exc}"}
+
+    result["source"] = "quant"
+    result["ticker"] = address
+    result["chain"] = chain_name
+
+    print(
+        f"[DIAG] run_td_sequential: {result['recommendation']} "
+        f"(setup_buy={result['setup_buy']} cd_buy={result['cd_buy']} score={result['score']})",
+        file=sys.stderr, flush=True,
+    )
+    return result
+
+
 def main() -> None:
     """Run the MCP stdio loop."""
     for line in sys.stdin:
@@ -308,9 +366,6 @@ def main() -> None:
             sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
             sys.stdout.flush()
 
-
-if __name__ == "__main__":
-    main()
 
 
 # ── execute_signal tool ─────────────────────────────────────────
@@ -354,60 +409,7 @@ def execute_signal(ticker_signal_json: str) -> dict:
         return {"error": f"Pipeline execution failed: {exc}"}
 
 
-# ── run_td_sequential tool ──────────────────────────────────────
+if __name__ == "__main__":
+    main()
 
-def run_td_sequential(
-    address: str,
-    chain: str = "solana",
-    bar: str = "1D",
-    limit: int = 299,
-) -> dict:
-    """Run TD Sequential analysis on an OnchainOS token.
 
-    Fetches K-line data via OnchainOS CLI, calculates TD Sequential
-    and returns a TickerSignal dict.
-    """
-    from nanobot_quant.onchainos_data import fetch_kline as _fetch_kline
-    from nanobot_quant.strategies.td_sequential import calculate as _calculate
-
-    # Default to resolved chain name
-    chain_name = chain if chain in ("solana", "arbitrum", "ethereum", "base", "bnb", "optimism", "polygon", "xdai") else "solana"
-
-    print(
-        f"[DIAG] run_td_sequential: address={address[:12]}... chain={chain_name} bar={bar} limit={limit}",
-        file=sys.stderr, flush=True,
-    )
-
-    try:
-        df = _fetch_kline(
-            chain=chain_name,
-            token_address=address,
-            bar=bar,
-            limit=limit,
-        )
-    except Exception as exc:
-        return {"error": f"Failed to fetch kline data: {exc}"}
-
-    if df is None or df.empty:
-        return {"error": "No kline data returned from OnchainOS"}
-
-    print(
-        f"[DIAG] run_td_sequential: fetched {len(df)} candles ({df.index[0]} → {df.index[-1]})",
-        file=sys.stderr, flush=True,
-    )
-
-    try:
-        result = _calculate(df)
-    except Exception as exc:
-        return {"error": f"TD Sequential calculation failed: {exc}"}
-
-    result["source"] = "quant"
-    result["ticker"] = address
-    result["chain"] = chain_name
-
-    print(
-        f"[DIAG] run_td_sequential: {result['recommendation']} "
-        f"(setup_buy={result['setup_buy']} cd_buy={result['cd_buy']} score={result['score']})",
-        file=sys.stderr, flush=True,
-    )
-    return result
