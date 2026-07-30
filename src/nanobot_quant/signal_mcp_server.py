@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import subprocess
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
@@ -245,6 +246,66 @@ def _handle_request(msg: dict) -> dict | None:
                             "required": ["ticker_signal_json"],
                         },
                     },
+                    {
+                        "name": "wallet_login_init",
+                        "description": (
+                            "Initiate onchainos social (Google/Apple/email) wallet login. "
+                            "Returns a loginUrl that the user must open in a browser. "
+                            "After browser confirmation, call wallet_login_poll to complete. "
+                            "Required after every Factory Rebuild (session data lost). "
+                            "The keyring data is stored in ~/.onchainos/ (file-based on Linux)."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "wallet_login_poll",
+                        "description": (
+                            "Poll for social login completion. Blocks up to 310 seconds. "
+                            "Call this after the user confirms login in their browser. "
+                            "Returns session data on success."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "authSessionId from wallet_login_init (optional, auto-detected if omitted)",
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "name": "wallet_payment_set",
+                        "description": (
+                            "Set onchainos payment default tier. Must call AFTER wallet login "
+                            "is complete (wallet_login_poll succeeded). Required for Market API "
+                            "tools (market_kline etc.) to work without QUOTA errors."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tier": {
+                                    "type": "string",
+                                    "default": "basic",
+                                    "description": "Payment tier: basic or premium",
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "name": "wallet_login_status",
+                        "description": (
+                            "Check onchainos login and payment status without side effects. "
+                            "Returns: logged_in, payment_basic, payment_premium booleans."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    }
                 ]
             },
         }
@@ -282,6 +343,46 @@ def _handle_request(msg: dict) -> dict | None:
             result = execute_signal(
                 ticker_signal_json=arguments.get("ticker_signal_json", ""),
             )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
+        if tool_name == "wallet_login_init":
+            result = wallet_login_init()
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
+        if tool_name == "wallet_login_poll":
+            result = wallet_login_poll(
+                session_id=arguments.get("session_id", ""),
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
+        if tool_name == "wallet_payment_set":
+            result = wallet_payment_set(
+                tier=arguments.get("tier", "basic"),
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
+        if tool_name == "wallet_login_status":
+            result = wallet_login_status()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -365,6 +466,120 @@ def run_td_sequential(
         file=sys.stderr, flush=True,
     )
     return result
+
+
+
+# ── onchainos wallet login tools ──────────────────────────────────
+
+ONCHAINOS_BIN = "/usr/local/bin/onchainos"
+
+def wallet_login_init() -> dict:
+    """Initiate onchainos social login. Returns loginUrl for the user."""
+    try:
+        proc = subprocess.run(
+            [ONCHAINOS_BIN, "wallet", "login", "--phase", "init"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
+    except subprocess.TimeoutExpired:
+        return {"error": "onchainos wallet login --phase init timed out (30s)"}
+
+    if proc.returncode != 0:
+        return {"error": f"init failed (rc={proc.returncode}): {proc.stderr.strip()}"}
+
+    try:
+        data = json.loads(proc.stdout.strip())
+    except json.JSONDecodeError:
+        return {"error": f"unexpected init output: {proc.stdout.strip()[:500]}"}
+
+    print(
+        f"[DIAG] wallet_login_init: session={data.get('authSessionId','?')[:12]}...",
+        file=sys.stderr, flush=True,
+    )
+    return {"login_url": data.get("loginUrl", ""), "auth_session_id": data.get("authSessionId", ""), "opened": data.get("opened", False)}
+
+
+def wallet_login_poll(session_id: str = "") -> dict:
+    """Poll for social login completion. Call after user finishes browser login."""
+    args = [ONCHAINOS_BIN, "wallet", "login", "--phase", "poll"]
+    if session_id:
+        args.extend(["--session-id", session_id])
+
+    try:
+        proc = subprocess.run(
+            args, capture_output=True, text=True, timeout=310,
+        )
+    except FileNotFoundError:
+        return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
+    except subprocess.TimeoutExpired:
+        return {"error": "wallet login poll timed out (310s) — user may not have completed browser login"}
+
+    combined = proc.stdout.strip() + proc.stderr.strip()
+    if proc.returncode != 0:
+        return {"error": f"poll failed (rc={proc.returncode}): {combined[:1000]}"}
+
+    try:
+        data = json.loads(proc.stdout.strip())
+    except json.JSONDecodeError:
+        data = {"raw": combined[:2000]}
+
+    print(
+        "[DIAG] wallet_login_poll: login complete",
+        file=sys.stderr, flush=True,
+    )
+    return data
+
+
+def wallet_payment_set(tier: str = "basic") -> dict:
+    """Set onchainos payment default tier (requires prior wallet login)."""
+    try:
+        proc = subprocess.run(
+            [ONCHAINOS_BIN, "payment", "default", "set", "--tier", tier],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
+    except subprocess.TimeoutExpired:
+        return {"error": "payment default set timed out (30s)"}
+
+    combined = proc.stdout.strip() + proc.stderr.strip()
+    if proc.returncode != 0:
+        return {"error": f"payment default set failed (rc={proc.returncode}): {combined[:1000]}"}
+
+    return {"status": "ok", "tier": tier, "output": combined[:500]}
+
+
+def wallet_login_status() -> dict:
+    """Check onchainos login / payment status without side effects."""
+    status = {"logged_in": False, "payment_basic": False, "payment_premium": False}
+
+    # Check if session.json exists (indicates prior login)
+    session_path = os.path.expanduser("~/.onchainos/session.json")
+    if os.path.isfile(session_path):
+        status["logged_in"] = True
+
+    # Check payment defaults
+    try:
+        proc = subprocess.run(
+            [ONCHAINOS_BIN, "payment", "default", "get", "--tier", "basic"],
+            capture_output=True, text=True, timeout=15,
+        )
+        status["payment_basic"] = proc.returncode == 0
+    except Exception:
+        pass
+
+    try:
+        proc = subprocess.run(
+            [ONCHAINOS_BIN, "payment", "default", "get", "--tier", "premium"],
+            capture_output=True, text=True, timeout=15,
+        )
+        status["payment_premium"] = proc.returncode == 0
+    except Exception:
+        pass
+
+    return status
+
 
 
 def main() -> None:
