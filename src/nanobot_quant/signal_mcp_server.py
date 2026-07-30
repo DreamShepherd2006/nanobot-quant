@@ -477,13 +477,13 @@ def wallet_login_init() -> dict:
     """Initiate onchainos social login. Returns loginUrl for the user."""
     try:
         proc = subprocess.run(
-            [ONCHAINOS_BIN, "wallet", "login", "--phase", "init"],
+            [ONCHAINOS_BIN, "wallet", "login", "init"],
             capture_output=True, text=True, timeout=30,
         )
     except FileNotFoundError:
         return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
     except subprocess.TimeoutExpired:
-        return {"error": "onchainos wallet login --phase init timed out (30s)"}
+        return {"error": "onchainos wallet login init timed out (30s)"}
 
     if proc.returncode != 0:
         return {"error": f"init failed (rc={proc.returncode}): {proc.stderr.strip()}"}
@@ -502,9 +502,9 @@ def wallet_login_init() -> dict:
 
 def wallet_login_poll(session_id: str = "") -> dict:
     """Poll for social login completion. Call after user finishes browser login."""
-    args = [ONCHAINOS_BIN, "wallet", "login", "--phase", "poll"]
+    args = [ONCHAINOS_BIN, "wallet", "login", "poll"]
     if session_id:
-        args.extend(["--session-id", session_id])
+        args.append(session_id)
 
     try:
         proc = subprocess.run(
@@ -513,7 +513,7 @@ def wallet_login_poll(session_id: str = "") -> dict:
     except FileNotFoundError:
         return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
     except subprocess.TimeoutExpired:
-        return {"error": "wallet login poll timed out (310s) — user may not have completed browser login"}
+        return {"error": "onchainos wallet login poll timed out (310s) — user may not have completed browser login"}
 
     combined = proc.stdout.strip() + proc.stderr.strip()
     if proc.returncode != 0:
