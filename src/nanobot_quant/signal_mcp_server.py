@@ -515,16 +515,18 @@ def wallet_login_init() -> dict:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 continue
-            login_url = data.get("loginUrl", "")
+            # Handle both flat {"loginUrl":...} and nested {"ok":true,"data":{"loginUrl":...}}
+            inner = data.get("data", data) if isinstance(data.get("data"), dict) else data
+            login_url = inner.get("loginUrl", "")
             if login_url:
                 print(
-                    f"[DIAG] wallet_login_init SUCCESS ({label}): session={data.get('authSessionId','?')[:12]}...",
+                    f"[DIAG] wallet_login_init SUCCESS ({label}): session={inner.get('authSessionId','?')[:12]}...",
                     file=sys.stderr, flush=True,
                 )
                 return {
                     "login_url": login_url,
-                    "auth_session_id": data.get("authSessionId", ""),
-                    "opened": data.get("opened", False),
+                    "auth_session_id": inner.get("authSessionId", ""),
+                    "opened": inner.get("opened", False),
                 }
 
     return {
@@ -577,7 +579,9 @@ def wallet_login_poll(session_id: str = "") -> dict:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 continue
-            if data.get("success", False) or data.get("accessToken"):
+            # Handle both flat and nested JSON
+            inner = data.get("data", data) if isinstance(data.get("data"), dict) else data
+            if inner.get("success", False) or inner.get("accessToken"):
                 print("[DIAG] wallet_login_poll SUCCESS", file=sys.stderr, flush=True)
                 return {"status": "logged_in", "message": "Wallet login completed"}
 
