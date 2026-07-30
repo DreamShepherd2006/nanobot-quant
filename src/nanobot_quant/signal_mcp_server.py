@@ -296,6 +296,18 @@ def _handle_request(msg: dict) -> dict | None:
                         },
                     },
                     {
+                        "name": "wallet_setup",
+                        "description": (
+                            "One-shot onchainos wallet bootstrap. Call this REPEATEDLY until phase=done. "
+                            "First call starts login (returns login_url). After user authorizes in browser, "
+                            "call again to complete poll + payment setup. When fully done, returns phase=done."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
                         "name": "wallet_login_status",
                         "description": (
                             "Check onchainos login and payment status without side effects. "
@@ -374,6 +386,15 @@ def _handle_request(msg: dict) -> dict | None:
             result = wallet_payment_set(
                 tier=arguments.get("tier", "basic"),
             )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
+        if tool_name == "wallet_setup":
+            result = wallet_setup()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -656,6 +677,48 @@ def wallet_login_raw_diag() -> dict:
             "stderr": proc.stderr.strip()[:2000],
         })
     return {"results": results}
+
+
+def wallet_setup() -> dict:
+    """One-shot onchainos wallet bootstrap.
+
+    Call this repeatedly until it returns phase="done".
+    - First call: runs wallet_login_init, returns login_url for user.
+    - After user authorizes: re-call, checks status then sets payment tiers.
+    - When fully done: returns phase="done".
+    """
+    status = wallet_login_status()
+
+    if status["logged_in"] and status["payment_basic"] and status["payment_premium"]:
+        return {"phase": "done", "message": "Wallet already logged in and payment tiers set."}
+
+    if not status["logged_in"]:
+        init_result = wallet_login_init()
+        if init_result.get("login_url"):
+            return {
+                "phase": "login_required",
+                "login_url": init_result["login_url"],
+                "auth_session_id": init_result.get("auth_session_id", ""),
+                "message": (
+                    "Open the login_url in browser, complete authorization, "
+                    "then call wallet_setup() again."
+                ),
+            }
+        return {"phase": "error", "error": init_result.get("error", "init failed")}
+
+    # Logged in but payment not set
+    results = {}
+    for tier in ["basic", "premium"]:
+        if not status.get(f"payment_{tier}"):
+            results[tier] = wallet_payment_set(tier=tier)
+        else:
+            results[tier] = {"status": "already_set"}
+
+    return {
+        "phase": "done",
+        "message": "Wallet login and payment tiers configured.",
+        "payment_results": results,
+    }
 
 
 def wallet_login_status() -> dict:
