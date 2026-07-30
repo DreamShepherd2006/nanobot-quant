@@ -587,7 +587,7 @@ def wallet_login_poll(session_id: str = "") -> dict:
 
     return {
         "status": "error",
-        "message": "all poll attempts failed — check quant stderr logs for details",
+        "message": f"all poll attempts failed (tried {len(candidates)} syntaxes — check stderr for DIAG lines)",
     }
 def wallet_payment_set(tier: str, asset: str = "", chain: str = "", name: str = "") -> dict:
     """Set default payment asset and tier. Uses known USDG on X Layer as defaults."""
@@ -635,6 +635,29 @@ def wallet_payment_set(tier: str, asset: str = "", chain: str = "", name: str = 
         "chain": chain,
         "name": name,
     }
+
+def wallet_login_raw_diag() -> dict:
+    """Run onchainos wallet login --phase poll and return raw output for debugging."""
+    import json as _json
+    results = []
+    for args in [
+        [ONCHAINOS_BIN, "wallet", "login", "--phase", "poll"],
+        [ONCHAINOS_BIN, "wallet", "login", "poll"],
+    ]:
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=310)
+        except subprocess.TimeoutExpired:
+            results.append({"args": args, "error": "timeout"})
+            continue
+        results.append({
+            "args": args,
+            "rc": proc.returncode,
+            "stdout": proc.stdout.strip()[:2000],
+            "stderr": proc.stderr.strip()[:2000],
+        })
+    return {"results": results}
+
+
 def wallet_login_status() -> dict:
     """Check onchainos login / payment status without side effects."""
     status = {"logged_in": False, "payment_basic": False, "payment_premium": False}
