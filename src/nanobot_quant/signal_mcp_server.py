@@ -477,34 +477,61 @@ def wallet_login_init() -> dict:
     """Initiate onchainos social login. Returns loginUrl for the user."""
     try:
         proc = subprocess.run(
-            [ONCHAINOS_BIN, "wallet", "login", "init"],
+            [ONCHAINOS_BIN, "wallet", "login", "--phase", "init"],
             capture_output=True, text=True, timeout=30,
         )
     except FileNotFoundError:
         return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
     except subprocess.TimeoutExpired:
-        return {"error": "onchainos wallet login init timed out (30s)"}
-
-    if proc.returncode != 0:
-        return {"error": f"init failed (rc={proc.returncode}): {proc.stderr.strip()}"}
-
-    try:
-        data = json.loads(proc.stdout.strip())
-    except json.JSONDecodeError:
-        return {"error": f"unexpected init output: {proc.stdout.strip()[:500]}"}
+        return {"error": "onchainos wallet login --phase init timed out (30s)"}
 
     print(
-        f"[DIAG] wallet_login_init: session={data.get('authSessionId','?')[:12]}...",
+        f"[DIAG] wallet_login_init rc={proc.returncode} "
+        f"stdout={proc.stdout.strip()[:300]!r} "
+        f"stderr={proc.stderr.strip()[:300]!r}",
         file=sys.stderr, flush=True,
     )
-    return {"login_url": data.get("loginUrl", ""), "auth_session_id": data.get("authSessionId", ""), "opened": data.get("opened", False)}
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        stdout = proc.stdout.strip()
+        return {
+            "error": f"init failed (rc={proc.returncode})",
+            "stdout": stdout[:1000],
+            "stderr": stderr[:1000],
+        }
+
+    # Try stdout first, then stderr (some CLIs output JSON to stderr)
+    for source, label in [(proc.stdout, "stdout"), (proc.stderr, "stderr")]:
+        text = source.strip()
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        print(
+            f"[DIAG] wallet_login_init ({label}): session={data.get('authSessionId','?')[:12]}...",
+            file=sys.stderr, flush=True,
+        )
+        return {
+            "login_url": data.get("loginUrl", ""),
+            "auth_session_id": data.get("authSessionId", ""),
+            "opened": data.get("opened", False),
+        }
+
+    return {
+        "error": "no JSON output from onchainos wallet login --phase init",
+        "stdout": proc.stdout.strip()[:500],
+        "stderr": proc.stderr.strip()[:500],
+    }
 
 
 def wallet_login_poll(session_id: str = "") -> dict:
     """Poll for social login completion. Call after user finishes browser login."""
-    args = [ONCHAINOS_BIN, "wallet", "login", "poll"]
+    args = [ONCHAINOS_BIN, "wallet", "login", "--phase", "poll"]
     if session_id:
-        args.append(session_id)
+        args.extend(["--session-id", session_id])
 
     try:
         proc = subprocess.run(
