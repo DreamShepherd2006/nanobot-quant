@@ -12,10 +12,17 @@ Protocol: stdio JSON-RPC (MCP).  No external MCP SDK required.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+
+# ── Redirect root logger to stderr ───────────────────────────────
+# lumibot (and other libs) configure StreamHandler→stdout at import
+# time.  stdout is the MCP JSON‑RPC channel — any stray log line
+# breaks the protocol.  Move everything to stderr before first import.
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
 
 SERVER_NAME = "signal-structurizer"
 SERVER_VERSION = "1.1.0"
