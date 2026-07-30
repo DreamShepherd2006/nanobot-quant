@@ -49,19 +49,6 @@ def discover() -> dict[str, MCPSpec]:
     return dict(_registry)
 
 
-# ── OnchainOS (OKX) MCP server ─────────────────────────────────
-
-okx_mcp = MCPSpec(
-    name="onchainos",
-    display="OnchainOS (OKX)",
-    command="/usr/local/bin/onchainos",
-    args=["mcp"],
-    target_agents=["quant"],
-    env_from_credential="okx",
-)
-register(okx_mcp)
-
-
 # ── Vibe-Trading MCP server ────────────────────────────────────
 
 vt_mcp = MCPSpec(

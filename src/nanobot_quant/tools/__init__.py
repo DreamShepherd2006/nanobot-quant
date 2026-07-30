@@ -1,1 +1,1 @@
-# nanobot-quant tools
+"""MCP tool implementations for signal-structurizer server."""
