@@ -100,7 +100,7 @@ def structurize_signal(debate_text: str, ticker: str) -> dict:
     if "error" in extracted:
         return extracted
 
-    return {
+    result = {
         "ticker": ticker.upper(),
         "recommendation": extracted.get("recommendation", "HOLD"),
         "confidence": extracted.get("confidence", "Unknown"),
@@ -116,6 +116,13 @@ def structurize_signal(debate_text: str, ticker: str) -> dict:
         "reason": extracted.get("reason", ""),
         "source": "vt_research",
     }
+
+    print(
+        f"[DIAG] structurize_signal: {ticker.upper()} → {result['recommendation']} "
+        f"(score={result['score']}, confidence={result['confidence']})",
+        file=sys.stderr, flush=True,
+    )
+    return result
 
 
 # ── MCP stdio JSON-RPC loop ───────────────────────────────────────
@@ -283,6 +290,12 @@ def execute_signal(ticker_signal_json: str) -> dict:
     for s in signal_list:
         if "ticker" not in s:
             return {"error": f"Missing 'ticker' in signal: {s}"}
+
+    ticker_summary = [s.get("ticker", "?") for s in signal_list]
+    print(
+        f"[DIAG] execute_signal: running pipeline on {ticker_summary}",
+        file=sys.stderr, flush=True,
+    )
 
     try:
         results = run_from_signals(signal_list)

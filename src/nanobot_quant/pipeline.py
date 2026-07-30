@@ -13,6 +13,8 @@ Designed to be called as a quant-agent tool (no live strategy needed).
 
 from __future__ import annotations
 
+import sys
+
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -385,6 +387,9 @@ def run_from_signals(
         else:
             parsed.append(s)
 
+    tickers = [s.ticker for s in parsed]
+    print(f"[DIAG] run_from_signals: {len(parsed)} signal(s) → {tickers}", file=sys.stderr, flush=True)
+
     pipeline = AnalysisPipeline(
         max_position_pct=max_position_pct,
         max_drawdown_pct=max_drawdown_pct,
@@ -456,5 +461,9 @@ def run_from_signals(
             "suggested_order": order,
             "position_value": position_value,
         })
+
+    passed = sum(1 for r in results if r["risk_passed"])
+    orders = sum(1 for r in results if r["suggested_order"] is not None)
+    print(f"[DIAG] run_from_signals done: {passed}/{len(results)} risk passed, {orders} order(s)", file=sys.stderr, flush=True)
 
     return results
