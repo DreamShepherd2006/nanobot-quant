@@ -154,6 +154,42 @@ def _handle_request(msg: dict) -> dict | None:
             "result": {
                 "tools": [
                     {
+                        "name": "run_td_sequential",
+                        "description": (
+                            "Run TD Sequential analysis on a Solana token. "
+                            "Fetches daily K-line data from OnchainOS, "
+                            "computes DeMark TD Setup/Countdown/TDST/score, "
+                            "and returns a structured TickerSignal with "
+                            "recommendation (BUY/SELL/HOLD), setup count, "
+                            "countdown count, score, support/resistance levels."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "address": {
+                                    "type": "string",
+                                    "description": "Token contract address, e.g. XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
+                                },
+                                "chain": {
+                                    "type": "string",
+                                    "default": "solana",
+                                    "description": "Chain: solana, arbitrum, ethereum, base, bnb, optimism, polygon",
+                                },
+                                "bar": {
+                                    "type": "string",
+                                    "default": "1D",
+                                    "description": "Candle interval: 1m, 5m, 15m, 1H, 4H, 1D, 1W",
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "default": 299,
+                                    "description": "Number of candles to fetch (max 299 per call)",
+                                },
+                            },
+                            "required": ["address"],
+                        },
+                    },
+                    {
                         "name": "structurize_signal",
                         "description": (
                             "Convert VT Swarm investment committee debate transcript "
@@ -206,6 +242,20 @@ def _handle_request(msg: dict) -> dict | None:
     if method == "tools/call":
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+        if tool_name == "run_td_sequential":
+            result = run_td_sequential(
+                address=arguments.get("address", ""),
+                chain=arguments.get("chain", "solana"),
+                bar=arguments.get("bar", "1D"),
+                limit=int(arguments.get("limit", 299)),
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
+                },
+            }
         if tool_name == "structurize_signal":
             result = structurize_signal(
                 debate_text=arguments.get("debate_text", ""),
@@ -302,3 +352,62 @@ def execute_signal(ticker_signal_json: str) -> dict:
         return {"results": results, "count": len(results)}
     except Exception as exc:
         return {"error": f"Pipeline execution failed: {exc}"}
+
+
+# ── run_td_sequential tool ──────────────────────────────────────
+
+def run_td_sequential(
+    address: str,
+    chain: str = "solana",
+    bar: str = "1D",
+    limit: int = 299,
+) -> dict:
+    """Run TD Sequential analysis on an OnchainOS token.
+
+    Fetches K-line data via OnchainOS CLI, calculates TD Sequential
+    and returns a TickerSignal dict.
+    """
+    from nanobot_quant.onchainos_data import fetch_kline as _fetch_kline
+    from nanobot_quant.strategies.td_sequential import calculate as _calculate
+
+    # Default to resolved chain name
+    chain_name = chain if chain in ("solana", "arbitrum", "ethereum", "base", "bnb", "optimism", "polygon", "xdai") else "solana"
+
+    print(
+        f"[DIAG] run_td_sequential: address={address[:12]}... chain={chain_name} bar={bar} limit={limit}",
+        file=sys.stderr, flush=True,
+    )
+
+    try:
+        df = _fetch_kline(
+            chain=chain_name,
+            token_address=address,
+            bar=bar,
+            limit=limit,
+        )
+    except Exception as exc:
+        return {"error": f"Failed to fetch kline data: {exc}"}
+
+    if df is None or df.empty:
+        return {"error": "No kline data returned from OnchainOS"}
+
+    print(
+        f"[DIAG] run_td_sequential: fetched {len(df)} candles ({df.index[0]} → {df.index[-1]})",
+        file=sys.stderr, flush=True,
+    )
+
+    try:
+        result = _calculate(df)
+    except Exception as exc:
+        return {"error": f"TD Sequential calculation failed: {exc}"}
+
+    result["source"] = "quant"
+    result["ticker"] = address
+    result["chain"] = chain_name
+
+    print(
+        f"[DIAG] run_td_sequential: {result['recommendation']} "
+        f"(setup_buy={result['setup_buy']} cd_buy={result['cd_buy']} score={result['score']})",
+        file=sys.stderr, flush=True,
+    )
+    return result

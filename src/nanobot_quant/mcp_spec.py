@@ -105,7 +105,7 @@ signal_mcp = MCPSpec(
     display="Signal Structurizer",
     command="python3",
     args=["-m", "nanobot_quant.signal_mcp_server"],
-    target_agents=["vt_research"],
+    target_agents=["vt_research", "quant"],
     env={
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     },
