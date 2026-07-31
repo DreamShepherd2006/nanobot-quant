@@ -67,8 +67,7 @@ class OnchainOSBroker(Broker):
         quantity = int(order.quantity)
 
         if side not in ("buy", "sell"):
-            order.update_status("rejected")
-            logger.error("Unsupported side: %s (only buy/sell)", side)
+            order.set_error(f"Unsupported side: {side} (only buy/sell)")
             return order
 
         # ── token resolution ──────────────────────────────────
@@ -83,7 +82,9 @@ class OnchainOSBroker(Broker):
         to_addr = resolve_token_address(to_symbol, self._tokens_json)
 
         if not from_addr or not to_addr:
-            order.update_status("rejected")
+            order.set_error(
+                f"Cannot resolve addresses: {from_symbol}→{to_symbol}"
+            )
             logger.error(
                 "Cannot resolve addresses: %s→%s", from_symbol, to_symbol
             )
@@ -97,8 +98,7 @@ class OnchainOSBroker(Broker):
             sol_price = get_token_price(from_addr) or 1.0
             token_price = get_token_price(to_addr) or 0.0
             if token_price <= 0:
-                order.update_status("rejected")
-                logger.error("Cannot get price for %s", symbol)
+                order.set_error(f"Cannot get price for {symbol}")
                 return order
             sol_needed = (quantity * token_price / sol_price) * (1 + self._sol_buffer_pct)
             from_amount = f"{sol_needed:.6f}"
@@ -106,10 +106,8 @@ class OnchainOSBroker(Broker):
         # ── execute swap ───────────────────────────────────────
         result = swap_execute(from_addr, to_addr, from_amount, self._slippage)
         if not result:
-            order.update_status("rejected")
-            logger.error(
-                "Swap execute failed: %s %s %s@%s",
-                side, quantity, symbol, from_amount,
+            order.set_error(
+                f"Swap execute failed: {side} {quantity} {symbol}@{from_amount}"
             )
             return order
 
@@ -117,13 +115,12 @@ class OnchainOSBroker(Broker):
         status = result.get("status", "unknown")
 
         if status not in ("success", "submitted", "pending"):
-            order.update_status("rejected")
-            logger.error("Swap returned status=%s tx=%s", status, tx_hash[:16])
+            order.set_error(f"Swap returned status={status} tx={tx_hash[:16]}")
             return order
 
         # ── fill order ─────────────────────────────────────────
         order.set_identifier(tx_hash)
-        order.update_status("filled")
+        order.set_filled()
 
         to_amount = float(result.get("toAmount") or 0)
         fill_price = to_amount / quantity if quantity > 0 else 0
