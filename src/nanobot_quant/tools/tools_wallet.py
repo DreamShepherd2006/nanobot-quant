@@ -21,7 +21,6 @@ def wallet_login_init() -> dict:
     candidates = [
         [ONCHAINOS_BIN, "wallet", "login"],
         [ONCHAINOS_BIN, "wallet", "login", "--phase", "init"],
-        [ONCHAINOS_BIN, "wallet", "login", "init"],
     ]
 
     for attempt, args in enumerate(candidates, 1):
@@ -81,11 +80,6 @@ def wallet_login_poll(session_id: str = "") -> dict:
         base_args.extend(["--session-id", session_id])
     candidates.append(base_args)
 
-    alt_args: list[str] = [ONCHAINOS_BIN, "wallet", "login", "poll"]
-    if session_id:
-        alt_args.append(session_id)
-    candidates.append(alt_args)
-
     for attempt, args in enumerate(candidates, 1):
         try:
             proc = subprocess.run(
@@ -103,10 +97,11 @@ def wallet_login_poll(session_id: str = "") -> dict:
         )
 
         if proc.returncode != 0:
-            if "10018" in proc.stderr or "not ready" in proc.stderr.lower():
-                return {"status": "pending", "message": "User has not completed login yet"}
-            if "timed out" in proc.stderr.lower() or "timeout" in proc.stderr.lower():
-                return {"status": "timeout", "message": proc.stderr.strip()[:500]}
+            combined = (proc.stderr + proc.stdout).lower()
+            if "10018" in combined or "not ready" in combined or "login timed out" in combined:
+                return {"status": "pending", "message": "User has not completed login yet — finish in browser then retry"}
+            if "timed out" in combined or "timeout" in combined:
+                return {"status": "timeout", "message": (proc.stderr + proc.stdout).strip()[:500]}
             continue
 
         for source, label in [(proc.stdout, "stdout"), (proc.stderr, "stderr")]:
@@ -181,7 +176,6 @@ def wallet_login_raw_diag() -> dict:
     results = []
     for args in [
         [ONCHAINOS_BIN, "wallet", "login", "--phase", "poll"],
-        [ONCHAINOS_BIN, "wallet", "login", "poll"],
     ]:
         try:
             proc = subprocess.run(args, capture_output=True, text=True, timeout=10)
