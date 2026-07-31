@@ -72,10 +72,12 @@ class OnchainOSBroker(Broker):
             return order
 
         # ── token resolution ──────────────────────────────────
+        quote_symbol = order.quote.symbol if order.quote else "USDC"
+
         if side == "buy":
-            from_symbol, to_symbol = "SOL", symbol
+            from_symbol, to_symbol = quote_symbol, symbol
         else:
-            from_symbol, to_symbol = symbol, "SOL"
+            from_symbol, to_symbol = symbol, quote_symbol
 
         from_addr = resolve_token_address(from_symbol, self._tokens_json)
         to_addr = resolve_token_address(to_symbol, self._tokens_json)

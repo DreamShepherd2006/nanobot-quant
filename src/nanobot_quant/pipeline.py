@@ -494,15 +494,20 @@ def run_from_signals(
                         symbol=req.asset,
                         asset_type="crypto",
                     )
+                    quote = Asset(
+                        symbol="USDC",
+                        asset_type="crypto",
+                    )
                     lumibot_order = LumibotOrder(
                         strategy=_StubStrategy(),
                         asset=asset,
+                        quote=quote,
                         quantity=req.quantity,
                         side=req.action,
                     )
-                    result = broker._submit_order(lumibot_order)
-                    tx_hash = result.get("tx_hash", "")
-                    broker_status = result.get("status", "unknown")
+                    broker._submit_order(lumibot_order)
+                    tx_hash = lumibot_order.identifier or ""
+                    broker_status = lumibot_order.status if hasattr(lumibot_order, 'status') else "unknown"
                     print(f"[DIAG] run_from_signals: {ticker} → {broker_status} tx={tx_hash}",
                           file=sys.stderr, flush=True)
                 except Exception as exc:
