@@ -137,6 +137,14 @@ def resolve_token_address(
     if symbol_upper == "SOL":
         return WSOL_ADDR
 
+    # Well-known Solana tokens (common trading pairs)
+    _KNOWN_TOKENS: dict[str, str] = {
+        "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    }
+    if symbol_upper in _KNOWN_TOKENS:
+        return _KNOWN_TOKENS[symbol_upper]
+
     # 1) User-configured list
     for entry in (tokens_json or []):
         if entry.get("symbol", "").upper() == symbol_upper:

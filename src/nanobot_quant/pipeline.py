@@ -507,12 +507,16 @@ def run_from_signals(
                     )
                     broker._submit_order(lumibot_order)
                     tx_hash = lumibot_order.identifier or ""
-                    order_error = getattr(lumibot_order, 'error', '') or ''
+                    order_error = (
+                        getattr(lumibot_order, 'error', '')
+                        or getattr(lumibot_order, '_error', '')
+                        or ''
+                    )
                     broker_status = lumibot_order.status if hasattr(lumibot_order, 'status') else "unknown"
                     if order_error:
                         broker_status = f"{broker_status}: {order_error}"
-                        print(f"[DIAG] run_from_signals: {ticker} → {broker_status} tx={tx_hash}",
-                              file=sys.stderr, flush=True)
+                    print(f"[DIAG] run_from_signals: {ticker} → {broker_status} tx={tx_hash} err={order_error!r}",
+                          file=sys.stderr, flush=True)
                 except Exception as exc:
                     print(f"[DIAG] run_from_signals: {ticker} broker FAILED: {exc}",
                           file=sys.stderr, flush=True)
