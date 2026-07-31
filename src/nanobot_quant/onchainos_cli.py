@@ -19,9 +19,32 @@ ONCHAINOS_BIN = "/usr/local/bin/onchainos"
 
 logger = logging.getLogger("nanobot_quant.onchainos_cli")
 
+_env_injected = False
+
+
+def _ensure_env() -> None:
+    """Inject OKX credentials into os.environ so onchainos CLI can call Market API.
+
+    Market endpoints (kline, price, token search) require OKX_API_KEY /
+    OKX_SECRET_KEY / OKX_PASSPHRASE env vars.  Wallet endpoints use
+    ~/.onchainos/keyring.enc instead.
+
+    Idempotent — called once before the first CLI invocation.
+    """
+    global _env_injected
+    if _env_injected:
+        return
+    try:
+        from nanobot_quant.okx_credentials import inject_env
+        inject_env()
+    except Exception:
+        pass
+    _env_injected = True
+
 
 def _run(*args, timeout: int = 15) -> Optional[dict | list]:
     """Run onchainos CLI and return parsed JSON output."""
+    _ensure_env()
     try:
         r = subprocess.run(
             [ONCHAINOS_BIN, *args],
