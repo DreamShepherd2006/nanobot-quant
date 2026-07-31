@@ -110,42 +110,25 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 # ── Market ────────────────────────────────────────────────────────
 
 def get_price(symbol: str, chain: str = "solana") -> Optional[str]:
-    """Get real-time token price in USD via swap quote.
+    """Get real-time token price in USD via market kline.
 
-    Uses onchainos swap quote for accurate live pricing.
+    Uses the most recent 1m candle's close as the current price.
     Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
     Returns price as string or None.
     """
-    addr = resolve_token_address(symbol)
-    if not addr:
-        return None
-
     # For stablecoins, return "1"
     if symbol.upper() in ("USDC", "USDT"):
         return "1"
 
-    usdc_addr = resolve_token_address("USDC")
-    if not usdc_addr:
+    addr = resolve_token_address(symbol)
+    if not addr:
         return None
 
-    # Quote: swap 1 SOL → USDC to get SOL price in USD
-    result = _run(
-        "swap", "quote",
-        "--from", addr,
-        "--to", usdc_addr,
-        "--amount", "1",
-        "--slippage", "0.01",
-        timeout=15,
-    )
-    if isinstance(result, dict):
-        if "_exit_code" in result:
-            return None
-        if result.get("ok"):
-            data = result.get("data", result)
-            to_amount = data.get("toAmount")
-            if to_amount:
-                return str(to_amount)
-
+    # kline returns list like [{ts, o, h, l, c, vol, ...}, ...]
+    candles = get_kline(addr, bar="1m", limit=1, chain=chain)
+    if candles:
+        c = candles[0]
+        return str(c.get("c") or c.get("close"))
     return None
 
 
