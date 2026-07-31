@@ -14,6 +14,43 @@ import sys
 ONCHAINOS_BIN = "/usr/local/bin/onchainos"
 _SESSION_ID_FILE = os.path.expanduser("~/.onchainos/last_session_id.txt")
 
+# Persistent storage for onchainos session data (survives Factory Rebuilds)
+_PERSISTENT_ONCHAINOS_DIR = "/data/legion/credentials/onchainos_sessions"
+
+
+def _ensure_onchainos_dir() -> None:
+    """Symlink ~/.onchainos → persistent /data/legion/credentials/onchainos_sessions/.
+
+    After Factory Rebuild ~/.onchainos/ is wiped, but keyring.enc and
+    session.json persist under /data/.  This symlink makes wallet login
+    survive rebuilds.
+    """
+    home_onchainos = os.path.expanduser("~/.onchainos")
+
+    # Already a correct symlink → done
+    if os.path.islink(home_onchainos):
+        target = os.readlink(home_onchainos)
+        if target == _PERSISTENT_ONCHAINOS_DIR:
+            return
+        # Wrong target — remove and re-link
+        os.unlink(home_onchainos)
+    elif os.path.isdir(home_onchainos):
+        # Real directory (not a symlink) — clean up
+        import shutil
+        shutil.rmtree(home_onchainos, ignore_errors=True)
+    elif os.path.isfile(home_onchainos):
+        os.unlink(home_onchainos)
+
+    # Create persistent target if not yet exists
+    os.makedirs(_PERSISTENT_ONCHAINOS_DIR, exist_ok=True)
+
+    # Create symlink
+    os.symlink(_PERSISTENT_ONCHAINOS_DIR, home_onchainos)
+    print(
+        f"[DIAG] _ensure_onchainos_dir: {home_onchainos} → {_PERSISTENT_ONCHAINOS_DIR}",
+        file=sys.stderr, flush=True,
+    )
+
 
 def wallet_login_init() -> dict:
     """Initiate onchainos social login. Returns loginUrl for the user.
@@ -268,6 +305,7 @@ def wallet_setup() -> dict:
     authorization without re-init (which would generate a fresh, different
     session and invalidate the one the user just authorized).
     """
+    _ensure_onchainos_dir()  # persistent symlink survives Factory Rebuilds
     status = wallet_login_status()
 
     if status["logged_in"] and status["payment_basic"] and status["payment_premium"]:
