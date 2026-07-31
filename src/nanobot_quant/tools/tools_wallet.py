@@ -112,9 +112,14 @@ def wallet_login_poll(session_id: str = "") -> dict:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 continue
+            # OKX CLI convention: {"ok": true, "data": {...}}
+            if data.get("ok"):
+                print("[DIAG] wallet_login_poll SUCCESS (ok=true)", file=sys.stderr, flush=True)
+                return {"status": "logged_in", "message": "Wallet login completed"}
+
             inner = data.get("data", data) if isinstance(data.get("data"), dict) else data
-            if inner.get("success", False) or inner.get("accessToken"):
-                print("[DIAG] wallet_login_poll SUCCESS", file=sys.stderr, flush=True)
+            if inner.get("ok") or inner.get("success", False) or inner.get("accessToken"):
+                print("[DIAG] wallet_login_poll SUCCESS (inner)", file=sys.stderr, flush=True)
                 return {"status": "logged_in", "message": "Wallet login completed"}
 
     return {
