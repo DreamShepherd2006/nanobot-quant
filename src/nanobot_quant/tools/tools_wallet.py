@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 ONCHAINOS_BIN = "/usr/local/bin/onchainos"
+_SESSION_ID_FILE = os.path.expanduser("~/.onchainos/last_session_id.txt")
 
 
 def wallet_login_init() -> dict:
@@ -225,40 +226,106 @@ def wallet_login_status() -> dict:
     return status
 
 
+def _read_saved_session_id() -> str:
+    """Read authSessionId persisted from a previous init call."""
+    try:
+        if os.path.isfile(_SESSION_ID_FILE):
+            with open(_SESSION_ID_FILE) as f:
+                return f.read().strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _save_session_id(session_id: str) -> None:
+    """Persist authSessionId so the next call can poll with it."""
+    if not session_id:
+        return
+    try:
+        os.makedirs(os.path.dirname(_SESSION_ID_FILE), exist_ok=True)
+        with open(_SESSION_ID_FILE, "w") as f:
+            f.write(session_id)
+    except OSError:
+        pass
+
+
+def _clear_saved_session_id() -> None:
+    """Remove the persisted session id after a successful poll."""
+    try:
+        os.remove(_SESSION_ID_FILE)
+    except (OSError, FileNotFoundError):
+        pass
+
+
 def wallet_setup() -> dict:
     """One-shot onchainos wallet bootstrap.
 
     Call this repeatedly until it returns phase="done".
-    - Try poll first: if there's a pending auth session, wait for user.
-    - If no pending session: init → return login_url for user.
-    - When fully done: returns phase="done".
+    Follows the official OKX flow: init → save session_id → user authorizes
+    in browser → poll with --session-id → payment setup.
+
+    The session_id is persisted to ~/.onchainos/last_session_id.txt so
+    subsequent calls (even after MCP restarts) can pick up the pending
+    authorization without re-init (which would generate a fresh, different
+    session and invalidate the one the user just authorized).
     """
     status = wallet_login_status()
 
     if status["logged_in"] and status["payment_basic"] and status["payment_premium"]:
+        _clear_saved_session_id()
         return {"phase": "done", "message": "Wallet already logged in and payment tiers set."}
 
     if not status["logged_in"]:
-        # Try poll first — user may have authorized since last init
-        poll_result = wallet_login_poll()
-        if poll_result.get("status") == "logged_in":
-            # Poll succeeded, proceed to payment setup below
-            pass
-        elif poll_result.get("status") in ("pending", "timeout"):
-            # User hasn't authorized yet, keep waiting (don't re-init)
-            return {
-                "phase": "polling",
-                "poll_status": poll_result["status"],
-                "message": poll_result.get("message", "Waiting for browser authorization..."),
-            }
-        else:
-            # No pending session — start a new one
+        # Try to continue a previous init: poll with the saved session_id
+        session_id = _read_saved_session_id()
+        if session_id:
+            print(
+                f"[DIAG] wallet_setup: found saved session_id={session_id[:16]}..., trying poll",
+                file=sys.stderr, flush=True,
+            )
+            poll_result = wallet_login_poll(session_id=session_id)
+            if poll_result.get("status") == "logged_in":
+                # Poll succeeded — login complete, remove saved file and proceed
+                print(
+                    "[DIAG] wallet_setup: poll succeeded, clearing saved session_id",
+                    file=sys.stderr, flush=True,
+                )
+                _clear_saved_session_id()
+                # Re-check status (keyring should be written now)
+                status = wallet_login_status()
+            elif poll_result.get("status") in ("pending",):
+                # Not yet authorized, return pending (don't re-init!)
+                return {
+                    "phase": "polling",
+                    "session_id": session_id,
+                    "message": poll_result.get(
+                        "message", "Waiting for browser authorization..."
+                    ),
+                }
+            else:
+                # Poll failed (expired, invalid). Clear and start fresh.
+                print(
+                    f"[DIAG] wallet_setup: poll failed ({poll_result.get('status')!r}), clearing saved session_id",
+                    file=sys.stderr, flush=True,
+                )
+                _clear_saved_session_id()
+                session_id = ""
+
+        # No valid session — start a new one
+        if not session_id:
             init_result = wallet_login_init()
             if init_result.get("login_url"):
+                sid = init_result.get("auth_session_id", "")
+                if sid:
+                    _save_session_id(sid)
+                    print(
+                        f"[DIAG] wallet_setup: init new session_id={sid[:16]}..., saved to file",
+                        file=sys.stderr, flush=True,
+                    )
                 return {
                     "phase": "login_required",
                     "login_url": init_result["login_url"],
-                    "auth_session_id": init_result.get("auth_session_id", ""),
+                    "auth_session_id": sid,
                     "message": (
                         "Open the login_url in browser, complete authorization, "
                         "then call wallet_setup() again."
