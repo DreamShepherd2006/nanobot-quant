@@ -13,6 +13,8 @@ import logging
 import subprocess
 from typing import Any, Optional
 
+from nanobot_quant.onchainos_errors import lookup as err_lookup
+
 ONCHAINOS_BIN = "/usr/local/bin/onchainos"
 
 logger = logging.getLogger("nanobot_quant.onchainos_cli")
@@ -34,7 +36,10 @@ def _run(*args, timeout: int = 15) -> Optional[dict | list]:
                     stderr_parsed = json.loads(r.stderr.strip())
                 except json.JSONDecodeError:
                     pass
-            logger.warning("onchainos CLI exit=%d stderr=%s", r.returncode, stderr_tail)
+            err_desc = err_lookup(stderr_parsed) if stderr_parsed else ""
+            if not err_desc or err_desc == str(stderr_parsed):
+                err_desc = stderr_tail
+            logger.warning("onchainos CLI exit=%d: %s", r.returncode, err_desc)
             return {"_exit_code": r.returncode, "_stderr": r.stderr.strip(), "_stderr_parsed": stderr_parsed}
         return json.loads(r.stdout) if r.stdout.strip() else None
     except Exception:

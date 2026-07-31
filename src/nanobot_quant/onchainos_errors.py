@@ -108,18 +108,22 @@ def lookup(code_or_response: Any) -> str:
         except ValueError:
             pass
     elif isinstance(code_or_response, dict):
-        # Try numeric "code" key first, then "error" message key
-        code_val = code_or_response.get("code")
-        if isinstance(code_val, int):
-            code = code_val
-            raw = str(code)
-        elif isinstance(code_val, str):
-            raw = code_val
-            try:
-                code = int(code_val)
-            except ValueError:
-                pass
-        else:
+        # Try numeric "code" key first, then "error" message key,
+        # then peek into _stderr_parsed (CLI error output)
+        for src in (code_or_response, code_or_response.get("_stderr_parsed") or {}):
+            code_val = src.get("code")
+            if isinstance(code_val, int):
+                code = code_val
+                raw = str(code)
+                break
+            if isinstance(code_val, str):
+                raw = code_val
+                try:
+                    code = int(code_val)
+                    break
+                except ValueError:
+                    pass
+        if code is None:
             raw = code_or_response.get("error", str(code_or_response))
 
     if code is not None and code in ERROR_CODES:
