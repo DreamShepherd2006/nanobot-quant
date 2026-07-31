@@ -471,7 +471,6 @@ def run_from_signals(
                     sys.stdout = sys.stderr
 
                     from lumibot.entities import Asset, Order as LumibotOrder
-                    from lumibot.trading_builtins import AssetType
                     from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
 
                     sys.stdout = _saved_stdout
@@ -480,7 +479,7 @@ def run_from_signals(
 
                     asset = Asset(
                         symbol=req.asset,
-                        asset_type=AssetType.CRYPTO,
+                        asset_type="crypto",
                     )
                     lumibot_order = LumibotOrder(
                         strategy=None,
