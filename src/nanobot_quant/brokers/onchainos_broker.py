@@ -40,11 +40,31 @@ class OnchainOSBroker(Broker):
         sol_buffer_pct: float = 0.05,
         **kwargs,
     ):
+        if "data_source" not in kwargs:
+            kwargs["data_source"] = _DummyDataSource()
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
         self._slippage = slippage
         self._sol_buffer_pct = sol_buffer_pct
         self._tracked: dict[str, dict] = {}  # tx_hash → order meta
+
+
+class _DummyDataSource:
+    """Minimal data source stub so the Lumibot broker constructor doesn't reject us.
+
+    OnchainOSBroker gets all pricing data through onchainos CLI; it never
+    calls the data source's query methods.  A Lumibot ``Broker`` simply
+    requires *something* in ``data_source`` at construction time.
+    """
+    def __init__(self):
+        self._timestep = "minute"
+
+    def get_last_price(self, *args, **kwargs) -> None:
+        return None
+
+    def get_historical_prices(self, *args, **kwargs):
+        import pandas as pd
+        return pd.DataFrame()
 
     # ═══════════════════════════════════════════════════════════════
     #  Order Execution
