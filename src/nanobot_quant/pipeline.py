@@ -40,6 +40,19 @@ from nanobot_quant.risk import RiskEngine
 from nanobot_quant.signal_schema import SignalRequest, SignalResponse, TickerSignal
 from nanobot_quant.strategies.td_sequential import calculate
 
+
+class _StubStrategy:
+    """Minimal strategy stub so Lumibot Order constructor doesn't crash.
+
+    When we call ``broker._submit_order()`` directly we are not running
+    inside a full Lumibot strategy loop.  The Order only needs a
+    non-None strategy handle; it never calls back into it during
+    manual submission.
+    """
+    name = "pipeline-live"
+    quote_asset = None
+
+
 DataSource = Literal["yahoo", "onchainos", "okx_cex"]
 
 
@@ -482,7 +495,7 @@ def run_from_signals(
                         asset_type="crypto",
                     )
                     lumibot_order = LumibotOrder(
-                        strategy=None,
+                        strategy=_StubStrategy(),
                         asset=asset,
                         quantity=req.quantity,
                         side=req.action,
