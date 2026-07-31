@@ -13,6 +13,8 @@ Designed to be called as a quant-agent tool (no live strategy needed).
 
 from __future__ import annotations
 
+import sys
+
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -346,3 +348,122 @@ class AnalysisPipeline:
             risk_passed=False,
             risk_details={"error": reason},
         )
+
+default_pipeline = AnalysisPipeline()
+
+
+def run_from_signals(
+    signals: list[TickerSignal] | list[dict],
+    *,
+    portfolio_value: float = 100000.0,
+    max_position_pct: float = 0.20,
+    max_drawdown_pct: float = 0.15,
+    stop_loss_pct: float = 0.10,
+) -> list[dict]:
+    """Run risk checks + order generation on pre-computed signals.
+
+    Entry point for vt_research's execute_signal MCP tool.  Signals
+    are already structured (from structurize_signal or quant TD),
+    so we skip data fetch and TD calculation.
+
+    Returns list of dicts::
+
+        [{
+            "ticker": str,
+            "recommendation": str,
+            "score": float|None,
+            "risk_passed": bool,
+            "risk_details": dict,
+            "suggested_order": dict|None,
+            "position_value": float|None,
+        }]
+    """
+    from nanobot_quant.portfolio.order_schema import OrderRequest
+
+    parsed: list[TickerSignal] = []
+    for s in signals:
+        if isinstance(s, dict):
+            parsed.append(TickerSignal(**s))
+        else:
+            parsed.append(s)
+
+    tickers = [s.ticker for s in parsed]
+    print(f"[DIAG] run_from_signals: {len(parsed)} signal(s) → {tickers}", file=sys.stderr, flush=True)
+
+    pipeline = AnalysisPipeline(
+        max_position_pct=max_position_pct,
+        max_drawdown_pct=max_drawdown_pct,
+        stop_loss_pct=stop_loss_pct,
+    )
+
+    results: list[dict] = []
+    for signal in parsed:
+        ticker = signal.ticker
+        avg_price = signal.price or 0.0
+
+        if not avg_price:
+            results.append({
+                "ticker": ticker,
+                "recommendation": signal.recommendation,
+                "score": signal.score,
+                "risk_passed": False,
+                "risk_details": {"error": "no price in signal"},
+                "suggested_order": None,
+                "position_value": None,
+            })
+            continue
+
+        risk_details: dict[str, str] = {}
+        risk_passed = True
+        qty = pipeline._calculate_quantity(portfolio_value, avg_price)
+        position_value = avg_price * qty
+
+        pos_check = pipeline._risk.check_position_limit(
+            position_value=position_value,
+            portfolio_value=portfolio_value,
+        )
+        risk_details["position_limit"] = "ok" if pos_check.approved else pos_check.reason
+        if not pos_check.approved:
+            risk_passed = False
+
+        dd_check = pipeline._risk.check_max_drawdown(
+            portfolio_value=portfolio_value, peak_portfolio=portfolio_value,
+        )
+        risk_details["max_drawdown"] = "ok" if dd_check.approved else dd_check.reason
+        if not dd_check.approved:
+            risk_passed = False
+
+        sl_check = pipeline._risk.check_stop_loss(
+            current_price=avg_price, entry_price=avg_price,
+        )
+        risk_details["stop_loss"] = "ok" if sl_check.approved else sl_check.reason
+        if not sl_check.approved:
+            risk_passed = False
+
+        order: dict | None = None
+        if risk_passed and signal.recommendation in ("BUY", "SELL"):
+            req = OrderRequest(
+                asset=ticker,
+                action="buy" if signal.recommendation == "BUY" else "sell",
+                quantity=qty,
+                order_type="market",
+                price=avg_price,
+                reason=f"VT swarm signal score={signal.score}",
+            )
+            order = req.to_dict()
+
+        results.append({
+            "ticker": ticker,
+            "recommendation": signal.recommendation,
+            "score": signal.score,
+            "risk_passed": risk_passed,
+            "risk_details": risk_details,
+            "suggested_order": order,
+            "position_value": position_value,
+        })
+
+    passed = sum(1 for r in results if r["risk_passed"])
+    orders = sum(1 for r in results if r["suggested_order"] is not None)
+    print(f"[DIAG] run_from_signals done: {passed}/{len(results)} risk passed, {orders} order(s)", file=sys.stderr, flush=True)
+
+    return results

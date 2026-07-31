@@ -49,19 +49,6 @@ def discover() -> dict[str, MCPSpec]:
     return dict(_registry)
 
 
-# ── OnchainOS (OKX) MCP server ─────────────────────────────────
-
-okx_mcp = MCPSpec(
-    name="onchainos",
-    display="OnchainOS (OKX)",
-    command="/usr/local/bin/onchainos",
-    args=["mcp"],
-    target_agents=["neo", "quant", "vt_research"],
-    env_from_credential="okx",
-)
-register(okx_mcp)
-
-
 # ── Vibe-Trading MCP server ────────────────────────────────────
 
 vt_mcp = MCPSpec(
@@ -105,7 +92,7 @@ signal_mcp = MCPSpec(
     display="Signal Structurizer",
     command="python3",
     args=["-m", "nanobot_quant.signal_mcp_server"],
-    target_agents=["vt_research"],
+    target_agents=["vt_research", "quant"],
     env={
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     },
