@@ -87,15 +87,21 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 # ── Market ────────────────────────────────────────────────────────
 
 def get_price(address: str, chain: str = "solana") -> Optional[str]:
-    """Get real-time token price in USD.
+    """Get real-time token price in USD via kline close price.
 
+    Uses the most recent 1m candle's close as the current price,
+    since onchainos CLI does not have a standalone 'market price' command.
     Returns price as string or None.
     """
-    result = _run("market", "price", "--address", address, "--chain", chain)
+    result = _run("market", "kline", "--address", address, "--bar", "1m", "--limit", "1", "--chain", chain)
     if isinstance(result, dict):
         data = result.get("data")
         if isinstance(data, list) and data:
-            return data[0].get("price")
+            return (
+                data[0].get("close")
+                or data[0].get("price")
+                or data[0].get("c")
+            )
     return None
 
 
