@@ -145,7 +145,17 @@ class OnchainOSBroker(Broker):
         reject_statuses = {"error", "failed", "rejected", "canceled", "cancelled"}
 
         if status and status.lower() in reject_statuses:
-            order.set_error(f"Swap returned status={status} tx={tx_hash[:16]}")
+            # Try to get a more detailed error from the data envelope
+            err_detail = (
+                data.get("error")
+                or data.get("errorMessage")
+                or data.get("msg")
+                or ""
+            )
+            if err_detail:
+                order.set_error(self._format_err(f"Swap {status}", {"error": err_detail}))
+            else:
+                order.set_error(self._format_err(f"Swap {status}", data))
             return order
 
         # ── fill order ─────────────────────────────────────────
