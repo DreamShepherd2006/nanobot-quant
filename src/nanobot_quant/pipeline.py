@@ -359,12 +359,17 @@ def run_from_signals(
     max_position_pct: float = 0.20,
     max_drawdown_pct: float = 0.15,
     stop_loss_pct: float = 0.10,
+    live: bool = False,
+    tokens_json: list[dict] | None = None,
 ) -> list[dict]:
     """Run risk checks + order generation on pre-computed signals.
 
     Entry point for vt_research's execute_signal MCP tool.  Signals
     are already structured (from structurize_signal or quant TD),
     so we skip data fetch and TD calculation.
+
+    When ``live=True``, orders that pass risk are forwarded to
+    OnchainOSBroker for on-chain swap execution.
 
     Returns list of dicts::
 
@@ -376,6 +381,8 @@ def run_from_signals(
             "risk_details": dict,
             "suggested_order": dict|None,
             "position_value": float|None,
+            "tx_hash": str|None,          # only when live=True
+            "broker_status": str|None,    # only when live=True
         }]
     """
     from nanobot_quant.portfolio.order_schema import OrderRequest
@@ -441,6 +448,9 @@ def run_from_signals(
             risk_passed = False
 
         order: dict | None = None
+        tx_hash: str | None = None
+        broker_status: str | None = None
+
         if risk_passed and signal.recommendation in ("BUY", "SELL"):
             req = OrderRequest(
                 asset=ticker,
@@ -452,6 +462,45 @@ def run_from_signals(
             )
             order = req.to_dict()
 
+            # ── Live execution via OnchainOSBroker ──
+            if live and order is not None:
+                print(f"[DIAG] run_from_signals: submitting {ticker} {req.action} x{req.quantity} live...",
+                      file=sys.stderr, flush=True)
+                try:
+                    _saved_stdout = sys.stdout
+                    sys.stdout = sys.stderr
+
+                    from lumibot.entities import Asset, Order as LumibotOrder
+                    from lumibot.trading_builtins import AssetType
+                    from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+
+                    sys.stdout = _saved_stdout
+
+                    broker = OnchainOSBroker(tokens_json=tokens_json or [])
+
+                    asset = Asset(
+                        symbol=req.asset,
+                        asset_type=AssetType.CRYPTO,
+                    )
+                    lumibot_order = LumibotOrder(
+                        strategy=None,
+                        asset=asset,
+                        quantity=req.quantity,
+                        side=req.action,
+                    )
+                    result = broker._submit_order(lumibot_order)
+                    tx_hash = result.get("tx_hash", "")
+                    broker_status = result.get("status", "unknown")
+                    print(f"[DIAG] run_from_signals: {ticker} → {broker_status} tx={tx_hash}",
+                          file=sys.stderr, flush=True)
+                except Exception as exc:
+                    print(f"[DIAG] run_from_signals: {ticker} broker FAILED: {exc}",
+                          file=sys.stderr, flush=True)
+                    import traceback
+                    traceback.print_exc(file=sys.stderr)
+                    tx_hash = ""
+                    broker_status = f"error: {exc}"
+
         results.append({
             "ticker": ticker,
             "recommendation": signal.recommendation,
@@ -460,6 +509,8 @@ def run_from_signals(
             "risk_details": risk_details,
             "suggested_order": order,
             "position_value": position_value,
+            "tx_hash": tx_hash,
+            "broker_status": broker_status,
         })
 
     passed = sum(1 for r in results if r["risk_passed"])
