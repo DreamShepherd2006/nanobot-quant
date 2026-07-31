@@ -86,22 +86,43 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 
 # ── Market ────────────────────────────────────────────────────────
 
-def get_price(address: str, chain: str = "solana") -> Optional[str]:
-    """Get real-time token price in USD via kline close price.
+def get_price(symbol: str, chain: str = "solana") -> Optional[str]:
+    """Get real-time token price in USD via swap quote.
 
-    Uses the most recent 1m candle's close as the current price,
-    since onchainos CLI does not have a standalone 'market price' command.
+    Uses onchainos swap quote for accurate live pricing.
+    Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
     Returns price as string or None.
     """
-    result = _run("market", "kline", "--address", address, "--bar", "1m", "--limit", "1", "--chain", chain)
+    addr = resolve_token_address(symbol)
+    if not addr:
+        return None
+
+    # For stablecoins, return "1"
+    if symbol.upper() in ("USDC", "USDT"):
+        return "1"
+
+    usdc_addr = resolve_token_address("USDC")
+    if not usdc_addr:
+        return None
+
+    # Quote: swap 1 SOL → USDC to get SOL price in USD
+    result = _run(
+        "swap", "quote",
+        "--from", addr,
+        "--to", usdc_addr,
+        "--amount", "1",
+        "--slippage", "0.01",
+        timeout=15,
+    )
     if isinstance(result, dict):
-        data = result.get("data")
-        if isinstance(data, list) and data:
-            return (
-                data[0].get("close")
-                or data[0].get("price")
-                or data[0].get("c")
-            )
+        if "_exit_code" in result:
+            return None
+        if result.get("ok"):
+            data = result.get("data", result)
+            to_amount = data.get("toAmount")
+            if to_amount:
+                return str(to_amount)
+
     return None
 
 
@@ -160,9 +181,12 @@ def resolve_token_address(
     return search_token(symbol)
 
 
-def get_token_price(address: str) -> Optional[float]:
-    """Get real-time token price as float (USD)."""
-    raw = get_price(address)
+def get_token_price(symbol: str) -> Optional[float]:
+    """Get real-time token price as float (USD).
+
+    Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
+    """
+    raw = get_price(symbol)
     if raw is None:
         return None
     try:
