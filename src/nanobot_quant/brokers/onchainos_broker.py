@@ -49,23 +49,6 @@ class OnchainOSBroker(Broker):
         self._tracked: dict[str, dict] = {}  # tx_hash → order meta
 
 
-class _DummyDataSource:
-    """Minimal data source stub so the Lumibot broker constructor doesn't reject us.
-
-    OnchainOSBroker gets all pricing data through onchainos CLI; it never
-    calls the data source's query methods.  A Lumibot ``Broker`` simply
-    requires *something* in ``data_source`` at construction time.
-    """
-    def __init__(self):
-        self._timestep = "minute"
-
-    def get_last_price(self, *args, **kwargs) -> None:
-        return None
-
-    def get_historical_prices(self, *args, **kwargs):
-        import pandas as pd
-        return pd.DataFrame()
-
     # ═══════════════════════════════════════════════════════════════
     #  Order Execution
     # ═══════════════════════════════════════════════════════════════
@@ -303,3 +286,17 @@ class _DummyDataSource:
 
     def get_historical_account_value(self) -> dict:
         return {}
+
+
+class _DummyDataSource:
+    """Minimal data source stub for the Lumibot broker constructor."""
+    def __init__(self):
+        self._timestep = "minute"
+
+    def get_last_price(self, *args, **kwargs) -> None:
+        return None
+
+    def get_historical_prices(self, *args, **kwargs):
+        import pandas as pd
+        return pd.DataFrame()
+
