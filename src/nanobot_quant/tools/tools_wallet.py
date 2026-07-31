@@ -229,8 +229,8 @@ def wallet_setup() -> dict:
     """One-shot onchainos wallet bootstrap.
 
     Call this repeatedly until it returns phase="done".
-    - First call: runs wallet_login_init, returns login_url for user.
-    - After user authorizes: re-call, checks status then sets payment tiers.
+    - Try poll first: if there's a pending auth session, wait for user.
+    - If no pending session: init → return login_url for user.
     - When fully done: returns phase="done".
     """
     status = wallet_login_status()
@@ -239,18 +239,32 @@ def wallet_setup() -> dict:
         return {"phase": "done", "message": "Wallet already logged in and payment tiers set."}
 
     if not status["logged_in"]:
-        init_result = wallet_login_init()
-        if init_result.get("login_url"):
+        # Try poll first — user may have authorized since last init
+        poll_result = wallet_login_poll()
+        if poll_result.get("status") == "logged_in":
+            # Poll succeeded, proceed to payment setup below
+            pass
+        elif poll_result.get("status") in ("pending", "timeout"):
+            # User hasn't authorized yet, keep waiting (don't re-init)
             return {
-                "phase": "login_required",
-                "login_url": init_result["login_url"],
-                "auth_session_id": init_result.get("auth_session_id", ""),
-                "message": (
-                    "Open the login_url in browser, complete authorization, "
-                    "then call wallet_setup() again."
-                ),
+                "phase": "polling",
+                "poll_status": poll_result["status"],
+                "message": poll_result.get("message", "Waiting for browser authorization..."),
             }
-        return {"phase": "error", "error": init_result.get("error", "init failed")}
+        else:
+            # No pending session — start a new one
+            init_result = wallet_login_init()
+            if init_result.get("login_url"):
+                return {
+                    "phase": "login_required",
+                    "login_url": init_result["login_url"],
+                    "auth_session_id": init_result.get("auth_session_id", ""),
+                    "message": (
+                        "Open the login_url in browser, complete authorization, "
+                        "then call wallet_setup() again."
+                    ),
+                }
+            return {"phase": "error", "error": init_result.get("error", "init failed")}
 
     # Logged in but payment not set
     results = {}
