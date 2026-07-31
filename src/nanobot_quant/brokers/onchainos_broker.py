@@ -111,14 +111,25 @@ class OnchainOSBroker(Broker):
             )
             return order
 
-        # onchainos CLI returns {"ok": true, "data": {...}} envelope
+        # Handle CLI-level failure (non-zero exit, no valid JSON)
+        if "_exit_code" in result:
+            err_detail = result.get("_stderr", "unknown CLI error")[:200]
+            order.set_error(
+                f"Swap CLI failed (exit={result['_exit_code']}): {err_detail}"
+            )
+            return order
+
+        # onchainos CLI returns {"ok": true/false, "data": {...}, "error": "..."}
+        if not result.get("ok"):
+            err_msg = result.get("error", "unknown onchainos error")
+            order.set_error(f"Swap rejected: {err_msg}")
+            return order
+
         data = result.get("data", result) if isinstance(result.get("data"), dict) else result
         tx_hash = data.get("swapTxHash") or data.get("txHash") or ""
         status = data.get("status", "unknown")
 
         # Accept any non-error status that indicates the swap was submitted.
-        # Common onchainos statuses: success, submitted, pending, processing,
-        # confirming, completed, confirmed, executed.
         reject_statuses = {"error", "failed", "rejected", "canceled", "cancelled"}
 
         if status and status.lower() in reject_statuses:

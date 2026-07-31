@@ -26,8 +26,10 @@ def _run(*args, timeout: int = 15) -> Optional[dict | list]:
             capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode != 0:
-            logger.warning("onchainos CLI non-zero exit: %s", r.returncode)
-            return None
+            stderr_tail = r.stderr.strip()[-200:] if r.stderr else "(no stderr)"
+            logger.warning("onchainos CLI exit=%d stderr=%s", r.returncode, stderr_tail)
+            # Return error info so caller can surface the reason
+            return {"_exit_code": r.returncode, "_stderr": r.stderr.strip()}
         return json.loads(r.stdout) if r.stdout.strip() else None
     except Exception:
         return None
