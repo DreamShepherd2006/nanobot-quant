@@ -111,10 +111,17 @@ class OnchainOSBroker(Broker):
             )
             return order
 
-        tx_hash = result.get("swapTxHash") or result.get("txHash", "")
-        status = result.get("status", "unknown")
+        # onchainos CLI returns {"ok": true, "data": {...}} envelope
+        data = result.get("data", result) if isinstance(result.get("data"), dict) else result
+        tx_hash = data.get("swapTxHash") or data.get("txHash") or ""
+        status = data.get("status", "unknown")
 
-        if status not in ("success", "submitted", "pending"):
+        # Accept any non-error status that indicates the swap was submitted.
+        # Common onchainos statuses: success, submitted, pending, processing,
+        # confirming, completed, confirmed, executed.
+        reject_statuses = {"error", "failed", "rejected", "canceled", "cancelled"}
+
+        if status and status.lower() in reject_statuses:
             order.set_error(f"Swap returned status={status} tx={tx_hash[:16]}")
             return order
 
