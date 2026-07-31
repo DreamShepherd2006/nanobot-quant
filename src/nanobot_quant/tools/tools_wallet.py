@@ -89,10 +89,10 @@ def wallet_login_poll(session_id: str = "") -> dict:
     for attempt, args in enumerate(candidates, 1):
         try:
             proc = subprocess.run(
-                args, capture_output=True, text=True, timeout=310,
+                args, capture_output=True, text=True, timeout=10,
             )
         except subprocess.TimeoutExpired:
-            return {"error": "onchainos wallet login poll timed out (310s)"}
+            return {"status": "pending", "message": "Still waiting for browser authorization (retry)"}
 
         print(
             f"[DIAG] wallet_login_poll attempt {attempt}: {args[1:]!r} "
@@ -146,7 +146,7 @@ def wallet_payment_set(tier: str, asset: str = "", chain: str = "", name: str = 
     ]
     try:
         proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=30,
+            args, capture_output=True, text=True, timeout=10,
         )
     except subprocess.TimeoutExpired:
         return {"error": "payment default set timed out"}
@@ -184,9 +184,9 @@ def wallet_login_raw_diag() -> dict:
         [ONCHAINOS_BIN, "wallet", "login", "poll"],
     ]:
         try:
-            proc = subprocess.run(args, capture_output=True, text=True, timeout=310)
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=10)
         except subprocess.TimeoutExpired:
-            results.append({"args": args, "error": "timeout"})
+            results.append({"args": args, "error": "timeout (10s)"})
             continue
         results.append({
             "args": args,
@@ -208,7 +208,7 @@ def wallet_login_status() -> dict:
     try:
         proc = subprocess.run(
             [ONCHAINOS_BIN, "payment", "default", "get", "--tier", "basic"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=5,
         )
         status["payment_basic"] = proc.returncode == 0
     except Exception:
@@ -217,7 +217,7 @@ def wallet_login_status() -> dict:
     try:
         proc = subprocess.run(
             [ONCHAINOS_BIN, "payment", "default", "get", "--tier", "premium"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=5,
         )
         status["payment_premium"] = proc.returncode == 0
     except Exception:
