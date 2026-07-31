@@ -17,6 +17,7 @@ from nanobot_quant.onchainos_cli import (
     get_token_price,
     WSOL_ADDR,
 )
+from nanobot_quant.onchainos_errors import lookup as err_lookup
 from lumibot.brokers import Broker
 
 logger = logging.getLogger("nanobot_quant.brokers.onchainos")
@@ -48,6 +49,20 @@ class OnchainOSBroker(Broker):
         self._sol_buffer_pct = sol_buffer_pct
         self._tracked: dict[str, dict] = {}  # tx_hash → order meta
 
+    @staticmethod
+    def _format_err(prefix: str, result: dict | None = None) -> str:
+        """Build a human-readable error string with code lookup."""
+        if not result:
+            return prefix
+        # Try to decode any error code in the response
+        detail = err_lookup(result)
+        if detail and detail != str(result):
+            return f"{prefix}: {detail}"
+        err_msg = result.get("error", "") or result.get("_stderr", "")
+        if err_msg:
+            clipped = err_msg.strip()[-300:]
+            return f"{prefix}: {clipped}"
+        return prefix
 
     # ═══════════════════════════════════════════════════════════════
     #  Order Execution
@@ -82,12 +97,11 @@ class OnchainOSBroker(Broker):
         to_addr = resolve_token_address(to_symbol, self._tokens_json)
 
         if not from_addr or not to_addr:
-            order.set_error(
+            msg = self._format_err(
                 f"Cannot resolve addresses: {from_symbol}→{to_symbol}"
             )
-            logger.error(
-                "Cannot resolve addresses: %s→%s", from_symbol, to_symbol
-            )
+            order.set_error(msg)
+            logger.error(msg)
             return order
 
         # ── amount calculation ─────────────────────────────────
@@ -98,7 +112,7 @@ class OnchainOSBroker(Broker):
             sol_price = get_token_price(from_addr) or 1.0
             token_price = get_token_price(to_addr) or 0.0
             if token_price <= 0:
-                order.set_error(f"Cannot get price for {symbol}")
+                order.set_error(self._format_err(f"Cannot get price for {symbol}"))
                 return order
             sol_needed = (quantity * token_price / sol_price) * (1 + self._sol_buffer_pct)
             from_amount = f"{sol_needed:.6f}"
@@ -107,22 +121,20 @@ class OnchainOSBroker(Broker):
         result = swap_execute(from_addr, to_addr, from_amount, self._slippage)
         if not result:
             order.set_error(
-                f"Swap execute failed: {side} {quantity} {symbol}@{from_amount}"
+                self._format_err(
+                    f"Swap execute failed: {side} {quantity} {symbol}@{from_amount}"
+                )
             )
             return order
 
         # Handle CLI-level failure (non-zero exit, no valid JSON)
         if "_exit_code" in result:
-            err_detail = result.get("_stderr", "unknown CLI error")[:200]
-            order.set_error(
-                f"Swap CLI failed (exit={result['_exit_code']}): {err_detail}"
-            )
+            order.set_error(self._format_err(f"Swap CLI exit={result['_exit_code']}", result))
             return order
 
         # onchainos CLI returns {"ok": true/false, "data": {...}, "error": "..."}
         if not result.get("ok"):
-            err_msg = result.get("error", "unknown onchainos error")
-            order.set_error(f"Swap rejected: {err_msg}")
+            order.set_error(self._format_err("Swap rejected", result))
             return order
 
         data = result.get("data", result) if isinstance(result.get("data"), dict) else result

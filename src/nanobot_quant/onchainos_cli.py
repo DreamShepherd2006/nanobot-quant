@@ -27,9 +27,15 @@ def _run(*args, timeout: int = 15) -> Optional[dict | list]:
         )
         if r.returncode != 0:
             stderr_tail = r.stderr.strip()[-200:] if r.stderr else "(no stderr)"
+            # Try to parse stderr as JSON (some CLI versions output errors to stderr)
+            stderr_parsed: Optional[dict] = None
+            if r.stderr.strip():
+                try:
+                    stderr_parsed = json.loads(r.stderr.strip())
+                except json.JSONDecodeError:
+                    pass
             logger.warning("onchainos CLI exit=%d stderr=%s", r.returncode, stderr_tail)
-            # Return error info so caller can surface the reason
-            return {"_exit_code": r.returncode, "_stderr": r.stderr.strip()}
+            return {"_exit_code": r.returncode, "_stderr": r.stderr.strip(), "_stderr_parsed": stderr_parsed}
         return json.loads(r.stdout) if r.stdout.strip() else None
     except Exception:
         return None
