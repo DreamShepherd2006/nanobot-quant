@@ -1,16 +1,20 @@
-"""execute_signal: signal → pipeline (Risk → Portfolio → Order).
+"""execute_signal: signal → pipeline (Risk → Portfolio → Order → optional Broker).
 
 Takes a structured TickerSignal (from run_td_sequential or structurize_signal)
 and runs it through the full execution pipeline.
+
+When ``live=True``, orders that pass risk are submitted to OnchainOSBroker
+for on-chain swap execution.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
-def execute_signal(ticker_signal_json: str) -> dict:
+def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
     """Execute the trading pipeline on structured signal(s).
 
     Takes a JSON signal (from structurize_signal or run_td_sequential) and
@@ -18,7 +22,14 @@ def execute_signal(ticker_signal_json: str) -> dict:
 
     Accepts either a single signal object or a list of signals.
 
-    Returns pipeline execution results with risk checks and suggested orders.
+    Args:
+        ticker_signal_json: JSON string of signal(s).
+        live: If True, submit orders to OnchainOSBroker for on-chain
+              execution.  Default False (paper-only).
+
+    Returns:
+        Pipeline execution results with risk checks and suggested orders.
+        When live=True, includes tx_hash and broker_status fields.
     """
     # ── Guard MCP stdio from library import-time logging ─────────
     _saved_stdout = sys.stdout
@@ -27,6 +38,8 @@ def execute_signal(ticker_signal_json: str) -> dict:
         from nanobot_quant.pipeline import run_from_signals
     finally:
         sys.stdout = _saved_stdout
+
+    print(f"[DIAG] execute_signal: live={live}", file=sys.stderr, flush=True)
 
     try:
         raw = json.loads(ticker_signal_json)
@@ -47,8 +60,62 @@ def execute_signal(ticker_signal_json: str) -> dict:
         file=sys.stderr, flush=True,
     )
 
+    tokens_json = _load_tokens(live)
+
     try:
-        results = run_from_signals(signal_list)
-        return {"results": results, "count": len(results)}
+        results = run_from_signals(
+            signal_list,
+            live=live,
+            tokens_json=tokens_json,
+        )
+        summary: dict = {"results": results, "count": len(results)}
+
+        if live:
+            submitted = sum(1 for r in results if r.get("tx_hash"))
+            summary["submitted_on_chain"] = submitted
+            print(
+                f"[DIAG] execute_signal done: {submitted}/{len(results)} submitted",
+                file=sys.stderr, flush=True,
+            )
+        return summary
     except Exception as exc:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         return {"error": f"Pipeline execution failed: {exc}"}
+
+
+def _load_tokens(live: bool) -> list[dict] | None:
+    """Load user-configured token mappings when live mode is requested."""
+    if not live:
+        return None
+
+    paths = [
+        "/data/legion/credentials/tokens.json",
+        "/mnt/workspace/legion/credentials/tokens.json",
+    ]
+    for p in paths:
+        if os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    print(
+                        f"[DIAG] execute_signal: loaded {len(data)} token(s) from {p}",
+                        file=sys.stderr, flush=True,
+                    )
+                    return data
+                print(
+                    "[DIAG] execute_signal: tokens.json not a list, ignoring",
+                    file=sys.stderr, flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[DIAG] execute_signal: failed to read {p}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+
+    print(
+        "[DIAG] execute_signal: no tokens.json, relying on CLI resolution",
+        file=sys.stderr, flush=True,
+    )
+    return None
