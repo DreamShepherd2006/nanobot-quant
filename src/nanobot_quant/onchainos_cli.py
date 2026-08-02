@@ -112,7 +112,7 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 def get_price(symbol: str, chain: str = "solana") -> Optional[str]:
     """Get real-time token price in USD via market kline.
 
-    Uses the most recent 1m candle's close as the current price.
+    Uses the most recent 1D candle's close as the current price.
     Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
     Returns price as string or None.
     """
@@ -125,7 +125,8 @@ def get_price(symbol: str, chain: str = "solana") -> Optional[str]:
         return None
 
     # kline returns list like [{ts, o, h, l, c, vol, ...}, ...]
-    candles = get_kline(addr, bar="1m", limit=1, chain=chain)
+    # Use 1D bar to match the verified-working onchainos_data path.
+    candles = get_kline(addr, bar="1D", limit=1, chain=chain)
     if candles:
         c = candles[0]
         return str(c.get("c") or c.get("close"))
@@ -143,7 +144,9 @@ def get_kline(
     Returns list of candle dicts ({ts, o, h, l, c, vol, volUsd, confirm})
     or None on failure. Max 299 candles.
     """
-    result = _run("market", "kline", "--address", address, "--bar", bar, "--limit", str(limit), "--chain", chain)
+    # Parameter order must match onchainos_data._run_cli (verified working):
+    #   market kline --address X --chain solana --bar 1D --limit 300
+    result = _run("market", "kline", "--address", address, "--chain", chain, "--bar", bar, "--limit", str(limit))
     if isinstance(result, dict):
         data = result.get("data")
         if isinstance(data, list):
