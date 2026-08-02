@@ -106,7 +106,10 @@ _TOOLS = [
             "Execute the trading pipeline on structured signal(s). "
             "Passes signal through Risk → Position Sizing → Order "
             "generation. Accepts a JSON signal string (single object "
-            "or list), returns risk checks and suggested orders."
+            "or list), returns risk checks and suggested orders. "
+            "Pass live=true to attempt on-chain execution — this only "
+            "works if the WebUI live trading toggle (/config/live) is "
+            "enabled; otherwise the order stays paper-only."
         ),
         "inputSchema": {
             "type": "object",
@@ -118,6 +121,15 @@ _TOOLS = [
                         "object or list of them. Expected fields: ticker, "
                         "recommendation, score, price."
                     ),
+                },
+                "live": {
+                    "type": "boolean",
+                    "description": (
+                        "Request real on-chain execution (default false). "
+                        "Effective only when the WebUI live trading toggle "
+                        "is enabled; otherwise forced to paper."
+                    ),
+                    "default": False,
                 },
             },
             "required": ["ticker_signal_json"],

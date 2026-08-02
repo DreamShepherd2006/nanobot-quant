@@ -39,7 +39,16 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
     finally:
         sys.stdout = _saved_stdout
 
-    print(f"[DIAG] execute_signal: live={live}", file=sys.stderr, flush=True)
+    # ── WebUI master switch (AND gate) ──────────────────────────
+    webui_live = _read_webui_live()
+    effective_live = bool(live) and webui_live
+    if live and not webui_live:
+        print(
+            "[DIAG] execute_signal: live requested but WebUI toggle is OFF — forcing paper",
+            file=sys.stderr, flush=True,
+        )
+
+    print(f"[DIAG] execute_signal: live={live}, webui_live={webui_live}, effective_live={effective_live}", file=sys.stderr, flush=True)
 
     try:
         raw = json.loads(ticker_signal_json)
@@ -60,17 +69,22 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
         file=sys.stderr, flush=True,
     )
 
-    tokens_json = _load_tokens(live)
+    tokens_json = _load_tokens(effective_live)
 
     try:
         results = run_from_signals(
             signal_list,
-            live=live,
+            live=effective_live,
             tokens_json=tokens_json,
         )
         summary: dict = {"results": results, "count": len(results)}
 
-        if live:
+        if live and not webui_live:
+            summary["live_blocked"] = (
+                "live 已请求但 WebUI 实盘开关未开启（/config/live），订单已强制走纸面路径"
+            )
+
+        if effective_live:
             submitted = sum(1 for r in results if r.get("tx_hash"))
             summary["submitted_on_chain"] = submitted
             print(
@@ -82,6 +96,35 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
         import traceback
         traceback.print_exc(file=sys.stderr)
         return {"error": f"Pipeline execution failed: {exc}"}
+
+
+def _read_webui_live() -> bool:
+    """Read the WebUI live-trading master switch (live.json).
+
+    Stored alongside API credentials at {data_root}/credentials/live.json.
+    This is the master gate — execute_signal can only go on-chain when
+    both the agent passed live=True AND this file says live=true.
+    """
+    paths = [
+        "/data/legion/credentials/live.json",
+        "/mnt/workspace/legion/credentials/live.json",
+    ]
+    for p in paths:
+        if os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    data = json.load(f)
+                return bool(data.get("live", False))
+            except Exception as exc:
+                print(
+                    f"[DIAG] execute_signal: failed to read {p}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+    print(
+        "[DIAG] execute_signal: live.json not found — live trading disabled",
+        file=sys.stderr, flush=True,
+    )
+    return False
 
 
 def _load_tokens(live: bool) -> list[dict] | None:
