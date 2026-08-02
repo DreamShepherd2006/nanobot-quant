@@ -52,6 +52,148 @@ def _ensure_onchainos_dir() -> None:
     )
 
 
+def _run_cli(args: list[str], timeout: int = 30, label: str = "") -> dict:
+    """Run an onchainos CLI subcommand and return its JSON envelope.
+
+    Returns {"ok": bool, "data": ..., "error": ..., "rc": int} on success;
+    {"error": ...} on timeout / missing binary. Diagnostic output goes to
+    stderr only (never stdout — the MCP JSON-RPC channel).
+    """
+    try:
+        proc = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        return {"error": f"onchainos binary not found at {ONCHAINOS_BIN}"}
+    except subprocess.TimeoutExpired:
+        return {"error": f"{label or args[1:]} timed out after {timeout}s"}
+
+    print(
+        f"[DIAG] {label or ' '.join(args[1:])} rc={proc.returncode} "
+        f"stdout={proc.stdout.strip()[:400]!r} "
+        f"stderr={proc.stderr.strip()[:400]!r}",
+        file=sys.stderr, flush=True,
+    )
+
+    text = (proc.stdout or "").strip()
+    if not text:
+        text = (proc.stderr or "").strip()
+    data = None
+    if text:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            pass
+    if isinstance(data, dict):
+        data.setdefault("rc", proc.returncode)
+        return data
+    return {
+        "ok": proc.returncode == 0,
+        "rc": proc.returncode,
+        "data": data if data is not None else text[:2000],
+        "stderr": (proc.stderr or "").strip()[:2000],
+    }
+
+
+def _ok_data(resp: dict) -> dict:
+    """Normalize a CLI envelope into a friendly result dict."""
+    if resp.get("ok"):
+        return {"status": "ok", "data": resp.get("data")}
+    err = resp.get("error") or resp.get("stderr") or "unknown CLI error"
+    if isinstance(err, dict):
+        err = json.dumps(err, ensure_ascii=False)
+    return {"status": "error", "error": str(err)[:2000]}
+
+
+# ── Wallet management tools (agentic-wallet-skills) ────────────────
+
+def wallet_status() -> dict:
+    """Show current wallet status: email, login type, active account, policy."""
+    return _ok_data(_run_cli(
+        [ONCHAINOS_BIN, "wallet", "status"],
+        timeout=30, label="wallet_status",
+    ))
+
+
+def wallet_addresses(chain: str = "") -> dict:
+    """List wallet addresses grouped by chain category (XLayer, EVM, Solana).
+    Optional chain filter: chain name or ID (e.g. "solana" or "501", "ethereum" or "1")."""
+    args = [ONCHAINOS_BIN, "wallet", "addresses"]
+    if chain:
+        args += ["--chain", chain]
+    return _ok_data(_run_cli(args, timeout=30, label="wallet_addresses"))
+
+
+def wallet_balance(
+    all_accounts: bool = False,
+    chain: str = "",
+    token_address: str = "",
+    force: bool = False,
+) -> dict:
+    """Query wallet balances.
+    - all_accounts: query all accounts' assets
+    - chain: chain name/ID filter (requires --all or account)
+    - token_address: filter by token contract address (requires --chain)
+    - force: bypass caches and re-fetch from API
+    """
+    args = [ONCHAINOS_BIN, "wallet", "balance"]
+    if all_accounts:
+        args.append("--all")
+    if chain:
+        args += ["--chain", chain]
+    if token_address:
+        args += ["--token-address", token_address]
+    if force:
+        args.append("--force")
+    return _ok_data(_run_cli(args, timeout=60, label="wallet_balance"))
+
+
+def wallet_chains() -> dict:
+    """List all supported chains (cached locally, refreshes every 10 minutes)."""
+    return _ok_data(_run_cli(
+        [ONCHAINOS_BIN, "wallet", "chains"],
+        timeout=30, label="wallet_chains",
+    ))
+
+
+def wallet_history(
+    chain: str = "",
+    address: str = "",
+    limit: str = "",
+    page_num: str = "",
+) -> dict:
+    """Query wallet transaction history.
+    Optional filters: chain (name/ID), address, limit (page size), page_num."""
+    args = [ONCHAINOS_BIN, "wallet", "history"]
+    if chain:
+        args += ["--chain", chain]
+    if address:
+        args += ["--address", address]
+    if limit:
+        args += ["--limit", limit]
+    if page_num:
+        args += ["--page-num", page_num]
+    return _ok_data(_run_cli(args, timeout=60, label="wallet_history"))
+
+
+def wallet_add() -> dict:
+    """Create a new sub-wallet account (up to 50 per wallet)."""
+    return _ok_data(_run_cli(
+        [ONCHAINOS_BIN, "wallet", "add"],
+        timeout=60, label="wallet_add",
+    ))
+
+
+def wallet_switch(account_id: str) -> dict:
+    """Switch the active wallet account."""
+    if not account_id:
+        return {"status": "error", "error": "account_id is required"}
+    return _ok_data(_run_cli(
+        [ONCHAINOS_BIN, "wallet", "switch", account_id],
+        timeout=30, label="wallet_switch",
+    ))
+
+
 def wallet_login_init() -> dict:
     """Initiate onchainos social login. Returns loginUrl for the user.
     Tries multiple CLI syntaxes for cross-version compatibility."""

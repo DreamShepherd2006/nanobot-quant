@@ -38,6 +38,13 @@ from nanobot_quant.tools.tools_wallet import (
     wallet_login_status,
     wallet_payment_set,
     wallet_setup,
+    wallet_status,
+    wallet_addresses,
+    wallet_balance,
+    wallet_chains,
+    wallet_history,
+    wallet_add,
+    wallet_switch,
 )
 from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import run_backtest
@@ -242,6 +249,115 @@ _TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "wallet_status",
+        "description": (
+            "Show current onchainos wallet status: email, loginType, "
+            "currentAccountId, currentAccountName, accountCount, policy."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "wallet_addresses",
+        "description": (
+            "List wallet addresses for the current account, grouped by chain "
+            "category (XLayer, EVM, Solana). Optional --chain filter: chain "
+            "name or ID (e.g. 'solana' or '501', 'ethereum' or '1')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chain": {
+                    "type": "string",
+                    "description": "Chain name or ID filter, e.g. solana/501, ethereum/1",
+                },
+            },
+        },
+    },
+    {
+        "name": "wallet_balance",
+        "description": (
+            "Query onchainos wallet balances. Use all_accounts=true to query all "
+            "accounts' assets; chain filters by chain name/ID; token_address "
+            "filters by token contract (requires chain); force bypasses caches "
+            "and re-fetches from API."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "all_accounts": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Query all accounts' assets",
+                },
+                "chain": {
+                    "type": "string",
+                    "description": "Chain name or ID, e.g. solana/501",
+                },
+                "token_address": {
+                    "type": "string",
+                    "description": "Filter by token contract address (requires chain)",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force refresh: bypass caches, re-fetch from API",
+                },
+            },
+        },
+    },
+    {
+        "name": "wallet_chains",
+        "description": "List all chains supported by onchainos wallet (cached locally).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "wallet_history",
+        "description": (
+            "Query onchainos wallet transaction history. Optional filters: chain "
+            "(name/ID), address, limit (page size), page_num (page cursor)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chain": {
+                    "type": "string",
+                    "description": "Chain name or ID filter, e.g. solana/501",
+                },
+                "address": {
+                    "type": "string",
+                    "description": "Filter by address",
+                },
+                "limit": {
+                    "type": "string",
+                    "description": "Page size limit",
+                },
+                "page_num": {
+                    "type": "string",
+                    "description": "Page cursor",
+                },
+            },
+        },
+    },
+    {
+        "name": "wallet_add",
+        "description": "Create a new sub-wallet account (up to 50 per wallet).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "wallet_switch",
+        "description": "Switch the active wallet account to the given account_id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "Account ID to switch to (from wallet_status / wallet_addresses)",
+                },
+            },
+            "required": ["account_id"],
+        },
+    },
 ]
 
 _TOOL_DISPATCH = {
@@ -254,6 +370,13 @@ _TOOL_DISPATCH = {
     "wallet_payment_set": wallet_payment_set,
     "wallet_setup": wallet_setup,
     "wallet_login_status": wallet_login_status,
+    "wallet_status": wallet_status,
+    "wallet_addresses": wallet_addresses,
+    "wallet_balance": wallet_balance,
+    "wallet_chains": wallet_chains,
+    "wallet_history": wallet_history,
+    "wallet_add": wallet_add,
+    "wallet_switch": wallet_switch,
 }
 
 
