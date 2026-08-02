@@ -52,18 +52,33 @@ def _run(*args, timeout: int = 15) -> Optional[dict | list]:
         )
         if r.returncode != 0:
             stderr_tail = r.stderr.strip()[-200:] if r.stderr else "(no stderr)"
-            # Try to parse stderr as JSON (some CLI versions output errors to stderr)
-            stderr_parsed: Optional[dict] = None
-            if r.stderr.strip():
+            stdout_tail = r.stdout.strip()[-200:] if r.stdout else "(no stdout)"
+            # onchainos CLI writes the error envelope ({"ok": false, "error": ...})
+            # to stdout on failure, not stderr. Parse both.
+            def _parse_json(text: str) -> Optional[dict]:
+                if not text.strip():
+                    return None
                 try:
-                    stderr_parsed = json.loads(r.stderr.strip())
+                    return json.loads(text.strip())
                 except json.JSONDecodeError:
-                    pass
-            err_desc = err_lookup(stderr_parsed) if stderr_parsed else ""
+                    return None
+
+            stderr_parsed = _parse_json(r.stderr)
+            stdout_parsed = _parse_json(r.stdout)
+            # Prefer stdout envelope (actual error message lives there)
+            err_desc = err_lookup(stdout_parsed) if stdout_parsed else ""
+            if not err_desc or err_desc == str(stdout_parsed):
+                err_desc = err_lookup(stderr_parsed) if stderr_parsed else ""
             if not err_desc or err_desc == str(stderr_parsed):
-                err_desc = stderr_tail
+                err_desc = stdout_tail if stdout_tail != "(no stdout)" else stderr_tail
             logger.warning("onchainos CLI exit=%d: %s", r.returncode, err_desc)
-            return {"_exit_code": r.returncode, "_stderr": r.stderr.strip(), "_stderr_parsed": stderr_parsed}
+            return {
+                "_exit_code": r.returncode,
+                "_stdout": r.stdout.strip(),
+                "_stdout_parsed": stdout_parsed,
+                "_stderr": r.stderr.strip(),
+                "_stderr_parsed": stderr_parsed,
+            }
         return json.loads(r.stdout) if r.stdout.strip() else None
     except Exception:
         return None

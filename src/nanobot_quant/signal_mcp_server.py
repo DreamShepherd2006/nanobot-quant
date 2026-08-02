@@ -18,8 +18,15 @@ import sys
 
 # ── Suppress library stdout during imports ──────────────────────
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
-logging.getLogger("lumibot").handlers.clear()
-logging.getLogger("lumibot").propagate = True
+# Clear handlers on the ENTIRE lumibot logger tree (sub-loggers like
+# lumibot.brokers.broker register their own stdout handlers, polluting
+# the MCP stdio JSON-RPC channel).
+for _lg_name in list(logging.Logger.manager.loggerDict):
+    if _lg_name == "lumibot" or _lg_name.startswith("lumibot."):
+        _lg = logging.getLogger(_lg_name)
+        _lg.handlers.clear()
+        _lg.propagate = True
+        _lg.setLevel(logging.WARNING)
 
 SERVER_NAME = "signal-structurizer"
 SERVER_VERSION = "2.0.0"

@@ -109,8 +109,12 @@ def lookup(code_or_response: Any) -> str:
             pass
     elif isinstance(code_or_response, dict):
         # Try numeric "code" key first, then "error" message key,
-        # then peek into _stderr_parsed (CLI error output)
-        for src in (code_or_response, code_or_response.get("_stderr_parsed") or {}):
+        # then peek into _stdout_parsed / _stderr_parsed (CLI error output)
+        for src in (
+            code_or_response,
+            code_or_response.get("_stdout_parsed") or {},
+            code_or_response.get("_stderr_parsed") or {},
+        ):
             code_val = src.get("code")
             if isinstance(code_val, int):
                 code = code_val
@@ -124,7 +128,20 @@ def lookup(code_or_response: Any) -> str:
                 except ValueError:
                     pass
         if code is None:
-            raw = code_or_response.get("error", str(code_or_response))
+            # Fallback: peek into data payload ({"ok": false, "data": {"code": ..., ...}})
+            data_src = code_or_response.get("data") or {}
+            if isinstance(data_src, dict):
+                for k in ("code", "error", "message", "errMsg", "msg"):
+                    v = data_src.get(k)
+                    if v:
+                        raw = str(v)
+                        try:
+                            code = int(v)
+                        except (TypeError, ValueError):
+                            pass
+                        break
+            if code is None:
+                raw = code_or_response.get("error", str(code_or_response))
 
     if code is not None and code in ERROR_CODES:
         return f"[{code}] {ERROR_CODES[code]}"

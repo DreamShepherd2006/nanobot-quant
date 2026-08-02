@@ -59,7 +59,13 @@ class OnchainOSBroker(Broker):
         detail = err_lookup(result)
         if detail and detail != str(result):
             return f"{prefix}: {detail}"
-        err_msg = result.get("error", "") or result.get("_stderr", "")
+        # CLI error envelope lives in stdout on failure ({"ok": false, "error": ...})
+        err_msg = (
+            result.get("error", "")
+            or (result.get("_stdout_parsed") or {}).get("error", "")
+            or (result.get("_stderr_parsed") or {}).get("error", "")
+            or result.get("_stderr", "")
+        )
         if err_msg:
             clipped = err_msg.strip()[-300:]
             return f"{prefix}: {clipped}"
