@@ -231,16 +231,27 @@ def swap_execute(
     to_addr: str,
     amount: str,
     slippage: str = "0.01",
+    chain: str = "solana",
+    wallet: str = "",
 ) -> Optional[dict]:
-    """Execute a swap. Returns dict with swapTxHash / txHash and status."""
-    return _run(
+    """Execute a swap. Returns dict with swapTxHash / txHash and status.
+
+    Uses ``--readable-amount`` (human-readable token amount, CLI converts
+    to minimal units via token decimals). ``chain``/``wallet`` are required
+    by onchainos CLI v4.3.x.
+    """
+    args = [
         "swap", "execute",
         "--from", from_addr,
         "--to", to_addr,
-        "--amount", amount,
-        "--slippage", slippage,
-        timeout=30,
-    )
+        "--readable-amount", amount,
+        "--chain", chain,
+    ]
+    if wallet:
+        args += ["--wallet", wallet]
+    if slippage:
+        args += ["--slippage", slippage]
+    return _run(*args, timeout=30)
 
 
 def swap_status(tx_hash: str) -> Optional[dict]:

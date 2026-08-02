@@ -18,6 +18,7 @@ from nanobot_quant.onchainos_cli import (
     WSOL_ADDR,
 )
 from nanobot_quant.onchainos_errors import lookup as err_lookup
+from nanobot_quant.okx_credentials import get_chain, get_wallet_address
 from lumibot.brokers import Broker
 
 logger = logging.getLogger("nanobot_quant.brokers.onchainos")
@@ -119,7 +120,19 @@ class OnchainOSBroker(Broker):
             from_amount = f"{sol_needed:.6f}"
 
         # ── execute swap ───────────────────────────────────────
-        result = swap_execute(from_addr, to_addr, from_amount, self._slippage)
+        chain = get_chain()
+        wallet = get_wallet_address()
+        if not wallet:
+            order.set_error(
+                self._format_err(
+                    f"Wallet address not configured: 请在 WebUI 业务管理 → API 配置中填写钱包地址"
+                )
+            )
+            return order
+        result = swap_execute(
+            from_addr, to_addr, from_amount, self._slippage,
+            chain=chain, wallet=wallet,
+        )
         if not result:
             order.set_error(
                 self._format_err(
