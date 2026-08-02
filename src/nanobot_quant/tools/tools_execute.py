@@ -39,6 +39,13 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
     finally:
         sys.stdout = _saved_stdout
 
+    # ── Silence lumibot logger tree AFTER import ──────────────────
+    # lumibot registers its own stdout handlers at import time (e.g.
+    # lumibot.brokers.broker telemetry). The startup-time cleanup in
+    # signal_mcp_server.py runs BEFORE this lazy import, so it can't
+    # see these loggers. Re-clean here once lumibot is loaded.
+    _silence_lumibot_loggers()
+
     # ── WebUI master switch (AND gate) ──────────────────────────
     webui_live = _read_webui_live()
     effective_live = bool(live) and webui_live
@@ -72,11 +79,21 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
     tokens_json = _load_tokens(effective_live)
 
     try:
-        results = run_from_signals(
-            signal_list,
-            live=effective_live,
-            tokens_json=tokens_json,
-        )
+        # Route EVERYTHING (import-time AND runtime loggers) to stderr while
+        # the pipeline runs. lumibot registers stdout handlers lazily during
+        # LumiBot startup, so wrapping the call is the only reliable guard.
+        from contextlib import redirect_stdout
+
+        _saved_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            results = run_from_signals(
+                signal_list,
+                live=effective_live,
+                tokens_json=tokens_json,
+            )
+        finally:
+            sys.stdout = _saved_stdout
         summary: dict = {"results": results, "count": len(results)}
 
         if live and not webui_live:
@@ -162,3 +179,22 @@ def _load_tokens(live: bool) -> list[dict] | None:
         file=sys.stderr, flush=True,
     )
     return None
+
+
+def _silence_lumibot_loggers() -> None:
+    """Clear stdout-bound handlers on the whole lumibot logger tree.
+
+    lumibot.brokers.broker and friends register their own StreamHandler
+    (bound to stdout) at import time. Any log line they emit then lands
+    on the MCP stdio JSON-RPC channel and breaks message parsing. Remove
+    those handlers and force propagation to the root logger (which the
+    MCP server has already pointed at stderr).
+    """
+    import logging
+
+    for _name in list(logging.Logger.manager.loggerDict):
+        if _name == "lumibot" or _name.startswith("lumibot."):
+            _lg = logging.getLogger(_name)
+            _lg.handlers.clear()
+            _lg.propagate = True
+            _lg.setLevel(logging.WARNING)
