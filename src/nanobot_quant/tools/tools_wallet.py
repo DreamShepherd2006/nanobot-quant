@@ -12,6 +12,44 @@ import subprocess
 import sys
 
 ONCHAINOS_BIN = "/usr/local/bin/onchainos"
+_SESSION_ID_FILE = os.path.expanduser("~/.onchainos/last_session_id.txt")
+
+# Persistent storage for onchainos session data (survives Factory Rebuilds)
+_PERSISTENT_ONCHAINOS_DIR = "/data/legion/credentials/onchainos_sessions"
+
+
+def _ensure_onchainos_dir() -> None:
+    """Symlink ~/.onchainos → persistent /data/legion/credentials/onchainos_sessions/.
+
+    After Factory Rebuild ~/.onchainos/ is wiped, but keyring.enc and
+    session.json persist under /data/.  This symlink makes wallet login
+    survive rebuilds.
+    """
+    home_onchainos = os.path.expanduser("~/.onchainos")
+
+    # Already a correct symlink → done
+    if os.path.islink(home_onchainos):
+        target = os.readlink(home_onchainos)
+        if target == _PERSISTENT_ONCHAINOS_DIR:
+            return
+        # Wrong target — remove and re-link
+        os.unlink(home_onchainos)
+    elif os.path.isdir(home_onchainos):
+        # Real directory (not a symlink) — clean up
+        import shutil
+        shutil.rmtree(home_onchainos, ignore_errors=True)
+    elif os.path.isfile(home_onchainos):
+        os.unlink(home_onchainos)
+
+    # Create persistent target if not yet exists
+    os.makedirs(_PERSISTENT_ONCHAINOS_DIR, exist_ok=True)
+
+    # Create symlink
+    os.symlink(_PERSISTENT_ONCHAINOS_DIR, home_onchainos)
+    print(
+        f"[DIAG] _ensure_onchainos_dir: {home_onchainos} → {_PERSISTENT_ONCHAINOS_DIR}",
+        file=sys.stderr, flush=True,
+    )
 
 
 def wallet_login_init() -> dict:
@@ -20,7 +58,6 @@ def wallet_login_init() -> dict:
     candidates = [
         [ONCHAINOS_BIN, "wallet", "login"],
         [ONCHAINOS_BIN, "wallet", "login", "--phase", "init"],
-        [ONCHAINOS_BIN, "wallet", "login", "init"],
     ]
 
     for attempt, args in enumerate(candidates, 1):
@@ -80,18 +117,13 @@ def wallet_login_poll(session_id: str = "") -> dict:
         base_args.extend(["--session-id", session_id])
     candidates.append(base_args)
 
-    alt_args: list[str] = [ONCHAINOS_BIN, "wallet", "login", "poll"]
-    if session_id:
-        alt_args.append(session_id)
-    candidates.append(alt_args)
-
     for attempt, args in enumerate(candidates, 1):
         try:
             proc = subprocess.run(
-                args, capture_output=True, text=True, timeout=310,
+                args, capture_output=True, text=True, timeout=10,
             )
         except subprocess.TimeoutExpired:
-            return {"error": "onchainos wallet login poll timed out (310s)"}
+            return {"status": "pending", "message": "Still waiting for browser authorization (retry)"}
 
         print(
             f"[DIAG] wallet_login_poll attempt {attempt}: {args[1:]!r} "
@@ -102,10 +134,11 @@ def wallet_login_poll(session_id: str = "") -> dict:
         )
 
         if proc.returncode != 0:
-            if "10018" in proc.stderr or "not ready" in proc.stderr.lower():
-                return {"status": "pending", "message": "User has not completed login yet"}
-            if "timed out" in proc.stderr.lower() or "timeout" in proc.stderr.lower():
-                return {"status": "timeout", "message": proc.stderr.strip()[:500]}
+            combined = (proc.stderr + proc.stdout).lower()
+            if "10018" in combined or "not ready" in combined or "login timed out" in combined:
+                return {"status": "pending", "message": "User has not completed login yet — finish in browser then retry"}
+            if "timed out" in combined or "timeout" in combined:
+                return {"status": "timeout", "message": (proc.stderr + proc.stdout).strip()[:500]}
             continue
 
         for source, label in [(proc.stdout, "stdout"), (proc.stderr, "stderr")]:
@@ -116,9 +149,14 @@ def wallet_login_poll(session_id: str = "") -> dict:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 continue
+            # OKX CLI convention: {"ok": true, "data": {...}}
+            if data.get("ok"):
+                print("[DIAG] wallet_login_poll SUCCESS (ok=true)", file=sys.stderr, flush=True)
+                return {"status": "logged_in", "message": "Wallet login completed"}
+
             inner = data.get("data", data) if isinstance(data.get("data"), dict) else data
-            if inner.get("success", False) or inner.get("accessToken"):
-                print("[DIAG] wallet_login_poll SUCCESS", file=sys.stderr, flush=True)
+            if inner.get("ok") or inner.get("success", False) or inner.get("accessToken"):
+                print("[DIAG] wallet_login_poll SUCCESS (inner)", file=sys.stderr, flush=True)
                 return {"status": "logged_in", "message": "Wallet login completed"}
 
     return {
@@ -145,7 +183,7 @@ def wallet_payment_set(tier: str, asset: str = "", chain: str = "", name: str = 
     ]
     try:
         proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=30,
+            args, capture_output=True, text=True, timeout=10,
         )
     except subprocess.TimeoutExpired:
         return {"error": "payment default set timed out"}
@@ -180,12 +218,11 @@ def wallet_login_raw_diag() -> dict:
     results = []
     for args in [
         [ONCHAINOS_BIN, "wallet", "login", "--phase", "poll"],
-        [ONCHAINOS_BIN, "wallet", "login", "poll"],
     ]:
         try:
-            proc = subprocess.run(args, capture_output=True, text=True, timeout=310)
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=10)
         except subprocess.TimeoutExpired:
-            results.append({"args": args, "error": "timeout"})
+            results.append({"args": args, "error": "timeout (10s)"})
             continue
         results.append({
             "args": args,
@@ -207,7 +244,7 @@ def wallet_login_status() -> dict:
     try:
         proc = subprocess.run(
             [ONCHAINOS_BIN, "payment", "default", "get", "--tier", "basic"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=5,
         )
         status["payment_basic"] = proc.returncode == 0
     except Exception:
@@ -216,7 +253,7 @@ def wallet_login_status() -> dict:
     try:
         proc = subprocess.run(
             [ONCHAINOS_BIN, "payment", "default", "get", "--tier", "premium"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=5,
         )
         status["payment_premium"] = proc.returncode == 0
     except Exception:
@@ -225,32 +262,113 @@ def wallet_login_status() -> dict:
     return status
 
 
+def _read_saved_session_id() -> str:
+    """Read authSessionId persisted from a previous init call."""
+    try:
+        if os.path.isfile(_SESSION_ID_FILE):
+            with open(_SESSION_ID_FILE) as f:
+                return f.read().strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _save_session_id(session_id: str) -> None:
+    """Persist authSessionId so the next call can poll with it."""
+    if not session_id:
+        return
+    try:
+        os.makedirs(os.path.dirname(_SESSION_ID_FILE), exist_ok=True)
+        with open(_SESSION_ID_FILE, "w") as f:
+            f.write(session_id)
+    except OSError:
+        pass
+
+
+def _clear_saved_session_id() -> None:
+    """Remove the persisted session id after a successful poll."""
+    try:
+        os.remove(_SESSION_ID_FILE)
+    except (OSError, FileNotFoundError):
+        pass
+
+
 def wallet_setup() -> dict:
     """One-shot onchainos wallet bootstrap.
 
     Call this repeatedly until it returns phase="done".
-    - First call: runs wallet_login_init, returns login_url for user.
-    - After user authorizes: re-call, checks status then sets payment tiers.
-    - When fully done: returns phase="done".
+    Follows the official OKX flow: init → save session_id → user authorizes
+    in browser → poll with --session-id → payment setup.
+
+    The session_id is persisted to ~/.onchainos/last_session_id.txt so
+    subsequent calls (even after MCP restarts) can pick up the pending
+    authorization without re-init (which would generate a fresh, different
+    session and invalidate the one the user just authorized).
     """
+    _ensure_onchainos_dir()  # persistent symlink survives Factory Rebuilds
     status = wallet_login_status()
 
     if status["logged_in"] and status["payment_basic"] and status["payment_premium"]:
+        _clear_saved_session_id()
         return {"phase": "done", "message": "Wallet already logged in and payment tiers set."}
 
     if not status["logged_in"]:
-        init_result = wallet_login_init()
-        if init_result.get("login_url"):
-            return {
-                "phase": "login_required",
-                "login_url": init_result["login_url"],
-                "auth_session_id": init_result.get("auth_session_id", ""),
-                "message": (
-                    "Open the login_url in browser, complete authorization, "
-                    "then call wallet_setup() again."
-                ),
-            }
-        return {"phase": "error", "error": init_result.get("error", "init failed")}
+        # Try to continue a previous init: poll with the saved session_id
+        session_id = _read_saved_session_id()
+        if session_id:
+            print(
+                f"[DIAG] wallet_setup: found saved session_id={session_id[:16]}..., trying poll",
+                file=sys.stderr, flush=True,
+            )
+            poll_result = wallet_login_poll(session_id=session_id)
+            if poll_result.get("status") == "logged_in":
+                # Poll succeeded — login complete, remove saved file and proceed
+                print(
+                    "[DIAG] wallet_setup: poll succeeded, clearing saved session_id",
+                    file=sys.stderr, flush=True,
+                )
+                _clear_saved_session_id()
+                # Re-check status (keyring should be written now)
+                status = wallet_login_status()
+            elif poll_result.get("status") in ("pending",):
+                # Not yet authorized, return pending (don't re-init!)
+                return {
+                    "phase": "polling",
+                    "session_id": session_id,
+                    "message": poll_result.get(
+                        "message", "Waiting for browser authorization..."
+                    ),
+                }
+            else:
+                # Poll failed (expired, invalid). Clear and start fresh.
+                print(
+                    f"[DIAG] wallet_setup: poll failed ({poll_result.get('status')!r}), clearing saved session_id",
+                    file=sys.stderr, flush=True,
+                )
+                _clear_saved_session_id()
+                session_id = ""
+
+        # No valid session — start a new one
+        if not session_id:
+            init_result = wallet_login_init()
+            if init_result.get("login_url"):
+                sid = init_result.get("auth_session_id", "")
+                if sid:
+                    _save_session_id(sid)
+                    print(
+                        f"[DIAG] wallet_setup: init new session_id={sid[:16]}..., saved to file",
+                        file=sys.stderr, flush=True,
+                    )
+                return {
+                    "phase": "login_required",
+                    "login_url": init_result["login_url"],
+                    "auth_session_id": sid,
+                    "message": (
+                        "Open the login_url in browser, complete authorization, "
+                        "then call wallet_setup() again."
+                    ),
+                }
+            return {"phase": "error", "error": init_result.get("error", "init failed")}
 
     # Logged in but payment not set
     results = {}

@@ -18,8 +18,15 @@ import sys
 
 # ── Suppress library stdout during imports ──────────────────────
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
-logging.getLogger("lumibot").handlers.clear()
-logging.getLogger("lumibot").propagate = True
+# Clear handlers on the ENTIRE lumibot logger tree (sub-loggers like
+# lumibot.brokers.broker register their own stdout handlers, polluting
+# the MCP stdio JSON-RPC channel).
+for _lg_name in list(logging.Logger.manager.loggerDict):
+    if _lg_name == "lumibot" or _lg_name.startswith("lumibot."):
+        _lg = logging.getLogger(_lg_name)
+        _lg.handlers.clear()
+        _lg.propagate = True
+        _lg.setLevel(logging.WARNING)
 
 SERVER_NAME = "signal-structurizer"
 SERVER_VERSION = "2.0.0"
@@ -106,7 +113,10 @@ _TOOLS = [
             "Execute the trading pipeline on structured signal(s). "
             "Passes signal through Risk → Position Sizing → Order "
             "generation. Accepts a JSON signal string (single object "
-            "or list), returns risk checks and suggested orders."
+            "or list), returns risk checks and suggested orders. "
+            "Pass live=true to attempt on-chain execution — this only "
+            "works if the WebUI live trading toggle (/config/live) is "
+            "enabled; otherwise the order stays paper-only."
         ),
         "inputSchema": {
             "type": "object",
@@ -118,6 +128,15 @@ _TOOLS = [
                         "object or list of them. Expected fields: ticker, "
                         "recommendation, score, price."
                     ),
+                },
+                "live": {
+                    "type": "boolean",
+                    "description": (
+                        "Request real on-chain execution (default false). "
+                        "Effective only when the WebUI live trading toggle "
+                        "is enabled; otherwise forced to paper."
+                    ),
+                    "default": False,
                 },
             },
             "required": ["ticker_signal_json"],

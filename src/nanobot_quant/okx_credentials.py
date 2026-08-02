@@ -67,6 +67,16 @@ def get_okx_passphrase() -> Optional[str]:
     return _read_credentials().get("passphrase")
 
 
+def get_wallet_address() -> Optional[str]:
+    """Return the user's wallet address (Solana or EVM) from okx.json."""
+    return _read_credentials().get("wallet_address")
+
+
+def get_chain() -> str:
+    """Return the trading chain from okx.json (default "solana")."""
+    return _read_credentials().get("chain") or "solana"
+
+
 def is_configured() -> bool:
     """Return True when all three credentials are present."""
     c = _read_credentials()

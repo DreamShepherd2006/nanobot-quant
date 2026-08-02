@@ -40,6 +40,19 @@ from nanobot_quant.risk import RiskEngine
 from nanobot_quant.signal_schema import SignalRequest, SignalResponse, TickerSignal
 from nanobot_quant.strategies.td_sequential import calculate
 
+
+class _StubStrategy:
+    """Minimal strategy stub so Lumibot Order constructor doesn't crash.
+
+    When we call ``broker._submit_order()`` directly we are not running
+    inside a full Lumibot strategy loop.  The Order only needs a
+    non-None strategy handle; it never calls back into it during
+    manual submission.
+    """
+    name = "pipeline-live"
+    quote_asset = None
+
+
 DataSource = Literal["yahoo", "onchainos", "okx_cex"]
 
 
@@ -359,12 +372,17 @@ def run_from_signals(
     max_position_pct: float = 0.20,
     max_drawdown_pct: float = 0.15,
     stop_loss_pct: float = 0.10,
+    live: bool = False,
+    tokens_json: list[dict] | None = None,
 ) -> list[dict]:
     """Run risk checks + order generation on pre-computed signals.
 
     Entry point for vt_research's execute_signal MCP tool.  Signals
     are already structured (from structurize_signal or quant TD),
     so we skip data fetch and TD calculation.
+
+    When ``live=True``, orders that pass risk are forwarded to
+    OnchainOSBroker for on-chain swap execution.
 
     Returns list of dicts::
 
@@ -376,6 +394,8 @@ def run_from_signals(
             "risk_details": dict,
             "suggested_order": dict|None,
             "position_value": float|None,
+            "tx_hash": str|None,          # only when live=True
+            "broker_status": str|None,    # only when live=True
         }]
     """
     from nanobot_quant.portfolio.order_schema import OrderRequest
@@ -441,6 +461,9 @@ def run_from_signals(
             risk_passed = False
 
         order: dict | None = None
+        tx_hash: str | None = None
+        broker_status: str | None = None
+
         if risk_passed and signal.recommendation in ("BUY", "SELL"):
             req = OrderRequest(
                 asset=ticker,
@@ -452,6 +475,56 @@ def run_from_signals(
             )
             order = req.to_dict()
 
+            # ── Live execution via OnchainOSBroker ──
+            if live and order is not None:
+                print(f"[DIAG] run_from_signals: submitting {ticker} {req.action} x{req.quantity} live...",
+                      file=sys.stderr, flush=True)
+                try:
+                    _saved_stdout = sys.stdout
+                    sys.stdout = sys.stderr
+
+                    from lumibot.entities import Asset, Order as LumibotOrder
+                    from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+
+                    sys.stdout = _saved_stdout
+
+                    broker = OnchainOSBroker(tokens_json=tokens_json or [])
+
+                    asset = Asset(
+                        symbol=req.asset,
+                        asset_type="crypto",
+                    )
+                    quote = Asset(
+                        symbol="USDC",
+                        asset_type="crypto",
+                    )
+                    lumibot_order = LumibotOrder(
+                        strategy=_StubStrategy(),
+                        asset=asset,
+                        quote=quote,
+                        quantity=req.quantity,
+                        side=req.action,
+                    )
+                    broker._submit_order(lumibot_order)
+                    tx_hash = lumibot_order.identifier or ""
+                    order_error = (
+                        getattr(lumibot_order, 'error', '')
+                        or getattr(lumibot_order, '_error', '')
+                        or ''
+                    )
+                    broker_status = lumibot_order.status if hasattr(lumibot_order, 'status') else "unknown"
+                    if order_error:
+                        broker_status = f"{broker_status}: {order_error}"
+                    print(f"[DIAG] run_from_signals: {ticker} → {broker_status} tx={tx_hash} err={order_error!r}",
+                          file=sys.stderr, flush=True)
+                except Exception as exc:
+                    print(f"[DIAG] run_from_signals: {ticker} broker FAILED: {exc}",
+                          file=sys.stderr, flush=True)
+                    import traceback
+                    traceback.print_exc(file=sys.stderr)
+                    tx_hash = ""
+                    broker_status = f"error: {exc}"
+
         results.append({
             "ticker": ticker,
             "recommendation": signal.recommendation,
@@ -460,6 +533,8 @@ def run_from_signals(
             "risk_details": risk_details,
             "suggested_order": order,
             "position_value": position_value,
+            "tx_hash": tx_hash,
+            "broker_status": broker_status,
         })
 
     passed = sum(1 for r in results if r["risk_passed"])

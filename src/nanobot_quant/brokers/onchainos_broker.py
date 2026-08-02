@@ -17,6 +17,8 @@ from nanobot_quant.onchainos_cli import (
     get_token_price,
     WSOL_ADDR,
 )
+from nanobot_quant.onchainos_errors import lookup as err_lookup
+from nanobot_quant.okx_credentials import get_chain, get_wallet_address
 from lumibot.brokers import Broker
 
 logger = logging.getLogger("nanobot_quant.brokers.onchainos")
@@ -40,11 +42,34 @@ class OnchainOSBroker(Broker):
         sol_buffer_pct: float = 0.05,
         **kwargs,
     ):
+        if "data_source" not in kwargs:
+            kwargs["data_source"] = _DummyDataSource()
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
         self._slippage = slippage
         self._sol_buffer_pct = sol_buffer_pct
         self._tracked: dict[str, dict] = {}  # tx_hash → order meta
+
+    @staticmethod
+    def _format_err(prefix: str, result: dict | None = None) -> str:
+        """Build a human-readable error string with code lookup."""
+        if not result:
+            return prefix
+        # Try to decode any error code in the response
+        detail = err_lookup(result)
+        if detail and detail != str(result):
+            return f"{prefix}: {detail}"
+        # CLI error envelope lives in stdout on failure ({"ok": false, "error": ...})
+        err_msg = (
+            result.get("error", "")
+            or (result.get("_stdout_parsed") or {}).get("error", "")
+            or (result.get("_stderr_parsed") or {}).get("error", "")
+            or result.get("_stderr", "")
+        )
+        if err_msg:
+            clipped = err_msg.strip()[-300:]
+            return f"{prefix}: {clipped}"
+        return prefix
 
     # ═══════════════════════════════════════════════════════════════
     #  Order Execution
@@ -64,24 +89,26 @@ class OnchainOSBroker(Broker):
         quantity = int(order.quantity)
 
         if side not in ("buy", "sell"):
-            order.update_status("rejected")
-            logger.error("Unsupported side: %s (only buy/sell)", side)
+            order.set_error(f"Unsupported side: {side} (only buy/sell)")
             return order
 
         # ── token resolution ──────────────────────────────────
+        quote_symbol = order.quote.symbol if order.quote else "USDC"
+
         if side == "buy":
-            from_symbol, to_symbol = "SOL", symbol
+            from_symbol, to_symbol = quote_symbol, symbol
         else:
-            from_symbol, to_symbol = symbol, "SOL"
+            from_symbol, to_symbol = symbol, quote_symbol
 
         from_addr = resolve_token_address(from_symbol, self._tokens_json)
         to_addr = resolve_token_address(to_symbol, self._tokens_json)
 
         if not from_addr or not to_addr:
-            order.update_status("rejected")
-            logger.error(
-                "Cannot resolve addresses: %s→%s", from_symbol, to_symbol
+            msg = self._format_err(
+                f"Cannot resolve addresses: {from_symbol}→{to_symbol}"
             )
+            order.set_error(msg)
+            logger.error(msg)
             return order
 
         # ── amount calculation ─────────────────────────────────
@@ -89,36 +116,71 @@ class OnchainOSBroker(Broker):
             from_amount = str(quantity)
         else:
             # Buy: estimate SOL needed via market price + buffer
-            sol_price = get_token_price(from_addr) or 1.0
-            token_price = get_token_price(to_addr) or 0.0
+            # Pass SYMBOLS (not addresses) — get_price uses onchainos kline which expects symbols
+            sol_price = get_token_price(from_symbol) or 1.0
+            token_price = get_token_price(to_symbol) or 0.0
             if token_price <= 0:
-                order.update_status("rejected")
-                logger.error("Cannot get price for %s", symbol)
+                order.set_error(self._format_err(f"Cannot get price for {symbol}"))
                 return order
             sol_needed = (quantity * token_price / sol_price) * (1 + self._sol_buffer_pct)
             from_amount = f"{sol_needed:.6f}"
 
         # ── execute swap ───────────────────────────────────────
-        result = swap_execute(from_addr, to_addr, from_amount, self._slippage)
+        chain = get_chain()
+        wallet = get_wallet_address()
+        if not wallet:
+            order.set_error(
+                self._format_err(
+                    f"Wallet address not configured: 请在 WebUI 业务管理 → API 配置中填写钱包地址"
+                )
+            )
+            return order
+        result = swap_execute(
+            from_addr, to_addr, from_amount, self._slippage,
+            chain=chain, wallet=wallet,
+        )
         if not result:
-            order.update_status("rejected")
-            logger.error(
-                "Swap execute failed: %s %s %s@%s",
-                side, quantity, symbol, from_amount,
+            order.set_error(
+                self._format_err(
+                    f"Swap execute failed: {side} {quantity} {symbol}@{from_amount}"
+                )
             )
             return order
 
-        tx_hash = result.get("swapTxHash") or result.get("txHash", "")
-        status = result.get("status", "unknown")
+        # Handle CLI-level failure (non-zero exit, no valid JSON)
+        if "_exit_code" in result:
+            order.set_error(self._format_err(f"Swap CLI exit={result['_exit_code']}", result))
+            return order
 
-        if status not in ("success", "submitted", "pending"):
-            order.update_status("rejected")
-            logger.error("Swap returned status=%s tx=%s", status, tx_hash[:16])
+        # onchainos CLI returns {"ok": true/false, "data": {...}, "error": "..."}
+        if not result.get("ok"):
+            order.set_error(self._format_err("Swap rejected", result))
+            return order
+
+        data = result.get("data", result) if isinstance(result.get("data"), dict) else result
+        tx_hash = data.get("swapTxHash") or data.get("txHash") or ""
+        status = data.get("status", "unknown")
+
+        # Accept any non-error status that indicates the swap was submitted.
+        reject_statuses = {"error", "failed", "rejected", "canceled", "cancelled"}
+
+        if status and status.lower() in reject_statuses:
+            # Try to get a more detailed error from the data envelope
+            err_detail = (
+                data.get("error")
+                or data.get("errorMessage")
+                or data.get("msg")
+                or ""
+            )
+            if err_detail:
+                order.set_error(self._format_err(f"Swap {status}", {"error": err_detail}))
+            else:
+                order.set_error(self._format_err(f"Swap {status}", data))
             return order
 
         # ── fill order ─────────────────────────────────────────
         order.set_identifier(tx_hash)
-        order.update_status("filled")
+        order.set_filled()
 
         to_amount = float(result.get("toAmount") or 0)
         fill_price = to_amount / quantity if quantity > 0 else 0
@@ -283,3 +345,17 @@ class OnchainOSBroker(Broker):
 
     def get_historical_account_value(self) -> dict:
         return {}
+
+
+class _DummyDataSource:
+    """Minimal data source stub for the Lumibot broker constructor."""
+    def __init__(self):
+        self._timestep = "minute"
+
+    def get_last_price(self, *args, **kwargs) -> None:
+        return None
+
+    def get_historical_prices(self, *args, **kwargs):
+        import pandas as pd
+        return pd.DataFrame()
+

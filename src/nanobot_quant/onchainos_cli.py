@@ -13,21 +13,72 @@ import logging
 import subprocess
 from typing import Any, Optional
 
+from nanobot_quant.onchainos_errors import lookup as err_lookup
+
 ONCHAINOS_BIN = "/usr/local/bin/onchainos"
 
 logger = logging.getLogger("nanobot_quant.onchainos_cli")
 
+_env_injected = False
+
+
+def _ensure_env() -> None:
+    """Inject OKX credentials into os.environ so onchainos CLI can call Market API.
+
+    Market endpoints (kline, price, token search) require OKX_API_KEY /
+    OKX_SECRET_KEY / OKX_PASSPHRASE env vars.  Wallet endpoints use
+    ~/.onchainos/keyring.enc instead.
+
+    Idempotent — called once before the first CLI invocation.
+    """
+    global _env_injected
+    if _env_injected:
+        return
+    try:
+        from nanobot_quant.okx_credentials import inject_env
+        inject_env()
+    except Exception:
+        pass
+    _env_injected = True
+
 
 def _run(*args, timeout: int = 15) -> Optional[dict | list]:
     """Run onchainos CLI and return parsed JSON output."""
+    _ensure_env()
     try:
         r = subprocess.run(
             [ONCHAINOS_BIN, *args],
             capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode != 0:
-            logger.warning("onchainos CLI non-zero exit: %s", r.returncode)
-            return None
+            stderr_tail = r.stderr.strip()[-200:] if r.stderr else "(no stderr)"
+            stdout_tail = r.stdout.strip()[-200:] if r.stdout else "(no stdout)"
+            # onchainos CLI writes the error envelope ({"ok": false, "error": ...})
+            # to stdout on failure, not stderr. Parse both.
+            def _parse_json(text: str) -> Optional[dict]:
+                if not text.strip():
+                    return None
+                try:
+                    return json.loads(text.strip())
+                except json.JSONDecodeError:
+                    return None
+
+            stderr_parsed = _parse_json(r.stderr)
+            stdout_parsed = _parse_json(r.stdout)
+            # Prefer stdout envelope (actual error message lives there)
+            err_desc = err_lookup(stdout_parsed) if stdout_parsed else ""
+            if not err_desc or err_desc == str(stdout_parsed):
+                err_desc = err_lookup(stderr_parsed) if stderr_parsed else ""
+            if not err_desc or err_desc == str(stderr_parsed):
+                err_desc = stdout_tail if stdout_tail != "(no stdout)" else stderr_tail
+            logger.warning("onchainos CLI exit=%d: %s", r.returncode, err_desc)
+            return {
+                "_exit_code": r.returncode,
+                "_stdout": r.stdout.strip(),
+                "_stdout_parsed": stdout_parsed,
+                "_stderr": r.stderr.strip(),
+                "_stderr_parsed": stderr_parsed,
+            }
         return json.loads(r.stdout) if r.stdout.strip() else None
     except Exception:
         return None
@@ -73,16 +124,27 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 
 # ── Market ────────────────────────────────────────────────────────
 
-def get_price(address: str, chain: str = "solana") -> Optional[str]:
-    """Get real-time token price in USD.
+def get_price(symbol: str, chain: str = "solana") -> Optional[str]:
+    """Get real-time token price in USD via market kline.
 
+    Uses the most recent 1D candle's close as the current price.
+    Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
     Returns price as string or None.
     """
-    result = _run("market", "price", "--address", address, "--chain", chain)
-    if isinstance(result, dict):
-        data = result.get("data")
-        if isinstance(data, list) and data:
-            return data[0].get("price")
+    # For stablecoins, return "1"
+    if symbol.upper() in ("USDC", "USDT"):
+        return "1"
+
+    addr = resolve_token_address(symbol)
+    if not addr:
+        return None
+
+    # kline returns list like [{ts, o, h, l, c, vol, ...}, ...]
+    # Use 1D bar to match the verified-working onchainos_data path.
+    candles = get_kline(addr, bar="1D", limit=1, chain=chain)
+    if candles:
+        c = candles[0]
+        return str(c.get("c") or c.get("close"))
     return None
 
 
@@ -97,7 +159,9 @@ def get_kline(
     Returns list of candle dicts ({ts, o, h, l, c, vol, volUsd, confirm})
     or None on failure. Max 299 candles.
     """
-    result = _run("market", "kline", "--address", address, "--bar", bar, "--limit", str(limit), "--chain", chain)
+    # Parameter order must match onchainos_data._run_cli (verified working):
+    #   market kline --address X --chain solana --bar 1D --limit 300
+    result = _run("market", "kline", "--address", address, "--chain", chain, "--bar", bar, "--limit", str(limit))
     if isinstance(result, dict):
         data = result.get("data")
         if isinstance(data, list):
@@ -124,6 +188,14 @@ def resolve_token_address(
     if symbol_upper == "SOL":
         return WSOL_ADDR
 
+    # Well-known Solana tokens (common trading pairs)
+    _KNOWN_TOKENS: dict[str, str] = {
+        "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    }
+    if symbol_upper in _KNOWN_TOKENS:
+        return _KNOWN_TOKENS[symbol_upper]
+
     # 1) User-configured list
     for entry in (tokens_json or []):
         if entry.get("symbol", "").upper() == symbol_upper:
@@ -133,9 +205,12 @@ def resolve_token_address(
     return search_token(symbol)
 
 
-def get_token_price(address: str) -> Optional[float]:
-    """Get real-time token price as float (USD)."""
-    raw = get_price(address)
+def get_token_price(symbol: str) -> Optional[float]:
+    """Get real-time token price as float (USD).
+
+    Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
+    """
+    raw = get_price(symbol)
     if raw is None:
         return None
     try:
@@ -171,16 +246,27 @@ def swap_execute(
     to_addr: str,
     amount: str,
     slippage: str = "0.01",
+    chain: str = "solana",
+    wallet: str = "",
 ) -> Optional[dict]:
-    """Execute a swap. Returns dict with swapTxHash / txHash and status."""
-    return _run(
+    """Execute a swap. Returns dict with swapTxHash / txHash and status.
+
+    Uses ``--readable-amount`` (human-readable token amount, CLI converts
+    to minimal units via token decimals). ``chain``/``wallet`` are required
+    by onchainos CLI v4.3.x.
+    """
+    args = [
         "swap", "execute",
         "--from", from_addr,
         "--to", to_addr,
-        "--amount", amount,
-        "--slippage", slippage,
-        timeout=30,
-    )
+        "--readable-amount", amount,
+        "--chain", chain,
+    ]
+    if wallet:
+        args += ["--wallet", wallet]
+    if slippage:
+        args += ["--slippage", slippage]
+    return _run(*args, timeout=30)
 
 
 def swap_status(tx_hash: str) -> Optional[dict]:
