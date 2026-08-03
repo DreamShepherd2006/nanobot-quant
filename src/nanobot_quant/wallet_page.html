@@ -228,7 +228,7 @@ function renderAccounts(accounts) {
         return `<div class="acc-addr">` +
                `<span class="chain">${esc(chain)}</span>` +
                `<span class="addr">${esc(addr)}</span>` +
-               `<button class="copy-btn" onclick="navigator.clipboard.writeText('${esc(addr)}').then(()=>toast('✅ 已复制', true))">📋</button></div>`;
+               `<button class="copy-btn" data-addr="${esc(addr)}">📋</button></div>`;
       }).join('');
     } else {
       addrHtml = '<div class="empty" style="padding:4px 0;font-size:.78em">无地址信息</div>';
