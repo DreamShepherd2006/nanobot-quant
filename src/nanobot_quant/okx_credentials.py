@@ -68,7 +68,14 @@ def get_okx_passphrase() -> Optional[str]:
 
 
 def get_wallet_address() -> Optional[str]:
-    """Return the user's wallet address (Solana or EVM) from okx.json."""
+    """Return the user's personal OKX Web3 wallet address from okx.json.
+
+    NOTE: This is the USER'S PERSONAL wallet address (e.g. ArWUBs...) —
+    kept only for backward compatibility / display purposes. It does NOT
+    determine the swap broadcast or quote address. The actual trading
+    address is the Agentic Wallet bound to the API key, resolved at
+    runtime via get_active_wallet_address().
+    """
     return _read_credentials().get("wallet_address")
 
 

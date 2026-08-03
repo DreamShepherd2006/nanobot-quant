@@ -73,7 +73,27 @@ def _render_detail_form(spec: CredentialSpec) -> str:
         val = html_escape(current.get(f.name, ""))
         required_attr = 'required' if f.required else ''
         placeholder = html_escape(f.placeholder)
-        fields_html_parts.append(f"""\
+        if f.options:
+            opts = "".join(
+                f'<option value="{html_escape(o)}"{" selected" if o == val else ""}>{html_escape(o)}</option>'
+                for o in f.options
+            )
+            fields_html_parts.append(f"""\
+  <div class="form-group">
+    <label for="{html_escape(f.name)}">{html_escape(f.label)}</label>
+    <select id="{html_escape(f.name)}" name="{html_escape(f.name)}" {required_attr}>
+      {opts}
+    </select>
+  </div>""")
+        elif f.readonly:
+            fields_html_parts.append(f"""\
+  <div class="form-group">
+    <label for="{html_escape(f.name)}">{html_escape(f.label)}</label>
+    <input id="{html_escape(f.name)}" name="{html_escape(f.name)}" type="text"
+           value="{val}" placeholder="{placeholder}" readonly disabled>
+  </div>""")
+        else:
+            fields_html_parts.append(f"""\
   <div class="form-group">
     <label for="{html_escape(f.name)}">{html_escape(f.label)}</label>
     <input id="{html_escape(f.name)}" name="{html_escape(f.name)}" type="{html_escape(f.type)}"

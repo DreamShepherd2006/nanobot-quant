@@ -195,6 +195,28 @@ def wallet_switch(account_id: str) -> dict:
     ))
 
 
+def get_active_wallet_address(chain: str = "solana") -> Optional[str]:
+    """Resolve the active account's address for a chain (Agentic Wallet).
+
+    The broadcast/quote address is the Agentic Wallet active account
+    (selected account in keyring.enc) — NOT the user's personal wallet
+    address. Returns None when not logged in or the chain has no address.
+    """
+    resp = wallet_addresses(chain)
+    if resp.get("status") != "ok":
+        return None
+    data = resp.get("data") or {}
+    group = (
+        "solana" if chain in ("solana", "501")
+        else "xlayer" if chain in ("xlayer", "196")
+        else "evm"
+    )
+    addrs = data.get(group) or []
+    if not addrs:
+        return None
+    return addrs[0].get("address") or None
+
+
 def _get(d: dict, *keys, default=None):
     """Read a possibly-camelCase/snake_case key from a dict (first hit wins)."""
     for k in keys:

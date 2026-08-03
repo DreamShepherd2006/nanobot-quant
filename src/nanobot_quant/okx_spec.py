@@ -11,8 +11,21 @@ OKX_SPEC = CredentialSpec(
         FieldSpec("api_key", "API Key", placeholder="从 OKX 开发者中心获取"),
         FieldSpec("secret_key", "Secret Key"),
         FieldSpec("passphrase", "Passphrase"),
-        FieldSpec("wallet_address", "钱包地址 (Wallet Address)", type="text", placeholder="Solana: E71V4... 或 EVM: 0x..."),
-        FieldSpec("chain", "链 (Chain)", type="text", placeholder="solana (默认)", required=False),
+        FieldSpec(
+            "wallet_address",
+            "个人钱包地址（仅展示）",
+            type="text",
+            placeholder="由 API Key 绑定的 Agentic Wallet 决定，无需填写",
+            required=False,
+            readonly=True,
+        ),
+        FieldSpec(
+            "chain",
+            "链 (Chain)",
+            type="select",
+            options=["solana", "ethereum", "xlayer"],
+            required=False,
+        ),
     ],
     docs_url="https://www.okx.com/account/my-api",
 )

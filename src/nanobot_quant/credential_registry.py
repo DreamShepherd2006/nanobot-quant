@@ -53,6 +53,8 @@ class FieldSpec:
     type: str = "password"  # "password" | "text"
     placeholder: str = ""
     required: bool = True
+    readonly: bool = False  # render as disabled input (display-only, not editable)
+    options: list[str] = field(default_factory=list)  # non-empty → render as <select>
 
 
 @dataclass
