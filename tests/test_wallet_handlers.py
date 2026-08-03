@@ -86,7 +86,7 @@ class TestAuthGuard:
     def test_page_requires_login(self):
         _, h = _make_handlers()
         resp = _run(h["/config/wallet"](_FakeRequest(user=None)))
-        assert resp.status_code == 401
+        assert resp.status_code == 307 or resp.status_code == 302  # RedirectResponse → "/"
 
     def test_page_requires_commander(self):
         _, h = _make_handlers()

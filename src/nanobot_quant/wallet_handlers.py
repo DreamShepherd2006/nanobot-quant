@@ -17,7 +17,7 @@ import asyncio
 import os
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .tools.tools_wallet import (
     wallet_add,
@@ -75,12 +75,14 @@ def register_wallet_routes(app, gatekeeper) -> None:
             return (403, "仅 Commander 可访问")
         return None
 
-    async def _wallet_page(request: Request) -> HTMLResponse:
-        denied = _guard(request.session.get("user"))
-        if denied:
+    async def _wallet_page(request: Request):
+        _u = request.session.get("user")
+        if not _u:
+            return RedirectResponse("/")
+        if not gatekeeper._platform.is_commander(_u):
             return HTMLResponse(
-                f"<h3 style='text-align:center;margin-top:60px;color:#888;'>{denied[1]}</h3>",
-                status_code=denied[0],
+                "<h3 style='text-align:center;margin-top:60px;color:#e74c3c;'>🔒 仅 Commander 可访问</h3>",
+                status_code=403,
             )
         return HTMLResponse(_WALLET_PAGE)
 
