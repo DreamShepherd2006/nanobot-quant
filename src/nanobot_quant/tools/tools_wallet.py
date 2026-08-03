@@ -195,6 +195,69 @@ def wallet_switch(account_id: str) -> dict:
     ))
 
 
+def _get(d: dict, *keys, default=None):
+    """Read a possibly-camelCase/snake_case key from a dict (first hit wins)."""
+    for k in keys:
+        if k in d:
+            return d[k]
+    return default
+
+
+def wallet_accounts() -> dict:
+    """List all sub-wallet accounts with their addresses.
+
+    The onchainos CLI has no "list accounts" command, so this reads
+    ~/.onchainos/wallets.json directly (same store the CLI uses; the
+    symlink to /data/legion/credentials/onchainos_sessions survives
+    Factory Rebuilds). Returns:
+    {"status": "ok", "data": {"selected_account_id": ..., "accounts": [
+        {"account_id", "account_name", "is_default", "is_active", "addresses": [
+            {"chain", "chain_index", "address", "type"}]}]}}
+    """
+    _ensure_onchainos_dir()
+    wallets_path = os.path.expanduser("~/.onchainos/wallets.json")
+    if not os.path.exists(wallets_path):
+        return {"status": "error", "error": "wallets.json 不存在 — 请先登录钱包"}
+    try:
+        with open(wallets_path, encoding="utf-8") as f:
+            wallets = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "error", "error": f"wallets.json 读取失败: {exc}"}
+
+    selected = _get(wallets, "selected_account_id", "selectedAccountId", default="") or ""
+    accounts = _get(wallets, "accounts", default=[]) or []
+    accounts_map = _get(wallets, "accounts_map", "accountsMap", default={}) or {}
+
+    result = []
+    for acc in accounts:
+        account_id = _get(acc, "account_id", "accountId", default="") or ""
+        entry = accounts_map.get(account_id) or {}
+        address_list = _get(entry, "address_list", "addressList", default=[]) or []
+        addresses = []
+        for addr in address_list:
+            addresses.append({
+                "chain": _get(addr, "chain_name", "chainName", default="") or "",
+                "chain_index": _get(addr, "chain_index", "chainIndex", default="") or "",
+                "address": _get(addr, "address", default="") or "",
+                "type": _get(addr, "address_type", "addressType", default="") or "",
+            })
+        result.append({
+            "account_id": account_id,
+            "account_name": _get(acc, "account_name", "accountName", default=account_id) or account_id,
+            "is_default": bool(_get(acc, "is_default", "isDefault", default=False)),
+            "is_active": account_id == selected,
+            "addresses": addresses,
+        })
+
+    return {
+        "status": "ok",
+        "data": {
+            "selected_account_id": selected,
+            "accounts": result,
+        },
+    }
+
+
 def wallet_login_init() -> dict:
     """Initiate onchainos social login. Returns loginUrl for the user.
     Tries multiple CLI syntaxes for cross-version compatibility."""

@@ -34,6 +34,25 @@
   .copy-btn { background:#e3f2fd; border:none; color:#1565c0; border-radius:4px;
               cursor:pointer; font-size:.75em; padding:3px 9px; flex-shrink:0; }
   .copy-btn:hover { background:#bbdefb; }
+  .acc-block { border:1px solid #e8e8e8; border-radius:8px; padding:10px 12px;
+               margin-bottom:10px; background:#fafafa; }
+  .acc-block:last-child { margin-bottom:0; }
+  .acc-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .acc-header .acc-name { font-weight:600; font-size:.95em; }
+  .acc-header .acc-id { font-family:ui-monospace,Menlo,monospace; font-size:.75em;
+                        color:#999; }
+  .acc-header .badge { font-size:.7em; padding:2px 8px; border-radius:20px; }
+  .acc-header .badge.active { background:#e3f2fd; color:#1565c0; }
+  .acc-header .badge.default { background:#fff3e0; color:#e65100; }
+  .acc-header .switch-acc { margin-left:auto; background:#fff; color:#1565c0;
+                            border:1px solid #1565c0; border-radius:4px; cursor:pointer;
+                            font-size:.75em; padding:3px 10px; }
+  .acc-header .switch-acc:hover { background:#e3f2fd; }
+  .acc-addr { display:flex; align-items:center; gap:8px; padding:3px 0 3px 8px;
+              border-left:2px solid #e0e0e0; margin-left:4px; }
+  .acc-addr .chain { min-width:64px; font-weight:600; font-size:.78em; }
+  .acc-addr .addr { font-family:ui-monospace,Menlo,monospace; font-size:.75em; color:#444;
+                    word-break:break-all; flex:1; }
   .txn-row { display:flex; align-items:center; gap:8px; padding:6px 0;
              border-bottom:1px dashed #f0f0f0; font-size:.85em; }
   .txn-row:last-child { border-bottom:none; }
@@ -85,6 +104,11 @@
 <div id="login-card" class="card">
   <div class="card-header"><span class="icon">🔐</span><span class="name">登录状态</span><span id="login-badge" class="badge off">检测中…</span></div>
   <div id="login-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div id="acc-card" class="card">
+  <div class="card-header"><span class="icon">👥</span><span class="name">子钱包账户</span><span id="acc-count" class="badge off">—</span></div>
+  <div id="acc-body"><div class="loading">加载中…</div></div>
 </div>
 
 <div id="addr-card" class="card">
@@ -173,6 +197,65 @@ function renderLogin(login, status) {
     rows = '<div class="empty">未登录。点击下方「🔗 登录 / 重新授权」打开登录链接。</div>';
   }
   body.innerHTML = rows;
+}
+
+function renderAccounts(accounts) {
+  const body = $('acc-body');
+  const countEl = $('acc-count');
+  if (!accounts || accounts.status !== 'ok' || !accounts.data || !accounts.data.accounts) {
+    body.innerHTML = `<div class="err">${esc(accounts?.error || '无法读取账户列表')}</div>`;
+    countEl.className = 'badge off';
+    countEl.textContent = '—';
+    return;
+  }
+  const list = accounts.data.accounts;
+  countEl.className = 'badge on';
+  countEl.textContent = list.length + ' 个账户';
+  if (!list.length) {
+    body.innerHTML = '<div class="empty">暂无子钱包账户</div>';
+    return;
+  }
+  let html = '';
+  for (const acc of list) {
+    const badges = [];
+    if (acc.is_active) badges.push('<span class="badge active">当前</span>');
+    if (acc.is_default) badges.push('<span class="badge default">默认</span>');
+    let addrHtml = '';
+    if (acc.addresses && acc.addresses.length) {
+      addrHtml = acc.addresses.map(a => {
+        const chain = a.chain_name || a.chainName || a.chain || '';
+        const addr = a.address || '';
+        return `<div class="acc-addr">` +
+               `<span class="chain">${esc(chain)}</span>` +
+               `<span class="addr">${esc(addr)}</span>` +
+               `<button class="copy-btn" onclick="navigator.clipboard.writeText('${esc(addr)}').then(()=>toast('✅ 已复制', true))">📋</button></div>`;
+      }).join('');
+    } else {
+      addrHtml = '<div class="empty" style="padding:4px 0;font-size:.78em">无地址信息</div>';
+    }
+    const switchBtn = acc.is_active ? '' :
+      `<button class="switch-acc" data-account-id="${esc(acc.account_id)}">🔀 切换到此账户</button>`;
+    html += `<div class="acc-block">` +
+            `<div class="acc-header"><span class="acc-name">${esc(acc.account_name || acc.account_id)}</span>` +
+            `<span class="acc-id">${esc(acc.account_id)}</span>` +
+            `${badges.join('')}${switchBtn}</div>` +
+            `${addrHtml}</div>`;
+  }
+  body.innerHTML = html;
+  body.querySelectorAll('.switch-acc').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await fetchJSON('/config/wallet/switch', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({account_id: btn.dataset.accountId}),
+        });
+        toast('✅ 已切换账户', true);
+        await loadData();
+      } catch (e) {
+        toast('❌ ' + e.message, false);
+      }
+    });
+  });
 }
 
 function renderAddresses(addrRes) {
@@ -280,6 +363,7 @@ async function loadData() {
   try {
     const data = await fetchJSON('/config/wallet/data');
     renderLogin(data.login, data.status);
+    renderAccounts(data.accounts);
     renderAddresses(data.addresses);
     renderBalance(data.balance);
     renderHistory(data.history);

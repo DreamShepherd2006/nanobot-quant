@@ -121,7 +121,7 @@ class TestDataAggregation:
         assert resp.status_code == 200
         data = json.loads(resp.body)
         assert data["ok"] is True
-        for key in ("status", "login", "addresses", "balance", "history"):
+        for key in ("status", "login", "addresses", "balance", "history", "accounts"):
             assert key in data
 
 

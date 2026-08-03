@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .tools.tools_wallet import (
+    wallet_accounts,
     wallet_add,
     wallet_addresses,
     wallet_balance,
@@ -96,12 +97,13 @@ def register_wallet_routes(app, gatekeeper) -> None:
         if denied:
             return JSONResponse({"ok": False, "error": denied[1]}, status_code=denied[0])
 
-        status_res, login_res, addr_res, bal_res, hist_res = await asyncio.gather(
+        status_res, login_res, addr_res, bal_res, hist_res, accounts_res = await asyncio.gather(
             _call(wallet_status, timeout=25),
             _call(wallet_login_status, timeout=10),
             _call(wallet_addresses, timeout=25),
             _call(wallet_balance, timeout=30),
             _call(wallet_history, limit="10", timeout=30),
+            _call(wallet_accounts, timeout=10),
         )
         return JSONResponse({
             "ok": True,
@@ -110,6 +112,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
             "addresses": addr_res,
             "balance": bal_res,
             "history": hist_res,
+            "accounts": accounts_res,
         })
 
     async def _wallet_login(request: Request) -> JSONResponse:
