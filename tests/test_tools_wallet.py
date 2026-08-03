@@ -9,6 +9,7 @@ from nanobot_quant.tools.tools_wallet import (
     ONCHAINOS_BIN,
     _ok_data,
     _run_cli,
+    get_active_wallet_address,
     wallet_accounts,
     wallet_add,
     wallet_addresses,
@@ -143,6 +144,50 @@ class TestWalletTools:
         assert r["status"] == "error"
         assert "account_id is required" in r["error"]
         assert len(fake_subprocess) == 0
+
+    def test_get_active_wallet_address_solana(self, monkeypatch, fake_subprocess):
+        def _fake_wallet_addresses(chain=""):
+            return {"status": "ok", "data": {
+                "accountId": "acct-1",
+                "xlayer": [],
+                "evm": [],
+                "solana": [{"address": "E71V4Qe...", "chainIndex": "501", "chainName": "Solana"}],
+            }}
+        monkeypatch.setattr(
+            "nanobot_quant.tools.tools_wallet.wallet_addresses",
+            _fake_wallet_addresses,
+        )
+        assert get_active_wallet_address("solana") == "E71V4Qe..."
+        # default chain is solana
+        assert get_active_wallet_address() == "E71V4Qe..."
+
+    def test_get_active_wallet_address_xlayer(self, monkeypatch):
+        def _fake_wallet_addresses(chain=""):
+            return {"status": "ok", "data": {
+                "accountId": "acct-1",
+                "xlayer": [{"address": "0xabc", "chainIndex": "196", "chainName": "X Layer"}],
+                "evm": [],
+                "solana": [],
+            }}
+        monkeypatch.setattr(
+            "nanobot_quant.tools.tools_wallet.wallet_addresses",
+            _fake_wallet_addresses,
+        )
+        assert get_active_wallet_address("xlayer") == "0xabc"
+
+    def test_get_active_wallet_address_not_logged_in(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.tools.tools_wallet.wallet_addresses",
+            lambda chain="": {"status": "error", "error": "not logged in"},
+        )
+        assert get_active_wallet_address("solana") is None
+
+    def test_get_active_wallet_address_empty_group(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.tools.tools_wallet.wallet_addresses",
+            lambda chain="": {"status": "ok", "data": {"xlayer": [], "evm": [], "solana": []}},
+        )
+        assert get_active_wallet_address("solana") is None
 
 
 class TestWalletAccounts:

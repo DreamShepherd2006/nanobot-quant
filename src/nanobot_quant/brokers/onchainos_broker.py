@@ -18,7 +18,8 @@ from nanobot_quant.onchainos_cli import (
     WSOL_ADDR,
 )
 from nanobot_quant.onchainos_errors import lookup as err_lookup
-from nanobot_quant.okx_credentials import get_chain, get_wallet_address
+from nanobot_quant.okx_credentials import get_chain
+from nanobot_quant.tools.tools_wallet import get_active_wallet_address
 from lumibot.brokers import Broker
 
 logger = logging.getLogger("nanobot_quant.brokers.onchainos")
@@ -127,11 +128,13 @@ class OnchainOSBroker(Broker):
 
         # ── execute swap ───────────────────────────────────────
         chain = get_chain()
-        wallet = get_wallet_address()
+        # 报价/广播地址 = Agentic Wallet 当前活跃账户（由 API Key 会话决定），
+        # 非用户个人钱包地址 — 动态从钱包会话获取，避免填错地址导致报价不准
+        wallet = get_active_wallet_address(chain)
         if not wallet:
             order.set_error(
                 self._format_err(
-                    f"Wallet address not configured: 请在 WebUI 业务管理 → API 配置中填写钱包地址"
+                    f"Agentic Wallet 地址不可用：请先在钱包管理中完成登录（wallet_setup）"
                 )
             )
             return order
