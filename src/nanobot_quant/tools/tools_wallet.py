@@ -59,6 +59,7 @@ def _run_cli(args: list[str], timeout: int = 30, label: str = "") -> dict:
     {"error": ...} on timeout / missing binary. Diagnostic output goes to
     stderr only (never stdout — the MCP JSON-RPC channel).
     """
+    _ensure_onchainos_dir()  # restore ~/.onchainos symlink after Factory Rebuild
     try:
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout,
