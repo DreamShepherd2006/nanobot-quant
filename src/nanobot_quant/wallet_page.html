@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>👛 钱包管理 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:#f5f5f5; color:#333; padding:20px; max-width:760px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:20px; }
+  .card { background:#fff; border-radius:10px; padding:16px; margin-bottom:12px;
+          border:1px solid #e0e0e0; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  .card-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .card-header .icon { font-size:1.3em; }
+  .card-header .name { font-weight:600; font-size:1.05em; }
+  .card-header .badge { margin-left:auto; font-size:.78em; padding:3px 10px; border-radius:20px; }
+  .badge.on { background:#e8f5e9; color:#2e7d32; }
+  .badge.off { background:#f5f5f5; color:#999; }
+  .badge.warn { background:#fff3e0; color:#e65100; }
+  .kv { display:flex; justify-content:space-between; padding:5px 0; font-size:.9em;
+        border-bottom:1px dashed #f0f0f0; }
+  .kv:last-child { border-bottom:none; }
+  .kv .k { color:#888; }
+  .kv .v { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86em;
+           word-break:break-all; text-align:right; max-width:70%; }
+  .addr-row { display:flex; align-items:center; gap:8px; padding:6px 0;
+              border-bottom:1px dashed #f0f0f0; }
+  .addr-row:last-child { border-bottom:none; }
+  .addr-row .chain { min-width:70px; font-weight:600; font-size:.85em; }
+  .addr-row .addr { font-family:ui-monospace,Menlo,monospace; font-size:.8em; color:#444;
+                    word-break:break-all; flex:1; }
+  .copy-btn { background:#e3f2fd; border:none; color:#1565c0; border-radius:4px;
+              cursor:pointer; font-size:.75em; padding:3px 9px; flex-shrink:0; }
+  .copy-btn:hover { background:#bbdefb; }
+  .acc-block { border:1px solid #e8e8e8; border-radius:8px; padding:10px 12px;
+               margin-bottom:10px; background:#fafafa; }
+  .acc-block:last-child { margin-bottom:0; }
+  .acc-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .acc-header .acc-name { font-weight:600; font-size:.95em; }
+  .acc-header .acc-id { font-family:ui-monospace,Menlo,monospace; font-size:.75em;
+                        color:#999; }
+  .acc-header .badge { font-size:.7em; padding:2px 8px; border-radius:20px; }
+  .acc-header .badge.active { background:#e3f2fd; color:#1565c0; }
+  .acc-header .badge.default { background:#fff3e0; color:#e65100; }
+  .acc-header .switch-acc { margin-left:auto; background:#fff; color:#1565c0;
+                            border:1px solid #1565c0; border-radius:4px; cursor:pointer;
+                            font-size:.75em; padding:3px 10px; }
+  .acc-header .switch-acc:hover { background:#e3f2fd; }
+  .acc-addr { display:flex; align-items:center; gap:8px; padding:3px 0 3px 8px;
+              border-left:2px solid #e0e0e0; margin-left:4px; }
+  .acc-addr .chain { min-width:64px; font-weight:600; font-size:.78em; }
+  .acc-addr .addr { font-family:ui-monospace,Menlo,monospace; font-size:.75em; color:#444;
+                    word-break:break-all; flex:1; }
+  .txn-row { display:flex; align-items:center; gap:8px; padding:6px 0;
+             border-bottom:1px dashed #f0f0f0; font-size:.85em; }
+  .txn-row:last-child { border-bottom:none; }
+  .txn-row .t-type { font-weight:600; }
+  .txn-row .t-type.buy { color:#2e7d32; }
+  .txn-row .t-type.sell { color:#c62828; }
+  .txn-row .t-time { color:#999; font-size:.78em; flex-shrink:0; }
+  .txn-row .t-amount { margin-left:auto; font-family:ui-monospace,Menlo,monospace; font-size:.82em; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  button { padding:8px 16px; border:none; border-radius:6px; font-size:.88em;
+           cursor:pointer; font-weight:500; }
+  .btn-primary { background:#1565c0; color:#fff; }
+  .btn-primary:hover { background:#0d47a1; }
+  .btn-outline { background:#fff; color:#1565c0; border:1px solid #1565c0; }
+  .btn-outline:hover { background:#e3f2fd; }
+  .btn-danger { background:#fff; color:#c62828; border:1px solid #c62828; }
+  .btn-danger:hover { background:#fdecea; }
+  .loading { color:#999; font-size:.88em; padding:12px 0; text-align:center; }
+  .err { background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; border-radius:6px;
+         padding:10px 14px; margin:10px 0; font-size:.85em; }
+  .ok { background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; border-radius:6px;
+        padding:10px 14px; margin:10px 0; font-size:.85em; }
+  .info { background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:10px 14px;
+          margin:10px 0; font-size:.85em; color:#1565c0; line-height:1.6; }
+  .login-box { background:#fff8e1; border:1px solid #ffd54f; border-radius:8px; padding:14px;
+               margin:10px 0; display:none; }
+  .login-box.show { display:block; }
+  .login-box a { word-break:break-all; color:#e65100; }
+  .empty { color:#999; text-align:center; padding:14px 0; font-size:.85em; }
+  a { color:#1565c0; text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .toast { position:fixed; bottom:1.5rem; right:1.5rem; padding:.75rem 1.25rem; border-radius:8px;
+           color:#fff; font-size:.9rem; z-index:999; opacity:0; transition:opacity .3s; }
+  .toast.ok { background:#1e8e3e; }
+  .toast.err { background:#c5221f; }
+  .toast.show { opacity:1; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:4px; }
+  .switch-form { display:flex; gap:6px; align-items:center; margin-top:6px; }
+  .switch-form input { flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.85em; }
+  .switch-form button { flex-shrink:0; }
+</style>
+</head>
+<body>
+<h1>👛 钱包管理</h1>
+<p class="subtitle">OKX Agentic Wallet — 登录状态、地址、余额与交易历史（数据来自 onchainos CLI）</p>
+
+<div id="global-msg"></div>
+
+<div id="login-card" class="card">
+  <div class="card-header"><span class="icon">🔐</span><span class="name">登录状态</span><span id="login-badge" class="badge off">检测中…</span></div>
+  <div id="login-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div id="acc-card" class="card">
+  <div class="card-header"><span class="icon">👥</span><span class="name">子钱包账户</span><span id="acc-count" class="badge off">—</span></div>
+  <div id="acc-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div id="addr-card" class="card">
+  <div class="card-header"><span class="icon">📍</span><span class="name">钱包地址</span></div>
+  <div id="addr-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div id="bal-card" class="card">
+  <div class="card-header"><span class="icon">💰</span><span class="name">余额</span></div>
+  <div id="bal-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div id="hist-card" class="card">
+  <div class="card-header"><span class="icon">🧾</span><span class="name">最近交易</span></div>
+  <div id="hist-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="icon">🛠️</span><span class="name">操作</span></div>
+  <div class="actions">
+    <button class="btn-primary" id="refresh-btn">🔄 刷新</button>
+    <button class="btn-outline" id="login-btn">🔗 登录 / 重新授权</button>
+    <button class="btn-outline" id="add-btn">🆕 创建子钱包</button>
+  </div>
+  <div class="switch-form">
+    <input id="switch-input" placeholder="切换账户 ID（如 acct-2）">
+    <button class="btn-outline" id="switch-btn">🔀 切换</button>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function fetchJSON(url, opts) {
+  const resp = await fetch(url, opts);
+  let data = {};
+  try { data = await resp.json(); } catch (e) { data = {ok: false, error: '无效响应'}; }
+  if (!resp.ok || data.ok === false) {
+    throw new Error(data.error || ('HTTP ' + resp.status));
+  }
+  return data;
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function toast(msg, ok) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err') + ' show';
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function kvRow(k, v) {
+  return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+}
+
+function renderLogin(login, status) {
+  const body = $('login-body');
+  const badge = $('login-badge');
+  const loggedIn = !!(login && login.logged_in);
+  badge.textContent = loggedIn ? '● 已登录' : '○ 未登录';
+  badge.className = 'badge ' + (loggedIn ? 'on' : 'warn');
+
+  let rows = '';
+  if (loggedIn) {
+    if (status && status.status === 'ok' && status.data) {
+      const d = status.data;
+      const email = d.email || d.loginEmail || '';
+      const lt = d.loginType || d.login_type || '';
+      const act = d.activeAccountId || d.active_account_id || '';
+      if (email) rows += kvRow('邮箱', email);
+      if (lt) rows += kvRow('登录方式', lt);
+      if (act) rows += kvRow('活跃账户', act);
+      if (d.policy) rows += kvRow('Policy', JSON.stringify(d.policy));
+    } else {
+      rows += kvRow('会话', '已登录（keyring 有效）');
+    }
+    rows += kvRow('Payment Basic', login.payment_basic ? '✅' : '—');
+    rows += kvRow('Payment Premium', login.payment_premium ? '✅' : '—');
+  } else {
+    rows = '<div class="empty">未登录。点击下方「🔗 登录 / 重新授权」打开登录链接。</div>';
+  }
+  body.innerHTML = rows;
+}
+
+function renderAccounts(accounts) {
+  const body = $('acc-body');
+  const countEl = $('acc-count');
+  if (!accounts || accounts.status !== 'ok' || !accounts.data || !accounts.data.accounts) {
+    body.innerHTML = `<div class="err">${esc(accounts?.error || '无法读取账户列表')}</div>`;
+    countEl.className = 'badge off';
+    countEl.textContent = '—';
+    return;
+  }
+  const list = accounts.data.accounts;
+  countEl.className = 'badge on';
+  countEl.textContent = list.length + ' 个账户';
+  if (!list.length) {
+    body.innerHTML = '<div class="empty">暂无子钱包账户</div>';
+    return;
+  }
+  let html = '';
+  for (const acc of list) {
+    const badges = [];
+    if (acc.is_active) badges.push('<span class="badge active">当前</span>');
+    if (acc.is_default) badges.push('<span class="badge default">默认</span>');
+    let addrHtml = '';
+    if (acc.addresses && acc.addresses.length) {
+      addrHtml = acc.addresses.map(a => {
+        const chain = a.chain_name || a.chainName || a.chain || '';
+        const addr = a.address || '';
+        return `<div class="acc-addr">` +
+               `<span class="chain">${esc(chain)}</span>` +
+               `<span class="addr">${esc(addr)}</span>` +
+               `<button class="copy-btn" data-addr="${esc(addr)}">📋</button></div>`;
+      }).join('');
+    } else {
+      addrHtml = '<div class="empty" style="padding:4px 0;font-size:.78em">无地址信息</div>';
+    }
+    const switchBtn = acc.is_active ? '' :
+      `<button class="switch-acc" data-account-id="${esc(acc.account_id)}">🔀 切换到此账户</button>`;
+    html += `<div class="acc-block">` +
+            `<div class="acc-header"><span class="acc-name">${esc(acc.account_name || acc.account_id)}</span>` +
+            `<span class="acc-id">${esc(acc.account_id)}</span>` +
+            `${badges.join('')}${switchBtn}</div>` +
+            `${addrHtml}</div>`;
+  }
+  body.innerHTML = html;
+  body.querySelectorAll('.switch-acc').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await fetchJSON('/config/wallet/switch', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({account_id: btn.dataset.accountId}),
+        });
+        toast('✅ 已切换账户', true);
+        await loadData();
+      } catch (e) {
+        toast('❌ ' + e.message, false);
+      }
+    });
+  });
+}
+
+function renderAddresses(addrRes) {
+  const body = $('addr-body');
+  if (addrRes.status !== 'ok' || !addrRes.data) {
+    body.innerHTML = `<div class="err">${esc(addrRes.error || '地址获取失败')}</div>`;
+    return;
+  }
+  const d = addrRes.data;
+  const groups = d.groups || d.chains || d.addresses || d;
+  let html = '';
+  if (Array.isArray(groups)) {
+    for (const g of groups) {
+      const chain = g.chain || g.chainName || g.name || '—';
+      const addrs = g.addresses || g.walletAddresses || [];
+      for (const a of (Array.isArray(addrs) ? addrs : [addrs])) {
+        const addr = (typeof a === 'string') ? a : (a.address || a.walletAddress || a.wallet_address || JSON.stringify(a));
+        const tag = a.label || a.name || '';
+        html += `<div class="addr-row"><span class="chain">${esc(chain)}${tag ? ' · ' + esc(tag) : ''}</span>` +
+                `<span class="addr">${esc(addr)}</span>` +
+                `<button class="copy-btn" data-addr="${esc(addr)}">复制</button></div>`;
+      }
+    }
+  } else if (typeof groups === 'object') {
+    for (const [chain, addrs] of Object.entries(groups)) {
+      const list = Array.isArray(addrs) ? addrs : [addrs];
+      for (const a of list) {
+        const addr = (typeof a === 'string') ? a : (a.address || a.walletAddress || a.wallet_address || JSON.stringify(a));
+        html += `<div class="addr-row"><span class="chain">${esc(chain)}</span>` +
+                `<span class="addr">${esc(addr)}</span>` +
+                `<button class="copy-btn" data-addr="${esc(addr)}">复制</button></div>`;
+      }
+    }
+  }
+  if (!html) html = '<div class="empty">无地址数据</div>';
+  body.innerHTML = html;
+
+  document.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.addr).then(
+        () => toast('✅ 已复制: ' + btn.dataset.addr.slice(0, 16) + '…', true),
+        () => toast('❌ 复制失败', false)
+      );
+    });
+  });
+}
+
+function renderBalance(balRes) {
+  const body = $('bal-body');
+  if (balRes.status !== 'ok' || !balRes.data) {
+    body.innerHTML = `<div class="err">${esc(balRes.error || '余额获取失败')}</div>`;
+    return;
+  }
+  const d = balRes.data;
+  let rows = '';
+  const total = d.totalValueUsd || d.total_value_usd || d.totalValue || '';
+  if (total) rows += kvRow('总价值 (USD)', '$' + total);
+  const assets = d.assets || d.balances || d.data || d;
+  if (Array.isArray(assets)) {
+    for (const a of assets) {
+      const sym = a.symbol || a.token || a.tokenSymbol || '—';
+      const amt = a.amount || a.balance || a.free || '';
+      const usd = a.usdValue || a.valueUsd || a.usd_value || '';
+      rows += kvRow(sym, `${amt}${usd ? ' ≈ $' + usd : ''}`);
+    }
+  } else if (typeof assets === 'object') {
+    for (const [sym, amt] of Object.entries(assets)) {
+      rows += kvRow(sym, String(amt));
+    }
+  }
+  if (!rows) rows = '<div class="empty">无余额数据</div>';
+  body.innerHTML = rows;
+}
+
+function renderHistory(histRes) {
+  const body = $('hist-body');
+  if (histRes.status !== 'ok' || !histRes.data) {
+    body.innerHTML = `<div class="err">${esc(histRes.error || '交易历史获取失败')}</div>`;
+    return;
+  }
+  const d = histRes.data;
+  const txns = d.transactions || d.txns || d.records || d.list || d.data;
+  if (!Array.isArray(txns) || txns.length === 0) {
+    body.innerHTML = '<div class="empty">暂无交易记录</div>';
+    return;
+  }
+  let html = '';
+  for (const t of txns.slice(0, 10)) {
+    const type = (t.type || t.txType || t.action || '—').toLowerCase();
+    const cls = type.includes('buy') ? 'buy' : (type.includes('sell') ? 'sell' : '');
+    const sym = t.symbol || t.token || t.asset || '';
+    const amt = t.amount || t.quantity || t.value || '';
+    const time = t.timestamp || t.time || t.createdAt || '';
+    const status = t.status || t.txStatus || '';
+    html += `<div class="txn-row"><span class="t-type ${cls}">${esc(type)}</span>` +
+            `<span>${esc(sym)} ${esc(amt)}</span>` +
+            `${status ? `<span class="t-time">${esc(status)}</span>` : ''}` +
+            `<span class="t-time">${esc(time)}</span></div>`;
+  }
+  body.innerHTML = html;
+}
+
+async function loadData() {
+  $('global-msg').innerHTML = '';
+  try {
+    const data = await fetchJSON('/config/wallet/data');
+    renderLogin(data.login, data.status);
+    renderAccounts(data.accounts);
+    renderAddresses(data.addresses);
+    renderBalance(data.balance);
+    renderHistory(data.history);
+  } catch (e) {
+    $('global-msg').innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+// ── Actions ──────────────────────────────────────────────────────
+
+$('refresh-btn').addEventListener('click', async () => {
+  toast('🔄 刷新中…', true);
+  await loadData();
+  toast('✅ 已刷新', true);
+});
+
+$('login-btn').addEventListener('click', async () => {
+  try {
+    const data = await fetchJSON('/config/wallet/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({phase: 'init'}),
+    });
+    if (data.login_url) {
+      const box = document.createElement('div');
+      box.className = 'login-box show';
+      box.innerHTML = `<strong>🔗 请在浏览器中打开并授权：</strong><br>` +
+        `<a href="${esc(data.login_url)}" target="_blank" rel="noopener">${esc(data.login_url)}</a>` +
+        `<br><small>授权完成后点击「🔄 刷新」确认登录状态。</small>`;
+      $('global-msg').appendChild(box);
+      toast('✅ 登录链接已生成', true);
+    } else {
+      throw new Error(data.error || '未返回登录链接');
+    }
+  } catch (e) {
+    toast('❌ ' + e.message, false);
+  }
+});
+
+$('add-btn').addEventListener('click', async () => {
+  if (!confirm('创建新的子钱包账户？（最多 50 个）')) return;
+  try {
+    const data = await fetchJSON('/config/wallet/add', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    });
+    toast('✅ 子钱包已创建', true);
+    await loadData();
+  } catch (e) {
+    toast('❌ ' + e.message, false);
+  }
+});
+
+$('switch-btn').addEventListener('click', async () => {
+  const accountId = $('switch-input').value.trim();
+  if (!accountId) { toast('❌ 请输入账户 ID', false); return; }
+  try {
+    await fetchJSON('/config/wallet/switch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_id: accountId}),
+    });
+    toast('✅ 已切换账户', true);
+    $('switch-input').value = '';
+    await loadData();
+  } catch (e) {
+    toast('❌ ' + e.message, false);
+  }
+});
+
+loadData();
+</script>
+</body>
+</html>

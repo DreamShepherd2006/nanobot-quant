@@ -1,6 +1,7 @@
 """Unit tests for onchainos wallet management tools (no CLI binary needed)."""
 
 import json
+import os
 import types
 
 import pytest
@@ -8,6 +9,7 @@ from nanobot_quant.tools.tools_wallet import (
     ONCHAINOS_BIN,
     _ok_data,
     _run_cli,
+    wallet_accounts,
     wallet_add,
     wallet_addresses,
     wallet_balance,
@@ -141,3 +143,89 @@ class TestWalletTools:
         assert r["status"] == "error"
         assert "account_id is required" in r["error"]
         assert len(fake_subprocess) == 0
+
+
+class TestWalletAccounts:
+    """wallet_accounts reads ~/.onchainos/wallets.json (no CLI binary)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_symlink(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.tools.tools_wallet._ensure_onchainos_dir",
+            lambda: None,
+        )
+
+    @pytest.fixture
+    def wallets_json(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        onchainos = home / ".onchainos"
+        onchainos.mkdir(parents=True)
+        monkeypatch.setattr(os.path, "expanduser", lambda p: str(home / p.lstrip("~/")))
+        return onchainos / "wallets.json"
+
+    def test_reads_accounts_and_addresses(self, wallets_json):
+        wallets_json.write_text(json.dumps({
+            "selected_account_id": "acct-1",
+            "accounts": [
+                {"account_id": "acct-1", "account_name": "My Wallet", "is_default": True},
+                {"account_id": "acct-2", "account_name": "Savings", "is_default": False},
+            ],
+            "accounts_map": {
+                "acct-1": {"address_list": [
+                    {"chain_name": "Solana", "chain_index": "501", "address": "SolAddr1", "address_type": "wallet"},
+                    {"chain_name": "EVM", "chain_index": "196", "address": "EvmAddr1", "address_type": "wallet"},
+                ]},
+                "acct-2": {"address_list": [
+                    {"chain_name": "Solana", "chain_index": "501", "address": "SolAddr2", "address_type": "wallet"},
+                ]},
+            },
+        }), encoding="utf-8")
+        r = wallet_accounts()
+        assert r["status"] == "ok"
+        data = r["data"]
+        assert data["selected_account_id"] == "acct-1"
+        assert len(data["accounts"]) == 2
+        first = data["accounts"][0]
+        assert first["account_id"] == "acct-1"
+        assert first["account_name"] == "My Wallet"
+        assert first["is_default"] is True
+        assert first["is_active"] is True
+        assert len(first["addresses"]) == 2
+        assert first["addresses"][0] == {
+            "chain": "Solana", "chain_index": "501",
+            "address": "SolAddr1", "type": "wallet",
+        }
+        second = data["accounts"][1]
+        assert second["is_active"] is False
+        assert second["addresses"][0]["address"] == "SolAddr2"
+
+    def test_supports_camelcase_fields(self, wallets_json):
+        wallets_json.write_text(json.dumps({
+            "selectedAccountId": "acct-9",
+            "accounts": [
+                {"accountId": "acct-9", "accountName": "Alpha", "isDefault": True},
+            ],
+            "accountsMap": {
+                "acct-9": {"addressList": [
+                    {"chainName": "Solana", "chainIndex": "501", "address": "SolAddr9", "addressType": "wallet"},
+                ]},
+            },
+        }), encoding="utf-8")
+        r = wallet_accounts()
+        assert r["status"] == "ok"
+        acc = r["data"]["accounts"][0]
+        assert acc["account_id"] == "acct-9"
+        assert acc["account_name"] == "Alpha"
+        assert acc["is_active"] is True
+        assert acc["addresses"][0]["chain"] == "Solana"
+
+    def test_missing_file(self, wallets_json):
+        r = wallet_accounts()
+        assert r["status"] == "error"
+        assert "wallets.json" in r["error"]
+
+    def test_invalid_json(self, wallets_json):
+        wallets_json.write_text("{not json", encoding="utf-8")
+        r = wallet_accounts()
+        assert r["status"] == "error"
+        assert "解析失败" in r["error"] or "读取失败" in r["error"]
