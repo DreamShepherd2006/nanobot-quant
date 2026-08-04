@@ -1,8 +1,12 @@
 """Tests for the research-chain safety gates and helpers.
 
 Covers:
-- ``onchainos_cli`` symbol helpers (bare_symbol / is_contract_address /
-  supported_symbols / chain_results_dir) — runnable anywhere.
+- ``onchainos_cli`` symbol helpers (bare_symbol / normalize_symbol /
+  is_contract_address / supported_symbols / chain_results_dir) — runnable
+  anywhere.
+- ``resolve_token`` tiered resolution + confirmation state (builtin →
+  alias → tokens.json → CLI → structured error) — runnable anywhere.
+- ``confirm_token`` confirmation memory (scheme C) — runnable anywhere.
 - ``pipeline.run_from_signals`` fail-closed token gate — requires pandas
   + lumibot (Nightly container), guarded with importorskip.
 """
@@ -15,12 +19,16 @@ import pytest
 from nanobot_quant.onchainos_cli import (
     bare_symbol,
     chain_results_dir,
+    confirm_token,
     is_contract_address,
+    normalize_symbol,
+    resolve_token,
     supported_symbols,
 )
 
 SOLANA_ADDR = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 EVM_ADDR = "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
+WSOL_ADDR = "So11111111111111111111111111111111111111112"
 
 
 class TestBareSymbol:
@@ -71,22 +79,157 @@ class TestChainResultsDir:
         assert chain_results_dir().name == "research_chains"
 
 
+class TestNormalizeSymbol:
+    def test_leading_dollar_and_whitespace(self):
+        assert normalize_symbol(" $SOL ") == "SOL"
+        assert normalize_symbol("usdc") == "USDC"
+
+    def test_pair_suffixes(self):
+        assert normalize_symbol("BTC-USDT") == "BTC"
+        assert normalize_symbol("ETH-USD") == "ETH"
+
+    def test_address_passthrough_unchanged(self):
+        # base58 is case-sensitive — addresses must pass through unchanged
+        assert normalize_symbol(SOLANA_ADDR) == SOLANA_ADDR
+        assert normalize_symbol(EVM_ADDR) == EVM_ADDR
+
+    def test_empty(self):
+        assert normalize_symbol("") == ""
+        assert normalize_symbol("   ") == ""
+
+
+class TestResolveToken:
+    """Tiered resolution: builtin → alias → tokens.json → CLI → error."""
+
+    def test_builtin_native_tokens(self):
+        r = resolve_token("SOL")
+        assert r["ok"] is True and r["source"] == "builtin"
+        assert r["address"] == WSOL_ADDR
+        assert r["needs_confirmation"] is False
+        assert r["confirmed"] is True
+        assert resolve_token("usdc")["address"].startswith("EPjF")
+
+    def test_aliases(self):
+        assert resolve_token("SOLANA")["address"] == resolve_token("SOL")["address"]
+        assert resolve_token("WRAPPED_SOL")["source"] == "builtin"
+
+    def test_address_passthrough(self):
+        r = resolve_token(SOLANA_ADDR)
+        assert r["ok"] is True and r["source"] == "address"
+        assert r["address"] == SOLANA_ADDR
+
+    def test_tokens_json_valid_entry_passes(self):
+        tj = [{"symbol": "WBTC", "address": "3J2H3uUjQGQvVXfY5fW9xGJQ7zHqVfKq8Yp3Vz3R7xUz"}]
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("WBTC", tokens_json=tj)
+        assert r["ok"] is True and r["source"] == "tokens_json"
+        assert r["needs_confirmation"] is False
+
+    def test_tokens_json_evm_address_needs_confirmation(self):
+        tj = [{"symbol": "WEVM", "address": EVM_ADDR}]
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("WEVM", tokens_json=tj)
+        # resolvable but questionable on solana → confirmation required
+        assert r["ok"] is True
+        assert r["needs_confirmation"] is True
+        assert r["category"] == "chain_mismatch"
+        assert r["confirmed"] is False
+
+    def test_tokens_json_evm_address_confirmed_passes(self):
+        tj = [{"symbol": "WEVM", "address": EVM_ADDR, "confirmed": True}]
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("WEVM", tokens_json=tj)
+        assert r["ok"] is True and r["needs_confirmation"] is False
+        assert r["confirmed"] is True
+
+    def test_tokens_json_invalid_address_needs_confirmation(self):
+        tj = [{"symbol": "BAD", "address": "not-an-address"}]
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("BAD", tokens_json=tj)
+        assert r["ok"] is True
+        assert r["needs_confirmation"] is True
+        assert r["category"] == "invalid_address"
+
+    def test_cli_fallback(self):
+        with mock.patch(
+            "nanobot_quant.onchainos_cli.search_token",
+            return_value=WSOL_ADDR,
+        ):
+            r = resolve_token("SOMECOIN")
+        assert r["ok"] is True and r["source"] == "cli"
+        assert r["needs_confirmation"] is False
+
+    def test_typo_suggestion(self):
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("USDTT")
+        assert r["ok"] is False and r["category"] == "typo"
+        assert r["suggestion"] == "USDT"
+
+    def test_not_found_with_chain_hint(self):
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("BTC")
+        assert r["ok"] is False and r["category"] == "not_found"
+        assert "no native token on Solana" in r["hint"]
+
+    def test_fake_coin_not_found(self):
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token("FAKECOIN")
+        assert r["ok"] is False and r["category"] == "not_found"
+        assert r["suggestion"] is None
+
+
+class TestConfirmToken:
+    """Confirmation memory (scheme C): confirmed=true persists and resets on edit."""
+
+    def _write_tokens(self, tmp_path, entries):
+        p = tmp_path / "tokens.json"
+        p.write_text(json.dumps(entries), encoding="utf-8")
+        return p
+
+    def test_confirm_persists_flag(self, tmp_path):
+        p = self._write_tokens(tmp_path, [{"symbol": "WEVM", "address": EVM_ADDR}])
+        with mock.patch("nanobot_quant.onchainos_cli.token_json_path", return_value=p):
+            out = confirm_token("WEVM", address=EVM_ADDR)
+        assert out["ok"] is True
+        data = json.loads(p.read_text(encoding="utf-8"))
+        assert data[0]["confirmed"] is True
+
+    def test_confirm_stale_address_rejected(self, tmp_path):
+        p = self._write_tokens(tmp_path, [{"symbol": "WEVM", "address": EVM_ADDR}])
+        with mock.patch("nanobot_quant.onchainos_cli.token_json_path", return_value=p):
+            out = confirm_token("WEVM", address="0xdeadbeef")
+        assert out["ok"] is False
+        data = json.loads(p.read_text(encoding="utf-8"))
+        assert data[0].get("confirmed") is not True
+
+    def test_confirmed_entry_passes_without_reask(self, tmp_path):
+        p = self._write_tokens(tmp_path, [{"symbol": "WEVM", "address": EVM_ADDR}])
+        with mock.patch("nanobot_quant.onchainos_cli.token_json_path", return_value=p):
+            confirm_token("WEVM", address=EVM_ADDR)
+        with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
+            r = resolve_token(
+                "WEVM",
+                tokens_json=[{"symbol": "WEVM", "address": EVM_ADDR, "confirmed": True}],
+            )
+        assert r["ok"] is True and r["needs_confirmation"] is False
+
+
 class TestPipelineTokenGate:
     """fail-closed gate: unsupported symbols never reach the broker."""
 
     @pytest.fixture(autouse=True)
     def _require_deps(self):
-        # pipeline.py imports pandas at module level; lumibot is only
-        # imported lazily inside the live-broker branch.
-        return pytest.importorskip("pandas")
+        # pipeline.py imports pandas and the lumibot-backed strategy at
+        # module level, so the full gate tests need the real dependencies
+        # (present in the HF Space container; skipped in this env).
+        pytest.importorskip("pandas")
+        return pytest.importorskip("lumibot")
 
-    def test_rejects_unsupported_symbol(self):
-        from nanobot_quant import pipeline as pl
-
+    def _signal(self, ticker="BTC"):
         from nanobot_quant.signal import TickerSignal
 
-        signal = TickerSignal(
-            ticker="BTC",
+        return TickerSignal(
+            ticker=ticker,
             recommendation="BUY",
             score=6.0,
             price=60000.0,
@@ -99,12 +242,32 @@ class TestPipelineTokenGate:
             tdst_resistance=62000.0,
             rvol=1.2,
         )
-        agg = pl.AnalysisPipeline()
+
+    def _resolve_ok(self, addr=WSOL_ADDR):
+        return {"ok": True, "address": addr, "source": "builtin",
+                "needs_confirmation": False, "issue": None, "confirmed": True,
+                "category": None, "suggestion": None, "hint": None}
+
+    def _resolve_bad(self):
+        return {"ok": False, "address": None, "source": None,
+                "needs_confirmation": False, "issue": None, "confirmed": False,
+                "category": "not_found", "suggestion": None,
+                "hint": "not supported"}
+
+    def _resolve_needs_confirm(self):
+        return {"ok": True, "address": EVM_ADDR,
+                "source": "tokens_json", "needs_confirmation": True,
+                "issue": "EVM address on solana chain", "confirmed": False,
+                "category": "chain_mismatch", "suggestion": None, "hint": None}
+
+    def test_rejects_unsupported_symbol(self):
+        from nanobot_quant import pipeline as pl
+
         with mock.patch(
-            "nanobot_quant.onchainos_cli.resolve_token_address",
-            return_value=None,
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_bad(),
         ):
-            results = agg.run_from_signals([signal])
+            results = pl.run_from_signals([self._signal()])
         assert len(results) == 1
         r = results[0]
         assert r["risk_passed"] is False
@@ -113,31 +276,39 @@ class TestPipelineTokenGate:
         assert r["suggested_order"] is None
         assert "SOL" in r["risk_details"]["supported"]
 
+    def test_needs_confirmation_blocked_without_confirm(self):
+        from nanobot_quant import pipeline as pl
+
+        with mock.patch(
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_needs_confirm(),
+        ):
+            results = pl.run_from_signals([self._signal()])
+        assert len(results) == 1
+        r = results[0]
+        assert r["risk_passed"] is False
+        assert r["risk_details"]["error"] == "needs_confirmation"
+
+    def test_needs_confirmation_lifted_with_confirm(self):
+        from nanobot_quant import pipeline as pl
+
+        with mock.patch(
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_needs_confirm(),
+        ):
+            results = pl.run_from_signals([self._signal()], confirm=True)
+        assert len(results) == 1
+        # the confirmation gate passed; the signal proceeds to the risk engine
+        assert results[0]["risk_details"] != {"error": "needs_confirmation"}
+
     def test_accepts_native_token(self):
         from nanobot_quant import pipeline as pl
 
-        from nanobot_quant.signal import TickerSignal
-
-        signal = TickerSignal(
-            ticker="SOL",
-            recommendation="BUY",
-            score=6.0,
-            price=180.0,
-            confidence=0.6,
-            setup_buy=9,
-            setup_sell=0,
-            cd_buy=0,
-            cd_sell=0,
-            tdst_support=170.0,
-            tdst_resistance=190.0,
-            rvol=1.1,
-        )
-        agg = pl.AnalysisPipeline()
         with mock.patch(
-            "nanobot_quant.onchainos_cli.resolve_token_address",
-            return_value="So11111111111111111111111111111111111111112",
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_ok(),
         ):
-            results = agg.run_from_signals([signal])
+            results = pl.run_from_signals([self._signal("SOL")])
         assert len(results) == 1
         # the gate passed; the signal proceeds to the risk engine
         assert results[0]["risk_details"] != {"error": "unsupported token"}
@@ -145,29 +316,12 @@ class TestPipelineTokenGate:
     def test_contract_address_ticker_passes_gate(self):
         from nanobot_quant import pipeline as pl
 
-        from nanobot_quant.signal import TickerSignal
-
-        signal = TickerSignal(
-            ticker=SOLANA_ADDR,
-            recommendation="BUY",
-            score=5.0,
-            price=1.0,
-            confidence=0.5,
-            setup_buy=9,
-            setup_sell=0,
-            cd_buy=0,
-            cd_sell=0,
-            tdst_support=0.99,
-            tdst_resistance=1.01,
-            rvol=1.0,
-        )
-        agg = pl.AnalysisPipeline()
-        # resolve returns None for the "symbol" (it is an address), but the
-        # gate recognises the ticker as an already-resolved address
+        # resolve returns failure for the "symbol" (it is an address), but
+        # the gate recognises the ticker as an already-resolved address
         with mock.patch(
-            "nanobot_quant.onchainos_cli.resolve_token_address",
-            return_value=None,
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_bad(),
         ):
-            results = agg.run_from_signals([signal])
+            results = pl.run_from_signals([self._signal(SOLANA_ADDR)])
         assert len(results) == 1
         assert results[0]["risk_details"] != {"error": "unsupported token"}

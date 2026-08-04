@@ -146,6 +146,17 @@ _TOOLS = [
                     ),
                     "default": False,
                 },
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicit user confirmation for a questionable tokens.json "
+                        "entry (default false).  When a token needs confirmation "
+                        "this returns error=needs_confirmation without executing; "
+                        "pass confirm=true only after the user confirmed.  The "
+                        "confirmation is persisted, so later runs pass automatically."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["ticker_signal_json"],
         },
@@ -393,6 +404,17 @@ _TOOLS = [
                     "type": "integer",
                     "default": 50,
                     "description": "Max swarm iterations (default 50)",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicit user confirmation for a questionable tokens.json "
+                        "entry (default false).  When a token needs confirmation "
+                        "this returns status=needs_confirmation without starting "
+                        "the swarm; pass confirm=true only after the user confirmed "
+                        "(persisted, so later runs pass automatically)."
+                    ),
+                    "default": False,
                 },
             },
             "required": ["symbol"],

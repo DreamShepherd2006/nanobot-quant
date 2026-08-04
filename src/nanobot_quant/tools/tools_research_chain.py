@@ -53,8 +53,13 @@ def _bare_symbol(pair: str) -> str:
 
 # ── background auto-chain ─────────────────────────────────────────
 
-def _auto_chain(run_id: str, symbol: str, chain: str, live: bool) -> None:
-    """Background thread: poll swarm run, then run the deterministic chain."""
+def _auto_chain(run_id: str, symbol: str, chain: str, live: bool, confirm: bool = False) -> None:
+    """Background thread: poll swarm run, then run the deterministic chain.
+
+    ``confirm`` is forwarded from the caller: when a tokens.json entry needs
+    user confirmation, the auto-chain records blocked (fail-closed) unless
+    the caller already obtained confirmation.
+    """
     from src.swarm.store import SwarmStore, swarm_runs_root  # vibe_trading
 
     store = SwarmStore(base_dir=swarm_runs_root())
@@ -93,15 +98,28 @@ def _auto_chain(run_id: str, symbol: str, chain: str, live: bool) -> None:
     signal["recommendation"] = str(signal.get("recommendation", "HOLD")).upper()
 
     # ③ TD technical check (required — fail-closed if unavailable)
-    from nanobot_quant.onchainos_cli import resolve_token_address
+    from nanobot_quant.onchainos_cli import confirm_token, resolve_token
 
-    addr = resolve_token_address(symbol)
+    resolved = resolve_token(symbol)
+    addr = resolved.get("address")
     if not addr:
         _chain_log(run_id, {
             "status": "blocked",
             "reason": f"cannot resolve on-chain address for {symbol}; TD check unavailable",
+            "category": resolved.get("category"),
+            "hint": resolved.get("hint"),
         })
         return
+    if resolved.get("needs_confirmation") and not confirm:
+        _chain_log(run_id, {
+            "status": "blocked",
+            "reason": f"token needs user confirmation: {resolved.get('issue')}",
+            "token": symbol,
+            "hint": "Re-run with confirm=true after the user confirms this tokens.json entry.",
+        })
+        return
+    if resolved.get("needs_confirmation") and confirm:
+        confirm_token(symbol, address=addr)
 
     from nanobot_quant.tools.tools_analysis import run_td_sequential
 
@@ -132,7 +150,7 @@ def _auto_chain(run_id: str, symbol: str, chain: str, live: bool) -> None:
     # ⑤ execute through the deterministic pipeline
     from nanobot_quant.tools.tools_execute import execute_signal
 
-    result = execute_signal(json.dumps(signal, ensure_ascii=False), live=live)
+    result = execute_signal(json.dumps(signal, ensure_ascii=False), live=live, confirm=confirm)
     _chain_log(run_id, {"status": "executed", "run_id": run_id, "signal": signal, "result": result})
 
 
@@ -185,6 +203,7 @@ def run_research_chain(
     chain: str = "solana",
     live: bool = False,
     max_iterations: int = 50,
+    confirm: bool = False,
 ) -> dict:
     """Start a VT investment_committee swarm debate and auto-chain the result.
 
@@ -202,13 +221,18 @@ def run_research_chain(
         live: Request on-chain execution (default False; still gated by the
               WebUI live toggle — AND condition).
         max_iterations: Max swarm iterations (default 50).
+        confirm: Explicit user confirmation for a questionable tokens.json
+                 entry (default False).  When a token needs confirmation this
+                 returns status=needs_confirmation instead of starting the
+                 swarm; pass confirm=true only after the user confirmed.
 
     Returns:
         dict with status=started, run_id, auto_chain=True. The final chain
         outcome is written to ``{data_root}/legion/research_chains/<run_id>.json``
         (query it via ``get_chain_result``) and mirrored to the MCP server
         stderr.  If the symbol cannot be resolved on-chain, returns
-        status=error immediately WITHOUT starting the swarm.
+        status=error immediately WITHOUT starting the swarm; if a tokens.json
+        entry needs user confirmation, returns status=needs_confirmation.
     """
     # ① start the swarm (direct library use, not the vibe-trading MCP server)
     try:
@@ -227,20 +251,29 @@ def run_research_chain(
     # authoritative safety gate lives in pipeline.run_from_signals() and
     # covers every execution path.
     from nanobot_quant.onchainos_cli import (
-        resolve_token_address,
+        confirm_token,
+        resolve_token,
         supported_symbols,
     )
-    addr = resolve_token_address(bare)
-    if not addr:
+    resolved = resolve_token(bare)
+    if not resolved["ok"]:
         return {
             "status": "error",
-            "error": f"{bare} is not supported on {chain} chain (cannot resolve on-chain address)",
+            "error": f"{bare} is not supported on {chain} chain ({resolved.get('category')})",
             "supported": supported_symbols(),
-            "hint": (
-                "Configure a wrapped token address in WebUI 业务管理 → tokens.json, "
-                "or use a native token like SOL/USDC/USDT."
-            ),
+            "suggestion": resolved.get("suggestion"),
+            "hint": resolved.get("hint"),
         }
+    if resolved["needs_confirmation"] and not confirm:
+        return {
+            "status": "needs_confirmation",
+            "token": bare,
+            "address": resolved["address"],
+            "issue": resolved["issue"],
+            "hint": "If the user confirms this tokens.json entry, re-run with confirm=true to start the swarm.",
+        }
+    if resolved["needs_confirmation"] and confirm:
+        confirm_token(bare, address=resolved["address"])
 
     swarm_dir = swarm_runs_root()
     store = SwarmStore(base_dir=swarm_dir)
@@ -258,7 +291,7 @@ def run_research_chain(
     # ② register the background auto-chain
     threading.Thread(
         target=_auto_chain,
-        args=(run_id, bare, chain, live),
+        args=(run_id, bare, chain, live, confirm),
         daemon=True,
     ).start()
 
