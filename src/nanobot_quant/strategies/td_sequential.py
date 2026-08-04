@@ -17,13 +17,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from nanobot_quant.td_params import DEFAULT_TD_PARAMS, load_td_params
 
-def calculate(df: pd.DataFrame, news_count: int = 0) -> dict:
+
+def calculate(
+    df: pd.DataFrame,
+    news_count: int = 0,
+    params: dict | None = None,
+) -> dict:
     """Run all DeMark calculations and return a summary for the latest bar.
 
     The input DataFrame must have columns: Open, High, Low, Close, Volume.
     Handles yfinance MultiIndex columns (e.g., ('Close', 'AAPL')) by
     flattening to single-level ('Close').
+
+    ``params``: optional parameter dict (see ``nanobot_quant.td_params``).
+    When omitted, the latest persisted ``td_params.json`` is loaded (falls
+    back to defaults == the pre-parameterisation hardcoded behaviour).
 
     Returns a JSON-serializable dict with keys:
     timestamp, price, recommendation, setup_buy, setup_sell,
@@ -38,7 +48,9 @@ def calculate(df: pd.DataFrame, news_count: int = 0) -> dict:
         "open": "Open", "high": "High", "low": "Low",
         "close": "Close", "volume": "Volume",
     }.get(c, c))
-    engine = _DeMarkEngine(df)
+    if params is None:
+        params = load_td_params()
+    engine = _DeMarkEngine(df, params)
     engine.run_all(news_count)
 
     last = engine.df.iloc[-1]
@@ -78,20 +90,35 @@ class _DeMarkEngine:
     Core algorithm logic preserved exactly.
     """
 
-    def __init__(self, df: pd.DataFrame) -> None:
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        params: dict | None = None,
+    ) -> None:
         self.df = df.copy()
+        p = params or DEFAULT_TD_PARAMS
+        self._setup = int(p.get("setup_period", 9))
+        self._cd = int(p.get("countdown_period", 13))
+        self._cmp = int(p.get("compare_length", 4))
+        self._strict = bool(p.get("countdown_strict", True))
+        self._recycle = int(p.get("recycle_threshold", 18))
+        self._w = {
+            "setup": float(p.get("weight_setup", 0.40)),
+            "countdown": float(p.get("weight_countdown", 0.30)),
+            "tdst": float(p.get("weight_tdst", 0.15)),
+            "volume": float(p.get("weight_volume", 0.10)),
+            "bb": float(p.get("weight_bb", 0.05)),
+        }
 
     # ── Setup ─────────────────────────────────────────────────────────
 
     def calculate_setup(self) -> pd.DataFrame:
-        """TD Setup (9-count).
+        """TD Setup (N-count).
 
-        - Buy Setup: close < close[i-4], preceded by price flip.
-        - Sell Setup: close > close[i-4], preceded by price flip.
+        - Buy Setup: close < close[i-compare_length], preceded by price flip.
+        - Sell Setup: close > close[i-compare_length], preceded by price flip.
         """
         close = self.df["Close"]
-        low = self.df["Low"]
-        high = self.df["High"]
 
         self.df["buy_setup_count"] = 0
         self.df["sell_setup_count"] = 0
@@ -99,11 +126,11 @@ class _DeMarkEngine:
         b_count = 0
         s_count = 0
 
-        for i in range(5, len(self.df)):
+        for i in range(self._cmp + 1, len(self.df)):
             # Buy Setup
-            if close.iloc[i] < close.iloc[i - 4]:
+            if close.iloc[i] < close.iloc[i - self._cmp]:
                 if b_count == 0:
-                    if close.iloc[i - 1] >= close.iloc[i - 5]:
+                    if close.iloc[i - 1] >= close.iloc[i - self._cmp - 1]:
                         b_count = 1
                 else:
                     b_count += 1
@@ -112,9 +139,9 @@ class _DeMarkEngine:
             self.df.at[self.df.index[i], "buy_setup_count"] = b_count
 
             # Sell Setup
-            if close.iloc[i] > close.iloc[i - 4]:
+            if close.iloc[i] > close.iloc[i - self._cmp]:
                 if s_count == 0:
-                    if close.iloc[i - 1] <= close.iloc[i - 5]:
+                    if close.iloc[i - 1] <= close.iloc[i - self._cmp - 1]:
                         s_count = 1
                 else:
                     s_count += 1
@@ -127,11 +154,11 @@ class _DeMarkEngine:
     # ── Countdown ─────────────────────────────────────────────────────
 
     def calculate_countdown(self) -> pd.DataFrame:
-        """TD Countdown (13-count).
+        """TD Countdown (N-count).
 
-        - Bar 13 qualification: Low[13] <= Close[8] (buy) or
-          High[13] >= Close[8] (sell).
-        - Recycle after >18 consecutive setup-qualifying bars.
+        - Bar N qualification: Low[N] <= Close[N-5] (buy) or
+          High[N] >= Close[N-5] (sell).
+        - Recycle after >recycle_threshold consecutive setup-qualifying bars.
         """
         close = self.df["Close"]
         high = self.df["High"]
@@ -154,61 +181,71 @@ class _DeMarkEngine:
 
         for i in range(len(self.df)):
             # ── Recycle checks ──
-            if active_buy and i >= 4:
-                buy_ext = buy_ext + 1 if close.iloc[i] < close.iloc[i - 4] else 0
-                if buy_ext > 18:
+            if active_buy and i >= self._cmp:
+                buy_ext = (
+                    buy_ext + 1
+                    if close.iloc[i] < close.iloc[i - self._cmp]
+                    else 0
+                )
+                if buy_ext > self._recycle:
                     self.df.at[self.df.index[i], "buy_countdown_recycled"] = True
                     active_buy = False
                     buy_count = 0
                     buy_bar8_close = np.nan
                     buy_ext = 0
 
-            if active_sell and i >= 4:
-                sell_ext = sell_ext + 1 if close.iloc[i] > close.iloc[i - 4] else 0
-                if sell_ext > 18:
+            if active_sell and i >= self._cmp:
+                sell_ext = (
+                    sell_ext + 1
+                    if close.iloc[i] > close.iloc[i - self._cmp]
+                    else 0
+                )
+                if sell_ext > self._recycle:
                     self.df.at[self.df.index[i], "sell_countdown_recycled"] = True
                     active_sell = False
                     sell_count = 0
                     sell_bar8_close = np.nan
                     sell_ext = 0
 
-            # ── Start countdown on Setup 9 ──
-            if not active_buy and self.df.iloc[i]["buy_setup_count"] == 9:
+            # ── Start countdown on Setup N ──
+            if not active_buy and self.df.iloc[i]["buy_setup_count"] == self._setup:
                 active_buy = True
                 buy_count = 0
                 buy_ext = 0
-            if not active_sell and self.df.iloc[i]["sell_setup_count"] == 9:
+            if not active_sell and self.df.iloc[i]["sell_setup_count"] == self._setup:
                 active_sell = True
                 sell_count = 0
                 sell_ext = 0
 
             # ── Buy countdown ──
             if active_buy and i >= 2:
-                if close.iloc[i] <= low.iloc[i - 2]:
-                    if buy_count < 12:
+                ref = low if self._strict else high
+                if close.iloc[i] <= ref.iloc[i - 2]:
+                    if buy_count < self._cd - 1:
                         buy_count += 1
-                        if buy_count == 8:
+                        if buy_count == self._cd - 5:
                             buy_bar8_close = close.iloc[i]
                         self.df.at[self.df.index[i], "buy_countdown_count"] = buy_count
-                    else:  # count == 12, checking bar 13
-                        if low.iloc[i] <= buy_bar8_close:
-                            buy_count = 13
-                            self.df.at[self.df.index[i], "buy_countdown_count"] = 13
+                    else:  # checking final bar N
+                        if ref.iloc[i] <= buy_bar8_close:
+                            buy_count = self._cd
+                            self.df.at[self.df.index[i], "buy_countdown_count"] = self._cd
                             active_buy = False
                             buy_count = 0
 
             # ── Sell countdown ──
             if active_sell and i >= 2:
-                if close.iloc[i] >= high.iloc[i - 2]:
-                    if sell_count < 12:
+                ref = high if self._strict else low
+                if close.iloc[i] >= ref.iloc[i - 2]:
+                    if sell_count < self._cd - 1:
                         sell_count += 1
-                        if sell_count == 8:
+                        if sell_count == self._cd - 5:
                             sell_bar8_close = close.iloc[i]
                         self.df.at[self.df.index[i], "sell_countdown_count"] = sell_count
                     else:
-                        if high.iloc[i] >= sell_bar8_close:
-                            sell_count = 13
-                            self.df.at[self.df.index[i], "sell_countdown_count"] = 13
+                        if ref.iloc[i] >= sell_bar8_close:
+                            sell_count = self._cd
+                            self.df.at[self.df.index[i], "sell_countdown_count"] = self._cd
                             active_sell = False
                             sell_count = 0
 
@@ -238,9 +275,9 @@ class _DeMarkEngine:
                 pending_resistance = high.iloc[i]
             if self.df.iloc[i]["sell_setup_count"] == 1:
                 pending_support = low.iloc[i]
-            if self.df.iloc[i]["buy_setup_count"] == 9:
+            if self.df.iloc[i]["buy_setup_count"] == self._setup:
                 last_resistance = pending_resistance
-            if self.df.iloc[i]["sell_setup_count"] == 9:
+            if self.df.iloc[i]["sell_setup_count"] == self._setup:
                 last_support = pending_support
 
             self.df.at[self.df.index[i], "tdst_support"] = last_support
@@ -280,10 +317,10 @@ class _DeMarkEngine:
             bb_upper = self.df.iloc[i]["bb_upper"]
             bb_lower = self.df.iloc[i]["bb_lower"]
 
-            b_9 = self.df.iloc[i]["buy_setup_count"] == 9
-            s_9 = self.df.iloc[i]["sell_setup_count"] == 9
-            b_13 = self.df.iloc[i]["buy_countdown_count"] == 13
-            s_13 = self.df.iloc[i]["sell_countdown_count"] == 13
+            b_9 = self.df.iloc[i]["buy_setup_count"] == self._setup
+            s_9 = self.df.iloc[i]["sell_setup_count"] == self._setup
+            b_13 = self.df.iloc[i]["buy_countdown_count"] == self._cd
+            s_13 = self.df.iloc[i]["sell_countdown_count"] == self._cd
 
             rec = "HOLD"
 
@@ -314,11 +351,12 @@ class _DeMarkEngine:
     # ── Volume / News scoring ─────────────────────────────────────────
 
     def calculate_buy_scoring(self, news_count: int = 0) -> float:
-        """5-factor composite score (0–100) computed for every bar.
+        """5-factor composite score computed for every bar.
 
-        Weights: Setup direction 40% | Countdown proximity 30%
-                 TDST support      15% | Volume confirmation 10%
-                 Bollinger regime   5%
+        Per-factor maxima: Setup 40 | Countdown 30 | TDST 15 | Volume 10 | BB 5
+        (raw scores, before weights). The combined score is
+        ``Σ raw_i × weight_i`` — with default weights the scale is
+        0–28.75, NOT 0–100 (historical docstring was misleading).
         """
         if self.df.empty:
             return 0.0
@@ -346,14 +384,14 @@ class _DeMarkEngine:
         # ── Setup direction (0–40) ──────────────────────────────────────
         self.df["setup_score"] = np.where(
             self.df["buy_setup_count"] > 0,
-            np.minimum(40.0, self.df["buy_setup_count"] / 9.0 * 40.0),
+            np.minimum(40.0, self.df["buy_setup_count"] / self._setup * 40.0),
             0.0,
         )
 
         # ── Countdown proximity (0–30) ───────────────────────────────────
         self.df["countdown_score"] = np.where(
             self.df["buy_countdown_count"] > 0,
-            np.minimum(30.0, self.df["buy_countdown_count"] / 13.0 * 30.0),
+            np.minimum(30.0, self.df["buy_countdown_count"] / self._cd * 30.0),
             0.0,
         )
 
@@ -371,13 +409,13 @@ class _DeMarkEngine:
             has_bl & (self.df["Close"] < self.df["bb_lower"]), "bb_score"
         ] = 5.0
 
-        # ── Composite (0–100) ────────────────────────────────────────────
+        # ── Composite (weighted) ─────────────────────────────────────────
         self.df["combined_score"] = (
-            self.df["volume_score"] * 0.10
-            + self.df["setup_score"] * 0.40
-            + self.df["countdown_score"] * 0.30
-            + self.df["tdst_score"] * 0.15
-            + self.df["bb_score"] * 0.05
+            self.df["volume_score"] * self._w["volume"]
+            + self.df["setup_score"] * self._w["setup"]
+            + self.df["countdown_score"] * self._w["countdown"]
+            + self.df["tdst_score"] * self._w["tdst"]
+            + self.df["bb_score"] * self._w["bb"]
         )
 
         # ── News bump (only for latest bar; news_count is per-call) ──────
