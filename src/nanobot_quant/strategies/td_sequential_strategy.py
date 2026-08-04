@@ -22,16 +22,20 @@ from nanobot_quant.order_tracker import OrderTracker
 from nanobot_quant.portfolio import PortfolioEngine
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.strategies.td_sequential import calculate
+from nanobot_quant.td_params import DEFAULT_TD_PARAMS
 
 
 class TdSequentialStrategy(Strategy):
     """A lumibot strategy that uses TD Sequential signals for trading.
 
     Trading rules (daily bars):
-    1. LONG entry: setup_buy >= 9 AND score > 0 AND no position
-    2. LONG exit:  setup_sell >= 9 OR cd_sell >= 13
+    1. LONG entry: setup_buy >= entry_setup AND score > score_threshold AND no position
+    2. LONG exit:  setup_sell >= exit_setup OR cd_sell >= exit_countdown
 
     Parameters are passed via the ``parameters`` dict in ``run_backtest()``.
+    TD algorithm parameters (setup_period, weights, …) live in the same dict
+    and default to the values in ``DEFAULT_TD_PARAMS`` (== pre-parameterisation
+    hardcoded behaviour).
     """
 
     parameters = {
@@ -40,6 +44,7 @@ class TdSequentialStrategy(Strategy):
         "max_position_pct": 0.20,   # max % of portfolio in one position
         "max_drawdown_pct": 0.15,   # skip new entries when drawdown > 15%
         "stop_loss_pct": 0.10,      # exit when loss exceeds 10%
+        **DEFAULT_TD_PARAMS,
     }
 
     # ── lifecycle hooks ───────────────────────────────────────────
@@ -75,8 +80,14 @@ class TdSequentialStrategy(Strategy):
             default_quantity=self.quantity,
         )
 
-        # OrderTracker — links Signals to lumibot Orders
+        # Build OrderTracker — links Signals to lumibot Orders
         self.tracker = OrderTracker()
+
+        # TD algorithm params (subset of the strategy parameters dict)
+        self._td_params = {
+            k: self.parameters.get(k, v)
+            for k, v in DEFAULT_TD_PARAMS.items()
+        }
 
     def on_trading_iteration(self):
         """Called for each bar (trading day) during the backtest.
@@ -124,12 +135,11 @@ class TdSequentialStrategy(Strategy):
         if len(df) < self._min_history:
             return
 
-        signal = calculate(df)
+        signal = calculate(df, params=self._td_params)
 
         # ── 4. Evaluate signals ──
         setup_buy = signal.get("setup_buy", 0) or 0
         setup_sell = signal.get("setup_sell", 0) or 0
-        cd_buy = signal.get("cd_buy", 0) or 0
         cd_sell = signal.get("cd_sell", 0) or 0
         score = signal.get("score", 0) or 0
         price = signal.get("price", 0) or 0
@@ -141,8 +151,20 @@ class TdSequentialStrategy(Strategy):
         if self._peak_portfolio is None or pv > self._peak_portfolio:
             self._peak_portfolio = pv
 
-        # ── BUY signal: setup_buy >= 9, positive score, no position ──
-        if setup_buy >= 9 and score > 0 and not has_position:
+        entry_setup = int(self._td_params.get("entry_setup", 9))
+        exit_setup = int(self._td_params.get("exit_setup", 9))
+        exit_countdown = int(self._td_params.get("exit_countdown", 13))
+        score_threshold = float(self._td_params.get("score_threshold", 0.0))
+        tdst_filter = bool(self._td_params.get("tdst_filter", False))
+        support = signal.get("tdst_support")
+
+        # ── BUY signal: setup_buy >= entry_setup, score above threshold, no position ──
+        if (
+            setup_buy >= entry_setup
+            and score > score_threshold
+            and not has_position
+            and (not tdst_filter or (support is not None and price > support))
+        ):
             result = self._risk.can_enter(
                 position_value=self.quantity * price,
                 portfolio_value=pv,
@@ -172,15 +194,15 @@ class TdSequentialStrategy(Strategy):
                 f"setup_buy={setup_buy} score={score:.1f}"
             )
 
-        # ── SELL signal: setup_sell >= 9 OR cd_sell >= 13 OR stop-loss ──
+        # ── SELL signal: setup_sell >= exit_setup OR cd_sell >= exit_countdown OR stop-loss ──
         elif has_position:
             position = self.get_position(self.symbol)
             exit_reason = ""
 
             # Check TD exit signal
-            if setup_sell >= 9:
+            if setup_sell >= exit_setup:
                 exit_reason = f"setup_sell={setup_sell}"
-            elif cd_sell >= 13:
+            elif cd_sell >= exit_countdown:
                 exit_reason = f"cd_sell={cd_sell}"
 
             # Check stop-loss

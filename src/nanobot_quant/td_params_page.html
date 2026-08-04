@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TD 参数 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:860px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:16px; }
+  .banner { border-radius:6px; padding:10px 14px; margin:12px 0; font-size:.88em; }
+  .banner.default { background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; }
+  .banner.custom { background:#fff3e0; border:1px solid #ffcc80; color:#e65100; }
+  .banner.msg { display:block; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; }
+  .banner.msg.hidden { display:none; }
+  .banner.msg.ok { background:#e8f5e9; border-color:#a5d6a7; color:#2e7d32; }
+  .banner.msg.err { background:#fce4ec; border-color:#ef9a9a; color:#c62828; }
+  .card { background:#fff; border-radius:8px; padding:18px 16px; margin-bottom:14px; border:1px solid #e0e0e0; }
+  .card h3 { font-size:1em; margin-bottom:4px; color:#444; }
+  .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 0; border-top:1px solid #f0f0f0; }
+  .field:first-of-type { border-top:none; }
+  .f-label { width:190px; font-weight:600; font-size:.9em; }
+  .f-std { color:#888; font-size:.8em; min-width:150px; }
+  .f-hint { color:#aaa; font-size:.78em; flex:1; min-width:160px; }
+  input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
+  input[type=checkbox] { width:18px; height:18px; accent-color:#1565c0; }
+  .weight-total { display:inline-block; padding:3px 10px; border-radius:4px; font-size:.82em; font-weight:600; margin-bottom:6px; }
+  .weight-total.ok { background:#e8f5e9; color:#2e7d32; }
+  .weight-total.err { background:#fce4ec; color:#c62828; }
+  .actions { margin:16px 0 4px; display:flex; gap:10px; align-items:center; }
+  button { padding:8px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
+  .btn-primary { background:#1565c0; color:#fff; }
+  .btn-primary:hover { background:#0d47a1; }
+  .btn-outline { background:#fff; color:#1565c0; border:1px solid #1565c0; }
+  .btn-outline:hover { background:#e3f2fd; }
+  .btn-danger { background:#fff; color:#c62828; border:1px solid #ef9a9a; }
+  .btn-danger:hover { background:#fce4ec; }
+  .note { background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:10px 14px; margin:12px 0; font-size:.85em; color:#1565c0; }
+</style>
+</head>
+<body>
+<h1>📐 TD 策略参数</h1>
+<p class="subtitle">TD Sequential 核心参数（DeMark 算法 + 自研评分 + 策略规则）。修改即保存到 td_params.json 并即时生效；默认值 = 旧版硬编码行为，未改动时零变化。</p>
+
+{banner}
+{msg}
+
+<div class="note">改动前建议先跑回测对比（第二步调测闭环）。权重合计必须 = 1.0，非法值会被拒绝。</div>
+
+{groups}
+
+<div class="actions">
+  <button class="btn-primary" id="btn-save">💾 保存参数</button>
+  <button class="btn-outline" id="btn-reset">↺ 恢复默认</button>
+</div>
+
+<script>
+(function () {
+  const form = document.querySelectorAll('.card input');
+  const msg = document.getElementById('save-msg');
+
+  function collect() {
+    const out = {};
+    document.querySelectorAll('.card input').forEach(function (el) {
+      if (el.type === 'checkbox') { out[el.name] = el.checked; }
+      else { out[el.name] = Number(el.value); }
+    });
+    return out;
+  }
+
+  function updateWeightTotal() {
+    const totalEl = document.getElementById('weight-total');
+    if (!totalEl) { return; }
+    const out = collect();
+    let total = 0;
+    ['weight_setup','weight_countdown','weight_tdst','weight_volume','weight_bb']
+      .forEach(function (k) { total += Number(out[k] || 0); });
+    totalEl.textContent = '权重合计：' + total.toFixed(3) + '（需 = 1.000）';
+    totalEl.className = 'weight-total ' + (Math.abs(total - 1) < 1e-6 ? 'ok' : 'err');
+  }
+
+  function show(text, ok) {
+    msg.textContent = text;
+    msg.className = 'banner msg ' + (ok ? 'ok' : 'err');
+  }
+
+  document.getElementById('btn-save').addEventListener('click', function () {
+    fetch('/config/td-params', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collect())
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.ok) { show(d.message || '已保存', true); }
+      else { show(d.error || '保存失败', false); }
+    }).catch(function (e) { show('网络错误: ' + e, false); });
+  });
+
+  document.getElementById('btn-reset').addEventListener('click', function () {
+    fetch('/config/td-params', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset: true })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.ok) {
+        show(d.message || '已恢复默认', true);
+        setTimeout(function () { location.reload(); }, 600);
+      } else { show(d.error || '重置失败', false); }
+    }).catch(function (e) { show('网络错误: ' + e, false); });
+  });
+
+  document.querySelectorAll('.card input').forEach(function (el) {
+    el.addEventListener('input', updateWeightTotal);
+    el.addEventListener('change', updateWeightTotal);
+  });
+  updateWeightTotal();
+})();
+</script>
+</body>
+</html>
