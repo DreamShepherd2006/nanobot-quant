@@ -100,7 +100,7 @@ def _auto_chain(run_id: str, symbol: str, chain: str, live: bool, confirm: bool 
     # ③ TD technical check (required — fail-closed if unavailable)
     from nanobot_quant.onchainos_cli import confirm_token, resolve_token
 
-    resolved = resolve_token(symbol)
+    resolved = resolve_token(symbol, tokens_json=_load_tokens_json())
     addr = resolved.get("address")
     if not addr:
         _chain_log(run_id, {
@@ -152,6 +152,26 @@ def _auto_chain(run_id: str, symbol: str, chain: str, live: bool, confirm: bool 
 
     result = execute_signal(json.dumps(signal, ensure_ascii=False), live=live, confirm=confirm)
     _chain_log(run_id, {"status": "executed", "run_id": run_id, "signal": signal, "result": result})
+
+
+def _load_tokens_json() -> list | None:
+    """Load user-configured tokens.json entries (None when absent/invalid).
+
+    The WebUI (``/config/tokens``) writes these entries; the research chain
+    must pass them into ``resolve_token`` so L2 (tokens.json) is honoured by
+    the fail-closed pre-check and the TD check — otherwise a questionable
+    entry could never surface as ``needs_confirmation``.
+    """
+    try:
+        from nanobot_quant.onchainos_cli import token_json_path
+
+        p = token_json_path()
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else None
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _chain_log(run_id: str, payload: dict) -> None:
@@ -255,12 +275,13 @@ def run_research_chain(
         resolve_token,
         supported_symbols,
     )
-    resolved = resolve_token(bare)
+    tokens_json = _load_tokens_json()
+    resolved = resolve_token(bare, tokens_json=tokens_json)
     if not resolved["ok"]:
         return {
             "status": "error",
             "error": f"{bare} is not supported on {chain} chain ({resolved.get('category')})",
-            "supported": supported_symbols(),
+            "supported": supported_symbols(tokens_json=tokens_json),
             "suggestion": resolved.get("suggestion"),
             "hint": resolved.get("hint"),
         }
