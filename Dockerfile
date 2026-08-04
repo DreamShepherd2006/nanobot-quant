@@ -37,10 +37,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=28]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@d901fbf2 \
+RUN echo "[bust=30]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-legion.git@af442172 \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @d901fbf2 (upstream staging — PR #37 wallet routes)"
+    && echo "✅ nanobot-legion @af442172 (upstream staging — PR #39 launch.sh VT env cleanup)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
