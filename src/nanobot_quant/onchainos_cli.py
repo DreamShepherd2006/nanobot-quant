@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any, Optional
 
 from nanobot_quant.onchainos_errors import lookup as err_lookup
@@ -203,6 +204,73 @@ def resolve_token_address(
 
     # 2) CLI query
     return search_token(symbol)
+
+
+def bare_symbol(pair: str) -> str:
+    """Strip a trading pair/symbol down to its bare token symbol.
+
+    "BTC-USDT" -> "BTC", "AAPL.US" -> "AAPL", "SOL" -> "SOL".
+    Contract addresses pass through unchanged (base58 is case-sensitive, so
+    they must NOT be upper-cased).
+    """
+    p = str(pair or "").strip()
+    if is_contract_address(p):
+        return p
+    p = p.upper()
+    for sep in ("-", "."):
+        if sep in p:
+            return p.split(sep)[0]
+    return p
+
+
+def is_contract_address(s: str) -> bool:
+    """Heuristic: is this string already a contract address (not a symbol)?
+
+    Solana base58 addresses are 32 bytes (~43-44 chars); EVM addresses are
+    42 chars starting with ``0x``.  Used so the pipeline safety gate treats
+    a pre-resolved address (quant line passes ``ticker=address``) as valid
+    without re-resolving it as a symbol.
+    """
+    t = str(s or "").strip()
+    if not t:
+        return False
+    if t.lower().startswith("0x"):
+        return len(t) == 42
+    base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    return len(t) in (32, 44) and all(c in base58 for c in t)
+
+
+def supported_symbols(tokens_json: list[dict] | None = None) -> list[str]:
+    """Return the symbols that can be resolved on-chain today.
+
+    Native/known tokens plus any user-configured entries from ``tokens.json``.
+    """
+    syms = ["SOL", "USDC", "USDT"]
+    for entry in (tokens_json or []):
+        s = str(entry.get("symbol", "")).upper()
+        if s and s not in syms:
+            syms.append(s)
+    return syms
+
+
+def chain_results_dir() -> Path:
+    """Persistent directory for research-chain execution outcomes.
+
+    ``{data_root}/legion/research_chains/`` (independent from the credentials
+    directory so audit records stay readable; survives Factory Rebuild).
+    Falls back to ``~/.research_chains`` when neither HF nor MS root exists.
+    """
+    for root in ("/data", "/mnt/workspace"):
+        d = Path(root) / "legion" / "research_chains"
+        try:
+            if d.parent.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+        except OSError:
+            continue
+    d = Path.home() / ".research_chains"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def get_token_price(symbol: str) -> Optional[float]:

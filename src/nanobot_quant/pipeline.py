@@ -421,6 +421,43 @@ def run_from_signals(
         ticker = signal.ticker
         avg_price = signal.price or 0.0
 
+        # ── fail-closed safety gate: token must be resolvable on-chain ──
+        # Covers EVERY execution path (quant line, vt line, direct
+        # execute_signal).  If the ticker is not a native/resolvable token
+        # on the target chain, the signal is rejected with an explicit
+        # error — never approximated with a look-alike asset.
+        from nanobot_quant.onchainos_cli import (
+            bare_symbol,
+            is_contract_address,
+            resolve_token_address,
+            supported_symbols,
+        )
+        bare = bare_symbol(ticker)
+        addr = resolve_token_address(bare, tokens_json=tokens_json)
+        # quant line passes ticker=contract-address directly → already resolvable
+        if not addr and is_contract_address(bare):
+            addr = bare
+        if not addr:
+            results.append({
+                "ticker": ticker,
+                "recommendation": signal.recommendation,
+                "score": signal.score,
+                "risk_passed": False,
+                "risk_details": {
+                    "error": "unsupported token",
+                    "reason": (
+                        f"{bare} is not a native/resolvable token on the "
+                        "target chain (cannot resolve on-chain address)"
+                    ),
+                    "supported": supported_symbols(tokens_json=tokens_json),
+                },
+                "suggested_order": None,
+                "position_value": None,
+                "tx_hash": None,
+                "broker_status": None,
+            })
+            continue
+
         if not avg_price:
             results.append({
                 "ticker": ticker,

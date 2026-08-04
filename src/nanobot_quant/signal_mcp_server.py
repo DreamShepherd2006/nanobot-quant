@@ -50,7 +50,7 @@ from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import run_backtest
 from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import execute_signal
-from nanobot_quant.tools.tools_research_chain import run_research_chain
+from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
 
 
 # ── Tool registry ───────────────────────────────────────────────
@@ -368,7 +368,9 @@ _TOOLS = [
             "completes. No further agent orchestration needed after this call. "
             "Returns the swarm run_id immediately; the chain runs in a "
             "background thread and its outcome is written to "
-            "<swarm_runs_root>/<run_id>/chain_result.json."
+            "<data_root>/legion/research_chains/<run_id>.json (query via "
+            "get_chain_result). Fails fast (status=error, no swarm started) "
+            "if the symbol is not a native/resolvable token on the chain."
         ),
         "inputSchema": {
             "type": "object",
@@ -396,6 +398,25 @@ _TOOLS = [
             "required": ["symbol"],
         },
     },
+    {
+        "name": "get_chain_result",
+        "description": (
+            "Return the persisted outcome of a run_research_chain execution: "
+            "reads <data_root>/legion/research_chains/<run_id>.json.  Lets "
+            "agents/WebUI audit whether the debate was executed, blocked, or "
+            "still pending — without touching the swarm run directory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Swarm run_id returned by run_research_chain",
+                },
+            },
+            "required": ["run_id"],
+        },
+    },
 ]
 
 _TOOL_DISPATCH = {
@@ -403,6 +424,7 @@ _TOOL_DISPATCH = {
     "structurize_signal": structurize_signal,
     "execute_signal": execute_signal,
     "run_research_chain": run_research_chain,
+    "get_chain_result": get_chain_result,
     "run_backtest": run_backtest,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,

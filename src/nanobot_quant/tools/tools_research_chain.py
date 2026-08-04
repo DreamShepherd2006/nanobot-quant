@@ -137,18 +137,44 @@ def _auto_chain(run_id: str, symbol: str, chain: str, live: bool) -> None:
 
 
 def _chain_log(run_id: str, payload: dict) -> None:
-    """Persist chain outcome next to the swarm run and mirror to stderr."""
-    try:
-        from src.swarm.store import swarm_runs_root
+    """Persist chain outcome to ``{data_root}/legion/research_chains``.
 
-        out_dir = swarm_runs_root() / run_id
+    Written to the persistent audit directory (independent from credentials;
+    survives Factory Rebuild) and mirrored to the MCP server stderr.
+    """
+    try:
+        from nanobot_quant.onchainos_cli import chain_results_dir
+
+        out_dir = chain_results_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "chain_result.json").write_text(
+        (out_dir / f"{run_id}.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception as exc:  # noqa: BLE001 — logging must never break the chain
         print(f"[DIAG] _chain_log failed: {exc}", file=sys.stderr, flush=True)
     print(f"[DIAG] run_research_chain {run_id}: {json.dumps(payload, ensure_ascii=False)[:800]}", file=sys.stderr, flush=True)
+
+
+def get_chain_result(run_id: str) -> dict:
+    """Return the persisted chain outcome for a swarm ``run_id``.
+
+    Reads ``{data_root}/legion/research_chains/<run_id>.json`` (the file
+    written by ``run_research_chain``'s background auto-chain).  Lets agents
+    and the WebUI audit whether the debate was executed, blocked, or still
+    pending — without touching the swarm run directory in site-packages.
+    """
+    try:
+        from nanobot_quant.onchainos_cli import chain_results_dir
+
+        p = chain_results_dir() / f"{run_id}.json"
+        if not p.is_file():
+            return {
+                "error": f"no chain result for run_id={run_id}",
+                "hint": "The swarm may still be running, or the auto-chain has not finished yet.",
+            }
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"failed to read chain result for {run_id}: {exc}"}
 
 
 # ── composite tool ────────────────────────────────────────────────
@@ -179,8 +205,10 @@ def run_research_chain(
 
     Returns:
         dict with status=started, run_id, auto_chain=True. The final chain
-        outcome is written to ``<swarm_runs_root>/<run_id>/chain_result.json``
-        and mirrored to the MCP server stderr.
+        outcome is written to ``{data_root}/legion/research_chains/<run_id>.json``
+        (query it via ``get_chain_result``) and mirrored to the MCP server
+        stderr.  If the symbol cannot be resolved on-chain, returns
+        status=error immediately WITHOUT starting the swarm.
     """
     # ① start the swarm (direct library use, not the vibe-trading MCP server)
     try:
@@ -192,6 +220,27 @@ def run_research_chain(
 
     pair = _normalize_pair(symbol)
     bare = _bare_symbol(pair)
+
+    # ── fail-closed pre-check: token must be resolvable on-chain ──
+    # Runs BEFORE starting the swarm so an unsupported symbol fails fast
+    # (no 15-40 min debate wasted).  This is an optimisation gate; the
+    # authoritative safety gate lives in pipeline.run_from_signals() and
+    # covers every execution path.
+    from nanobot_quant.onchainos_cli import (
+        resolve_token_address,
+        supported_symbols,
+    )
+    addr = resolve_token_address(bare)
+    if not addr:
+        return {
+            "status": "error",
+            "error": f"{bare} is not supported on {chain} chain (cannot resolve on-chain address)",
+            "supported": supported_symbols(),
+            "hint": (
+                "Configure a wrapped token address in WebUI 业务管理 → tokens.json, "
+                "or use a native token like SOL/USDC/USDT."
+            ),
+        }
 
     swarm_dir = swarm_runs_root()
     store = SwarmStore(base_dir=swarm_dir)
