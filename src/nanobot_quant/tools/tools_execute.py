@@ -14,7 +14,7 @@ import os
 import sys
 
 
-def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
+def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool = False) -> dict:
     """Execute the trading pipeline on structured signal(s).
 
     Takes a JSON signal (from structurize_signal or run_td_sequential) and
@@ -26,6 +26,11 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
         ticker_signal_json: JSON string of signal(s).
         live: If True, submit orders to OnchainOSBroker for on-chain
               execution.  Default False (paper-only).
+        confirm: Explicit user confirmation for a questionable tokens.json
+                 entry (default False).  When a token needs confirmation
+                 this returns error=needs_confirmation without executing;
+                 pass confirm=true only after the user confirmed (the
+                 confirmation is persisted so later runs pass automatically).
 
     Returns:
         Pipeline execution results with risk checks and suggested orders.
@@ -78,6 +83,34 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
 
     tokens_json = _load_tokens(effective_live)
 
+    # ── Token confirmation gate (A + C) ──────────────────────────
+    # tokens.json entries are trusted but validated: questionable entries
+    # (bad address format / EVM address on solana chain) require explicit
+    # user confirmation before anything executes.  confirm=True (only after
+    # the user confirmed) persists confirmed=true so later runs pass without
+    # asking again.  Fail-closed: any unresolved token aborts the whole batch.
+    from nanobot_quant.onchainos_cli import confirm_token, resolve_token
+
+    for s in signal_list:
+        bare = s.get("ticker", "")
+        resolved = resolve_token(bare, tokens_json=tokens_json)
+        if not resolved.get("ok"):
+            return {
+                "error": f"token '{bare}' cannot be resolved on-chain ({resolved.get('category')})",
+                "suggestion": resolved.get("suggestion"),
+                "hint": resolved.get("hint"),
+            }
+        if resolved.get("needs_confirmation") and not confirm:
+            return {
+                "error": "needs_confirmation",
+                "token": bare,
+                "address": resolved.get("address"),
+                "issue": resolved.get("issue"),
+                "hint": "If the user confirms this tokens.json entry, re-run with confirm=true.",
+            }
+        if resolved.get("needs_confirmation") and confirm:
+            confirm_token(bare, address=resolved.get("address"))
+
     try:
         # Route EVERYTHING (import-time AND runtime loggers) to stderr while
         # the pipeline runs. lumibot registers stdout handlers lazily during
@@ -91,6 +124,7 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False) -> dict:
                 signal_list,
                 live=effective_live,
                 tokens_json=tokens_json,
+                confirm=confirm,
             )
         finally:
             sys.stdout = _saved_stdout

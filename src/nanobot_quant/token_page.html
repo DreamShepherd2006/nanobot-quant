@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>代币地址管理 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family: -apple-system, sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:860px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:16px; }
+  .note { background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:10px 14px; margin:16px 0; font-size:.88em; color:#1565c0; }
+  .card { background:#fff; border-radius:8px; padding:16px; margin-bottom:14px; border:1px solid #e0e0e0; }
+  .card h2 { font-size:1em; margin-bottom:10px; }
+  .form-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input, select { padding:8px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; }
+  input[type=text] { flex:1; min-width:140px; font-family:ui-monospace,monospace; }
+  select { min-width:110px; }
+  table { width:100%; border-collapse:collapse; font-size:.88em; }
+  th, td { text-align:left; padding:9px 8px; border-bottom:1px solid #eee; vertical-align:top; }
+  th { color:#666; font-weight:600; }
+  .mono { font-family:ui-monospace,monospace; font-size:.85em; word-break:break-all; }
+  .sym { font-weight:600; }
+  .status { display:inline-block; padding:2px 8px; border-radius:4px; font-size:.8em; white-space:nowrap; }
+  .status-clean { background:#e8f5e9; color:#2e7d32; }
+  .status-confirmed { background:#ede7f6; color:#5e35b1; }
+  .status-warn { background:#fff3e0; color:#e65100; }
+  .issue { color:#e65100; font-size:.78em; margin-top:3px; }
+  .actions { white-space:nowrap; }
+  button { padding:6px 12px; border:none; border-radius:6px; font-size:.85em; cursor:pointer; font-weight:500; }
+  .btn-primary { background:#1565c0; color:#fff; }
+  .btn-primary:hover { background:#0d47a1; }
+  .btn-outline { background:#fff; color:#1565c0; border:1px solid #1565c0; }
+  .btn-outline:hover { background:#e3f2fd; }
+  .btn-danger { background:#fff; color:#c62828; border:1px solid #ef9a9a; }
+  .btn-danger:hover { background:#fce4ec; }
+  .empty { text-align:center; color:#999; padding:28px 12px; }
+  .msg { border-radius:6px; padding:10px 14px; margin:12px 0; font-size:.88em; display:none; }
+  .msg.ok { display:block; background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; }
+  .msg.err { display:block; background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; }
+  .builtin { background:#f1f8e9; border:1px solid #c5e1a5; color:#33691e; border-radius:6px; padding:8px 14px; font-size:.85em; }
+</style>
+</head>
+<body>
+<h1>🪙 代币地址管理</h1>
+<p class="subtitle">管理自定义代币地址（tokens.json）。录入不等于信任——地址有疑问（链不匹配/格式错误）的条目在执行前会被拦截，需你确认后才放行；确认记忆化，改地址后自动重置。</p>
+
+<div class="card">
+  <h2>➕ 新增代币</h2>
+  <div class="form-row">
+    <input type="text" id="f-symbol" placeholder="Symbol（如 WEVM）" autocomplete="off">
+    <input type="text" id="f-address" placeholder="合约地址（base58 / 0x…）" autocomplete="off">
+    <select id="f-chain">
+      <option value="solana" selected>solana</option>
+      <option value="xlayer">xlayer</option>
+      <option value="ethereum">ethereum</option>
+    </select>
+    <button class="btn-primary" id="btn-add">添加</button>
+  </div>
+</div>
+
+<div class="builtin">L1 内建白名单（无需管理）：{builtin_html}</div>
+
+<div class="card">
+  <h2>📋 自定义代币（{count_html}）</h2>
+  {table_html}
+</div>
+
+<div id="msg" class="msg"></div>
+
+<script>
+function showMsg(ok, text) {
+  var m = document.getElementById('msg');
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  m.textContent = text;
+}
+function flash(ok, text) {
+  showMsg(ok, text);
+  setTimeout(function(){ document.getElementById('msg').className = 'msg'; }, 4000);
+}
+function post(path, body, okText) {
+  return fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, data:d}; }); })
+    .then(function(res){
+      if (res.status >= 400 || !res.data.ok) {
+        flash(false, res.data.error || ('HTTP ' + res.status));
+        return null;
+      }
+      flash(true, okText || res.data.message || 'OK');
+      location.reload();
+      return res.data;
+    }).catch(function(e){ flash(false, '网络错误: ' + e); return null; });
+}
+
+document.getElementById('btn-add').addEventListener('click', function(){
+  post('/config/tokens/add', {
+    symbol: document.getElementById('f-symbol').value,
+    address: document.getElementById('f-address').value,
+    chain: document.getElementById('f-chain').value
+  }, '已添加');
+});
+
+document.querySelectorAll('button[data-act]').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    var act = btn.dataset.act, sym = btn.dataset.symbol;
+    if (act === 'delete') {
+      if (!confirm('确定删除 ' + sym + ' 吗？')) return;
+      post('/config/tokens/delete', {symbol: sym});
+    } else if (act === 'confirm') {
+      if (!confirm('确认地址无误并标记 ' + sym + ' 为已确认？（仅当你核实过该地址）')) return;
+      post('/config/tokens/confirm', {symbol: sym, address: btn.dataset.address});
+    } else if (act === 'edit') {
+      var addr = prompt('编辑 ' + sym + ' 的合约地址：', btn.dataset.address);
+      if (!addr) return;
+      var chain = prompt('编辑 ' + sym + ' 的链（solana/xlayer/ethereum）：', btn.dataset.chain || 'solana');
+      if (!chain) return;
+      post('/config/tokens/edit', {symbol: sym, address: addr.trim(), chain: chain.trim()});
+    }
+  });
+});
+</script>
+</body>
+</html>

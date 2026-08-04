@@ -374,6 +374,7 @@ def run_from_signals(
     stop_loss_pct: float = 0.10,
     live: bool = False,
     tokens_json: list[dict] | None = None,
+    confirm: bool = False,
 ) -> list[dict]:
     """Run risk checks + order generation on pre-computed signals.
 
@@ -383,6 +384,11 @@ def run_from_signals(
 
     When ``live=True``, orders that pass risk are forwarded to
     OnchainOSBroker for on-chain swap execution.
+
+    ``confirm`` lifts the confirmation gate for questionable tokens.json
+    entries (callers pass confirm=true ONLY after the user explicitly
+    confirmed the entry).  Without it, such entries are rejected with
+    risk_details.error="needs_confirmation" (fail-closed).
 
     Returns list of dicts::
 
@@ -420,6 +426,66 @@ def run_from_signals(
     for signal in parsed:
         ticker = signal.ticker
         avg_price = signal.price or 0.0
+
+        # ── fail-closed safety gate: token must be resolvable on-chain ──
+        # Covers EVERY execution path (quant line, vt line, direct
+        # execute_signal).  If the ticker is not a native/resolvable token
+        # on the target chain, the signal is rejected with an explicit
+        # error — never approximated with a look-alike asset.
+        from nanobot_quant.onchainos_cli import (
+            bare_symbol,
+            is_contract_address,
+            resolve_token,
+            supported_symbols,
+        )
+        bare = bare_symbol(ticker)
+        resolved = resolve_token(bare, tokens_json=tokens_json)
+        addr = resolved.get("address")
+        # quant line passes ticker=contract-address directly → already resolvable
+        if not addr and is_contract_address(bare):
+            addr = bare
+        if not addr:
+            results.append({
+                "ticker": ticker,
+                "recommendation": signal.recommendation,
+                "score": signal.score,
+                "risk_passed": False,
+                "risk_details": {
+                    "error": "unsupported token",
+                    "reason": (
+                        f"{bare} is not a native/resolvable token on the "
+                        "target chain (cannot resolve on-chain address)"
+                    ),
+                    "category": resolved.get("category"),
+                    "suggestion": resolved.get("suggestion"),
+                    "hint": resolved.get("hint"),
+                    "supported": supported_symbols(tokens_json=tokens_json),
+                },
+                "suggested_order": None,
+                "position_value": None,
+                "tx_hash": None,
+                "broker_status": None,
+            })
+            continue
+        if resolved.get("needs_confirmation") and not confirm:
+            results.append({
+                "ticker": ticker,
+                "recommendation": signal.recommendation,
+                "score": signal.score,
+                "risk_passed": False,
+                "risk_details": {
+                    "error": "needs_confirmation",
+                    "reason": resolved.get("issue"),
+                    "token": bare,
+                    "address": addr,
+                    "hint": "Re-run with confirm=true after the user confirms this tokens.json entry.",
+                },
+                "suggested_order": None,
+                "position_value": None,
+                "tx_hash": None,
+                "broker_status": None,
+            })
+            continue
 
         if not avg_price:
             results.append({

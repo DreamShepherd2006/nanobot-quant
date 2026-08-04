@@ -43,7 +43,7 @@ try:
         get_advanced_info as _get_advanced_info,
         get_holders as _get_holders,
         get_price as _get_price,
-        search_token as _search_token,
+        resolve_token_address as _resolve_token_address,
     )
     _HAS_SHARED = True
 except ImportError:
@@ -68,7 +68,11 @@ def _fetch_onchainos_data(user_vars):
         return {symbol: {"ok": False, "error": "onchainos CLI not found",
                          "address": "", "data": {}}}
 
-    addr = _search_token(symbol)
+    # Resolve via the shared single-source token resolution (builtin
+    # SOL/USDC/USDT, aliases, tokens.json, CLI fallback) so the enrichment
+    # layer agrees with the execution gates and native coins resolve
+    # correctly (SOL → WSOL) instead of failing "token not found".
+    addr = _resolve_token_address(symbol)
     if not addr:
         _enrich_log.warning("onchainos enrich: %s -> token not found on chain", symbol)
         return {symbol: {"ok": False, "error": "token not found on chain",

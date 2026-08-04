@@ -50,6 +50,7 @@ from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import run_backtest
 from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import execute_signal
+from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
 
 
 # ── Tool registry ───────────────────────────────────────────────
@@ -142,6 +143,17 @@ _TOOLS = [
                         "Request real on-chain execution (default false). "
                         "Effective only when the WebUI live trading toggle "
                         "is enabled; otherwise forced to paper."
+                    ),
+                    "default": False,
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicit user confirmation for a questionable tokens.json "
+                        "entry (default false).  When a token needs confirmation "
+                        "this returns error=needs_confirmation without executing; "
+                        "pass confirm=true only after the user confirmed.  The "
+                        "confirmation is persisted, so later runs pass automatically."
                     ),
                     "default": False,
                 },
@@ -358,12 +370,83 @@ _TOOLS = [
             "required": ["account_id"],
         },
     },
+    {
+        "name": "run_research_chain",
+        "description": (
+            "All-in-one research-to-execution: starts a VT investment_committee "
+            "swarm debate, then automatically chains structurize_signal -> "
+            "run_td_sequential (TD check) -> execute_signal once the debate "
+            "completes. No further agent orchestration needed after this call. "
+            "Returns the swarm run_id immediately; the chain runs in a "
+            "background thread and its outcome is written to "
+            "<data_root>/legion/research_chains/<run_id>.json (query via "
+            "get_chain_result). Fails fast (status=error, no swarm started) "
+            "if the symbol is not a native/resolvable token on the chain."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Token symbol, e.g. BTC, SPCX, ETH-USD",
+                },
+                "chain": {
+                    "type": "string",
+                    "default": "solana",
+                    "description": "Chain for the TD technical check (default solana)",
+                },
+                "live": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Request on-chain execution (default False; still gated by the WebUI live toggle)",
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Max swarm iterations (default 50)",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicit user confirmation for a questionable tokens.json "
+                        "entry (default false).  When a token needs confirmation "
+                        "this returns status=needs_confirmation without starting "
+                        "the swarm; pass confirm=true only after the user confirmed "
+                        "(persisted, so later runs pass automatically)."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_chain_result",
+        "description": (
+            "Return the persisted outcome of a run_research_chain execution: "
+            "reads <data_root>/legion/research_chains/<run_id>.json.  Lets "
+            "agents/WebUI audit whether the debate was executed, blocked, or "
+            "still pending — without touching the swarm run directory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Swarm run_id returned by run_research_chain",
+                },
+            },
+            "required": ["run_id"],
+        },
+    },
 ]
 
 _TOOL_DISPATCH = {
     "run_td_sequential": run_td_sequential,
     "structurize_signal": structurize_signal,
     "execute_signal": execute_signal,
+    "run_research_chain": run_research_chain,
+    "get_chain_result": get_chain_result,
     "run_backtest": run_backtest,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,

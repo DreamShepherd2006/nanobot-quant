@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any, Optional
 
 from nanobot_quant.onchainos_errors import lookup as err_lookup
@@ -173,36 +174,321 @@ def get_kline(
 
 WSOL_ADDR = "So11111111111111111111111111111111111111112"
 
+# Well-known Solana tokens (native coin + common trading pairs)
+_BUILTIN_TOKENS: dict[str, str] = {
+    "SOL": WSOL_ADDR,
+    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+}
+
+# Common aliases / full names → canonical symbol (L1 tolerance for
+# typos and non-symbol inputs such as "SOLANA" or "BITCOIN").
+_ALIASES: dict[str, str] = {
+    "SOLANA": "SOL",
+    "WRAPPEDSOL": "SOL",
+    "WRAPPED_SOL": "SOL",
+    "BITCOIN": "BTC",
+    "ETHEREUM": "ETH",
+    "TETHER": "USDT",
+    "USDCOIN": "USDC",
+    "USDTETHER": "USDT",
+}
+
+# Guidance for symbols that exist but have NO native token on Solana.
+_CHAIN_HINTS: dict[str, str] = {
+    "BTC": (
+        "BTC has no native token on Solana; on-chain execution is rejected "
+        "(fail-closed). Research via CEX data (OKX BTC-USDT) is still available."
+    ),
+    "ETH": (
+        "ETH has no native token on Solana; on-chain execution is rejected "
+        "(fail-closed). Research via CEX data (OKX ETH-USDT) is still available."
+    ),
+}
+
+
+def normalize_symbol(raw: str) -> str:
+    """L0: normalise free-text input to a bare uppercase symbol.
+
+    - trims whitespace and drops a leading ``$`` (``"$SOL"`` → ``"SOL"``)
+    - contract addresses pass through UNCHANGED (base58 is case-sensitive)
+    - trading-pair suffixes are split off (``"BTC-USDT"`` → ``"BTC"``)
+    """
+    p = str(raw or "").strip()
+    if not p:
+        return ""
+    if is_contract_address(p):
+        return p
+    p = p.lstrip("$").strip().upper()
+    for sep in ("-", "."):
+        if sep in p:
+            p = p.split(sep)[0]
+    return p
+
+
+def resolve_token(
+    symbol: str,
+    tokens_json: list[dict] | None = None,
+    chain: str = "solana",
+) -> dict:
+    """Unified tiered token resolution with validation + confirmation state.
+
+    This is the single source of truth used by every token gate
+    (``run_research_chain`` pre-check, ``pipeline.run_from_signals`` terminal
+    gate, VT grounding enrichment) so the whitelists cannot drift apart.
+
+    Tier order:
+      L0 normalise → L1 builtin (SOL/USDC/USDT + aliases) → L2 tokens.json
+      (user-configured, validated; questionable entries need confirmation)
+      → L3 CLI query → L4 structured error (typo suggestion / not_found).
+
+    Returns an envelope dict::
+
+        {
+          "ok": True/False,
+          "address": str|None,
+          "source": "address"|"builtin"|"tokens_json"|"cli"|None,
+          "needs_confirmation": bool,   # True → caller must get explicit
+                                        # user confirmation (confirm=True)
+          "issue": str|None,            # why confirmation is needed
+          "confirmed": bool,            # tokens.json entry confirmed by user
+          "category": None|"typo"|"not_found"|"chain_mismatch"|"invalid_address",
+          "suggestion": str|None,       # did-you-mean hint
+          "hint": str|None,             # guidance for the caller
+        }
+    """
+    raw = normalize_symbol(symbol)
+    if not raw:
+        return {"ok": False, "address": None, "source": None,
+                "needs_confirmation": False, "issue": None,
+                "confirmed": False, "category": "not_found",
+                "suggestion": None, "hint": "empty symbol"}
+
+    # L0b: caller already passed a contract address → pass through
+    if is_contract_address(raw):
+        return {"ok": True, "address": raw, "source": "address",
+                "needs_confirmation": False, "issue": None,
+                "confirmed": True, "category": None, "suggestion": None,
+                "hint": None}
+
+    # L1: builtin (native coin + well-known SPL) — always trusted
+    if raw in _BUILTIN_TOKENS:
+        return {"ok": True, "address": _BUILTIN_TOKENS[raw], "source": "builtin",
+                "needs_confirmation": False, "issue": None,
+                "confirmed": True, "category": None, "suggestion": None,
+                "hint": None}
+
+    # Alias → canonical, then re-enter resolution (SOLANA→SOL, BITCOIN→BTC…)
+    canonical = _ALIASES.get(raw, raw)
+    if canonical != raw:
+        return resolve_token(canonical, tokens_json=tokens_json, chain=chain)
+
+    # L2: user-configured tokens.json (highest trust — validated, not blind)
+    for entry in (tokens_json or []):
+        if str(entry.get("symbol", "")).upper() != raw:
+            continue
+        addr = str(entry.get("address") or "").strip()
+        confirmed = bool(entry.get("confirmed", False))
+        check = _validate_token_entry(entry, chain=chain)
+        if check["ok"] or confirmed:
+            return {"ok": True, "address": addr, "source": "tokens_json",
+                    "needs_confirmation": (not confirmed and not check["ok"]),
+                    "issue": check["issue"],
+                    "confirmed": confirmed, "category": None,
+                    "suggestion": None, "hint": None}
+        return {"ok": True, "address": addr, "source": "tokens_json",
+                "needs_confirmation": True, "issue": check["issue"],
+                "confirmed": False, "category": check["category"],
+                "suggestion": None,
+                "hint": ("Check this entry in WebUI 业务管理 → tokens.json, "
+                          "then re-run with confirm=true to accept it")}
+
+    # L3: CLI lookup
+    addr = search_token(raw)
+    if addr:
+        return {"ok": True, "address": addr, "source": "cli",
+                "needs_confirmation": False, "issue": None,
+                "confirmed": True, "category": None, "suggestion": None,
+                "hint": None}
+
+    # L4: structured failure (typo suggestion / not_found / chain hint)
+    candidates = list(_BUILTIN_TOKENS) + list(_ALIASES)
+    for entry in (tokens_json or []):
+        s = str(entry.get("symbol", "")).upper()
+        if s and s not in candidates:
+            candidates.append(s)
+    suggestion = _fuzzy_suggestion(raw, candidates)
+    category = "typo" if suggestion else "not_found"
+    hint = _CHAIN_HINTS.get(raw) or (
+        "Configure the token in WebUI 业务管理 → tokens.json "
+        "(symbol + address), or use a native token like SOL/USDC/USDT."
+    )
+    return {"ok": False, "address": None, "source": None,
+            "needs_confirmation": False, "issue": None,
+            "confirmed": False, "category": category,
+            "suggestion": suggestion, "hint": hint}
+
+
+def _validate_token_entry(entry: dict, chain: str = "solana") -> dict:
+    """Local validation of a tokens.json entry (no network calls).
+
+    Checks address presence, chain ownership (EVM address on a solana chain)
+    and address format. Returns ``{"ok": bool, "issue": str|None,
+    "category": str|None}``.
+    """
+    addr = str(entry.get("address") or "").strip()
+    if not addr:
+        return {"ok": False, "issue": "missing address",
+                "category": "invalid_address"}
+    if chain == "solana" and addr.lower().startswith("0x"):
+        return {"ok": False,
+                "issue": f"address is an EVM (0x…) address, not a {chain} address",
+                "category": "chain_mismatch"}
+    if not is_contract_address(addr):
+        return {"ok": False,
+                "issue": f"'{addr[:16]}…' is not a valid contract address",
+                "category": "invalid_address"}
+    return {"ok": True, "issue": None, "category": None}
+
+
+def _fuzzy_suggestion(raw: str, candidates: list[str]) -> Optional[str]:
+    """Best-effort did-you-mean suggestion (input len>=3, cutoff 0.8)."""
+    if len(raw) < 3 or not candidates:
+        return None
+    import difflib
+    matches = difflib.get_close_matches(raw, candidates, n=1, cutoff=0.8)
+    return matches[0] if matches else None
+
+
+def token_json_path() -> Path:
+    """Path to the user-configured tokens.json (WebUI 业务管理)."""
+    for root in ("/data", "/mnt/workspace"):
+        d = Path(root) / "legion" / "credentials"
+        try:
+            if d.exists():
+                return d / "tokens.json"
+        except OSError:
+            continue
+    return Path.home() / ".tokens.json"
+
+
+def confirm_token(
+    symbol: str,
+    tokens_json: list[dict] | None = None,
+    address: str | None = None,
+) -> dict:
+    """Mark a tokens.json entry as user-confirmed (persist ``confirmed=true``).
+
+    Call ONLY after the user explicitly confirmed the entry — this is the
+    confirmation memory (scheme C).  A confirmed entry passes the resolution
+    gate on later runs without asking again.  If the address is later edited
+    in WebUI, the confirmation is automatically reset (the entry is treated
+    as unconfirmed until the user confirms the new address).
+
+    Returns a short status dict.
+    """
+    path = token_json_path()
+    if not path.is_file():
+        return {"ok": False, "error": f"tokens.json not found at {path}"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "error": f"failed to read tokens.json: {exc}"}
+    if not isinstance(data, list):
+        return {"ok": False, "error": "tokens.json is not a list"}
+    raw = normalize_symbol(symbol)
+    changed = False
+    for entry in data:
+        if str(entry.get("symbol", "")).upper() != raw:
+            continue
+        if address and str(entry.get("address", "")) != address:
+            # Entry changed since the check — do not confirm a stale row.
+            continue
+        entry["confirmed"] = True
+        changed = True
+    if not changed:
+        return {"ok": False, "error": f"no matching token entry for {raw}"}
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except Exception as exc:
+        return {"ok": False, "error": f"failed to write tokens.json: {exc}"}
+    return {"ok": True, "confirmed_symbol": raw, "path": str(path)}
+
 
 def resolve_token_address(
     symbol: str,
     tokens_json: list[dict] | None = None,
 ) -> Optional[str]:
-    """Resolve a token symbol to its contract address.
+    """Backward-compatible wrapper around ``resolve_token`` (address only)."""
+    return resolve_token(symbol, tokens_json=tokens_json).get("address")
 
-    1. Check ``tokens_json`` (user-configured in WebUI).
-    2. Query onchainos CLI ``token search``.
-    3. Return WSOL address for "SOL".
+
+def bare_symbol(pair: str) -> str:
+    """Strip a trading pair/symbol down to its bare token symbol.
+
+    "BTC-USDT" -> "BTC", "AAPL.US" -> "AAPL", "SOL" -> "SOL".
+    Contract addresses pass through unchanged (base58 is case-sensitive, so
+    they must NOT be upper-cased).
     """
-    symbol_upper = symbol.upper()
-    if symbol_upper == "SOL":
-        return WSOL_ADDR
+    p = str(pair or "").strip()
+    if is_contract_address(p):
+        return p
+    p = p.upper()
+    for sep in ("-", "."):
+        if sep in p:
+            return p.split(sep)[0]
+    return p
 
-    # Well-known Solana tokens (common trading pairs)
-    _KNOWN_TOKENS: dict[str, str] = {
-        "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-        "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-    }
-    if symbol_upper in _KNOWN_TOKENS:
-        return _KNOWN_TOKENS[symbol_upper]
 
-    # 1) User-configured list
+def is_contract_address(s: str) -> bool:
+    """Heuristic: is this string already a contract address (not a symbol)?
+
+    Solana base58 addresses are 32 bytes (~43-44 chars); EVM addresses are
+    42 chars starting with ``0x``.  Used so the pipeline safety gate treats
+    a pre-resolved address (quant line passes ``ticker=address``) as valid
+    without re-resolving it as a symbol.
+    """
+    t = str(s or "").strip()
+    if not t:
+        return False
+    if t.lower().startswith("0x"):
+        return len(t) == 42
+    base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    return len(t) in (32, 44) and all(c in base58 for c in t)
+
+
+def supported_symbols(tokens_json: list[dict] | None = None) -> list[str]:
+    """Return the symbols that can be resolved on-chain today.
+
+    Native/known tokens plus any user-configured entries from ``tokens.json``.
+    """
+    syms = ["SOL", "USDC", "USDT"]
     for entry in (tokens_json or []):
-        if entry.get("symbol", "").upper() == symbol_upper:
-            return entry.get("address")
+        s = str(entry.get("symbol", "")).upper()
+        if s and s not in syms:
+            syms.append(s)
+    return syms
 
-    # 2) CLI query
-    return search_token(symbol)
+
+def chain_results_dir() -> Path:
+    """Persistent directory for research-chain execution outcomes.
+
+    ``{data_root}/legion/research_chains/`` (independent from the credentials
+    directory so audit records stay readable; survives Factory Rebuild).
+    Falls back to ``~/.research_chains`` when neither HF nor MS root exists.
+    """
+    for root in ("/data", "/mnt/workspace"):
+        d = Path(root) / "legion" / "research_chains"
+        try:
+            if d.parent.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+        except OSError:
+            continue
+    d = Path.home() / ".research_chains"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def get_token_price(symbol: str) -> Optional[float]:
