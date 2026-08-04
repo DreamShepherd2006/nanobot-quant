@@ -50,6 +50,7 @@ from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import run_backtest
 from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import execute_signal
+from nanobot_quant.tools.tools_research_chain import run_research_chain
 
 
 # ── Tool registry ───────────────────────────────────────────────
@@ -358,12 +359,50 @@ _TOOLS = [
             "required": ["account_id"],
         },
     },
+    {
+        "name": "run_research_chain",
+        "description": (
+            "All-in-one research-to-execution: starts a VT investment_committee "
+            "swarm debate, then automatically chains structurize_signal -> "
+            "run_td_sequential (TD check) -> execute_signal once the debate "
+            "completes. No further agent orchestration needed after this call. "
+            "Returns the swarm run_id immediately; the chain runs in a "
+            "background thread and its outcome is written to "
+            "<swarm_runs_root>/<run_id>/chain_result.json."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Token symbol, e.g. BTC, SPCX, ETH-USD",
+                },
+                "chain": {
+                    "type": "string",
+                    "default": "solana",
+                    "description": "Chain for the TD technical check (default solana)",
+                },
+                "live": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Request on-chain execution (default False; still gated by the WebUI live toggle)",
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Max swarm iterations (default 50)",
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
 ]
 
 _TOOL_DISPATCH = {
     "run_td_sequential": run_td_sequential,
     "structurize_signal": structurize_signal,
     "execute_signal": execute_signal,
+    "run_research_chain": run_research_chain,
     "run_backtest": run_backtest,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,

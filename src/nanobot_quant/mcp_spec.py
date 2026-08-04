@@ -95,9 +95,13 @@ signal_mcp = MCPSpec(
     target_agents=["vt_research", "quant"],
     env={
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+        "LANGCHAIN_PROVIDER": "deepseek",
     },
     env_provider_keys={
         "DEEPSEEK_API_KEY": "deepseek",
+    },
+    env_provider_model_keys={
+        "LANGCHAIN_MODEL_NAME": "deepseek",
     },
 )
 register(signal_mcp)
