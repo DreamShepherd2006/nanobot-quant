@@ -22,6 +22,8 @@ credentials 目录读）→ fetch_kline / fetch_kline_range（OnchainOS CLI）
 from __future__ import annotations
 
 import html as _html
+import json
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -42,9 +44,11 @@ _DEFAULT_TICKER = "SOL"
 _DEFAULT_LIMIT = 60
 _DEFAULT_HISTORY_DAYS = 90
 
-# yfinance interval / window-span mapping (seconds) per page bar option.
-_YF_INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "60m", "4H": "4h", "1D": "1d", "1W": "1wk"}
-_YF_SPAN = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "4H": 14400, "1D": 86400, "1W": 604800}
+# EastMoney (primary stock source) klt codes + window spans.
+_EM_KLTS = {"1m": "1", "5m": "5", "15m": "15", "1H": "60", "1D": "101", "1W": "102"}
+# yfinance (fallback) interval map — no 4h in either source.
+_YF_INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "60m", "1D": "1d", "1W": "1wk"}
+_SPAN = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "1D": 86400, "1W": 604800}
 _SOURCES = ("onchainos", "stock")
 
 
@@ -75,15 +79,87 @@ def _fetch_stock_kline(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch real-stock candles via yfinance, normalised to the OnchainOS
-    DataFrame shape (lowercase ohlcv columns, naive DatetimeIndex).
+    """Fetch real-stock candles, normalised to the OnchainOS DataFrame shape
+    (lowercase ohlcv columns, naive DatetimeIndex).
 
     ``ticker`` is the US stock symbol itself (方案 A — no token→stock map).
+
+    Primary source is EastMoney (push2his.eastmoney.com, no API key, works
+    from datacenter IPs); Yahoo Finance (yfinance) is the fallback because
+    Yahoo rate-limits datacenter IPs (429). 4H is unsupported for stocks.
     """
-    interval = _YF_INTERVALS.get(bar, "1d")
+    errors: list[str] = []
+    try:
+        return _fetch_stock_kline_eastmoney(ticker, bar=bar, limit=limit, start=start, end=end)
+    except Exception as exc:
+        errors.append("东财: %s" % exc)
+    try:
+        return _fetch_stock_kline_yahoo(ticker, bar=bar, limit=limit, start=start, end=end)
+    except Exception as exc:
+        errors.append("yfinance: %s" % exc)
+    raise RuntimeError("；".join(errors) or "股票数据获取失败")
+
+
+def _fetch_stock_kline_eastmoney(
+    ticker: str,
+    bar: str = "1D",
+    limit: int = 60,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    """EastMoney kline API → normalised DataFrame.
+
+    Response klines: "date,open,close,high,low,volume" (fields2
+    f51..f56). secid=105.<SYMBOL> (US market). 4H has no klt code.
+    """
+    klt = _EM_KLTS.get(bar)
+    if klt is None:
+        raise ValueError(f"股票数据源暂不支持 {bar} 周期（支持 1m/5m/15m/1H/1D/1W）")
     if start is None:
         now = end or datetime.now()
-        span = _YF_SPAN.get(bar, 86400) * max(limit, 10) * 2
+        span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
+        start = now - timedelta(seconds=span)
+        end = now
+    url = (
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+        f"secid=105.{ticker}&fields1=f1,f2,f3,f4,f5&"
+        "fields2=f51,f52,f53,f54,f55,f56&"
+        f"klt={klt}&fqt=1&beg={start.strftime('%Y%m%d')}&end={end.strftime('%Y%m%d')}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    klines = (payload.get("data") or {}).get("klines") or []
+    if not klines:
+        raise RuntimeError(f"东财无数据: {ticker}")
+    rows = []
+    for line in klines:
+        p = line.split(",")
+        rows.append({"time": p[0], "open": float(p[1]), "close": float(p[2]),
+                     "high": float(p[3]), "low": float(p[4]), "volume": float(p[5])})
+    df = pd.DataFrame(rows).set_index("time")
+    df.index = pd.to_datetime(df.index)
+    df.index.name = "time"
+    df = df[["open", "high", "low", "close", "volume"]]
+    if limit and len(df) > limit:
+        df = df.tail(limit)
+    return df
+
+
+def _fetch_stock_kline_yahoo(
+    ticker: str,
+    bar: str = "1D",
+    limit: int = 60,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    """yfinance fallback — Yahoo rate-limits datacenter IPs (429)."""
+    interval = _YF_INTERVALS.get(bar)
+    if interval is None:
+        raise ValueError(f"股票数据源暂不支持 {bar} 周期（支持 1m/5m/15m/1H/1D/1W）")
+    if start is None:
+        now = end or datetime.now()
+        span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
         start = now - timedelta(seconds=span)
         end = now
     # yfinance `end` is exclusive; extend by one day so the requested end
@@ -101,6 +177,7 @@ def _fetch_stock_kline(
     if df is None or df.empty:
         raise RuntimeError(f"yfinance 无数据: {ticker}")
     if isinstance(df.columns, pd.MultiIndex):
+        # yfinance ≥1.x wraps columns as (Close, NVDA), (High, NVDA) …
         df.columns = df.columns.get_level_values(0)
     df = df.rename(columns={c: str(c).lower() for c in df.columns})
     cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
@@ -362,7 +439,7 @@ def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, sou
     source_opts = (
         '<label>数据源</label><select name="source">'
         '<option value="onchainos"%s>链上 DEX (OnchainOS)</option>'
-        '<option value="stock"%s>股票 (yfinance)</option></select>'
+        '<option value="stock"%s>股票 (东财/yfinance)</option></select>'
         % (" selected" if source == "onchainos" else "", " selected" if source == "stock" else "")
     )
     placeholder = "AAPL / SPY" if source == "stock" else "SOL / BTC"
@@ -449,7 +526,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source="o
         if df.empty:
             return ('<div class="banner err">%s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(bar))), None
-        src_label = "yfinance（%s）" % _esc(ticker)
+        src_label = "股票（%s）" % _esc(ticker)
     else:
         resolved = _resolve_for_table(ticker)
         if not resolved.get("ok"):
@@ -494,7 +571,7 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup, sourc
         if df.empty:
             return ('<div class="banner err">%s 在 %s ~ %s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
-        src_label = "yfinance（%s）" % _esc(ticker)
+        src_label = "股票（%s）" % _esc(ticker)
     else:
         resolved = _resolve_for_table(ticker)
         if not resolved.get("ok"):
