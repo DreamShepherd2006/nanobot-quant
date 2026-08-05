@@ -12,16 +12,23 @@
 credentials 目录读）→ fetch_kline / fetch_kline_range（OnchainOS CLI）
 → 当前 strategy.json 选中策略的引擎 run_all() → 服务端渲染表格。
 
+可选股票数据源（?source=stock）：yfinance.download 拉真实美股 K 线，
+用于 RWA 股票代币对应真实股票的长历史分析（方案 A：标的直接填美股
+代码，不建映射表）。列名/时区统一为 OnchainOS 同形，TD 引擎零改动。
+
 与 run_td_sequential 共用同一套参数（td_params.json 按策略独立保存）。
 """
 
 from __future__ import annotations
 
 import html as _html
+import json
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import yfinance as yf
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
@@ -36,6 +43,13 @@ _BARS = ["1m", "5m", "15m", "1H", "4H", "1D", "1W"]
 _DEFAULT_TICKER = "SOL"
 _DEFAULT_LIMIT = 60
 _DEFAULT_HISTORY_DAYS = 90
+
+# EastMoney (primary stock source) klt codes + window spans.
+_EM_KLTS = {"1m": "1", "5m": "5", "15m": "15", "1H": "60", "1D": "101", "1W": "102"}
+# yfinance (fallback) interval map — no 4h in either source.
+_YF_INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "60m", "1D": "1d", "1W": "1wk"}
+_SPAN = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "1D": 86400, "1W": 604800}
+_SOURCES = ("onchainos", "stock")
 
 
 # ── 数据获取 ──────────────────────────────────────────────────────────
@@ -56,6 +70,143 @@ def _resolve_for_table(ticker: str) -> dict:
     # default "solana"); re-attach it for fetch_kline / display.
     resolved.setdefault("chain", "solana")
     return resolved
+
+
+def _fetch_stock_kline(
+    ticker: str,
+    bar: str = "1D",
+    limit: int = 60,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    """Fetch real-stock candles, normalised to the OnchainOS DataFrame shape
+    (lowercase ohlcv columns, naive DatetimeIndex).
+
+    ``ticker`` is the US stock symbol itself (方案 A — no token→stock map).
+
+    Primary source is EastMoney (push2his.eastmoney.com, no API key, works
+    from datacenter IPs); Yahoo Finance (yfinance) is the fallback because
+    Yahoo rate-limits datacenter IPs (429). 4H is unsupported for stocks.
+    """
+    errors: list[str] = []
+    try:
+        return _fetch_stock_kline_eastmoney(ticker, bar=bar, limit=limit, start=start, end=end)
+    except Exception as exc:
+        errors.append("东财: %s" % exc)
+    try:
+        return _fetch_stock_kline_yahoo(ticker, bar=bar, limit=limit, start=start, end=end)
+    except Exception as exc:
+        errors.append("yfinance: %s" % exc)
+    raise RuntimeError("；".join(errors) or "股票数据获取失败")
+
+
+def _stock_secid(ticker: str) -> str:
+    """Map a symbol to an EastMoney secid.
+
+    6-digit numeric codes are treated as A-shares (SSE ``1.`` / SZSE
+    ``0.``); anything else is treated as a US symbol (``105.`` NYSE).
+    """
+    if ticker.isdigit() and len(ticker) == 6:
+        return f"1.{ticker}" if ticker.startswith(("6", "9")) else f"0.{ticker}"
+    return f"105.{ticker}"
+
+
+def _yf_symbol(ticker: str) -> str:
+    """Map a symbol to yfinance format: 6-digit codes get .SS/.SZ suffix."""
+    if ticker.isdigit() and len(ticker) == 6:
+        return f"{ticker}.SS" if ticker.startswith(("6", "9")) else f"{ticker}.SZ"
+    return ticker
+
+
+def _fetch_stock_kline_eastmoney(
+    ticker: str,
+    bar: str = "1D",
+    limit: int = 60,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    """EastMoney kline API → normalised DataFrame.
+
+    Response klines: "date,open,close,high,low,volume" (fields2
+    f51..f56). US symbols use secid=105.<SYMBOL>; 6-digit codes are
+    A-shares (secid 1./0.). 4H has no klt code.
+    """
+    klt = _EM_KLTS.get(bar)
+    if klt is None:
+        raise ValueError(f"股票数据源暂不支持 {bar} 周期（支持 1m/5m/15m/1H/1D/1W）")
+    if start is None:
+        now = end or datetime.now()
+        span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
+        start = now - timedelta(seconds=span)
+        end = now
+    url = (
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+        f"secid={_stock_secid(ticker)}&fields1=f1,f2,f3,f4,f5&"
+        "fields2=f51,f52,f53,f54,f55,f56&"
+        f"klt={klt}&fqt=1&beg={start.strftime('%Y%m%d')}&end={end.strftime('%Y%m%d')}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    klines = (payload.get("data") or {}).get("klines") or []
+    if not klines:
+        raise RuntimeError(f"东财无数据: {ticker}")
+    rows = []
+    for line in klines:
+        p = line.split(",")
+        rows.append({"time": p[0], "open": float(p[1]), "close": float(p[2]),
+                     "high": float(p[3]), "low": float(p[4]), "volume": float(p[5])})
+    df = pd.DataFrame(rows).set_index("time")
+    df.index = pd.to_datetime(df.index)
+    df.index.name = "time"
+    df = df[["open", "high", "low", "close", "volume"]]
+    if limit and len(df) > limit:
+        df = df.tail(limit)
+    return df
+
+
+def _fetch_stock_kline_yahoo(
+    ticker: str,
+    bar: str = "1D",
+    limit: int = 60,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    """yfinance fallback — Yahoo rate-limits datacenter IPs (429)."""
+    interval = _YF_INTERVALS.get(bar)
+    if interval is None:
+        raise ValueError(f"股票数据源暂不支持 {bar} 周期（支持 1m/5m/15m/1H/1D/1W）")
+    if start is None:
+        now = end or datetime.now()
+        span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
+        start = now - timedelta(seconds=span)
+        end = now
+    # yfinance `end` is exclusive; extend by one day so the requested end
+    # date is included.
+    end = end + timedelta(days=1) if bar in ("1D", "1W") else end
+    df = yf.download(
+        _yf_symbol(ticker),
+        start=start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else start,
+        end=end.strftime("%Y-%m-%d") if hasattr(end, "strftime") else end,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
+    if df is None or df.empty:
+        raise RuntimeError(f"yfinance 无数据: {ticker}")
+    if isinstance(df.columns, pd.MultiIndex):
+        # yfinance ≥1.x wraps columns as (Close, NVDA), (High, NVDA) …
+        df.columns = df.columns.get_level_values(0)
+    df = df.rename(columns={c: str(c).lower() for c in df.columns})
+    cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
+    df = df[cols].dropna(subset=["close"])
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    df.index.name = "time"
+    if limit and len(df) > limit:
+        df = df.tail(limit)
+    return df
 
 
 def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFrame:
@@ -299,35 +450,46 @@ def _query_int(q: dict, key: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
-def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str) -> str:
+def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, source: str = "onchainos") -> str:
     bar_opts = "".join(
         f'<option value="{b}"{" selected" if b == bar else ""}>{b}</option>'
         for b in _BARS
     )
+    source_opts = (
+        '<label>数据源</label><select name="source">'
+        '<option value="onchainos"%s>链上 DEX (OnchainOS)</option>'
+        '<option value="stock"%s>股票 (东财/yfinance)</option></select>'
+        % (" selected" if source == "onchainos" else "", " selected" if source == "stock" else "")
+    )
+    placeholder = "NVDA / 601127" if source == "stock" else "SOL / BTC"
     if tab == "history":
         return (
             '<form class="inline" method="get" action="/config/td-table">'
             '<input type="hidden" name="tab" value="history">'
-            '<label>标的</label><input name="ticker" value="%s" size="8">'
+            '%s'
+            '<label>标的</label><input name="ticker" value="%s" size="8" placeholder="%s">'
             '<label>周期</label><select name="bar">%s</select>'
             '<label>起始</label><input type="date" name="start" value="%s">'
             '<label>结束</label><input type="date" name="end" value="%s">'
-            '<button>分析</button></form>' % (_esc(ticker), bar_opts, _esc(start), _esc(end))
+            '<button>分析</button></form>'
+            % (source_opts, _esc(ticker), placeholder, bar_opts, _esc(start), _esc(end))
         )
     return (
         '<form class="inline" method="get" action="/config/td-table">'
         '<input type="hidden" name="tab" value="snapshot">'
-        '<label>标的</label><input name="ticker" value="%s" size="8">'
+        '%s'
+        '<label>标的</label><input name="ticker" value="%s" size="8" placeholder="%s">'
         '<label>周期</label><select name="bar">%s</select>'
         '<label>K 线数</label><input type="number" name="limit" value="%d" min="20" max="300" style="width:70px">'
-        '<button>刷新</button></form>' % (_esc(ticker), bar_opts, limit)
+        '<button>刷新</button></form>'
+        % (source_opts, _esc(ticker), placeholder, bar_opts, limit)
     )
 
 
 def td_table_page(request: Request) -> HTMLResponse:
     """GET /config/td-table — render the double-tab page.
 
-    Query params: tab=snapshot|history, ticker, bar, limit | start/end.
+    Query params: tab=snapshot|history, ticker, bar, limit | start/end, source.
     """
     q = dict(request.query_params)
     tab = q.get("tab", "snapshot")
@@ -336,6 +498,9 @@ def td_table_page(request: Request) -> HTMLResponse:
     if bar not in _BARS:
         bar = "1D"
     limit = _query_int(q, "limit", _DEFAULT_LIMIT, 20, 300)
+    source = q.get("source") or "onchainos"
+    if source not in _SOURCES:
+        source = "onchainos"
     today = datetime.now()
     end = (q.get("end") or today.strftime("%Y-%m-%d")).strip()
     start = (q.get("start") or (today - timedelta(days=_DEFAULT_HISTORY_DAYS)).strftime("%Y-%m-%d")).strip()
@@ -348,9 +513,9 @@ def td_table_page(request: Request) -> HTMLResponse:
     banner = ""
     content = ""
     if tab == "history":
-        content = _render_history(ticker, bar, start, end, strategy_name, params, setup)
+        content = _render_history(ticker, bar, start, end, strategy_name, params, setup, source)
     else:
-        content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup)
+        content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source)
 
     if isinstance(content, tuple):  # (error_html,)
         banner = content[0]
@@ -365,24 +530,35 @@ def td_table_page(request: Request) -> HTMLResponse:
     page = page.replace("{limit}", str(limit))
     page = page.replace("{start}", _esc(start))
     page = page.replace("{end}", _esc(end))
-    page = page.replace("{form}", _form(tab, ticker, bar, limit, start, end))
+    page = page.replace("{form}", _form(tab, ticker, bar, limit, start, end, source))
     page = page.replace("{banner}", banner)
     page = page.replace("{content}", content)
     return HTMLResponse(page)
 
 
-def _render_snapshot(ticker, bar, limit, strategy_name, params, setup):
-    resolved = _resolve_for_table(ticker)
-    if not resolved.get("ok"):
-        return ('<div class="banner err">标的解析失败：%s（%s）——可在「📊 业务管理」→ 代币管理添加或确认。</div>'
-                % (_esc(resolved.get("issue") or "unknown"), _esc(resolved.get("category") or ""))), None
-    try:
-        df = fetch_kline(resolved["chain"], resolved["address"], bar=bar, limit=limit)
-    except Exception as exc:  # CLI failure (e.g. missing credentials)
-        return ('<div class="banner err">K 线获取失败：%s</div>' % _esc(exc)), None
-    if df.empty:
-        return ('<div class="banner err">%s 无 %s K 线数据（可能链上无交易或区间过短）。</div>'
-                % (_esc(ticker), _esc(bar))), None
+def _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source="onchainos"):
+    if source == "stock":
+        try:
+            df = _fetch_stock_kline(ticker, bar=bar, limit=limit)
+        except Exception as exc:
+            return ('<div class="banner err">股票数据获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 无 %s 股票 K 线数据（yfinance）。</div>'
+                    % (_esc(ticker), _esc(bar))), None
+        src_label = "股票（%s）" % _esc(ticker)
+    else:
+        resolved = _resolve_for_table(ticker)
+        if not resolved.get("ok"):
+            return ('<div class="banner err">标的解析失败：%s（%s）——可在「📊 业务管理」→ 代币管理添加或确认。</div>'
+                    % (_esc(resolved.get("issue") or "unknown"), _esc(resolved.get("category") or ""))), None
+        try:
+            df = fetch_kline(resolved["chain"], resolved["address"], bar=bar, limit=limit)
+        except Exception as exc:  # CLI failure (e.g. missing credentials)
+            return ('<div class="banner err">K 线获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 无 %s K 线数据（可能链上无交易或区间过短）。</div>'
+                    % (_esc(ticker), _esc(bar))), None
+        src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
     seq = _engine_run(df, strategy_name, params)
     disp = _display(seq)
@@ -394,30 +570,41 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup):
     table = ('<table><thead><tr>%s</tr></thead><tbody>\n%s\n</tbody></table>'
              % (_build_headers(has_cd, has_tdst, has_score),
                 _build_rows(disp, setup)))
-    hint = ('<div class="banner info">最近 %d 根 %s · 数据来源 OnchainOS（%s/%s）。'
+    hint = ('<div class="banner info">最近 %d 根 %s · 数据来源 %s。'
             '当前策略参数来自 td_params.json（%s 独立保存）。</div>'
-            % (len(disp), _esc(bar), _esc(resolved["chain"]), _esc(resolved["address"]), _esc(strategy_name)))
+            % (len(disp), _esc(bar), src_label, _esc(strategy_name)))
     return status + hint + table
 
 
-def _render_history(ticker, bar, start, end, strategy_name, params, setup):
-    resolved = _resolve_for_table(ticker)
-    if not resolved.get("ok"):
-        return ('<div class="banner err">标的解析失败：%s（%s）</div>'
-                % (_esc(resolved.get("issue") or "unknown"), _esc(resolved.get("category") or ""))), None
+def _render_history(ticker, bar, start, end, strategy_name, params, setup, source="onchainos"):
     try:
         start_dt = datetime.strptime(start, "%Y-%m-%d")
         end_dt = datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)
     except ValueError:
         return '<div class="banner err">日期格式错误（应为 YYYY-MM-DD）。</div>', None
-    try:
-        df = fetch_kline_range(resolved["chain"], resolved["address"],
-                               start=start_dt, end=end_dt, bar=bar)
-    except Exception as exc:
-        return ('<div class="banner err">K 线获取失败：%s</div>' % _esc(exc)), None
-    if df.empty:
-        return ('<div class="banner err">%s 在 %s ~ %s 无 %s K 线数据。</div>'
-                % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
+    if source == "stock":
+        try:
+            df = _fetch_stock_kline(ticker, bar=bar, start=start_dt, end=end_dt)
+        except Exception as exc:
+            return ('<div class="banner err">股票数据获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 在 %s ~ %s 无 %s 股票 K 线数据（yfinance）。</div>'
+                    % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
+        src_label = "股票（%s）" % _esc(ticker)
+    else:
+        resolved = _resolve_for_table(ticker)
+        if not resolved.get("ok"):
+            return ('<div class="banner err">标的解析失败：%s（%s）</div>'
+                    % (_esc(resolved.get("issue") or "unknown"), _esc(resolved.get("category") or ""))), None
+        try:
+            df = fetch_kline_range(resolved["chain"], resolved["address"],
+                                   start=start_dt, end=end_dt, bar=bar)
+        except Exception as exc:
+            return ('<div class="banner err">K 线获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 在 %s ~ %s 无 %s K 线数据。</div>'
+                    % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
+        src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
     seq = _engine_run(df, strategy_name, params)
     disp = _display(seq)
@@ -429,8 +616,8 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup):
     table = ('<table><thead><tr>%s</tr></thead><tbody>\n%s\n</tbody></table>'
              % (_build_headers(has_cd, has_tdst, has_score), _build_rows(disp, setup)))
     stats = _render_stats_table(rows, agg)
-    hint = ('<div class="banner info">%s ~ %s 共 %d 根 %s K 线 · 9 信号 %d 个 · 胜率统计仅含区间内可观察完整后续的信号。</div>'
-            % (_esc(start), _esc(end), len(disp), _esc(bar), len(rows)))
+    hint = ('<div class="banner info">%s ~ %s 共 %d 根 %s K 线 · 数据来源 %s · 9 信号 %d 个 · 胜率统计仅含区间内可观察完整后续的信号。</div>'
+            % (_esc(start), _esc(end), len(disp), _esc(bar), src_label, len(rows)))
     return hint + table + stats
 
 
