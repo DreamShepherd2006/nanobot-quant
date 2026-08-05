@@ -68,10 +68,19 @@ def calculate(
         except (ValueError, TypeError):
             return str(val)
 
+    rec = str(last["recommendation"])
+    # Execution chain honours setup/countdown signals only.  TDST break
+    # signals ("… (Resistance/Support Break)") are display/reference and
+    # must never trigger orders — downgrade to HOLD here so every consumer
+    # (run_td_sequential, research-chain TD gate) stays consistent with
+    # backtest rules (setup_buy>=9 / setup_sell>=9).
+    if "Break" in rec:
+        rec = "HOLD"
+
     return {
         "timestamp": str(last.name),
         "price": _scalar(last["Close"]),
-        "recommendation": str(last["recommendation"]),
+        "recommendation": rec,
         "setup_buy": int(last["buy_setup_count"]),
         "setup_sell": int(last["sell_setup_count"]),
         "cd_buy": int(last["buy_countdown_count"]),
@@ -329,25 +338,29 @@ class _DeMarkEngine:
 
             rec = "HOLD"
 
-            # ── Sell signals ──
+            # ── Sell signals (setup / countdown) ──
             if s_9 or s_13:
                 rec = "SELL (Overbought)" if close > bb_upper else "SELL (Setup Complete)"
 
-            # Support break → sell
-            if not np.isnan(support) and i > 0:
-                prev_close = self.df.iloc[i - 1]["Close"]
-                if close < support <= prev_close:
-                    rec = "SELL (Support Break)"
-
-            # ── Buy signals ──
+            # ── Buy signals (setup / countdown) ──
             if b_9 or b_13:
                 rec = "BUY (Oversold)" if close < bb_lower else "BUY (Setup Complete)"
 
-            # Resistance break → buy
-            if not np.isnan(resist) and i > 0:
-                prev_close = self.df.iloc[i - 1]["Close"]
-                if close > resist >= prev_close:
-                    rec = "BUY (Resistance Break)"
+            # ── TDST break signals (display/reference only) ──
+            # Never override setup/countdown signals: the execution chain
+            # (run_td_sequential / research-chain TD gate) honours
+            # setup/countdown only, matching backtest rules.  Break signals
+            # are shown in the table for reference but must not flip the
+            # direction of a completed setup on the same bar.
+            if rec == "HOLD":
+                if not np.isnan(support) and i > 0:
+                    prev_close = self.df.iloc[i - 1]["Close"]
+                    if close < support <= prev_close:
+                        rec = "SELL (Support Break)"
+                if not np.isnan(resist) and i > 0:
+                    prev_close = self.df.iloc[i - 1]["Close"]
+                    if close > resist >= prev_close:
+                        rec = "BUY (Resistance Break)"
 
             self.df.at[self.df.index[i], "recommendation"] = rec
 
