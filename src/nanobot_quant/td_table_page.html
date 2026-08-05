@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TD 序列分析</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 24px auto; max-width: 1080px; padding: 0 16px; color: #222; background: #fafafa; }
+  h2 { margin: 8px 0 12px; font-size: 20px; }
+  .badge { font-size: 12px; font-weight: 500; color: #555; background: #eef1f5; border-radius: 10px;
+           padding: 2px 10px; margin-left: 8px; vertical-align: middle; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tabs a { text-decoration: none; padding: 6px 14px; border-radius: 8px; font-size: 14px;
+            color: #444; background: #fff; border: 1px solid #ddd; }
+  .tabs a.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  form.inline { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff;
+                border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 13px; }
+  form.inline label { color: #666; }
+  form.inline input, form.inline select { padding: 5px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  form.inline button { padding: 6px 16px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; cursor: pointer; font-size: 13px; }
+  .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; }
+  .banner.err { background: #fdecea; border: 1px solid #f5c6c2; color: #b3261e; }
+  .banner.info { background: #e8f1fe; border: 1px solid #b9d3f8; color: #1a4f9e; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; background: #fff; }
+  th { background: #f3f5f8; text-align: right; padding: 8px 10px; border-bottom: 2px solid #e2e6ec; white-space: nowrap; }
+  td { padding: 6px 10px; border-bottom: 1px solid #eef0f3; text-align: right; white-space: nowrap; }
+  td.time { text-align: left; color: #555; }
+  .num { font-variant-numeric: tabular-nums; }
+  .up { color: #e0533d; } .dn { color: #2e7d32; }
+  tr.sig-buy { background: #e9f7ec; }
+  tr.sig-sell { background: #fdeeee; }
+  tr.flip { background: #f0f6fe; }
+  .sig { font-weight: 600; }
+  .sig.buy { color: #1b7f3d; } .sig.sell { color: #c62828; } .sig.hold { color: #999; }
+  .setup { font-weight: 700; }
+  .setup.buy { color: #1b7f3d; } .setup.sell { color: #c62828; }
+  .muted { color: #aaa; }
+  .status { display: flex; gap: 16px; flex-wrap: wrap; background: #fff; border: 1px solid #e5e7eb;
+            border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; font-size: 13px; }
+  .status b { font-size: 15px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-top: 18px; }
+  .stat-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 16px; }
+  .stat-card h4 { margin: 0 0 8px; font-size: 14px; }
+  .stat-card table { font-size: 12px; }
+  .stat-card th, .stat-card td { padding: 5px 8px; }
+  .legend { font-size: 12px; color: #777; margin: 8px 0 2px; }
+</style>
+</head>
+<body>
+<h2>📊 TD 序列分析<span class="badge">当前策略：{strategy_label}</span></h2>
+<div class="tabs">
+  <a class="{snap_active}" href="/config/td-table?tab=snapshot&amp;ticker={ticker}&amp;bar={bar}&amp;limit={limit}">① 实时快照</a>
+  <a class="{hist_active}" href="/config/td-table?tab=history&amp;ticker={ticker}&amp;bar={bar}&amp;start={start}&amp;end={end}">② 历史区间分析</a>
+  <a href="/config/strategy">⇄ 切换策略</a>
+</div>
+{form}
+{banner}
+{content}
+<div class="legend">图例：<span class="setup buy">绿 1-9</span> = Buy Setup 进度（连续下跌计数）｜<span class="setup sell">红 1-9</span> = Sell Setup 进度（连续上涨计数）｜信号行 = setup 完成（count == Setup 周期）｜浅蓝行 = 新一轮 setup 启动（count==1）</div>
+</body>
+</html>
