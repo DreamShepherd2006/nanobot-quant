@@ -16,6 +16,7 @@ import os
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
+from .strategies.registry import get_strategy, load_selected
 from .td_params import (
     PARAM_META,
     WEIGHT_KEYS,
@@ -94,6 +95,25 @@ def _group_html(group: str, params: dict) -> str:
     return f'<div class="card"><h3>{_GROUP_TITLES[group]}</h3>{extra}{fields}</div>'
 
 
+def _strategy_banner() -> str:
+    """Show which strategy the parameter set applies to.
+
+    The registry stores the WebUI label per strategy; two TD variants share
+    the same param defaults today, but the banner makes the binding explicit
+    so switching strategy on the selection page is visible here too.
+    """
+    try:
+        name = load_selected()
+        label = get_strategy(name).label
+    except Exception:
+        name, label = "td_sequential", "TD Sequential（原版）"
+    return (
+        f'<div class="banner strategy">🎯 当前策略：{label}'
+        '——以下参数应用于该策略'
+        '（可在「📈 策略选择」页切换）</div>'
+    )
+
+
 def _render_page(params: dict, message: str = "") -> str:
     custom = td_params_path().is_file()
     banner = (
@@ -109,7 +129,7 @@ def _render_page(params: dict, message: str = "") -> str:
     )
     groups = "".join(_group_html(g, params) for g in ("td", "weights", "strategy"))
     return (
-        _PAGE_HTML.replace("{banner}", banner)
+        _PAGE_HTML.replace("{banner}", _strategy_banner() + banner)
         .replace("{msg}", msg)
         .replace("{groups}", groups)
         .replace("{saved_at}", "")

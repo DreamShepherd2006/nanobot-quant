@@ -334,6 +334,7 @@ class TestHandlers:
         assert "Setup 周期" in html
         assert "权重合计" in html
         assert 'value="9"' in html  # default setup period rendered
+        assert "当前策略：TD Sequential（原版）" in html  # strategy banner
 
     def test_save_via_handler(self, _isolated_params):
         from nanobot_quant.td_params_handlers import td_params_save
