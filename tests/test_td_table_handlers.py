@@ -1,0 +1,212 @@
+"""TD 序列可视化分析页（/config/td-table）handler 测试。
+
+覆盖：引擎映射、K 线序列计算、9 信号回溯统计、页面渲染（mock 数据源，
+避免 CLI 依赖）。handler 直调（FakeRequest），与 td_params 测试同模式。
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from nanobot_quant.strategies.registry import resolve_engine_cls
+from nanobot_quant.strategies.td_sequential_cycle import CycleDeMarkEngine
+from nanobot_quant.strategies.td_sequential_futu import FutuDeMarkEngine
+from nanobot_quant.td_table_handlers import (
+    _build_rows,
+    _engine_run,
+    _render_stats_table,
+    signal_stats,
+    td_table_page,
+)
+from tests.test_td_sequential_cycle import _falling_df as _cycle_fall  # noqa: F401
+
+
+def _seq_df() -> pd.DataFrame:
+    """Engine output with a completed Buy setup at the last bar + no forward bars."""
+    closes = [100, 101, 102, 103, 104, 100, 99, 98, 97, 96, 95, 94, 93, 92]
+    df = pd.DataFrame(
+        {"Open": closes,
+         "High": [c + 1 for c in closes],
+         "Low": [c - 1 for c in closes],
+         "Close": closes,
+         "Volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+    return _engine_run(df, "td_sequential", {"setup_period": 9, "compare_length": 4})
+
+
+class FakeRequest:
+    def __init__(self, params: dict):
+        self.query_params = params
+
+
+def test_resolve_engine_cls_mapping():
+    from nanobot_quant.strategies.td_sequential import _DeMarkEngine
+    assert resolve_engine_cls("td_sequential") is _DeMarkEngine
+    assert resolve_engine_cls("td_sequential_cycle") is CycleDeMarkEngine
+    assert resolve_engine_cls("td_sequential_futu") is FutuDeMarkEngine
+
+
+def test_engine_run_normalises_columns():
+    df = pd.DataFrame(
+        {"open": [1, 2, 3], "high": [3, 4, 5], "low": [0, 1, 2],
+         "close": [1, 2, 3], "volume": [10, 10, 10]},
+        index=pd.date_range("2026-01-01", periods=3, freq="D"),
+    )
+    out = _engine_run(df, "td_sequential_futu", {"setup_period": 9})
+    assert "Close" in out.columns
+    assert "buy_setup_count" in out.columns
+    assert "combined_score" in out.columns
+
+
+def test_signal_stats_counts_and_forward_returns():
+    seq = _seq_df()
+    rows, agg = signal_stats(seq, 9)
+    # falling 9-bar setup completes at the last bar (count reaches 9)
+    buy_rows = [r for r in rows if r["direction"] == "BUY"]
+    assert len(buy_rows) == 1
+    r = buy_rows[0]
+    assert r["price"] == 92.0
+    # no forward bars available (range end) → pct None
+    assert r["pct3"] is None and r["pct5"] is None and r["pct10"] is None
+    assert agg["BUY"][3] is None  # no observable signals → no stats
+    assert agg["SELL"][3] is None
+
+
+def test_signal_stats_win_aggregation():
+    # 5 rising bars → 9 falling bars (setup at index 13, price 92) → 10 rebounds
+    closes = ([100, 101, 102, 103, 104]
+              + [100, 99, 98, 97, 96, 95, 94, 93, 92]
+              + [93, 94, 95, 96, 97, 98, 99, 100, 101, 102])
+    df = pd.DataFrame(
+        {"Open": closes, "High": [c + 1 for c in closes],
+         "Low": [c - 1 for c in closes], "Close": closes,
+         "Volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+    seq = _engine_run(df, "td_sequential", {"setup_period": 9, "compare_length": 4})
+    rows, agg = signal_stats(seq, 9)
+    buy_rows = [r for r in rows if r["direction"] == "BUY"]
+    assert len(buy_rows) == 1
+    r = buy_rows[0]
+    assert r["price"] == 92.0
+    assert r["pct3"] is not None and r["pct5"] is not None and r["pct10"] is not None
+    # pct3 after trigger: bar 16 close = 95
+    assert r["pct3"] == pytest.approx((95 / 92 - 1) * 100)
+    a = agg["BUY"][3]
+    assert a["n"] == 1
+    assert a["win"] == 1  # 95 > 92 → win
+    assert a["rate"] == 100.0
+
+
+def test_signal_stats_sell_side():
+    closes = [100, 99, 98, 97, 96] + [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111]
+    df = pd.DataFrame(
+        {"Open": closes, "High": [c + 1 for c in closes],
+         "Low": [c - 1 for c in closes], "Close": closes,
+         "Volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+    seq = _engine_run(df, "td_sequential", {"setup_period": 9, "compare_length": 4})
+    rows, agg = signal_stats(seq, 9)
+    sell_rows = [r for r in rows if r["direction"] == "SELL"]
+    assert len(sell_rows) == 1
+    assert sell_rows[0]["price"] == 108.0
+    assert agg["SELL"][3] is not None
+
+
+def test_build_rows_highlights_signals():
+    from nanobot_quant.td_table_handlers import _display
+    seq = _seq_df()
+    rows_html = _build_rows(_display(seq), 9)
+    # last bar (count==9 → BUY) gets sig-buy class
+    assert 'class="sig-buy"' in rows_html
+    # signal text present
+    assert "BUY (Setup Complete)" in rows_html
+
+
+def test_render_stats_table_html():
+    rows = [
+        {"time": "2026-01-12 16:00", "direction": "BUY", "price": 93.0,
+         "p3": 92.0, "pct3": -1.08, "p5": 94.0, "pct5": 1.08,
+         "p10": None, "pct10": None},
+    ]
+    agg = {"BUY": {3: {"n": 1, "win": 0, "rate": 0.0}, 5: {"n": 1, "win": 1, "rate": 100.0},
+                   10: None},
+           "SELL": {3: None, 5: None, 10: None}}
+    html = _render_stats_table(rows, agg)
+    assert "9 信号回溯" in html
+    assert "BUY" in html
+    assert "100.0%" in html
+
+
+def test_page_renders_with_mocked_data(monkeypatch):
+    import nanobot_quant.td_table_handlers as mod
+
+    closes = list(range(100, 105)) + list(range(100, 91, -1))  # 14 bars, 9-bar fall
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+    monkeypatch.setattr(mod, "_resolve_for_table",
+                        lambda ticker: {"ok": True, "chain": "solana",
+                                       "address": "So11111111111111111111111111111111111111112"})
+    monkeypatch.setattr(mod, "fetch_kline", lambda chain, addr, bar="1D", limit=60: df)
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    resp = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "SOL", "bar": "1D", "limit": "60"}))
+    body = resp.body.decode()
+    assert "TD 序列分析" in body
+    assert "BUY (Setup Complete)" in body
+    assert "当前策略" in body
+
+
+def test_page_renders_history_with_mocked_data(monkeypatch):
+    import nanobot_quant.td_table_handlers as mod
+
+    closes = list(range(100, 105)) + list(range(100, 91, -1))
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+    monkeypatch.setattr(mod, "_resolve_for_table",
+                        lambda ticker: {"ok": True, "chain": "solana",
+                                       "address": "So11111111111111111111111111111111111111112"})
+    monkeypatch.setattr(mod, "fetch_kline_range",
+                        lambda chain, addr, start, end, bar="1D": df)
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    resp = td_table_page(FakeRequest({"tab": "history", "ticker": "SOL", "bar": "1D",
+                                      "start": "2026-01-01", "end": "2026-01-31"}))
+    body = resp.body.decode()
+    assert "9 信号回溯" in body
+    assert "胜率" in body
+    assert "BUY" in body
+
+
+def test_page_resolve_error_banner(monkeypatch):
+    import nanobot_quant.td_table_handlers as mod
+
+    monkeypatch.setattr(mod, "_resolve_for_table",
+                        lambda ticker: {"ok": False, "issue": "not supported on solana chain",
+                                       "category": "not_found"})
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    resp = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "XYZZY", "bar": "1D"}))
+    body = resp.body.decode()
+    assert "标的解析失败" in body
+    assert "not_found" in body

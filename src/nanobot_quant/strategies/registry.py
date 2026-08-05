@@ -137,6 +137,27 @@ def get_strategy(name: str) -> StrategySpec:
         ) from None
 
 
+def resolve_engine_cls(name: str | None = None):
+    """Resolve the DeMark engine class for a strategy (default: selected).
+
+    The table visualisation page needs the full per-bar sequence
+    (``run_all()``), which ``signal_fn`` (scalar-only ``calculate``) cannot
+    provide — engines are therefore resolved explicitly per variant. Keeps
+    the private engine classes out of the public ``StrategySpec`` surface.
+    """
+    if name is None:
+        name = load_selected()
+    if name == "td_sequential_cycle":
+        from nanobot_quant.strategies.td_sequential_cycle import CycleDeMarkEngine
+        return CycleDeMarkEngine
+    if name == "td_sequential_futu":
+        from nanobot_quant.strategies.td_sequential_futu import FutuDeMarkEngine
+        return FutuDeMarkEngine
+    # td_sequential (production default) — the base engine itself
+    from nanobot_quant.strategies.td_sequential import _DeMarkEngine
+    return _DeMarkEngine
+
+
 def list_strategies(enabled_only: bool = True) -> list[StrategySpec]:
     _ensure_registered()
     return [s for s in _REGISTRY.values() if not enabled_only or s.enabled]

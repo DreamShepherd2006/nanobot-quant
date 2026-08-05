@@ -203,6 +203,14 @@ def _trim_range(
     """Concatenate and trim frame list to [start, end]."""
     if not frames:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    # The kline parser builds a tz-aware UTC index; normalise naive
+    # boundaries (e.g. parsed from a date-only form field) to UTC so the
+    # comparison below does not raise
+    # "Invalid comparison between dtype=datetime64[ns, UTC] and datetime".
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
     result = pd.concat(frames)
     result = result[~result.index.duplicated()].sort_index()
     return result[(result.index >= start) & (result.index <= end)]
