@@ -1,0 +1,127 @@
+"""策略注册表测试 — StrategySpec 注册 / 选择持久化 / 分发。"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from nanobot_quant.strategies.registry import (
+    DEFAULT_STRATEGY,
+    StrategySpec,
+    get_strategy,
+    list_strategies,
+    list_strategies_names,
+    load_selected,
+    register,
+    resolve_signal_fn,
+    save_selected,
+    strategy_paths,
+)
+
+
+def test_default_strategy_is_td_sequential():
+    assert DEFAULT_STRATEGY == "td_sequential"
+
+
+def test_builtin_strategies_registered():
+    names = list_strategies_names()
+    assert "td_sequential" in names
+    assert "td_sequential_cycle" in names
+
+
+def test_cycle_is_variant_of_td():
+    base = get_strategy("td_sequential")
+    cycle = get_strategy("td_sequential_cycle")
+    assert cycle.variant_of == "td_sequential"
+    assert base.variant_of is None
+    assert base.signal_fn is not None and cycle.signal_fn is not None
+
+
+def test_cycle_defaults_have_no_countdown_weight():
+    """同花顺口径：countdown 权重为 0，其余四项归一化后合计 1.0."""
+    d = get_strategy("td_sequential_cycle").params_defaults
+    assert d["weight_countdown"] == 0.0
+    visible = sum(d[k] for k in ("weight_setup", "weight_tdst",
+                                 "weight_volume", "weight_bb"))
+    assert abs(visible - 1.0) <= 1e-6
+    assert d["weight_setup"] == round(0.40 / 0.70, 4)
+    # original variant keeps the classic weights
+    base = get_strategy("td_sequential").params_defaults
+    assert base["weight_countdown"] == 0.30
+
+
+def test_cycle_engine_outputs_no_countdown():
+    """cycle 信号 cd_buy/cd_sell 恒 0（同花顺九转只到 9）."""
+    import pandas as pd
+
+    from nanobot_quant.strategies.td_sequential_cycle import calculate as cycle_calc
+
+    # 50 bars of a clean uptrend (triggers sell setup sequences)
+    close = list(range(100, 150, 1))
+    df = pd.DataFrame({
+        "Open": close,
+        "High": [c + 1 for c in close],
+        "Low": [c - 1 for c in close],
+        "Close": close,
+        "Volume": [1000] * len(close),
+    })
+    out = cycle_calc(df)
+    assert out["cd_buy"] == 0
+    assert out["cd_sell"] == 0
+    assert isinstance(out["score"], (int, float)) or out["score"] is None
+
+
+def test_duplicate_register_rejected():
+    spec = StrategySpec(name="td_sequential", label="dup", description="d")
+    with pytest.raises(ValueError):
+        register(spec)
+
+
+def test_unknown_strategy_raises():
+    with pytest.raises(KeyError):
+        get_strategy("no_such_strategy")
+
+
+def test_save_load_roundtrip(tmp_path):
+    p = str(tmp_path / "strategy.json")
+    save_selected(p, "td_sequential_cycle")
+    assert load_selected(p) == "td_sequential_cycle"
+    with open(p, encoding="utf-8") as f:
+        assert json.load(f) == {"strategy": "td_sequential_cycle"}
+
+
+def test_save_unknown_strategy_rejected(tmp_path):
+    p = str(tmp_path / "strategy.json")
+    with pytest.raises(KeyError):
+        save_selected(p, "bogus")
+
+
+def test_load_missing_file_falls_back_to_default(tmp_path):
+    assert load_selected(str(tmp_path / "nope.json")) == DEFAULT_STRATEGY
+
+
+def test_strategy_paths_cover_both_data_root_conventions():
+    """WebUI writes {data_root}/legion/strategy.json; when data_root=/data/legion
+    the file lands under /data/legion/legion/ — tool-side candidates must cover
+    both conventions so the WebUI selection actually takes effect."""
+    paths = strategy_paths()
+    assert "/data/legion/legion/strategy.json" in paths
+    assert "/data/legion/strategy.json" in paths
+    assert "/mnt/workspace/legion/legion/strategy.json" in paths
+    assert "/mnt/workspace/legion/strategy.json" in paths
+
+
+def test_resolve_default_is_td_calculate():
+    fn = resolve_signal_fn()  # no strategy.json on CI → default
+    assert fn.__module__ == "nanobot_quant.strategies.td_sequential"
+
+
+def test_resolve_explicit_cycle():
+    fn = resolve_signal_fn("td_sequential_cycle")
+    assert fn.__module__ == "nanobot_quant.strategies.td_sequential_cycle"
+
+
+def test_list_strategies_returns_specs():
+    specs = list_strategies()
+    assert all(isinstance(s, StrategySpec) for s in specs)
+    assert any(s.name == "td_sequential" for s in specs)

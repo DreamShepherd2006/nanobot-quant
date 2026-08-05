@@ -16,6 +16,7 @@ import os
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
+from .strategies.registry import get_strategy, load_selected
 from .td_params import (
     PARAM_META,
     WEIGHT_KEYS,
@@ -52,12 +53,13 @@ async def _body(request: Request) -> dict | None:
 # ── Page ────────────────────────────────────────────────────────────────
 
 
-def _field_html(key: str, value: object) -> str:
-    """Render one editable field (number input or checkbox)."""
+def _field_html(key: str, value: object, defaults: dict) -> str:
+    """Render one editable field (number input or checkbox).
+    ``defaults`` is the current strategy's defaults (shown as 默认)."""
     meta = PARAM_META[key]
     label = meta.get("label", key)
     hint = meta.get("hint", "")
-    std = meta.get("std", "")
+    std = defaults.get(key, meta.get("std", ""))
     if meta.get("type") == "bool":
         checked = ' checked="checked"' if value else ""
         return (
@@ -77,12 +79,21 @@ def _field_html(key: str, value: object) -> str:
     )
 
 
-def _group_html(group: str, params: dict) -> str:
+def _param_applies(meta: dict, strategy: str) -> bool:
+    """True when the parameter is part of the strategy's schema."""
+    allowed = meta.get("strategies")
+    return allowed is None or strategy in allowed
+
+
+def _group_html(group: str, params: dict, strategy: str, defaults: dict) -> str:
     fields = "".join(
-        _field_html(k, params[k])
+        _field_html(k, params[k], defaults)
         for k in PARAM_META
         if PARAM_META[k].get("group") == group
+        and _param_applies(PARAM_META[k], strategy)
     )
+    if not fields:
+        return ""
     extra = ""
     if group == "weights":
         total = sum(float(params[k]) for k in WEIGHT_KEYS)
@@ -92,6 +103,25 @@ def _group_html(group: str, params: dict) -> str:
             f'权重合计：{total:.3f}（需 = 1.000）</div>'
         )
     return f'<div class="card"><h3>{_GROUP_TITLES[group]}</h3>{extra}{fields}</div>'
+
+
+def _strategy_banner() -> str:
+    """Show which strategy the parameter set applies to.
+
+    The registry stores the WebUI label per strategy; two TD variants share
+    the same param defaults today, but the banner makes the binding explicit
+    so switching strategy on the selection page is visible here too.
+    """
+    try:
+        name = load_selected()
+        label = get_strategy(name).label
+    except Exception:
+        name, label = "td_sequential", "TD Sequential（原版）"
+    return (
+        f'<div class="banner strategy">🎯 当前策略：{label}'
+        '——以下参数仅应用于该策略，按策略独立保存'
+        '（可在「📈 策略选择」页切换）</div>'
+    )
 
 
 def _render_page(params: dict, message: str = "") -> str:
@@ -107,9 +137,17 @@ def _render_page(params: dict, message: str = "") -> str:
         if message
         else '<div class="banner msg hidden" id="save-msg"></div>'
     )
-    groups = "".join(_group_html(g, params) for g in ("td", "weights", "strategy"))
+    try:
+        name = load_selected()
+        defaults = get_strategy(name).params_defaults
+    except Exception:
+        name, defaults = "td_sequential", dict(DEFAULT_TD_PARAMS)
+    groups = "".join(
+        _group_html(g, params, name, defaults)
+        for g in ("td", "weights", "strategy")
+    )
     return (
-        _PAGE_HTML.replace("{banner}", banner)
+        _PAGE_HTML.replace("{banner}", _strategy_banner() + banner)
         .replace("{msg}", msg)
         .replace("{groups}", groups)
         .replace("{saved_at}", "")

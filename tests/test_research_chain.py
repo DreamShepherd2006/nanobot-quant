@@ -75,8 +75,12 @@ class TestSupportedSymbols:
 
 
 class TestChainResultsDir:
-    def test_dir_name(self):
-        assert chain_results_dir().name == "research_chains"
+    def test_dir_name(self, tmp_path):
+        (tmp_path / "legion").mkdir()
+        d = chain_results_dir(roots=(str(tmp_path),))
+        assert d == tmp_path / "legion" / "research_chains"
+        assert d.name == "research_chains"
+        assert d.is_dir()
 
 
 class TestNormalizeSymbol:

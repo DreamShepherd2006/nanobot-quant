@@ -334,6 +334,7 @@ class TestHandlers:
         assert "Setup 周期" in html
         assert "权重合计" in html
         assert 'value="9"' in html  # default setup period rendered
+        assert "当前策略：TD Sequential（原版）" in html  # strategy banner
 
     def test_save_via_handler(self, _isolated_params):
         from nanobot_quant.td_params_handlers import td_params_save
@@ -374,3 +375,67 @@ class TestHandlers:
         assert data["ok"] is True
         assert not _isolated_params.is_file()
         assert "默认参数" in _call(td_params_page).body.decode()
+
+
+# ── Per-strategy parameter sets (strategy registry) ─────────────────────
+
+class TestPerStrategyParams:
+    """Parameters are stored per strategy; switching strategy shows the
+    selected strategy's own set."""
+
+    def test_params_isolated_per_strategy(self, _isolated_params):
+        res = save_td_params({"setup_period": 8}, strategy="td_sequential")
+        assert res["ok"] is True
+        assert load_td_params(strategy="td_sequential")["setup_period"] == 8
+        # the other variant is untouched
+        assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 9
+        assert _isolated_params.is_file()
+
+    def test_legacy_flat_layout_migrates_to_default_strategy(self, _isolated_params):
+        """Old single-layer file belongs to the production default strategy;
+        a subsequent save migrates the file to the per-strategy layout."""
+        _isolated_params.write_text(
+            json.dumps({"setup_period": 8}), encoding="utf-8"
+        )
+        assert load_td_params(strategy="td_sequential")["setup_period"] == 8
+        assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 9
+        save_td_params({"countdown_period": 12}, strategy="td_sequential_cycle")
+        raw = json.loads(_isolated_params.read_text(encoding="utf-8"))
+        assert raw["td_sequential"]["setup_period"] == 8
+        assert raw["td_sequential_cycle"]["countdown_period"] == 12
+
+    def test_reset_only_current_strategy(self, _isolated_params):
+        save_td_params({"setup_period": 8}, strategy="td_sequential")
+        save_td_params({"setup_period": 7}, strategy="td_sequential_cycle")
+        res = save_td_params({"reset": True}, strategy="td_sequential")
+        assert res["ok"] is True
+        assert load_td_params(strategy="td_sequential")["setup_period"] == 9
+        assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 7
+
+    def test_cycle_defaults_no_countdown(self):
+        """cycle 参数默认无 countdown 权重（归一化四项合计 1.0）."""
+        d = load_td_params(strategy="td_sequential_cycle")
+        assert d["weight_countdown"] == 0.0
+        assert abs(sum(d[k] for k in ("weight_setup", "weight_tdst",
+                                      "weight_volume", "weight_bb")) - 1.0) <= 1e-6
+        # original variant unaffected
+        base = load_td_params(strategy="td_sequential")
+        assert base["weight_countdown"] == 0.30
+
+    def test_param_applies_filters_countdown(self):
+        from nanobot_quant.td_params import PARAM_META
+        from nanobot_quant.td_params_handlers import _param_applies
+
+        assert _param_applies(PARAM_META["setup_period"], "td_sequential_cycle")
+        assert not _param_applies(PARAM_META["countdown_period"], "td_sequential_cycle")
+        assert _param_applies(PARAM_META["countdown_period"], "td_sequential")
+
+    def test_group_html_omits_countdown_for_cycle(self):
+        from nanobot_quant.strategies.registry import get_strategy
+        from nanobot_quant.td_params_handlers import _group_html
+
+        base = get_strategy("td_sequential").params_defaults
+        cycle = get_strategy("td_sequential_cycle").params_defaults
+        assert "Countdown 权重" not in _group_html("weights", cycle, "td_sequential_cycle", cycle)
+        assert "Setup 权重" in _group_html("weights", cycle, "td_sequential_cycle", cycle)
+        assert "Countdown 权重" in _group_html("weights", base, "td_sequential", base)

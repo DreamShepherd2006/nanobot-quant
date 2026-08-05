@@ -471,14 +471,16 @@ def supported_symbols(tokens_json: list[dict] | None = None) -> list[str]:
     return syms
 
 
-def chain_results_dir() -> Path:
+def chain_results_dir(roots: tuple = ("/data", "/mnt/workspace")) -> Path:
     """Persistent directory for research-chain execution outcomes.
 
     ``{data_root}/legion/research_chains/`` (independent from the credentials
     directory so audit records stay readable; survives Factory Rebuild).
     Falls back to ``~/.research_chains`` when neither HF nor MS root exists.
+    The ``roots`` parameter is test-only (inject a tmp dir to keep the test
+    environment-independent).
     """
-    for root in ("/data", "/mnt/workspace"):
+    for root in roots:
         d = Path(root) / "legion" / "research_chains"
         try:
             if d.parent.exists():

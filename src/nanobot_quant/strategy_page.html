@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>策略选择</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          background: #f5f5f5; color: #333; padding: 2rem; max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .sub { color: #666; font-size: 0.875rem; margin-bottom: 1.5rem; }
+  .strategies { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .strategy-card { flex: 1; min-width: 280px; background: #fff; border-radius: 12px;
+                padding: 1.5rem; text-align: left; cursor: pointer;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+                transition: all 0.2s; border: 2px solid transparent; }
+  .strategy-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+  .strategy-card.active { border-color: #1a73e8; background: #f0f6ff; }
+  .strategy-card .icon { font-size: 2rem; margin-bottom: 0.6rem; }
+  .strategy-card h2 { font-size: 1.05rem; margin-bottom: 0.4rem; }
+  .strategy-card p { font-size: 0.83rem; color: #555; line-height: 1.55; margin-bottom: 0.6rem; }
+  .strategy-card .meta { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .strategy-card .chip { background: #f1f3f4; color: #444; border-radius: 20px;
+            padding: 2px 10px; font-size: 0.72rem; }
+  .strategy-card .chip.code { font-family: ui-monospace, Menlo, monospace; background: #e8eaed; }
+  .badge { display: inline-block; background: #1e8e3e; color: #fff; border-radius: 20px;
+            padding: 2px 12px; font-size: 0.75rem; margin-top: 0.6rem; }
+  .strategy-card:not(.active) .badge { display: none; }
+  .back { display: inline-block; margin-top: 1.5rem; color: #1a73e8; text-decoration: none;
+           font-size: 0.9rem; }
+  .back:hover { text-decoration: underline; }
+  .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; padding: 0.75rem 1.25rem;
+            border-radius: 8px; color: #fff; font-size: 0.9rem; z-index: 999;
+            opacity: 0; transition: opacity 0.3s; }
+  .toast.ok { background: #1e8e3e; }
+  .toast.err { background: #c5221f; }
+  .toast.show { opacity: 1; }
+  .info { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; margin-top: 1.5rem;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08); font-size: 0.85rem; color: #555;
+          line-height: 1.7; }
+  .info code { background: #f1f3f4; padding: 1px 5px; border-radius: 3px; font-size: 0.82rem; }
+</style>
+</head>
+<body>
+<h1>📈 策略选择</h1>
+<p class="sub">选择 Quant 路线使用的确定性信号策略（TD 算法口径变体 / 未来新策略）。</p>
+
+<div class="strategies">
+{cards}
+</div>
+
+<div class="info">
+  <p><strong>当前策略</strong>：{current_label}</p>
+  <p><strong>生效范围</strong>：Quant 路线（<code>mode.json</code> 为 <code>quant</code>）下，下一次 <code>run_td_sequential</code> / 信号生成调用即生效，无需重启。</p>
+  <p><strong>路线与策略分离</strong>：<code>mode.json</code> 管流程形态（quant 确定性 / research AI 辩论），本页管 quant 路线用哪个策略。Research 路线固定走 VT Swarm 辩论流程，不受本页影响。</p>
+  <p><strong>参数</strong>：TD 参数见「TD 策略参数」页（<code>/config/td-params</code>），两变体共享同一参数集。</p>
+</div>
+
+<a class="back" href="javascript:history.back()">← 返回</a>
+
+<div id="toast" class="toast"></div>
+
+<script>
+async function switchStrategy(name) {
+  const resp = await fetch('/config/strategy', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({strategy: name})
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    toast('✅ 已切换到 ' + name, true);
+    setTimeout(() => location.reload(), 600);
+  } else {
+    toast('❌ ' + (data.error || '切换失败'), false);
+  }
+}
+
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err') + ' show';
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+</script>
+</body>
+</html>
