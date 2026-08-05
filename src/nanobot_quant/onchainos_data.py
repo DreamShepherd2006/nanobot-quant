@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,6 +19,20 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 MAX_LIMIT = 300  # max candles per CLI call
+
+# Candle interval → seconds (for range math). The CLI's `market kline` has no
+# time-range/pagination args (confirmed in onchainos-skills v4.3.1 cli source:
+# only --address/--chain/--bar/--limit), so a range is served by a single call
+# with limit = needed candles, trimmed locally.
+_BAR_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1H": 3600,
+    "4H": 14400,
+    "1D": 86400,
+    "1W": 604800,
+}
 
 # ── Common chain names (CLI uses names, not IDs) ─────────────────
 CHAIN_IDS: dict[str, str] = {
@@ -133,7 +146,11 @@ def fetch_kline_range(
     end: Optional[datetime] = None,
     bar: str = "1D",
 ) -> pd.DataFrame:
-    """Fetch kline data across a date range via CLI (auto-paginates backwards).
+    """Fetch kline data across a date range via CLI (single call, local trim).
+
+    The CLI's ``market kline`` accepts only ``--address/--chain/--bar/--limit``
+    (no --before / start / end), so a range wider than MAX_LIMIT candles
+    cannot be fetched — we raise a clear error instead of failing silently.
 
     Args:
         chain: Chain name (e.g. "solana") or ID.
@@ -143,56 +160,40 @@ def fetch_kline_range(
         bar: Candle interval.
 
     Returns:
-        Combined DataFrame for the full range.
+        DataFrame trimmed to [start, end], oldest → newest.
+
+    Raises:
+        ValueError: if the requested range needs more than MAX_LIMIT candles.
     """
     if end is None:
         end = datetime.now(timezone.utc)
 
-    start_ms = int(start.timestamp() * 1000)
+    span_s = _BAR_SECONDS.get(bar)
+    if span_s is None:
+        raise ValueError(f"不支持的周期 {bar!r}（支持 1m/5m/15m/1H/4H/1D/1W）")
+
+    needed = int((end.timestamp() - start.timestamp()) / span_s) + 2  # +slack
+    if needed > MAX_LIMIT:
+        raise ValueError(
+            f"链上 DEX 源单次最多返回 {MAX_LIMIT} 根 {bar} K 线，"
+            f"当前区间需要 {needed} 根（{start:%Y-%m-%d} ~ {end:%Y-%m-%d}）。"
+            f"请缩短时间范围（≤{MAX_LIMIT} 根，约 {MAX_LIMIT * span_s / 86400:.1f} 天）"
+            f"或改用股票源。"
+        )
+
     chain_name = _resolve_chain_name(chain)
-
-    all_frames: list[pd.DataFrame] = []
-
-    # First call: no --before (gets newest candles)
     args = [
         "market", "kline",
         "--address", token_address,
         "--chain", chain_name,
         "--bar", bar,
-        "--limit", str(MAX_LIMIT),
+        "--limit", str(max(needed, 2)),
     ]
     data = _run_cli(args)
     df = _parse_kline_response(data)
     if df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    all_frames.append(df)
-
-    # Check if we already covered the start
-    earliest = int(df.index[0].timestamp() * 1000)
-    if earliest <= start_ms:
-        return _trim_range(all_frames, start, end)
-
-    # Paginate backwards using --before
-    while earliest > start_ms:
-        args = [
-            "market", "kline",
-            "--address", token_address,
-            "--chain", chain_name,
-            "--bar", bar,
-            "--limit", str(MAX_LIMIT),
-            "--before", str(earliest),
-        ]
-        data = _run_cli(args)
-        df = _parse_kline_response(data)
-        if df.empty:
-            break
-        all_frames.append(df)
-        earliest = int(df.index[0].timestamp() * 1000)
-        if earliest <= start_ms:
-            break
-        time.sleep(0.3)  # rate limit
-
-    return _trim_range(all_frames, start, end)
+    return _trim_range([df], start, end)
 
 
 def _trim_range(
