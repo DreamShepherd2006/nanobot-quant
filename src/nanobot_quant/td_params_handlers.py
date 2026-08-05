@@ -109,7 +109,7 @@ def _strategy_banner() -> str:
         name, label = "td_sequential", "TD Sequential（原版）"
     return (
         f'<div class="banner strategy">🎯 当前策略：{label}'
-        '——以下参数应用于该策略'
+        '——以下参数仅应用于该策略，按策略独立保存'
         '（可在「📈 策略选择」页切换）</div>'
     )
 

@@ -375,3 +375,39 @@ class TestHandlers:
         assert data["ok"] is True
         assert not _isolated_params.is_file()
         assert "默认参数" in _call(td_params_page).body.decode()
+
+
+# ── Per-strategy parameter sets (strategy registry) ─────────────────────
+
+class TestPerStrategyParams:
+    """Parameters are stored per strategy; switching strategy shows the
+    selected strategy's own set."""
+
+    def test_params_isolated_per_strategy(self, _isolated_params):
+        res = save_td_params({"setup_period": 8}, strategy="td_sequential")
+        assert res["ok"] is True
+        assert load_td_params(strategy="td_sequential")["setup_period"] == 8
+        # the other variant is untouched
+        assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 9
+        assert _isolated_params.is_file()
+
+    def test_legacy_flat_layout_migrates_to_default_strategy(self, _isolated_params):
+        """Old single-layer file belongs to the production default strategy;
+        a subsequent save migrates the file to the per-strategy layout."""
+        _isolated_params.write_text(
+            json.dumps({"setup_period": 8}), encoding="utf-8"
+        )
+        assert load_td_params(strategy="td_sequential")["setup_period"] == 8
+        assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 9
+        save_td_params({"countdown_period": 12}, strategy="td_sequential_cycle")
+        raw = json.loads(_isolated_params.read_text(encoding="utf-8"))
+        assert raw["td_sequential"]["setup_period"] == 8
+        assert raw["td_sequential_cycle"]["countdown_period"] == 12
+
+    def test_reset_only_current_strategy(self, _isolated_params):
+        save_td_params({"setup_period": 8}, strategy="td_sequential")
+        save_td_params({"setup_period": 7}, strategy="td_sequential_cycle")
+        res = save_td_params({"reset": True}, strategy="td_sequential")
+        assert res["ok"] is True
+        assert load_td_params(strategy="td_sequential")["setup_period"] == 9
+        assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 7

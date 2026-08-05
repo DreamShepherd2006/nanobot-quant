@@ -5,6 +5,11 @@ them to ``{data_root}/legion/td_params.json``. Every consumer (MCP tools,
 pipeline, strategy, backtest) reloads the latest file on each call, so
 changes take effect immediately — no restart required.
 
+Since the strategy registry (v0.2) supports multiple TD variants, the
+parameter file is keyed by strategy name — each strategy keeps its own
+independent set. A legacy single-layer file (params directly at top level)
+is treated as the ``td_sequential`` (production default) set.
+
 Missing / invalid file → ``DEFAULT_TD_PARAMS``, which is byte-for-byte
 identical to the pre-parameterisation hardcoded behaviour (setup 9,
 countdown 13, compare 4, weights 0.40/0.30/0.15/0.10/0.05, score > 0).
@@ -92,34 +97,62 @@ def td_params_path() -> Path:
     return Path.home() / ".td_params.json"
 
 
-def load_td_params() -> dict[str, Any]:
-    """Load persisted params, falling back to defaults on any problem."""
-    try:
-        raw = json.loads(td_params_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+def load_td_params(strategy: str | None = None) -> dict[str, Any]:
+    """Load persisted params for a strategy (default: currently selected).
+
+    File layout: ``{"td_sequential": {...}, "td_sequential_cycle": {...}}``
+    so each strategy keeps an independent parameter set. A legacy
+    single-layer file (params directly at top level) is treated as the
+    ``td_sequential`` (production default) set for backward compatibility.
+    Missing / invalid file → ``DEFAULT_TD_PARAMS``.
+    """
+    if strategy is None:
+        strategy = _selected_strategy()
+    raw = _read_raw()
+    if raw is None:
         return dict(DEFAULT_TD_PARAMS)
 
+    if strategy in raw and isinstance(raw[strategy], dict):
+        section = raw[strategy]
+    elif _is_legacy_flat(raw):
+        # legacy single-layer file → belongs to the production default strategy
+        section = raw if strategy == "td_sequential" else {}
+    else:
+        section = {}
+
     merged = dict(DEFAULT_TD_PARAMS)
-    if isinstance(raw, dict):
-        for key in DEFAULT_TD_PARAMS:
-            if key in raw and validate_value(key, raw[key]) is None:
-                merged[key] = raw[key]
+    for key in DEFAULT_TD_PARAMS:
+        if key in section and validate_value(key, section[key]) is None:
+            merged[key] = section[key]
     return merged
 
 
-def save_td_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Validate + persist. Returns dict with "ok" and optional "error".
+def save_td_params(params: dict[str, Any], strategy: str | None = None) -> dict[str, Any]:
+    """Validate + persist for a strategy (default: currently selected).
 
-    ``params == {"reset": True}`` removes the persisted file and returns
-    the defaults (used by the WebUI 恢复默认 button).
+    Returns dict with "ok" and optional "error". ``params == {"reset":
+    True}`` removes only the strategy's section and returns its defaults
+    (used by the WebUI 恢复默认 button).
     """
+    if strategy is None:
+        strategy = _selected_strategy()
     merged = dict(DEFAULT_TD_PARAMS)
     if not isinstance(params, dict):
         return {"ok": False, "error": "请求体必须为 JSON 对象"}
     if params.get("reset") is True:
         path = td_params_path()
         try:
-            if path.is_file():
+            raw = _read_raw() or {}
+            if _is_legacy_flat(raw):
+                raw = _migrate_legacy(raw)
+            raw.pop(strategy, None)
+            if raw:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            elif path.is_file():
                 path.unlink()
         except OSError as exc:
             return {"ok": False, "error": f"重置失败: {exc}"}
@@ -136,9 +169,13 @@ def save_td_params(params: dict[str, Any]) -> dict[str, Any]:
 
     path = td_params_path()
     try:
+        raw = _read_raw() or {}
+        if _is_legacy_flat(raw):
+            raw = _migrate_legacy(raw)
+        raw[strategy] = merged
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         try:
@@ -148,6 +185,38 @@ def save_td_params(params: dict[str, Any]) -> dict[str, Any]:
     except OSError as exc:
         return {"ok": False, "error": f"写入失败: {exc}"}
     return {"ok": True, "params": merged}
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────
+
+def _selected_strategy() -> str:
+    """Current strategy name from the registry (import deferred to avoid
+    the registry→td_params module-level import cycle)."""
+    from nanobot_quant.strategies.registry import load_selected
+
+    return load_selected()
+
+
+def _read_raw() -> dict | None:
+    """Parse td_params.json; None when missing or invalid JSON."""
+    try:
+        raw = json.loads(td_params_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _is_legacy_flat(raw: dict) -> bool:
+    """True when the file is the old single-layer layout (params at top
+    level instead of keyed by strategy)."""
+    return any(key in raw for key in DEFAULT_TD_PARAMS)
+
+
+def _migrate_legacy(raw: dict) -> dict:
+    """Convert legacy single-layer layout to per-strategy layout."""
+    return {
+        "td_sequential": {k: raw[k] for k in DEFAULT_TD_PARAMS if k in raw},
+    }
 
 
 # ── Validation ───────────────────────────────────────────────────────────
