@@ -68,6 +68,7 @@ def _ensure_registered() -> None:
     # TD variants
     from nanobot_quant.strategies.td_sequential import calculate as _td_calc
     from nanobot_quant.strategies.td_sequential_cycle import calculate as _td_cycle_calc
+    from nanobot_quant.strategies.td_sequential_futu import calculate as _td_futu_calc
     from nanobot_quant.td_params import DEFAULT_TD_PARAMS, PARAM_META
 
     register(StrategySpec(
@@ -91,6 +92,20 @@ def _ensure_registered() -> None:
         params_defaults=_cycle_defaults(),
         data_source="onchainos",
         signal_fn=_td_cycle_calc,
+    ))
+    register(StrategySpec(
+        name="td_sequential_futu",
+        label="TD Sequential（富途 NINE）",
+        description="富途「神奇九转」口径（忠实复刻 moonscript 源码）：无翻转确认，"
+                    "连续满足即数；setup 达到 9 后继续累加不重置，信号恰在 count==9 的"
+                    "那根触发一次（连续单边行情只触发一次）；无 countdown/TDST，"
+                    "score = setup_count/setup_period（0–1 尺度）。民间最简化口径样本，"
+                    "供三向算法对照。",
+        variant_of="td_sequential",
+        params_schema=PARAM_META,
+        params_defaults=dict(DEFAULT_TD_PARAMS),
+        data_source="onchainos",
+        signal_fn=_td_futu_calc,
     ))
     _REGISTERED = True
 
