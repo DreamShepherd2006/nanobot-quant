@@ -158,6 +158,16 @@ def _fetch_stock_kline_eastmoney(
                      "high": float(p[3]), "low": float(p[4]), "volume": float(p[5])})
     df = pd.DataFrame(rows).set_index("time")
     df.index = pd.to_datetime(df.index)
+    # EastMoney timestamp semantics (verified 2026-08-05 against live API):
+    #   A-share (secid 1./0.)      → Asia/Shanghai
+    #   US daily   (klt=101)       → America/New_York (dates are US trading days)
+    #   US intraday (klt=5/15/60)  → Asia/Shanghai (US 16:00 close = 04:00 Beijing)
+    if ticker.isdigit() and len(ticker) == 6:
+        em_tz = "Asia/Shanghai"
+    else:
+        # _EM_KLTS values are strings ("101", "60", ...)
+        em_tz = "America/New_York" if klt == "101" else "Asia/Shanghai"
+    df.index = df.index.tz_localize(em_tz)
     df.index.name = "time"
     df = df[["open", "high", "low", "close", "volume"]]
     if limit and len(df) > limit:
@@ -201,8 +211,8 @@ def _fetch_stock_kline_yahoo(
     df = df.rename(columns={c: str(c).lower() for c in df.columns})
     cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
     df = df[cols].dropna(subset=["close"])
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
+    # Keep the exchange tz (e.g. America/New_York, Asia/Shanghai for
+    # .SS/.SZ) — the display layer tz_convert()s to local/UTC.
     df.index.name = "time"
     if limit and len(df) > limit:
         df = df.tail(limit)
@@ -221,13 +231,18 @@ def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFr
     return engine.df
 
 
-def _display(df: pd.DataFrame) -> pd.DataFrame:
-    """Add Asia/Shanghai display time + pct-change columns."""
+def _display(df: pd.DataFrame, fallback_tz: str = "UTC") -> pd.DataFrame:
+    """Add Asia/Shanghai + UTC display-time columns and pct-change.
+
+    ``fallback_tz`` is used only when the index is naive (defensive; all
+    real data sources now annotate their native tz).
+    """
     idx = df.index
     if getattr(idx, "tz", None) is None:
-        idx = idx.tz_localize("UTC")
+        idx = idx.tz_localize(fallback_tz)
     out = df.copy()
     out["_time"] = idx.tz_convert(_TZ).strftime("%Y-%m-%d %H:%M")
+    out["_time_utc"] = idx.tz_convert("UTC").strftime("%Y-%m-%d %H:%M")
     out["_pct"] = df["Close"].pct_change() * 100
     return out
 
@@ -340,6 +355,7 @@ def _build_rows(df: pd.DataFrame, setup: int) -> str:
 
         td = ["<tr%s>" % cls,
               f'<td class="time">{_esc(rec["_time"])}</td>',
+              f'<td class="time utc">{_esc(rec["_time_utc"])}</td>',
               f'<td class="num">{_fmt_price(rec["Close"])}</td>',
               f'<td class="num {pct_cls}">{pct_txt}</td>',
               _setup_cell(df, i, "buy_setup_count", setup),
@@ -369,7 +385,7 @@ def _build_rows(df: pd.DataFrame, setup: int) -> str:
 
 
 def _build_headers(has_cd: bool, has_tdst: bool, has_score: bool) -> str:
-    heads = ["时间", "收盘", "涨跌%", "Buy Setup", "Sell Setup"]
+    heads = ["时间", "UTC 时间", "收盘", "涨跌%", "Buy Setup", "Sell Setup"]
     if has_cd:
         heads.append("Countdown")
     if has_tdst:
