@@ -100,6 +100,24 @@ def _fetch_stock_kline(
     raise RuntimeError("；".join(errors) or "股票数据获取失败")
 
 
+def _stock_secid(ticker: str) -> str:
+    """Map a symbol to an EastMoney secid.
+
+    6-digit numeric codes are treated as A-shares (SSE ``1.`` / SZSE
+    ``0.``); anything else is treated as a US symbol (``105.`` NYSE).
+    """
+    if ticker.isdigit() and len(ticker) == 6:
+        return f"1.{ticker}" if ticker.startswith(("6", "9")) else f"0.{ticker}"
+    return f"105.{ticker}"
+
+
+def _yf_symbol(ticker: str) -> str:
+    """Map a symbol to yfinance format: 6-digit codes get .SS/.SZ suffix."""
+    if ticker.isdigit() and len(ticker) == 6:
+        return f"{ticker}.SS" if ticker.startswith(("6", "9")) else f"{ticker}.SZ"
+    return ticker
+
+
 def _fetch_stock_kline_eastmoney(
     ticker: str,
     bar: str = "1D",
@@ -110,7 +128,8 @@ def _fetch_stock_kline_eastmoney(
     """EastMoney kline API → normalised DataFrame.
 
     Response klines: "date,open,close,high,low,volume" (fields2
-    f51..f56). secid=105.<SYMBOL> (US market). 4H has no klt code.
+    f51..f56). US symbols use secid=105.<SYMBOL>; 6-digit codes are
+    A-shares (secid 1./0.). 4H has no klt code.
     """
     klt = _EM_KLTS.get(bar)
     if klt is None:
@@ -122,7 +141,7 @@ def _fetch_stock_kline_eastmoney(
         end = now
     url = (
         "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
-        f"secid=105.{ticker}&fields1=f1,f2,f3,f4,f5&"
+        f"secid={_stock_secid(ticker)}&fields1=f1,f2,f3,f4,f5&"
         "fields2=f51,f52,f53,f54,f55,f56&"
         f"klt={klt}&fqt=1&beg={start.strftime('%Y%m%d')}&end={end.strftime('%Y%m%d')}"
     )
@@ -166,7 +185,7 @@ def _fetch_stock_kline_yahoo(
     # date is included.
     end = end + timedelta(days=1) if bar in ("1D", "1W") else end
     df = yf.download(
-        ticker,
+        _yf_symbol(ticker),
         start=start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else start,
         end=end.strftime("%Y-%m-%d") if hasattr(end, "strftime") else end,
         interval=interval,
@@ -442,7 +461,7 @@ def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, sou
         '<option value="stock"%s>股票 (东财/yfinance)</option></select>'
         % (" selected" if source == "onchainos" else "", " selected" if source == "stock" else "")
     )
-    placeholder = "AAPL / SPY" if source == "stock" else "SOL / BTC"
+    placeholder = "NVDA / 601127" if source == "stock" else "SOL / BTC"
     if tab == "history":
         return (
             '<form class="inline" method="get" action="/config/td-table">'
