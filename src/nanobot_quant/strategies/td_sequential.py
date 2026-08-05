@@ -24,6 +24,7 @@ def calculate(
     df: pd.DataFrame,
     news_count: int = 0,
     params: dict | None = None,
+    engine_cls=None,
 ) -> dict:
     """Run all DeMark calculations and return a summary for the latest bar.
 
@@ -34,6 +35,10 @@ def calculate(
     ``params``: optional parameter dict (see ``nanobot_quant.td_params``).
     When omitted, the latest persisted ``td_params.json`` is loaded (falls
     back to defaults == the pre-parameterisation hardcoded behaviour).
+
+    ``engine_cls``: engine class override (used by TD variants, e.g.
+    ``td_sequential_cycle`` which recycles setup count 1-9).  Defaults to
+    ``_DeMarkEngine`` (production behaviour, zero change).
 
     Returns a JSON-serializable dict with keys:
     timestamp, price, recommendation, setup_buy, setup_sell,
@@ -50,7 +55,7 @@ def calculate(
     }.get(c, c))
     if params is None:
         params = load_td_params()
-    engine = _DeMarkEngine(df, params)
+    engine = (engine_cls or _DeMarkEngine)(df, params)
     engine.run_all(news_count)
 
     last = engine.df.iloc[-1]

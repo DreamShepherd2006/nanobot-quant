@@ -14,25 +14,30 @@ def run_td_sequential(
     chain: str = "solana",
     bar: str = "1D",
     limit: int = 299,
+    strategy: str | None = None,
 ) -> dict:
     """Run TD Sequential analysis on an OnchainOS token.
 
     Fetches K-line data via OnchainOS CLI, calculates TD Sequential
     and returns a TickerSignal dict.
+
+    ``strategy``: strategy name registered in the strategy registry
+    (see ``/config/strategy``).  When omitted, the currently selected
+    strategy from ``strategy.json`` is used (default ``td_sequential``).
     """
     # ── Guard MCP stdio from library import-time logging ─────────
     _saved_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
         from nanobot_quant.onchainos_data import fetch_kline as _fetch_kline
-        from nanobot_quant.strategies.td_sequential import calculate as _calculate
+        from nanobot_quant.strategies.registry import resolve_signal_fn as _resolve
     finally:
         sys.stdout = _saved_stdout
 
     chain_name = chain if chain in ("solana", "arbitrum", "ethereum", "base", "bnb", "optimism", "polygon", "xdai") else "solana"
 
     print(
-        f"[DIAG] run_td_sequential: address={address[:12]}... chain={chain_name} bar={bar} limit={limit}",
+        f"[DIAG] run_td_sequential: address={address[:12]}... chain={chain_name} bar={bar} limit={limit} strategy={strategy or 'selected'}",
         file=sys.stderr, flush=True,
     )
 
@@ -55,6 +60,11 @@ def run_td_sequential(
     )
 
     try:
+        _calculate = _resolve(strategy)
+    except Exception as exc:
+        return {"error": f"Strategy resolution failed: {exc}"}
+
+    try:
         result = _calculate(df)
     except Exception as exc:
         return {"error": f"TD Sequential calculation failed: {exc}"}
@@ -64,7 +74,7 @@ def run_td_sequential(
     result["chain"] = chain_name
 
     print(
-        f"[DIAG] run_td_sequential: {result['recommendation']} "
+        f"[DIAG] run_td_sequential: strategy={_calculate.__module__} {result['recommendation']} "
         f"(setup_buy={result['setup_buy']} cd_buy={result['cd_buy']} score={result['score']})",
         file=sys.stderr, flush=True,
     )
