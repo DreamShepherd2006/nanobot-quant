@@ -23,12 +23,30 @@ from nanobot_quant.strategies.td_sequential import (
 class CycleDeMarkEngine(_DeMarkEngine):
     """DeMark engine with setup count recycling after ``setup_period``.
 
-    Inherits countdown / TDST / Bollinger / scoring / recommendations
-    verbatim; only the setup counter behaviour differs (1-9 loop).
-    Note: because setup restarts at 1 every cycle, TDST pending/lock also
-    refreshes per cycle (tracking the most recent completed setup), which
-    is closer to canonical DeMark than the base variant.
+    Inherits TDST / Bollinger / scoring / recommendations verbatim; the
+    setup counter recycles 1-9 (同花顺口径) and countdown is disabled
+    (同花顺九转 displays setup 1-9 only — no countdown 13). Because setup
+    restarts at 1 every cycle, TDST pending/lock also refreshes per cycle
+    (tracking the most recent completed setup).
     """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        params: dict | None = None,
+    ) -> None:
+        super().__init__(df, params)
+        # 同花顺口径无 countdown：权重强制为 0（防御——即使调用方传入
+        # 原版默认参数，score 也不会混入 countdown 成分）。
+        self._w["countdown"] = 0.0
+
+    def calculate_countdown(self) -> pd.DataFrame:
+        """同花顺口径：不计算 countdown — columns stay 0."""
+        self.df["buy_countdown_count"] = 0
+        self.df["sell_countdown_count"] = 0
+        self.df["buy_countdown_recycled"] = False
+        self.df["sell_countdown_recycled"] = False
+        return self.df
 
     def calculate_setup(self) -> pd.DataFrame:
         """TD Setup with 1-9 recycling (同花顺「九转序列」口径)."""

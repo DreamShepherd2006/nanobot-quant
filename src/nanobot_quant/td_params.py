@@ -7,12 +7,14 @@ changes take effect immediately — no restart required.
 
 Since the strategy registry (v0.2) supports multiple TD variants, the
 parameter file is keyed by strategy name — each strategy keeps its own
-independent set. A legacy single-layer file (params directly at top level)
-is treated as the ``td_sequential`` (production default) set.
+independent set (and schema: the 同花顺 cycle variant has no countdown).
+A legacy single-layer file (params directly at top level) is treated as
+the ``td_sequential`` (production default) set.
 
-Missing / invalid file → ``DEFAULT_TD_PARAMS``, which is byte-for-byte
-identical to the pre-parameterisation hardcoded behaviour (setup 9,
-countdown 13, compare 4, weights 0.40/0.30/0.15/0.10/0.05, score > 0).
+Missing / invalid file → the strategy's ``params_defaults``, which for
+``td_sequential`` is byte-for-byte identical to the pre-parameterisation
+hardcoded behaviour (setup 9, countdown 13, compare 4, weights
+0.40/0.30/0.15/0.10/0.05, score > 0).
 """
 
 from __future__ import annotations
@@ -46,21 +48,28 @@ DEFAULT_TD_PARAMS: dict[str, Any] = {
 }
 
 #: Human-readable bounds used by the WebUI form validation + display.
+#: ``strategies`` limits a parameter to specific strategies (absent = all).
+#: TD variant ``td_sequential_cycle`` (同花顺口径) has no countdown, so
+#: countdown-related parameters are excluded from its schema.
 PARAM_META: dict[str, dict[str, Any]] = {
     "setup_period": {"group": "td", "min": 5, "max": 14, "step": 1, "std": 9,
                      "label": "Setup 周期", "hint": "DeMark 标准 9；8–14 为实验变体"},
     "countdown_period": {"group": "td", "min": 9, "max": 16, "step": 1, "std": 13,
-                         "label": "Countdown 周期", "hint": "DeMark 标准 13"},
+                         "label": "Countdown 周期", "hint": "DeMark 标准 13",
+                         "strategies": ["td_sequential"]},
     "compare_length": {"group": "td", "min": 3, "max": 5, "step": 1, "std": 4,
                        "label": "Setup 比较长度", "hint": "close vs close[i-N]，标准 4"},
     "countdown_strict": {"group": "td", "type": "bool", "std": True,
-                         "label": "Countdown 严格判定", "hint": "strict: close≤low[i-2]；relaxed: close≤high[i-1]"},
+                         "label": "Countdown 严格判定", "hint": "strict: close≤low[i-2]；relaxed: close≤high[i-1]",
+                         "strategies": ["td_sequential"]},
     "recycle_threshold": {"group": "td", "min": 1, "max": 30, "step": 1, "std": 18,
-                          "label": "Countdown 回收阈值", "hint": "连续 >N 根同向 K 线后重置"},
+                          "label": "Countdown 回收阈值", "hint": "连续 >N 根同向 K 线后重置",
+                          "strategies": ["td_sequential"]},
     "weight_setup": {"group": "weights", "min": 0.0, "max": 1.0, "step": 0.05, "std": 0.40,
                      "label": "Setup 权重", "hint": "评分方向因子"},
     "weight_countdown": {"group": "weights", "min": 0.0, "max": 1.0, "step": 0.05, "std": 0.30,
-                         "label": "Countdown 权重", "hint": "评分邻近度因子"},
+                         "label": "Countdown 权重", "hint": "评分邻近度因子",
+                         "strategies": ["td_sequential"]},
     "weight_tdst": {"group": "weights", "min": 0.0, "max": 1.0, "step": 0.05, "std": 0.15,
                     "label": "TDST 权重", "hint": "评分支撑因子"},
     "weight_volume": {"group": "weights", "min": 0.0, "max": 1.0, "step": 0.05, "std": 0.10,
@@ -74,7 +83,8 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "exit_setup": {"group": "strategy", "min": 1, "max": 20, "step": 1, "std": 9,
                    "label": "平仓 Setup 阈值", "hint": "setup_sell ≥ N 平仓（当前偏早）"},
     "exit_countdown": {"group": "strategy", "min": 1, "max": 20, "step": 1, "std": 13,
-                       "label": "平仓 Countdown 阈值", "hint": "cd_sell ≥ N 平仓"},
+                       "label": "平仓 Countdown 阈值", "hint": "cd_sell ≥ N 平仓",
+                       "strategies": ["td_sequential"]},
     "tdst_filter": {"group": "strategy", "type": "bool", "std": False,
                     "label": "TDST 方向过滤", "hint": "要求 close > tdst_support 才入场"},
 }
@@ -101,16 +111,16 @@ def load_td_params(strategy: str | None = None) -> dict[str, Any]:
     """Load persisted params for a strategy (default: currently selected).
 
     File layout: ``{"td_sequential": {...}, "td_sequential_cycle": {...}}``
-    so each strategy keeps an independent parameter set. A legacy
-    single-layer file (params directly at top level) is treated as the
-    ``td_sequential`` (production default) set for backward compatibility.
-    Missing / invalid file → ``DEFAULT_TD_PARAMS``.
+    so each strategy keeps an independent parameter set (and schema). A
+    legacy single-layer file (params directly at top level) is treated as
+    the ``td_sequential`` (production default) set for backward
+    compatibility. Missing / invalid file → the strategy's defaults.
     """
     if strategy is None:
         strategy = _selected_strategy()
     raw = _read_raw()
     if raw is None:
-        return dict(DEFAULT_TD_PARAMS)
+        return _defaults_for(strategy)
 
     if strategy in raw and isinstance(raw[strategy], dict):
         section = raw[strategy]
@@ -120,8 +130,8 @@ def load_td_params(strategy: str | None = None) -> dict[str, Any]:
     else:
         section = {}
 
-    merged = dict(DEFAULT_TD_PARAMS)
-    for key in DEFAULT_TD_PARAMS:
+    merged = _defaults_for(strategy)
+    for key in merged:
         if key in section and validate_value(key, section[key]) is None:
             merged[key] = section[key]
     return merged
@@ -136,7 +146,7 @@ def save_td_params(params: dict[str, Any], strategy: str | None = None) -> dict[
     """
     if strategy is None:
         strategy = _selected_strategy()
-    merged = dict(DEFAULT_TD_PARAMS)
+    merged = _defaults_for(strategy)
     if not isinstance(params, dict):
         return {"ok": False, "error": "请求体必须为 JSON 对象"}
     if params.get("reset") is True:
@@ -157,7 +167,7 @@ def save_td_params(params: dict[str, Any], strategy: str | None = None) -> dict[
         except OSError as exc:
             return {"ok": False, "error": f"重置失败: {exc}"}
         return {"ok": True, "message": "已恢复默认参数", "params": merged}
-    for key in DEFAULT_TD_PARAMS:
+    for key in merged:
         if key in params:
             err = validate_value(key, params[key])
             if err is not None:
@@ -195,6 +205,17 @@ def _selected_strategy() -> str:
     from nanobot_quant.strategies.registry import load_selected
 
     return load_selected()
+
+
+def _defaults_for(strategy: str) -> dict[str, Any]:
+    """Strategy-specific defaults (registry params_defaults); falls back to
+    the global defaults on any problem."""
+    try:
+        from nanobot_quant.strategies.registry import get_strategy
+
+        return dict(get_strategy(strategy).params_defaults)
+    except Exception:
+        return dict(DEFAULT_TD_PARAMS)
 
 
 def _read_raw() -> dict | None:
@@ -245,7 +266,9 @@ def validate_value(key: str, value: Any) -> str | None:
 
 
 def validate_weights(params: dict[str, Any]) -> str | None:
-    """Weights must sum to 1.0 (tolerance 1e-6)."""
+    """Weights must sum to 1.0 (tolerance 1e-6). The cycle variant keeps
+    ``weight_countdown`` at 0 (schema-excluded), so the visible four weights
+    still sum to 1.0."""
     total = sum(float(params[k]) for k in WEIGHT_KEYS)
     if abs(total - 1.0) > 1e-6:
         return f"权重合计必须 = 1.0（当前 {total:.3f}）"

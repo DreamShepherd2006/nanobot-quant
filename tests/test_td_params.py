@@ -411,3 +411,31 @@ class TestPerStrategyParams:
         assert res["ok"] is True
         assert load_td_params(strategy="td_sequential")["setup_period"] == 9
         assert load_td_params(strategy="td_sequential_cycle")["setup_period"] == 7
+
+    def test_cycle_defaults_no_countdown(self):
+        """cycle 参数默认无 countdown 权重（归一化四项合计 1.0）."""
+        d = load_td_params(strategy="td_sequential_cycle")
+        assert d["weight_countdown"] == 0.0
+        assert abs(sum(d[k] for k in ("weight_setup", "weight_tdst",
+                                      "weight_volume", "weight_bb")) - 1.0) <= 1e-6
+        # original variant unaffected
+        base = load_td_params(strategy="td_sequential")
+        assert base["weight_countdown"] == 0.30
+
+    def test_param_applies_filters_countdown(self):
+        from nanobot_quant.td_params import PARAM_META
+        from nanobot_quant.td_params_handlers import _param_applies
+
+        assert _param_applies(PARAM_META["setup_period"], "td_sequential_cycle")
+        assert not _param_applies(PARAM_META["countdown_period"], "td_sequential_cycle")
+        assert _param_applies(PARAM_META["countdown_period"], "td_sequential")
+
+    def test_group_html_omits_countdown_for_cycle(self):
+        from nanobot_quant.strategies.registry import get_strategy
+        from nanobot_quant.td_params_handlers import _group_html
+
+        base = get_strategy("td_sequential").params_defaults
+        cycle = get_strategy("td_sequential_cycle").params_defaults
+        assert "Countdown 权重" not in _group_html("weights", cycle, "td_sequential_cycle", cycle)
+        assert "Setup 权重" in _group_html("weights", cycle, "td_sequential_cycle", cycle)
+        assert "Countdown 权重" in _group_html("weights", base, "td_sequential", base)

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 DEFAULT_STRATEGY = "td_sequential"
 
@@ -84,14 +84,32 @@ def _ensure_registered() -> None:
         name="td_sequential_cycle",
         label="TD Sequential（同花顺九转）",
         description="TD Sequential 同花顺「九转序列」口径：setup 达到 9 后从 1 重新计数"
-                    "（1-9 循环），TDST 随每轮 setup 刷新。研究变体，供算法校准对照。",
+                    "（1-9 循环）；无 countdown（cd_buy/cd_sell 恒 0）；评分仅由"
+                    "setup/TDST/Volume/Bollinger 组成，权重归一化。研究变体，供算法校准对照。",
         variant_of="td_sequential",
         params_schema=PARAM_META,
-        params_defaults=dict(DEFAULT_TD_PARAMS),
+        params_defaults=_cycle_defaults(),
         data_source="onchainos",
         signal_fn=_td_cycle_calc,
     ))
     _REGISTERED = True
+
+
+def _cycle_defaults() -> dict[str, Any]:
+    """同花顺口径默认参数：无 countdown。
+
+    Removes the countdown weight and re-normalises the remaining four
+    weights so they still sum to 1.0 (0.40/0.15/0.10/0.05 ÷ 0.70).
+    """
+    from nanobot_quant.td_params import DEFAULT_TD_PARAMS
+
+    d = dict(DEFAULT_TD_PARAMS)
+    d["weight_countdown"] = 0.0
+    d["weight_setup"] = round(0.40 / 0.70, 4)   # 0.5714
+    d["weight_tdst"] = round(0.15 / 0.70, 4)    # 0.2143
+    d["weight_volume"] = round(0.10 / 0.70, 4)  # 0.1429
+    d["weight_bb"] = round(0.05 / 0.70, 4)      # 0.0714
+    return d
 
 
 def get_strategy(name: str) -> StrategySpec:

@@ -37,6 +37,40 @@ def test_cycle_is_variant_of_td():
     assert base.signal_fn is not None and cycle.signal_fn is not None
 
 
+def test_cycle_defaults_have_no_countdown_weight():
+    """同花顺口径：countdown 权重为 0，其余四项归一化后合计 1.0."""
+    d = get_strategy("td_sequential_cycle").params_defaults
+    assert d["weight_countdown"] == 0.0
+    visible = sum(d[k] for k in ("weight_setup", "weight_tdst",
+                                 "weight_volume", "weight_bb"))
+    assert abs(visible - 1.0) <= 1e-6
+    assert d["weight_setup"] == round(0.40 / 0.70, 4)
+    # original variant keeps the classic weights
+    base = get_strategy("td_sequential").params_defaults
+    assert base["weight_countdown"] == 0.30
+
+
+def test_cycle_engine_outputs_no_countdown():
+    """cycle 信号 cd_buy/cd_sell 恒 0（同花顺九转只到 9）."""
+    import pandas as pd
+
+    from nanobot_quant.strategies.td_sequential_cycle import calculate as cycle_calc
+
+    # 50 bars of a clean uptrend (triggers sell setup sequences)
+    close = list(range(100, 150, 1))
+    df = pd.DataFrame({
+        "Open": close,
+        "High": [c + 1 for c in close],
+        "Low": [c - 1 for c in close],
+        "Close": close,
+        "Volume": [1000] * len(close),
+    })
+    out = cycle_calc(df)
+    assert out["cd_buy"] == 0
+    assert out["cd_sell"] == 0
+    assert isinstance(out["score"], (int, float)) or out["score"] is None
+
+
 def test_duplicate_register_rejected():
     spec = StrategySpec(name="td_sequential", label="dup", description="d")
     with pytest.raises(ValueError):
