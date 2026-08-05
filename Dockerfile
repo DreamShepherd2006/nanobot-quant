@@ -37,10 +37,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=32]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@7b2d1673 \
+RUN echo "[bust=33]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-legion.git@0ad4600d \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @7b2d1673 (upstream staging — PR #42 /config/td-params routes + business chat TD link)"
+    && echo "✅ nanobot-legion @0ad4600d (CD fork feat/strategy-routes — /config/strategy route)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
@@ -73,10 +73,10 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=34]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@dc8ec56 \
+RUN echo "[bust=35]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@452f9b9 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @dc8ec56 (upstream main — PR #52 TD params WebUI) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @452f9b9 (CD fork feat/strategy-registry) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
