@@ -51,7 +51,11 @@ def _resolve_for_table(ticker: str) -> dict:
             tokens_json = _json.loads(tokens.read_text(encoding="utf-8"))
     except OSError:
         tokens_json = None
-    return resolve_token(ticker, tokens_json=tokens_json)
+    resolved = resolve_token(ticker, tokens_json=tokens_json)
+    # resolve_token does not echo the chain back (it is an input param,
+    # default "solana"); re-attach it for fetch_kline / display.
+    resolved.setdefault("chain", "solana")
+    return resolved
 
 
 def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFrame:
