@@ -15,6 +15,7 @@ from nanobot_quant.strategies.registry import (
     register,
     resolve_signal_fn,
     save_selected,
+    strategy_paths,
 )
 
 
@@ -63,6 +64,17 @@ def test_save_unknown_strategy_rejected(tmp_path):
 
 def test_load_missing_file_falls_back_to_default(tmp_path):
     assert load_selected(str(tmp_path / "nope.json")) == DEFAULT_STRATEGY
+
+
+def test_strategy_paths_cover_both_data_root_conventions():
+    """WebUI writes {data_root}/legion/strategy.json; when data_root=/data/legion
+    the file lands under /data/legion/legion/ — tool-side candidates must cover
+    both conventions so the WebUI selection actually takes effect."""
+    paths = strategy_paths()
+    assert "/data/legion/legion/strategy.json" in paths
+    assert "/data/legion/strategy.json" in paths
+    assert "/mnt/workspace/legion/legion/strategy.json" in paths
+    assert "/mnt/workspace/legion/strategy.json" in paths
 
 
 def test_resolve_default_is_td_calculate():

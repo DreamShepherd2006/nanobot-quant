@@ -21,8 +21,14 @@ from typing import Callable, Optional
 DEFAULT_STRATEGY = "td_sequential"
 
 # 持久化路径候选（HF / MS 平台，与 tools_execute 的 live.json 同模式）
+# 注意 data_root 有两种约定：标准部署 data_root=/data（或 /mnt/workspace），
+# nanobot-quant 等空间 squad_config.json 中 data_root=/data/legion，导致 WebUI
+# 写入 {data_root}/legion/strategy.json 实际落在 /data/legion/legion/strategy.json。
+# 候选覆盖两种约定（legion/legion 优先；同一空间只会存在其一）。
 _STRATEGY_PATHS = [
+    "/data/legion/legion/strategy.json",
     "/data/legion/strategy.json",
+    "/mnt/workspace/legion/legion/strategy.json",
     "/mnt/workspace/legion/strategy.json",
 ]
 
