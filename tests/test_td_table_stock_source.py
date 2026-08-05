@@ -73,7 +73,7 @@ def test_stock_secid_mapping():
 
 
 def test_fetch_stock_kline_eastmoney_parse(monkeypatch):
-    """东财主源（A 股 secid=1.）：JSON klines → 小写列/naive index/行数。"""
+    """东财主源（A 股 secid=1.）：JSON klines → 小写列/Asia/Shanghai aware/行数。"""
     import nanobot_quant.td_table_handlers as m
 
     calls = {}
@@ -85,9 +85,9 @@ def test_fetch_stock_kline_eastmoney_parse(monkeypatch):
     monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
     df = _fetch_stock_kline("601127", bar="1D", limit=60)
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
-    assert df.index.tz is None
+    assert str(df.index.tz) == "Asia/Shanghai"
     assert len(df) == 3
-    assert df.index[0] == pd.Timestamp("2026-01-02")
+    assert df.index[0] == pd.Timestamp("2026-01-02", tz="Asia/Shanghai")
     assert "secid=1.601127" in calls["url"]
     assert "klt=101" in calls["url"]
 
@@ -125,7 +125,7 @@ def test_fetch_stock_kline_yahoo_fallback(monkeypatch):
     monkeypatch.setattr(m.yf, "download", fake_download)
     df = _fetch_stock_kline("601127", bar="1D", limit=60)
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
-    assert df.index.tz is None
+    assert str(df.index.tz) == "America/New_York"  # yfinance exchange tz kept
     assert len(df) == 60
     assert calls["interval"] == "1d"
     assert calls["ticker"] == "601127.SS"
@@ -190,3 +190,60 @@ def test_page_source_param_persisted(monkeypatch):
     body = resp.body.decode("utf-8")
     assert 'value="stock" selected' in body
     assert 'placeholder="NVDA / 601127"' in body
+
+_EM_JSON_1H = '{"data":{"klines":[' \
+    '"2026-08-04 22:30,135.700,138.010,138.580,134.330,198247166",' \
+    '"2026-08-04 23:30,140.000,141.000,142.000,139.000,200000000",' \
+    '"2026-08-05 04:00,141.500,142.900,143.800,140.500,180000000"' \
+    ']}}'
+
+
+def test_fetch_stock_kline_us_daily_ny_tz(monkeypatch):
+    """美股日 K（klt=101）：东财返回美东日期 → America/New_York。"""
+    import nanobot_quant.td_table_handlers as m
+
+    calls = {}
+
+    def fake_urlopen(req, timeout=20):
+        calls["url"] = req.full_url
+        return FakeResp(_EM_JSON)
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    df = _fetch_stock_kline("NVDA", bar="1D", limit=60)
+    assert "secid=105.NVDA" in calls["url"]
+    assert str(df.index.tz) == "America/New_York"
+
+
+def test_fetch_stock_kline_us_intraday_shanghai_tz(monkeypatch):
+    """美股分钟 K（klt=60）：东财时间戳为北京时间 → Asia/Shanghai。
+
+    实测（2026-08-05）：美东 16:00 收盘 = 北京 04:00，东财分钟 K 用
+    北京时间标注；日 K 用美东日期标注。
+    """
+    import nanobot_quant.td_table_handlers as m
+
+    calls = {}
+
+    def fake_urlopen(req, timeout=20):
+        calls["url"] = req.full_url
+        return FakeResp(_EM_JSON_1H)
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    df = _fetch_stock_kline("NVDA", bar="1H", limit=60)
+    assert "klt=60" in calls["url"]
+    assert str(df.index.tz) == "Asia/Shanghai"
+    # 北京 08-05 04:00 = UTC 08-04 20:00 = 美东 08-04 16:00（收盘）
+    assert df.index[-1].tz_convert("America/New_York").hour == 16
+
+
+def test_display_utc_column_for_onchainos():
+    """链上源（aware UTC 索引）：_time=北京、_time_utc=UTC 两列并存。"""
+    import nanobot_quant.td_table_handlers as m
+
+    idx = pd.date_range("2026-08-05 05:15", periods=2, freq="15min", tz="UTC")
+    df = pd.DataFrame({"Close": [63.5, 63.7]}, index=idx)
+    out = m._display(df)
+    assert out["_time"].iloc[0] == "2026-08-05 13:15"      # UTC+8
+    assert out["_time_utc"].iloc[0] == "2026-08-05 05:15"  # 原生 UTC
+    headers = m._build_headers(True, True, True)
+    assert "UTC 时间" in headers
