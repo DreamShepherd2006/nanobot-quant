@@ -439,3 +439,56 @@ class TestPerStrategyParams:
         assert "Countdown 权重" not in _group_html("weights", cycle, "td_sequential_cycle", cycle)
         assert "Setup 权重" in _group_html("weights", cycle, "td_sequential_cycle", cycle)
         assert "Countdown 权重" in _group_html("weights", base, "td_sequential", base)
+
+
+# ── TDST break signals are display/reference only (2026-08-05) ──────────
+
+
+def _mk_df(closes: list) -> pd.DataFrame:
+    """One bar per close: High=close+1, Low=close-1, daily index."""
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": [c + 1 for c in closes],
+            "Low": [c - 1 for c in closes],
+            "Close": closes,
+            "Volume": [1_000_000] * len(closes),
+        },
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+
+
+def test_tdst_break_is_display_only():
+    """TDST 突破（setup 未完成）：表格列保留 BUY (Resistance Break)，
+    但 calculate() 摘要降级 HOLD——执行链不触发（与回测 setup 规则一致）。"""
+    from nanobot_quant.strategies.td_sequential import _DeMarkEngine, calculate
+
+    # setup_buy 1-9 完成后重置，最后一根 110 突破 TDST 压力 101
+    closes = [100, 101, 102, 103, 104] + list(range(100, 91, -1)) + [110]
+    df = _mk_df(closes)
+    engine = _DeMarkEngine(df, None)
+    engine.run_all(news_count=0)
+    last = engine.df.iloc[-1]
+    assert last["sell_setup_count"] != 9          # setup 未完成
+    assert last["buy_setup_count"] == 0
+    assert last["recommendation"] == "BUY (Resistance Break)"  # 表格仍展示
+    assert calculate(df)["recommendation"] == "HOLD"            # 执行链降级
+
+
+def test_setup_signal_not_overridden_by_tdst_break():
+    """同一 bar setup 完成 + TDST 突破：rec 保留 setup 信号方向（不被突破覆盖）。"""
+    from nanobot_quant.strategies.td_sequential import _DeMarkEngine, calculate
+
+    # sell setup 1-9 完成（连续上涨），最后一根 113 同时突破 TDST 压力 101
+    closes = (
+        [100, 101, 102, 103, 104]
+        + list(range(100, 91, -1))
+        + [105, 106, 107, 108, 109, 110, 111, 112, 113]
+    )
+    df = _mk_df(closes)
+    engine = _DeMarkEngine(df, None)
+    engine.run_all(news_count=0)
+    last = engine.df.iloc[-1]
+    assert last["sell_setup_count"] == 9
+    assert last["recommendation"] == "SELL (Setup Complete)"
+    assert calculate(df)["recommendation"] == "SELL (Setup Complete)"
