@@ -33,3 +33,14 @@ except ImportError:
     sys.modules.setdefault("lumibot", _lumibot)
     sys.modules.setdefault("lumibot.strategies", _strategies)
     sys.modules.setdefault("lumibot.strategies.strategy", _strategy_mod)
+
+try:
+    import yfinance  # noqa: F401
+except ImportError:
+    _yf = types.ModuleType("yfinance")
+
+    def _download(*args, **kwargs):
+        raise RuntimeError("yfinance stub — not installed in test container")
+
+    _yf.download = _download
+    sys.modules.setdefault("yfinance", _yf)
