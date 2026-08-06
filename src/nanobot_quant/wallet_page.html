@@ -380,18 +380,24 @@ $('refresh-btn').addEventListener('click', async () => {
   toast('✅ 已刷新', true);
 });
 
+let pendingSessionId = '';
+
 $('login-btn').addEventListener('click', async () => {
   try {
+    // 移除上一次残留的登录框，避免重复点击堆叠
+    document.querySelectorAll('.login-box').forEach(b => b.remove());
     const data = await fetchJSON('/config/wallet/login', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({phase: 'init'}),
     });
     if (data.login_url) {
+      pendingSessionId = data.auth_session_id || '';
       const box = document.createElement('div');
       box.className = 'login-box show';
       box.innerHTML = `<strong>🔗 请在浏览器中打开并授权：</strong><br>` +
         `<a href="${esc(data.login_url)}" target="_blank" rel="noopener">${esc(data.login_url)}</a>` +
-        `<br><small>授权完成后点击「🔄 刷新」确认登录状态。</small>`;
+        `<br><small>授权完成后点击下方「✅ 我已授权，确认」完成登录。</small><br>` +
+        `<button class="btn-outline" id="confirm-login-btn" style="margin-top:8px">✅ 我已授权，确认</button>`;
       $('global-msg').appendChild(box);
       toast('✅ 登录链接已生成', true);
     } else {
@@ -399,6 +405,38 @@ $('login-btn').addEventListener('click', async () => {
     }
   } catch (e) {
     toast('❌ ' + e.message, false);
+  }
+});
+
+// 事件委托：处理动态生成的「✅ 我已授权，确认」按钮（发起 login poll 领取 token）
+document.addEventListener('click', async (e) => {
+  if (e.target.id !== 'confirm-login-btn') return;
+  const btn = e.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ 确认中…';
+  try {
+    const resp = await fetch('/config/wallet/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({phase: 'poll', session_id: pendingSessionId}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (data.status === 'logged_in') {
+      toast('✅ 登录成功', true);
+      const box = btn.closest('.login-box');
+      if (box) box.remove();
+      pendingSessionId = '';
+      await loadData();
+    } else if (data.status === 'pending') {
+      toast('⏳ 尚未完成授权：请先在浏览器中打开链接并授权，再点确认', false);
+      btn.disabled = false;
+      btn.textContent = '✅ 我已授权，确认';
+    } else {
+      throw new Error(data.message || data.error || '登录确认失败');
+    }
+  } catch (err) {
+    toast('❌ ' + err.message, false);
+    btn.disabled = false;
+    btn.textContent = '✅ 我已授权，确认';
   }
 });
 
