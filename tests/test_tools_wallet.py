@@ -16,6 +16,7 @@ from nanobot_quant.tools.tools_wallet import (
     wallet_balance,
     wallet_chains,
     wallet_history,
+    wallet_send,
     wallet_status,
     wallet_switch,
 )
@@ -44,6 +45,44 @@ def fake_subprocess(monkeypatch):
         write=lambda *a, **k: None, flush=lambda: None,
     ))
     return calls
+
+
+class TestWalletSend:
+    def test_send_native_coin(self, fake_subprocess):
+        resp = wallet_send("solana", "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq", "1.5")
+        assert resp.get("status") == "ok"
+        args = fake_subprocess[-1]
+        assert args[:3] == [ONCHAINOS_BIN, "wallet", "send"]
+        assert args[args.index("--chain") + 1] == "solana"
+        assert args[args.index("--to") + 1] == "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq"
+        assert args[args.index("--readable-amount") + 1] == "1.5"
+        assert "--contract-token" not in args
+
+    def test_send_token_with_from_and_force(self, fake_subprocess):
+        resp = wallet_send(
+            "solana", "6HWbojG7Kb6vRHsWbUX5858yVHxQqcWTxv8k8nHNyN1s", "0.01",
+            contract_token="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            from_address="E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq",
+            force=True,
+        )
+        assert resp.get("status") == "ok"
+        args = fake_subprocess[-1]
+        assert args[args.index("--contract-token") + 1] == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        assert args[args.index("--from") + 1] == "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq"
+        assert args[-1] == "--force"
+
+    def test_send_missing_args(self):
+        resp = wallet_send("", "", "")
+        assert resp["status"] == "error"
+
+    def test_send_cli_error_propagated(self, monkeypatch):
+        def _fake_run(args, capture_output=True, text=True, timeout=30):
+            return _FakeProc(1, json.dumps({"ok": False, "error": "[52001] Insufficient balance"}))
+
+        monkeypatch.setattr("nanobot_quant.tools.tools_wallet.subprocess.run", _fake_run)
+        resp = wallet_send("solana", "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq", "9999")
+        assert resp["status"] == "error"
+        assert "52001" in resp["error"]
 
 
 class TestRunCli:

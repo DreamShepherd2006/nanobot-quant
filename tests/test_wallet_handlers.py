@@ -79,6 +79,11 @@ class TestRegister:
             "/config/wallet/login",
             "/config/wallet/add",
             "/config/wallet/switch",
+            "/config/wallet/send",
+            "/config/wallet/send/confirm",
+            "/config/wallet/address-book/add",
+            "/config/wallet/address-book/remove",
+            "/config/wallet/address-book/limit",
         }
 
 
@@ -121,7 +126,8 @@ class TestDataAggregation:
         assert resp.status_code == 200
         data = json.loads(resp.body)
         assert data["ok"] is True
-        for key in ("status", "login", "addresses", "balance", "history", "accounts"):
+        for key in ("status", "login", "addresses", "balance", "history", "accounts",
+                    "chains", "address_book"):
             assert key in data
 
 
@@ -197,3 +203,284 @@ class TestCallHelper:
         result = _run(_call(_boom, timeout=5))
         assert result["status"] == "error"
         assert "cli exploded" in result["error"]
+
+
+# ── Transfer (two-step backend confirmation) ────────────────────────────
+
+_SOL_ADDR = "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq"
+
+
+def _gk_with_book(tmp_path, addresses=None, max_amount=None):
+    """Gatekeeper with data_root pinned to tmp_path and an optional pre-seeded book."""
+    gk = _FakeGatekeeper()
+    gk._platform.data_root = str(tmp_path)
+    if addresses is not None:
+        path = tmp_path / "credentials" / "address_book.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"addresses": addresses, "max_amount": max_amount}))
+    return gk
+
+
+class TestTransfer:
+    def test_send_requires_login(self):
+        _, h = _make_handlers()
+        resp = _run(h["/config/wallet/send"](_FakeRequest(user=None)))
+        assert resp.status_code == 401
+
+    def test_send_requires_commander(self):
+        _, h = _make_handlers()
+        resp = _run(h["/config/wallet/send"](_FakeRequest(user={"name": "bob", "commander": False})))
+        assert resp.status_code == 403
+
+    def test_confirm_requires_login(self):
+        _, h = _make_handlers()
+        resp = _run(h["/config/wallet/send/confirm"](_FakeRequest(user=None)))
+        assert resp.status_code == 401
+
+    def test_send_missing_fields(self):
+        _, h = _make_handlers()
+        req = _FakeRequest(user={"name": "commander", "commander": True}, body={})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 400
+
+    def test_send_invalid_address_format(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"chain": "solana", "to_address": "0x1234", "amount": "1"})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 400
+        assert "格式无效" in json.loads(resp.body)["error"]
+
+    def test_send_address_not_in_book(self, tmp_path, monkeypatch):
+        async def _fake_call(fn, *args, **kwargs):
+            return {"status": "ok", "data": []}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path, addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"chain": "solana", "to_address": "6HWbojG7Kb6vRHsWbUX5858yVHxQqcWTxv8k8nHNyN1s", "amount": "1"})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 400
+        assert "地址簿" in json.loads(resp.body)["error"]
+
+    def test_send_over_limit(self, tmp_path, monkeypatch):
+        async def _fake_call(fn, *args, **kwargs):
+            return {"status": "ok", "data": []}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}],
+                           max_amount=10.0)
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"chain": "solana", "to_address": _SOL_ADDR, "amount": "100"})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 400
+        assert "限额" in json.loads(resp.body)["error"]
+
+    def test_send_unsupported_chain(self, tmp_path, monkeypatch):
+        async def _fake_call(fn, *args, **kwargs):
+            return {"status": "ok", "data": [{"chainName": "solana"}]}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        evm = "0xe06e734a46f6d7ea98302a68ca50dd7dc26378d3"
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "EVM", "chain": "eth", "address": evm}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"chain": "eth", "to_address": evm, "amount": "1"})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 400
+        assert "不支持的链" in json.loads(resp.body)["error"]
+
+    def test_send_preview_returns_tx_id(self, tmp_path, monkeypatch):
+        async def _fake_call(fn, *args, **kwargs):
+            return {"status": "ok", "data": [{"chainName": "solana"}]}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"chain": "solana", "to_address": _SOL_ADDR, "amount": "1.5"})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 200
+        data = json.loads(resp.body)
+        assert data["ok"] is True
+        assert len(data["tx_id"]) == 32
+        assert data["preview"]["amount"] == "1.5"
+        assert data["preview"]["token"] is None
+
+    def test_send_confirm_executes(self, tmp_path, monkeypatch):
+        captured = {}
+
+        async def _fake_call(fn, *args, **kwargs):
+            if fn.__name__ == "wallet_chains":
+                return {"status": "ok", "data": [{"chainName": "solana"}]}
+            captured["fn"] = fn.__name__
+            captured["args"] = args
+            return {"status": "ok", "data": {"txHash": "abc123"}}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        user = {"name": "commander", "commander": True}
+        req = _FakeRequest(user=user,
+                           body={"chain": "solana", "to_address": _SOL_ADDR, "amount": "1.5"})
+        resp = _run(h["/config/wallet/send"](req))
+        tx_id = json.loads(resp.body)["tx_id"]
+        resp2 = _run(h["/config/wallet/send/confirm"](_FakeRequest(user=user, body={"tx_id": tx_id})))
+        assert resp2.status_code == 200
+        data2 = json.loads(resp2.body)
+        assert data2["ok"] is True
+        assert captured["fn"] == "wallet_send"
+        assert captured["args"][0] == "solana"
+        assert captured["args"][1] == _SOL_ADDR
+        assert captured["args"][2] == "1.5"
+        assert captured["args"][3] == ""
+
+    def test_send_confirm_unknown_tx(self):
+        _, h = _make_handlers()
+        req = _FakeRequest(user={"name": "commander", "commander": True}, body={"tx_id": "nope"})
+        resp = _run(h["/config/wallet/send/confirm"](req))
+        assert resp.status_code == 400
+
+    def test_send_confirm_expired(self, tmp_path, monkeypatch):
+        class _FakeTime:
+            def __init__(self):
+                self.t = 1000.0
+
+            def time(self):
+                return self.t
+
+        ft = _FakeTime()
+        monkeypatch.setattr("nanobot_quant.wallet_handlers.time", ft)
+
+        async def _fake_call(fn, *args, **kwargs):
+            return {"status": "ok", "data": [{"chainName": "solana"}]}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        user = {"name": "commander", "commander": True}
+        req = _FakeRequest(user=user,
+                           body={"chain": "solana", "to_address": _SOL_ADDR, "amount": "1.5"})
+        resp = _run(h["/config/wallet/send"](req))
+        tx_id = json.loads(resp.body)["tx_id"]
+        ft.t = 2000.0  # 60s later — beyond the 30s TTL
+        resp2 = _run(h["/config/wallet/send/confirm"](_FakeRequest(user=user, body={"tx_id": tx_id})))
+        assert resp2.status_code == 400
+        assert "过期" in json.loads(resp2.body)["error"]
+
+    def test_send_confirm_single_use(self, tmp_path, monkeypatch):
+        async def _fake_call(fn, *args, **kwargs):
+            if fn.__name__ == "wallet_chains":
+                return {"status": "ok", "data": [{"chainName": "solana"}]}
+            return {"status": "ok", "data": {"txHash": "abc"}}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        user = {"name": "commander", "commander": True}
+        req = _FakeRequest(user=user,
+                           body={"chain": "solana", "to_address": _SOL_ADDR, "amount": "1"})
+        tx_id = json.loads(_run(h["/config/wallet/send"](req)).body)["tx_id"]
+        assert _run(h["/config/wallet/send/confirm"](_FakeRequest(user=user, body={"tx_id": tx_id}))).status_code == 200
+        resp2 = _run(h["/config/wallet/send/confirm"](_FakeRequest(user=user, body={"tx_id": tx_id})))
+        assert resp2.status_code == 400
+
+
+# ── Address book ────────────────────────────────────────────────────────
+
+
+class TestAddressBook:
+    def test_add_valid(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"name": "个人钱包", "chain": "solana", "address": _SOL_ADDR})
+        resp = _run(h["/config/wallet/address-book/add"](req))
+        assert resp.status_code == 200
+        data = json.loads(resp.body)
+        assert data["ok"] is True
+        assert len(data["address_book"]["addresses"]) == 1
+        saved = json.loads((tmp_path / "credentials" / "address_book.json").read_text())
+        assert saved["addresses"][0]["name"] == "个人钱包"
+        assert saved["addresses"][0]["chain"] == "solana"
+        assert saved["addresses"][0]["address"] == _SOL_ADDR
+
+    def test_add_requires_commander(self):
+        _, h = _make_handlers()
+        resp = _run(h["/config/wallet/address-book/add"](_FakeRequest(user={"name": "bob", "commander": False})))
+        assert resp.status_code == 403
+
+    def test_add_duplicate(self, tmp_path):
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"name": "重复", "chain": "solana", "address": _SOL_ADDR})
+        resp = _run(h["/config/wallet/address-book/add"](req))
+        assert resp.status_code == 400
+        assert "已存在" in json.loads(resp.body)["error"]
+
+    def test_add_invalid_address(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"name": "坏地址", "chain": "solana", "address": "0x1234"})
+        resp = _run(h["/config/wallet/address-book/add"](req))
+        assert resp.status_code == 400
+        assert "格式无效" in json.loads(resp.body)["error"]
+
+    def test_add_evm_address(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"name": "EVM", "chain": "eth", "address": "0xe06e734a46f6d7ea98302a68ca50dd7dc26378d3"})
+        resp = _run(h["/config/wallet/address-book/add"](req))
+        assert resp.status_code == 200
+
+    def test_remove_valid(self, tmp_path):
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True}, body={"id": "e1"})
+        resp = _run(h["/config/wallet/address-book/remove"](req))
+        assert resp.status_code == 200
+        assert json.loads(resp.body)["address_book"]["addresses"] == []
+
+    def test_remove_unknown(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True}, body={"id": "ghost"})
+        resp = _run(h["/config/wallet/address-book/remove"](req))
+        assert resp.status_code == 404
+
+    def test_limit_set_and_clear(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[])
+        _, h = _make_handlers(gk)
+        user = {"name": "commander", "commander": True}
+        resp = _run(h["/config/wallet/address-book/limit"](_FakeRequest(user=user, body={"max_amount": 500})))
+        assert resp.status_code == 200
+        assert json.loads(resp.body)["address_book"]["max_amount"] == 500
+        resp2 = _run(h["/config/wallet/address-book/limit"](_FakeRequest(user=user, body={"max_amount": None})))
+        assert resp.status_code == 200
+        assert json.loads(resp2.body)["address_book"]["max_amount"] is None
+
+    def test_limit_invalid(self, tmp_path):
+        gk = _gk_with_book(tmp_path, addresses=[])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True}, body={"max_amount": -5})
+        resp = _run(h["/config/wallet/address-book/limit"](req))
+        assert resp.status_code == 400
+
+    def test_limit_requires_login(self):
+        _, h = _make_handlers()
+        resp = _run(h["/config/wallet/address-book/limit"](_FakeRequest(user=None)))
+        assert resp.status_code == 401

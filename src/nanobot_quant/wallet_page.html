@@ -93,6 +93,18 @@
   .switch-form { display:flex; gap:6px; align-items:center; margin-top:6px; }
   .switch-form input { flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.85em; }
   .switch-form button { flex-shrink:0; }
+  .form-label { font-size:.8em; color:#666; display:block; margin-top:10px; }
+  .inp { width:100%; padding:7px 10px; border:1px solid #ccc; border-radius:6px;
+         font-size:.88em; margin:4px 0 8px; background:#fff; color:#333; }
+  .inp:focus { outline:none; border-color:#1565c0; }
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none;
+                   align-items:center; justify-content:center; z-index:1000; }
+  .modal-overlay.show { display:flex; }
+  .modal { background:#fff; border-radius:10px; padding:20px; max-width:440px; width:92%;
+           box-shadow:0 4px 20px rgba(0,0,0,.2); }
+  .modal h3 { margin-bottom:10px; }
+  .modal .kv { font-size:.88em; }
+  small { color:#999; }
 </style>
 </head>
 <body>
@@ -126,6 +138,16 @@
   <div id="hist-body"><div class="loading">加载中…</div></div>
 </div>
 
+<div id="send-card" class="card">
+  <div class="card-header"><span class="icon">💸</span><span class="name">转账</span><span class="badge warn">不可逆</span></div>
+  <div id="send-body"><div class="loading">加载中…</div></div>
+</div>
+
+<div id="ab-card" class="card">
+  <div class="card-header"><span class="icon">📒</span><span class="name">地址簿</span><span id="ab-count" class="badge off">—</span></div>
+  <div id="ab-body"><div class="loading">加载中…</div></div>
+</div>
+
 <div class="card">
   <div class="card-header"><span class="icon">🛠️</span><span class="name">操作</span></div>
   <div class="actions">
@@ -140,6 +162,17 @@
 </div>
 
 <div id="toast" class="toast"></div>
+
+<div id="send-modal" class="modal-overlay">
+  <div class="modal">
+    <h3>⚠️ 确认转账</h3>
+    <div id="send-preview"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button class="btn-outline" id="send-cancel-btn">取消</button>
+      <button class="btn-danger" id="send-confirm-btn">确认转账</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -367,9 +400,190 @@ async function loadData() {
     renderAddresses(data.addresses);
     renderBalance(data.balance);
     renderHistory(data.history);
+    renderSend(data.chains, data.address_book);
+    renderAddressBook(data.address_book);
   } catch (e) {
     $('global-msg').innerHTML = `<div class="err">${esc(e.message)}</div>`;
   }
+}
+
+// ── Transfer (two-step backend confirmation) ───────────────────────
+
+let pendingTxId = '';
+
+function chainNames(chainsRes) {
+  let names = [];
+  if (chainsRes && chainsRes.status === 'ok' && Array.isArray(chainsRes.data)) {
+    names = chainsRes.data
+      .map(c => c.chainName || c.chain_name || c.name || '')
+      .filter(Boolean);
+  }
+  if (!names.length) {
+    names = ['solana', 'eth', 'xlayer', 'arb_eth', 'base_eth', 'op_eth', 'bnb',
+             'matic', 'avax', 'ftm', 'blast_eth', 'scroll_eth', 'era_eth', 's'];
+  }
+  const uniq = [...new Set(names.map(n => String(n).toLowerCase()))];
+  uniq.sort((a, b) => (a === 'solana' ? -1 : b === 'solana' ? 1 : 0));
+  return uniq;
+}
+
+function renderSendTo(list) {
+  const chain = $('send-chain').value;
+  const matches = (list || []).filter(e => e.chain === chain);
+  const sel = $('send-to');
+  if (!matches.length) {
+    sel.disabled = true;
+    sel.innerHTML = '<option value="">该链暂无登记地址 — 请先在「地址簿」添加</option>';
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = matches.map(e =>
+    `<option value="${esc(e.address)}">${esc(e.name)} · ${esc(e.address.slice(0, 12))}…</option>`
+  ).join('');
+}
+
+function renderSend(chainsRes, book) {
+  const body = $('send-body');
+  const chains = chainNames(chainsRes);
+  const list = (book && book.addresses) || [];
+  const chainOpts = chains.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  body.innerHTML = `
+    <div class="form-label">链</div>
+    <select id="send-chain" class="inp">${chainOpts}</select>
+    <div class="form-label">目标地址（仅限地址簿中的登记地址）</div>
+    <select id="send-to" class="inp"></select>
+    <div class="form-label">代币合约（可选，留空 = 链原生币）</div>
+    <input id="send-token" class="inp" placeholder="如 USDC 合约地址 / 留空转原生币">
+    <div class="form-label">金额（人类可读，按代币小数位换算）</div>
+    <input id="send-amount" class="inp" placeholder="如 1.5" type="number" step="any" min="0">
+    <button class="btn-primary" id="send-submit-btn" style="width:100%">📤 提交转账</button>
+    <div class="info" style="margin-top:8px">⚠️ 转账不可逆：确认后将立即广播上链，无法撤销。目标地址必须已在地址簿中登记。</div>`;
+  $('send-chain').addEventListener('change', () => renderSendTo(list));
+  renderSendTo(list);
+  $('send-submit-btn').addEventListener('click', submitSend);
+}
+
+async function submitSend() {
+  const chain = $('send-chain').value;
+  const to = $('send-to').value;
+  const amount = $('send-amount').value.trim();
+  const token = $('send-token').value.trim();
+  if (!to || !amount) { toast('❌ 请选择目标地址并填写金额', false); return; }
+  try {
+    const data = await fetchJSON('/config/wallet/send', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chain, to_address: to, amount, token_address: token}),
+    });
+    pendingTxId = data.tx_id || '';
+    const p = data.preview || {};
+    $('send-preview').innerHTML =
+      kvRow('链', p.chain) + kvRow('目标地址', p.to_address) +
+      kvRow('金额', p.amount + (p.token ? `（${p.token}）` : '（链原生币）')) +
+      '<div class="info" style="margin:8px 0 0">⚠️ 确认后立即广播上链，不可撤销。请在 30 秒内完成确认。</div>';
+    $('send-modal').classList.add('show');
+  } catch (e) {
+    toast('❌ ' + e.message, false);
+  }
+}
+
+async function confirmSend() {
+  const btn = $('send-confirm-btn');
+  btn.disabled = true;
+  try {
+    const data = await fetchJSON('/config/wallet/send/confirm', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tx_id: pendingTxId}),
+    });
+    pendingTxId = '';
+    $('send-modal').classList.remove('show');
+    const d = data.data || {};
+    const tx = d.txHash || d.transactionHash || d.hash || d.txId || '';
+    toast('✅ 转账已广播' + (tx ? ' · ' + tx.slice(0, 16) + '…' : ''), true);
+    await loadData();
+  } catch (e) {
+    toast('❌ ' + e.message, false);
+  }
+  btn.disabled = false;
+}
+
+$('send-cancel-btn').addEventListener('click', () => {
+  $('send-modal').classList.remove('show');
+  pendingTxId = '';
+});
+$('send-confirm-btn').addEventListener('click', confirmSend);
+
+// ── Address book ───────────────────────────────────────────────────
+
+function renderAddressBook(book) {
+  const body = $('ab-body');
+  const list = (book && book.addresses) || [];
+  const countEl = $('ab-count');
+  countEl.textContent = list.length + ' 个地址';
+  countEl.className = 'badge ' + (list.length ? 'on' : 'off');
+  const chains = chainNames(null);
+  let html = '';
+  if (!list.length) {
+    html = '<div class="empty">暂无登记地址 — 转账目标必须先从地址簿添加</div>';
+  } else {
+    for (const e of list) {
+      html += `<div class="addr-row"><span class="chain">${esc(e.name)}<br><small>${esc(e.chain)}</small></span>` +
+        `<span class="addr">${esc(e.address)}</span>` +
+        `<button class="copy-btn" data-addr="${esc(e.address)}">📋</button>` +
+        `<button class="btn-danger ab-remove" data-id="${esc(e.id)}" style="padding:2px 8px;font-size:.75em">删除</button></div>`;
+    }
+  }
+  html += `<div class="form-label">添加目标地址（转账只允许从这里选择）</div>
+    <div class="row">
+      <input id="ab-name" class="inp" placeholder="名称（如：个人钱包 / OKX 交易所）" style="flex:2">
+      <select id="ab-chain" class="inp" style="flex:1">${chains.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>
+    </div>
+    <input id="ab-address" class="inp" placeholder="目标地址（base58 / 0x…）">
+    <button class="btn-outline" id="ab-add-btn">➕ 添加到地址簿</button>
+    <div class="form-label">单笔限额（可选，按金额数值；留空 = 不限制）</div>
+    <div class="row">
+      <input id="ab-limit" class="inp" placeholder="如 1000" style="flex:2" value="${book && book.max_amount != null ? esc(String(book.max_amount)) : ''}">
+      <button class="btn-outline" id="ab-limit-btn">💾 保存限额</button>
+    </div>`;
+  body.innerHTML = html;
+
+  body.querySelectorAll('.ab-remove').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('从地址簿删除该地址？')) return;
+      try {
+        await fetchJSON('/config/wallet/address-book/remove', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id: btn.dataset.id}),
+        });
+        toast('✅ 已删除', true);
+        await loadData();
+      } catch (e) { toast('❌ ' + e.message, false); }
+    });
+  });
+  $('ab-add-btn').addEventListener('click', async () => {
+    const name = $('ab-name').value.trim();
+    const chain = $('ab-chain').value;
+    const address = $('ab-address').value.trim();
+    if (!name || !address) { toast('❌ 请填写名称和地址', false); return; }
+    try {
+      await fetchJSON('/config/wallet/address-book/add', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, chain, address}),
+      });
+      toast('✅ 已添加到地址簿', true);
+      await loadData();
+    } catch (e) { toast('❌ ' + e.message, false); }
+  });
+  $('ab-limit-btn').addEventListener('click', async () => {
+    const raw = $('ab-limit').value.trim();
+    const max_amount = raw === '' ? null : Number(raw);
+    try {
+      await fetchJSON('/config/wallet/address-book/limit', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({max_amount}),
+      });
+      toast(raw === '' ? '✅ 已取消限额' : `✅ 单笔限额已设为 ${max_amount}`, true);
+    } catch (e) { toast('❌ ' + e.message, false); }
+  });
 }
 
 // ── Actions ──────────────────────────────────────────────────────
