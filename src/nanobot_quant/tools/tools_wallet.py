@@ -215,7 +215,7 @@ def wallet_send(
     args = [
         ONCHAINOS_BIN, "wallet", "send",
         "--chain", chain,
-        "--to", to_address,
+        "--recipient", to_address,
         "--readable-amount", readable_amount,
     ]
     if contract_token:
