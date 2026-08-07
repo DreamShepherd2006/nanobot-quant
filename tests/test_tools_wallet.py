@@ -54,7 +54,7 @@ class TestWalletSend:
         args = fake_subprocess[-1]
         assert args[:3] == [ONCHAINOS_BIN, "wallet", "send"]
         assert args[args.index("--chain") + 1] == "solana"
-        assert args[args.index("--to") + 1] == "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq"
+        assert args[args.index("--recipient") + 1] == "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq"
         assert args[args.index("--readable-amount") + 1] == "1.5"
         assert "--contract-token" not in args
 
