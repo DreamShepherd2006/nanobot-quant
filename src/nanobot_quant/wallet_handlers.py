@@ -23,6 +23,8 @@ import uuid
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from .onchainos_cli import normalize_symbol
+from .token_handlers import _read_tokens
 from .tools.tools_wallet import (
     wallet_accounts,
     wallet_add,
@@ -62,6 +64,41 @@ async def _call(fn, *args, timeout: float = 25.0, **kwargs):
         return {"status": "error", "error": f"{getattr(fn, '__name__', fn)} timed out"}
     except Exception as exc:  # noqa: BLE001 — CLI errors surface to the page
         return {"status": "error", "error": f"{getattr(fn, '__name__', fn)}: {exc}"}
+
+
+def _merge_tracked_tokens(bal_res: dict, tokens: list[dict]) -> dict:
+    """Append user-registered tokens (tokens.json) to balance assets.
+
+    `wallet balance` returns every non-zero asset of the active account, so a
+    tracked token that is missing from the response has a zero balance — we
+    still show it (marked ``tracked``) so users always see the tokens they
+    care about, even at 0. Pure function, unit-tested.
+    """
+    if bal_res.get("status") != "ok" or not isinstance(bal_res.get("data"), dict):
+        return bal_res
+    data = bal_res["data"]
+    assets = data.get("assets") or data.get("balances") or []
+    if not isinstance(assets, list):
+        assets = []
+    known = set()
+    for a in assets:
+        if isinstance(a, dict):
+            sym = normalize_symbol(a.get("symbol") or a.get("token") or a.get("tokenSymbol") or "")
+            if sym:
+                known.add(sym)
+    for t in tokens:
+        sym = normalize_symbol(t.get("symbol", ""))
+        if not sym or sym in known:
+            continue
+        assets.append({
+            "symbol": sym,
+            "amount": "0",
+            "tracked": True,
+            "chain": str(t.get("chain") or "solana"),
+        })
+        known.add(sym)
+    data["assets"] = assets
+    return bal_res
 
 
 # ── Route registration helper (closure pattern, mirrors live_handlers) ──
@@ -149,6 +186,11 @@ def register_wallet_routes(app, gatekeeper) -> None:
             _call(wallet_accounts, timeout=10),
             _call(wallet_chains, timeout=30),
         )
+        # Merge user-registered tokens (tokens.json) into the balance view so
+        # tracked tokens show even with zero balance. wallet balance returns
+        # all non-zero assets, so a tracked token missing from the response
+        # means its balance is 0 (displayed as "0" with a 🪙 marker).
+        bal_res = _merge_tracked_tokens(bal_res, _read_tokens())
         return JSONResponse({
             "ok": True,
             "status": status_res,

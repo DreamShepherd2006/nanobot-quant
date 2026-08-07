@@ -11,6 +11,7 @@ import json
 
 from nanobot_quant.wallet_handlers import (
     _call,
+    _merge_tracked_tokens,
     register_wallet_routes,
 )
 
@@ -484,3 +485,55 @@ class TestAddressBook:
         _, h = _make_handlers()
         resp = _run(h["/config/wallet/address-book/limit"](_FakeRequest(user=None)))
         assert resp.status_code == 401
+
+
+# ── _merge_tracked_tokens ─────────────────────────────────────────
+
+
+class TestMergeTrackedTokens:
+    def _bal(self, assets=None):
+        return {"status": "ok", "data": {"assets": assets if assets is not None else []}}
+
+    def test_error_result_passthrough(self):
+        res = {"status": "error", "error": "boom"}
+        assert _merge_tracked_tokens(res, [{"symbol": "RENDER"}]) is res
+
+    def test_non_dict_data_passthrough(self):
+        res = {"status": "ok", "data": []}
+        assert _merge_tracked_tokens(res, [{"symbol": "RENDER"}]) is res
+
+    def test_appends_tracked_zero_balance(self):
+        res = self._bal([{"symbol": "SOL", "amount": "1.2"}])
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        assets = out["data"]["assets"]
+        assert [a["symbol"] for a in assets] == ["SOL", "RENDER"]
+        assert assets[1]["amount"] == "0"
+        assert assets[1]["tracked"] is True
+        assert assets[1]["chain"] == "solana"
+
+    def test_existing_symbol_not_duplicated(self):
+        res = self._bal([{"symbol": "render", "amount": "3.5"}])  # case-insensitive match
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        assets = out["data"]["assets"]
+        assert len(assets) == 1
+        assert "tracked" not in assets[0]
+
+    def test_multiple_tokens_and_case_normalization(self):
+        res = self._bal([{"token": "usdc", "amount": "5"}])
+        out = _merge_tracked_tokens(res, [
+            {"symbol": "USDC", "chain": "solana"},
+            {"symbol": "crclx", "chain": "xlayer"},
+        ])
+        assets = out["data"]["assets"]
+        assert [a.get("symbol") or a.get("token") for a in assets] == ["usdc", "CRCLX"]
+        assert assets[1]["tracked"] is True
+
+    def test_empty_token_list_noop(self):
+        res = self._bal([{"symbol": "SOL", "amount": "1"}])
+        out = _merge_tracked_tokens(res, [])
+        assert out["data"]["assets"] == [{"symbol": "SOL", "amount": "1"}]
+
+    def test_balances_key_used_when_no_assets(self):
+        res = {"status": "ok", "data": {"balances": [{"symbol": "SOL", "amount": "2"}]}}
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        assert [a["symbol"] for a in out["data"]["assets"]] == ["SOL", "RENDER"]
