@@ -66,7 +66,69 @@ async def _call(fn, *args, timeout: float = 25.0, **kwargs):
         return {"status": "error", "error": f"{getattr(fn, '__name__', fn)}: {exc}"}
 
 
-def _merge_tracked_tokens(bal_res: dict, tokens: list[dict]) -> dict:
+# ── tracked token balance merge ────────────────────────────────────
+
+
+# Map fine-grained wallet chain codes (from wallets.json, e.g. "sol", "xlayer_test")
+# to the coarse chain names used in tokens.json (e.g. "solana", "xlayer").
+_CHAIN_ALIASES = {
+    "sol": "solana",
+    "eth": "ethereum",
+    "op_eth": "optimism",
+    "arb_eth": "arbitrum",
+    "base_eth": "base",
+    "linea_eth": "linea",
+    "scroll_eth": "scroll",
+    "blast_eth": "blast",
+    "era_eth": "zksync",
+    "boba_eth": "boba",
+    "matic": "polygon",
+    "avax": "avalanche",
+    "ftm": "fantom",
+    "xdai": "gnosis",
+    "klay": "klaytn",
+    "mnt": "mantle",
+    "ron": "ronin",
+    "cfx": "conflux",
+    "xlayer_test": "xlayer",
+}
+
+
+def _chain_address_map(accounts_res: dict) -> dict[str, str]:
+    """Fine-grained chain code -> wallet address for the active sub-account.
+
+    Source is the `wallet accounts` response (wallets.json) that backs the
+    📍 钱包地址 card, so the sub-row wallet addresses always match the card.
+    """
+    if not isinstance(accounts_res, dict) or accounts_res.get("status") != "ok":
+        return {}
+    data = accounts_res.get("data") or {}
+    accounts = data.get("accounts") or []
+    if not isinstance(accounts, list) or not accounts:
+        return {}
+    active = next((a for a in accounts if isinstance(a, dict) and a.get("is_active")), accounts[0])
+    if not isinstance(active, dict):
+        return {}
+    out: dict[str, str] = {}
+    for a in active.get("addresses") or []:
+        if isinstance(a, dict) and a.get("address"):
+            chain = str(a.get("chain") or a.get("chain_index") or "").strip().lower()
+            if chain:
+                out[chain] = a["address"]
+    return out
+
+
+def _resolve_wallet_address(tokens_chain: str, addr_map: dict[str, str]) -> str:
+    tc = (tokens_chain or "").strip().lower()
+    if not tc:
+        return ""
+    for raw_chain, addr in addr_map.items():
+        if raw_chain == tc or _CHAIN_ALIASES.get(raw_chain) == tc:
+            return addr
+    return ""
+
+
+def _merge_tracked_tokens(bal_res: dict, tokens: list[dict], addr_map: dict[str, str] | None = None) -> dict:
     """Append user-registered tokens (tokens.json) to balance assets.
 
     `wallet balance` returns every non-zero asset of the active account, so a
@@ -90,13 +152,16 @@ def _merge_tracked_tokens(bal_res: dict, tokens: list[dict]) -> dict:
         sym = normalize_symbol(t.get("symbol", ""))
         if not sym or sym in known:
             continue
-        assets.append({
+        entry = {
             "symbol": sym,
             "amount": "0",
             "tracked": True,
             "chain": str(t.get("chain") or "solana"),
             "address": str(t.get("address") or ""),
-        })
+        }
+        if addr_map:
+            entry["wallet_address"] = _resolve_wallet_address(entry["chain"], addr_map)
+        assets.append(entry)
         known.add(sym)
     data["assets"] = assets
     return bal_res
@@ -191,7 +256,9 @@ def register_wallet_routes(app, gatekeeper) -> None:
         # tracked tokens show even with zero balance. wallet balance returns
         # all non-zero assets, so a tracked token missing from the response
         # means its balance is 0 (displayed as "0" with a 🪙 marker).
-        bal_res = _merge_tracked_tokens(bal_res, _read_tokens())
+        # addr_map (from the accounts card) lets the sub-row also show the
+        # wallet address of the token's chain.
+        bal_res = _merge_tracked_tokens(bal_res, _read_tokens(), _chain_address_map(accounts_res))
         return JSONResponse({
             "ok": True,
             "status": status_res,

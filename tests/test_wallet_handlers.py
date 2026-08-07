@@ -513,6 +513,31 @@ class TestMergeTrackedTokens:
         assert assets[1]["chain"] == "solana"
         assert assets[1]["address"] == "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof"
 
+    def test_wallet_address_resolved_from_addr_map(self):
+        res = self._bal([{"symbol": "SOL", "amount": "1.2"}])
+        addr_map = {"sol": "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq",
+                    "xlayer_test": "0xe06e734a46f6d7ea98302a68ca50dd7dc26378d3"}
+        out = _merge_tracked_tokens(res, [
+            {"symbol": "RENDER", "chain": "solana", "address": "rndrizK..."},
+            {"symbol": "CRCLX", "chain": "xlayer", "address": "0x4ae46a..."},
+        ], addr_map=addr_map)
+        by_sym = {a["symbol"]: a for a in out["data"]["assets"]}
+        assert by_sym["RENDER"]["wallet_address"] == "E71V4QebmxDoQrDUAvRZun5xt879trqyxH2TeoaDLeQq"
+        assert by_sym["CRCLX"]["wallet_address"] == "0xe06e734a46f6d7ea98302a68ca50dd7dc26378d3"
+
+    def test_wallet_address_unknown_chain_empty(self):
+        res = self._bal([{"symbol": "SOL", "amount": "1.2"}])
+        out = _merge_tracked_tokens(
+            res, [{"symbol": "FOO", "chain": "unknownchain", "address": "abc"}],
+            addr_map={"sol": "E71V4Qe..."},
+        )
+        assert out["data"]["assets"][1]["wallet_address"] == ""
+
+    def test_no_addr_map_no_wallet_address(self):
+        res = self._bal([{"symbol": "SOL", "amount": "1.2"}])
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        assert "wallet_address" not in out["data"]["assets"][1]
+
     def test_existing_symbol_not_duplicated(self):
         res = self._bal([{"symbol": "render", "amount": "3.5"}])  # case-insensitive match
         out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
