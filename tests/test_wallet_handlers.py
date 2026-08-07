@@ -569,6 +569,22 @@ class TestMergeRealCliShape:
         assert assets[1]["amount"] == "0"
         assert assets[1]["tracked"] is True
 
+    def test_enriches_tracked_token_present_in_cli(self):
+        """A registered token that the CLI reports with a real balance keeps
+        its amount AND gains the tracked metadata / sub-row data."""
+        res = self._real_bal([{"symbol": "RENDER", "balance": "12.06", "usdValue": "16.16",
+                               "chainIndex": "501", "tokenAddress": "rndrizK..."}])
+        addr_map = {"sol": "6HWbojG7Kb6vRHsWbUX5858yVHxQqcWTxv8k8nHNyN1s"}
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana",
+                                           "address": "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof"}],
+                                    addr_map=addr_map)
+        r = next(a for a in out["data"]["assets"] if a["symbol"] == "RENDER")
+        assert r["amount"] == "12.06"           # real balance preserved
+        assert r["tracked"] is True             # 🪙 marker
+        assert r["chain"] == "solana"
+        assert r["address"] == "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof"
+        assert r["wallet_address"] == "6HWbojG7Kb6vRHsWbUX5858yVHxQqcWTxv8k8nHNyN1s"
+
     def test_renderable_assets_key_written(self):
         res = self._real_bal([{"symbol": "SOL", "balance": "1.2"}])
         out = _merge_tracked_tokens(res, [{"symbol": "RENDER"}])
@@ -680,10 +696,13 @@ class TestFillTrackedBalances:
 
     def test_existing_symbol_not_duplicated(self):
         res = self._bal([{"symbol": "render", "amount": "3.5"}])  # case-insensitive match
-        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana",
+                                           "address": "rndrizK..."}])
         assets = out["data"]["assets"]
-        assert len(assets) == 1
-        assert "tracked" not in assets[0]
+        assert len(assets) == 1  # no duplicate row
+        assert assets[0]["amount"] == "3.5"  # real balance preserved
+        assert assets[0]["tracked"] is True  # enriched with metadata
+        assert assets[0]["chain"] == "solana"
 
     def test_multiple_tokens_and_case_normalization(self):
         res = self._bal([{"token": "usdc", "amount": "5"}])

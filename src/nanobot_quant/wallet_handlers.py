@@ -179,7 +179,20 @@ def _merge_tracked_tokens(bal_res: dict, tokens: list[dict], addr_map: dict[str,
                 known.add(sym)
     for t in tokens:
         sym = normalize_symbol(t.get("symbol", ""))
-        if not sym or sym in known:
+        if not sym:
+            continue
+        if sym in known:
+            # The CLI already reports this tracked token with its real
+            # balance — enrich that entry with the registered metadata so the
+            # sub-rows (chain / contract / wallet address) still show.
+            for a in assets:
+                if isinstance(a, dict) and normalize_symbol(a.get("symbol") or "") == sym:
+                    a.setdefault("tracked", True)
+                    a["chain"] = str(t.get("chain") or a.get("chain") or "solana")
+                    a["address"] = str(t.get("address") or a.get("tokenAddress") or "")
+                    if addr_map:
+                        a["wallet_address"] = _resolve_wallet_address(a["chain"], addr_map)
+                    break
             continue
         entry = {
             "symbol": sym,
