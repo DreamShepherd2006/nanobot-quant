@@ -34,6 +34,10 @@
   .copy-btn { background:#e3f2fd; border:none; color:#1565c0; border-radius:4px;
               cursor:pointer; font-size:.75em; padding:3px 9px; flex-shrink:0; }
   .copy-btn:hover { background:#bbdefb; }
+  .addr-sub { display:flex; align-items:center; gap:6px; margin:-4px 0 6px 22px;
+              font-size:.78em; color:#888; font-family:ui-monospace,Menlo,monospace;
+              word-break:break-all; }
+  .addr-sub .copy-btn { font-size:.72em; padding:1px 6px; flex-shrink:0; }
   .acc-block { border:1px solid #e8e8e8; border-radius:8px; padding:10px 12px;
                margin-bottom:10px; background:#fafafa; }
   .acc-block:last-child { margin-bottom:0; }
@@ -341,8 +345,14 @@ function renderBalance(balRes) {
       const sym = a.symbol || a.token || a.tokenSymbol || '—';
       const amt = a.amount || a.balance || a.free || '';
       const usd = a.usdValue || a.valueUsd || a.usd_value || '';
-      // 🪙 marks user-registered tokens (tokens.json) — shown even at 0 balance
+      // 🪙 marks user-registered tokens (tokens.json) — shown even at 0 balance,
+      // with the full contract address below for careful verification
       rows += kvRow(a.tracked ? '🪙 ' + sym : sym, `${amt}${usd ? ' ≈ $' + usd : ''}`);
+      if (a.tracked && a.address) {
+        rows += `<div class="addr-sub">${esc(a.chain ? a.chain + ' · ' : '')}` +
+                `<span class="addr-full">${esc(a.address)}</span>` +
+                `<button class="copy-btn" data-addr="${esc(a.address)}">📋 复制</button></div>`;
+      }
     }
   } else if (typeof assets === 'object') {
     for (const [sym, amt] of Object.entries(assets)) {
@@ -351,6 +361,15 @@ function renderBalance(balRes) {
   }
   if (!rows) rows = '<div class="empty">无余额数据</div>';
   body.innerHTML = rows;
+
+  document.querySelectorAll('#bal-body .copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.addr).then(
+        () => toast('✅ 已复制: ' + btn.dataset.addr.slice(0, 16) + '…', true),
+        () => toast('❌ 复制失败', false)
+      );
+    });
+  });
 }
 
 function renderHistory(histRes) {

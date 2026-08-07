@@ -504,12 +504,14 @@ class TestMergeTrackedTokens:
 
     def test_appends_tracked_zero_balance(self):
         res = self._bal([{"symbol": "SOL", "amount": "1.2"}])
-        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana",
+                                           "address": "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof"}])
         assets = out["data"]["assets"]
         assert [a["symbol"] for a in assets] == ["SOL", "RENDER"]
         assert assets[1]["amount"] == "0"
         assert assets[1]["tracked"] is True
         assert assets[1]["chain"] == "solana"
+        assert assets[1]["address"] == "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof"
 
     def test_existing_symbol_not_duplicated(self):
         res = self._bal([{"symbol": "render", "amount": "3.5"}])  # case-insensitive match

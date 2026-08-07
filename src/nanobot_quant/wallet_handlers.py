@@ -95,6 +95,7 @@ def _merge_tracked_tokens(bal_res: dict, tokens: list[dict]) -> dict:
             "amount": "0",
             "tracked": True,
             "chain": str(t.get("chain") or "solana"),
+            "address": str(t.get("address") or ""),
         })
         known.add(sym)
     data["assets"] = assets
