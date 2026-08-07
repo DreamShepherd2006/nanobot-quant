@@ -420,7 +420,7 @@ async function loadData() {
     renderBalance(data.balance);
     renderHistory(data.history);
     renderSend(data.chains, data.address_book);
-    renderAddressBook(data.address_book);
+    renderAddressBook(data.address_book, data.chains);
   } catch (e) {
     $('global-msg').innerHTML = `<div class="err">${esc(e.message)}</div>`;
   }
@@ -430,6 +430,9 @@ async function loadData() {
 
 let pendingTxId = '';
 
+const CHAIN_ALIASES = {'solana': 'sol', 'ethereum': 'eth', 'x_layer': 'xlayer', 'x-layer': 'xlayer', 'x layer': 'xlayer'};
+function nChain(c) { c = String(c || '').trim().toLowerCase(); return CHAIN_ALIASES[c] || c; }
+
 function chainNames(chainsRes) {
   let names = [];
   if (chainsRes && chainsRes.status === 'ok' && Array.isArray(chainsRes.data)) {
@@ -438,17 +441,17 @@ function chainNames(chainsRes) {
       .filter(Boolean);
   }
   if (!names.length) {
-    names = ['solana', 'eth', 'xlayer', 'arb_eth', 'base_eth', 'op_eth', 'bnb',
-             'matic', 'avax', 'ftm', 'blast_eth', 'scroll_eth', 'era_eth', 's'];
+    names = ['sol', 'eth', 'xlayer', 'arb_eth', 'base_eth', 'op_eth', 'bnb',
+             'matic', 'avax', 'ftm', 'blast_eth', 'scroll_eth', 'era_eth'];
   }
   const uniq = [...new Set(names.map(n => String(n).toLowerCase()))];
-  uniq.sort((a, b) => (a === 'solana' ? -1 : b === 'solana' ? 1 : 0));
+  uniq.sort((a, b) => (a === 'sol' ? -1 : b === 'sol' ? 1 : 0));
   return uniq;
 }
 
 function renderSendTo(list) {
   const chain = $('send-chain').value;
-  const matches = (list || []).filter(e => e.chain === chain);
+  const matches = (list || []).filter(e => nChain(e.chain) === nChain(chain));
   const sel = $('send-to');
   if (!matches.length) {
     sel.disabled = true;
@@ -533,13 +536,13 @@ $('send-confirm-btn').addEventListener('click', confirmSend);
 
 // ── Address book ───────────────────────────────────────────────────
 
-function renderAddressBook(book) {
+function renderAddressBook(book, chainsRes) {
   const body = $('ab-body');
   const list = (book && book.addresses) || [];
   const countEl = $('ab-count');
   countEl.textContent = list.length + ' 个地址';
   countEl.className = 'badge ' + (list.length ? 'on' : 'off');
-  const chains = chainNames(null);
+  const chains = chainNames(chainsRes);
   let html = '';
   if (!list.length) {
     html = '<div class="empty">暂无登记地址 — 转账目标必须先从地址簿添加</div>';

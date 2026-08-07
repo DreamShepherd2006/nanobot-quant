@@ -285,7 +285,7 @@ class TestTransfer:
 
     def test_send_unsupported_chain(self, tmp_path, monkeypatch):
         async def _fake_call(fn, *args, **kwargs):
-            return {"status": "ok", "data": [{"chainName": "solana"}]}
+            return {"status": "ok", "data": [{"chainName": "sol"}]}
 
         monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
         evm = "0xe06e734a46f6d7ea98302a68ca50dd7dc26378d3"
@@ -300,7 +300,7 @@ class TestTransfer:
 
     def test_send_preview_returns_tx_id(self, tmp_path, monkeypatch):
         async def _fake_call(fn, *args, **kwargs):
-            return {"status": "ok", "data": [{"chainName": "solana"}]}
+            return {"status": "ok", "data": [{"chainName": "sol"}]}
 
         monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
         gk = _gk_with_book(tmp_path,
@@ -316,12 +316,29 @@ class TestTransfer:
         assert data["preview"]["amount"] == "1.5"
         assert data["preview"]["token"] is None
 
+    def test_send_alias_book_match(self, tmp_path, monkeypatch):
+        """Legacy address-book entries (chain="solana") must match the CLI
+        chainName dropdown value ("sol") — regression for the chain mismatch
+        that made registered addresses unselectable in the send form."""
+        async def _fake_call(fn, *args, **kwargs):
+            return {"status": "ok", "data": [{"chainName": "sol"}]}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        gk = _gk_with_book(tmp_path,
+                           addresses=[{"id": "e1", "name": "个人钱包", "chain": "solana", "address": _SOL_ADDR}])
+        _, h = _make_handlers(gk)
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={"chain": "sol", "to_address": _SOL_ADDR, "amount": "1.5"})
+        resp = _run(h["/config/wallet/send"](req))
+        assert resp.status_code == 200
+        assert json.loads(resp.body)["ok"] is True
+
     def test_send_confirm_executes(self, tmp_path, monkeypatch):
         captured = {}
 
         async def _fake_call(fn, *args, **kwargs):
             if fn.__name__ == "wallet_chains":
-                return {"status": "ok", "data": [{"chainName": "solana"}]}
+                return {"status": "ok", "data": [{"chainName": "sol"}]}
             captured["fn"] = fn.__name__
             captured["args"] = args
             return {"status": "ok", "data": {"txHash": "abc123"}}
@@ -340,7 +357,7 @@ class TestTransfer:
         data2 = json.loads(resp2.body)
         assert data2["ok"] is True
         assert captured["fn"] == "wallet_send"
-        assert captured["args"][0] == "solana"
+        assert captured["args"][0] == "sol"
         assert captured["args"][1] == _SOL_ADDR
         assert captured["args"][2] == "1.5"
         assert captured["args"][3] == ""
@@ -363,7 +380,7 @@ class TestTransfer:
         monkeypatch.setattr("nanobot_quant.wallet_handlers.time", ft)
 
         async def _fake_call(fn, *args, **kwargs):
-            return {"status": "ok", "data": [{"chainName": "solana"}]}
+            return {"status": "ok", "data": [{"chainName": "sol"}]}
 
         monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
         gk = _gk_with_book(tmp_path,
@@ -382,7 +399,7 @@ class TestTransfer:
     def test_send_confirm_single_use(self, tmp_path, monkeypatch):
         async def _fake_call(fn, *args, **kwargs):
             if fn.__name__ == "wallet_chains":
-                return {"status": "ok", "data": [{"chainName": "solana"}]}
+                return {"status": "ok", "data": [{"chainName": "sol"}]}
             return {"status": "ok", "data": {"txHash": "abc"}}
 
         monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
@@ -414,7 +431,7 @@ class TestAddressBook:
         assert len(data["address_book"]["addresses"]) == 1
         saved = json.loads((tmp_path / "credentials" / "address_book.json").read_text())
         assert saved["addresses"][0]["name"] == "个人钱包"
-        assert saved["addresses"][0]["chain"] == "solana"
+        assert saved["addresses"][0]["chain"] == "sol"
         assert saved["addresses"][0]["address"] == _SOL_ADDR
 
     def test_add_requires_commander(self):

@@ -94,6 +94,25 @@ _CHAIN_ALIASES = {
 }
 
 
+# Map human-readable chain names to the OKX CLI chainName (short) form used by
+# the /config/wallet send dropdown (e.g. "solana" -> "sol"). Address-book
+# entries created before the dropdown sources were unified may store long
+# names; normalize on both sides so matching is alias-agnostic.
+_NORMALIZE_ALIASES = {
+    "solana": "sol",
+    "ethereum": "eth",
+    "x_layer": "xlayer",
+    "x-layer": "xlayer",
+    "x layer": "xlayer",
+}
+
+
+def _normalize_chain(chain: str) -> str:
+    """Normalize a chain identifier to the OKX CLI chainName form."""
+    c = (chain or "").strip().lower()
+    return _NORMALIZE_ALIASES.get(c, c)
+
+
 def _chain_address_map(accounts_res: dict) -> dict[str, str]:
     """Fine-grained chain code -> wallet address for the active sub-account.
 
@@ -330,7 +349,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
 
     def _is_valid_address(chain: str, address: str) -> bool:
         address = address.strip()
-        if chain in ("solana", "501"):
+        if _normalize_chain(chain) in ("sol", "501"):
             return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address))
         return bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", address))
 
@@ -459,7 +478,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
         except Exception:
             return JSONResponse({"ok": False, "error": "无效请求"}, status_code=400)
 
-        chain = str(body.get("chain", "")).strip().lower()
+        chain = _normalize_chain(str(body.get("chain", "")).strip().lower())
         to_address = str(body.get("to_address", "")).strip()
         amount = str(body.get("amount", "")).strip()
         token_address = str(body.get("token_address", "")).strip()
@@ -471,7 +490,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
 
         book = _load_address_book()
         if not any(
-            e.get("chain") == chain and e.get("address") == to_address
+            _normalize_chain(str(e.get("chain") or "")) == chain and e.get("address") == to_address
             for e in book.get("addresses", [])
         ):
             return JSONResponse(
@@ -571,7 +590,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": "无效请求"}, status_code=400)
 
         name = str(body.get("name", "")).strip()
-        chain = str(body.get("chain", "")).strip().lower()
+        chain = _normalize_chain(str(body.get("chain", "")).strip().lower())
         address = str(body.get("address", "")).strip()
         if not name or not chain or not address:
             return JSONResponse({"ok": False, "error": "name / chain / address 必填"}, status_code=400)
@@ -580,7 +599,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
 
         book = _load_address_book()
         if any(
-            e.get("chain") == chain and e.get("address") == address
+            _normalize_chain(str(e.get("chain") or "")) == chain and e.get("address") == address
             for e in book.get("addresses", [])
         ):
             return JSONResponse({"ok": False, "error": "该地址已存在"}, status_code=400)
