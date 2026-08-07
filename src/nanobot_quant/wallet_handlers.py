@@ -170,6 +170,98 @@ def _get_token_assets(data: dict) -> list:
     return []
 
 
+def _parse_all_accounts_balance(data: dict) -> tuple[list[dict], str]:
+    """Parse a `wallet balance --all` response into per-account groups.
+
+    CLI v4.3.1 --all shape (batch API):
+
+        data = {
+          "totalValueUsd": "<sum>",
+          "details": {                        # map: accountId -> cache entry
+            "<accountId>": {                  # snake_case fields
+              "updated_at": ...,
+              "data": [ {                     # balance group
+                "accountId": ..., "accountName": ..., "tokenAssets": [...]
+              } ],
+              "total_value_usd": "...",
+            },
+            ...
+          }
+        }
+
+    Falls back to a flat ``details`` list, then to the single-account shape
+    (``data.details[0].tokenAssets``) so the UI stays uniform. Pure function,
+    unit-tested.
+    """
+    if not isinstance(data, dict) or not data:
+        return [], ""
+    total = str(data.get("totalValueUsd") or data.get("total_value_usd") or "")
+    details = data.get("details")
+    accounts: list[dict] = []
+    if isinstance(details, dict):  # --all batch map: accountId -> entry
+        for account_id, entry in details.items():
+            if not isinstance(entry, dict):
+                continue
+            group = entry.get("data")
+            if isinstance(group, list) and group and isinstance(group[0], dict):
+                group = group[0]
+            if not isinstance(group, dict):
+                group = {}
+            assets = group.get("tokenAssets") or group.get("assets") or []
+            accounts.append({
+                "account_id": str(group.get("accountId") or group.get("account_id") or account_id or ""),
+                "account_name": str(group.get("accountName") or group.get("account_name") or ""),
+                "total_value_usd": str(entry.get("total_value_usd") or entry.get("totalValueUsd")
+                                        or group.get("totalValueUsd") or group.get("total_value_usd") or ""),
+                "is_active": False,
+                "assets": assets if isinstance(assets, list) else [],
+            })
+    elif isinstance(details, list):  # flat list of balance groups
+        # A single group without accountId is the legacy single-account
+        # shape — treat it as the active account.
+        single = len(details) == 1
+        for group in details:
+            if not isinstance(group, dict):
+                continue
+            assets = group.get("tokenAssets") or group.get("assets") or []
+            accounts.append({
+                "account_id": str(group.get("accountId") or group.get("account_id") or ""),
+                "account_name": str(group.get("accountName") or group.get("account_name") or ""),
+                "total_value_usd": str(group.get("totalValueUsd") or group.get("total_value_usd") or ""),
+                "is_active": single,
+                "assets": assets if isinstance(assets, list) else [],
+            })
+    else:
+        # single-account response — wrap the one account so the UI stays uniform
+        accounts.append({
+            "account_id": "",
+            "account_name": "",
+            "total_value_usd": total,
+            "is_active": True,
+            "assets": _get_token_assets(data),
+        })
+    return accounts, total
+
+
+def _merge_tracked_into_active_account(
+    accounts: list[dict], tokens: list[dict], addr_map: dict[str, str] | None = None,
+) -> list[dict]:
+    """Merge user-registered tokens (tokens.json) into the *active* account.
+
+    tokens.json entries are global (symbol/chain/address) and the address
+    book / wallet card only tracks the active account, so tracked tokens are
+    attributed to the active account (existing single-account behaviour);
+    other accounts keep only what the CLI reports. Pure function, unit-tested.
+    """
+    if not accounts:
+        return accounts
+    active = next((a for a in accounts if a.get("is_active")), accounts[0])
+    tmp = {"status": "ok", "data": {"details": [{"tokenAssets": active.get("assets") or []}]}}
+    merged = _merge_tracked_tokens(tmp, tokens, addr_map)
+    active["assets"] = merged["data"].get("assets") or []
+    return accounts
+
+
 def _merge_tracked_tokens(bal_res: dict, tokens: list[dict], addr_map: dict[str, str] | None = None) -> dict:
     """Append user-registered tokens (tokens.json) to balance assets.
 
@@ -384,22 +476,54 @@ def register_wallet_routes(app, gatekeeper) -> None:
             _call(wallet_status, timeout=25),
             _call(wallet_login_status, timeout=10),
             _call(wallet_addresses, timeout=25),
-            _call(wallet_balance, timeout=30),
+            _call(wallet_balance, all_accounts=True, timeout=60),
             _call(wallet_history, limit="10", timeout=30),
             _call(wallet_accounts, timeout=10),
             _call(wallet_chains, timeout=30),
         )
-        # Merge user-registered tokens (tokens.json) into the balance view so
-        # tracked tokens show even with zero balance. wallet balance returns
-        # all non-zero assets, so a tracked token missing from the response
-        # means its balance is 0 (displayed as "0" with a 🪙 marker).
-        # addr_map (from the accounts card) lets the sub-row also show the
-        # wallet address of the token's chain.
-        bal_res = _merge_tracked_tokens(bal_res, _read_tokens(), _chain_address_map(accounts_res))
-        # Some mints (e.g. RENDER) are missing from the balance detail even
-        # when the account holds them — probe those tracked tokens per-contract
-        # so the real quantity shows instead of a hardcoded 0.
-        bal_res = await _fill_tracked_balances(bal_res, _read_tokens())
+        # --all batch mode: split the response into per-account groups and
+        # tag the active account so the balance card shows every sub-account.
+        # Tracked-token merge + per-contract probes stay on the active account
+        # (existing behaviour); other accounts keep only what the CLI reports.
+        tokens = _read_tokens()
+        if bal_res.get("status") == "ok" and isinstance(bal_res.get("data"), dict):
+            data = bal_res["data"]
+            accounts, total_usd = _parse_all_accounts_balance(data)
+            # Prefer account names / active flag from the wallet accounts card
+            # (wallets.json) — the --all cache entries carry no names.
+            acc_meta = {
+                a.get("account_id"): a for a in
+                ((accounts_res.get("data") or {}).get("accounts") or [])
+                if isinstance(a, dict) and a.get("account_id")
+            }
+            for acc in accounts:
+                meta = acc_meta.get(acc["account_id"])
+                if meta:
+                    if not acc["account_name"]:
+                        acc["account_name"] = str(meta.get("account_name") or "")
+                    acc["is_active"] = bool(meta.get("is_active"))
+            if accounts and not any(a.get("is_active") for a in accounts):
+                accounts[0]["is_active"] = True
+            # Merge user-registered tokens (tokens.json) into the balance view
+            # so tracked tokens show even with zero balance. wallet balance
+            # returns all non-zero assets, so a tracked token missing from the
+            # response means its balance is 0 ("0" with a 🪙 marker). addr_map
+            # (from the accounts card) lets the sub-row also show the wallet
+            # address of the token's chain.
+            accounts = _merge_tracked_into_active_account(
+                accounts, tokens, _chain_address_map(accounts_res))
+            # Some mints (e.g. RENDER) are missing from the balance detail even
+            # when the account holds them — probe those tracked tokens per-contract
+            # so the real quantity shows instead of a hardcoded 0.
+            active = next((a for a in accounts if a.get("is_active")), accounts[0] if accounts else None)
+            if active is not None:
+                tmp = {"status": "ok", "data": {"assets": active.get("assets") or []}}
+                tmp = await _fill_tracked_balances(tmp, tokens)
+                active["assets"] = tmp["data"].get("assets") or []
+            data["accounts"] = accounts
+            if total_usd:
+                data["totalValueUsd"] = total_usd
+            bal_res = {"status": "ok", "data": data}
         return JSONResponse({
             "ok": True,
             "status": status_res,
