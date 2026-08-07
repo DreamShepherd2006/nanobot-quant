@@ -291,42 +291,31 @@ function renderAccounts(accounts) {
   });
 }
 
-function renderAddresses(addrRes) {
+function renderAddresses(accountsRes) {
   const body = $('addr-body');
-  if (addrRes.status !== 'ok' || !addrRes.data) {
-    body.innerHTML = `<div class="err">${esc(addrRes.error || '地址获取失败')}</div>`;
+  if (!accountsRes || accountsRes.status !== 'ok' || !accountsRes.data || !accountsRes.data.accounts) {
+    body.innerHTML = `<div class="err">${esc(accountsRes?.error || '地址获取失败')}</div>`;
     return;
   }
-  const d = addrRes.data;
-  const groups = d.groups || d.chains || d.addresses || d;
-  let html = '';
-  if (Array.isArray(groups)) {
-    for (const g of groups) {
-      const chain = g.chain || g.chainName || g.name || '—';
-      const addrs = g.addresses || g.walletAddresses || [];
-      for (const a of (Array.isArray(addrs) ? addrs : [addrs])) {
-        const addr = (typeof a === 'string') ? a : (a.address || a.walletAddress || a.wallet_address || JSON.stringify(a));
-        const tag = a.label || a.name || '';
-        html += `<div class="addr-row"><span class="chain">${esc(chain)}${tag ? ' · ' + esc(tag) : ''}</span>` +
-                `<span class="addr">${esc(addr)}</span>` +
-                `<button class="copy-btn" data-addr="${esc(addr)}">复制</button></div>`;
-      }
-    }
-  } else if (typeof groups === 'object') {
-    for (const [chain, addrs] of Object.entries(groups)) {
-      const list = Array.isArray(addrs) ? addrs : [addrs];
-      for (const a of list) {
-        const addr = (typeof a === 'string') ? a : (a.address || a.walletAddress || a.wallet_address || JSON.stringify(a));
-        html += `<div class="addr-row"><span class="chain">${esc(chain)}</span>` +
-                `<span class="addr">${esc(addr)}</span>` +
-                `<button class="copy-btn" data-addr="${esc(addr)}">复制</button></div>`;
-      }
-    }
+  // 数据源：wallets.json（wallet_accounts），链码为细粒度（eth/op_eth/bnb/sol/...），
+  // 而非 wallet addresses 命令的粗粒度分类（evm/solana/xlayer）
+  const active = accountsRes.data.accounts.find(a => a.is_active) || accountsRes.data.accounts[0];
+  if (!active || !active.addresses || active.addresses.length === 0) {
+    body.innerHTML = '<div class="empty">无地址数据</div>';
+    return;
   }
-  if (!html) html = '<div class="empty">无地址数据</div>';
+  let html = kvRow('账户', `${active.account_name || 'Account'}（${active.account_id}）`);
+  for (const a of active.addresses) {
+    const chain = a.chain || a.chain_index || '—';
+    const addr = a.address || '';
+    if (!addr) continue;
+    html += `<div class="addr-row"><span class="chain">${esc(chain)}</span>` +
+            `<span class="addr">${esc(addr)}</span>` +
+            `<button class="copy-btn" data-addr="${esc(addr)}">复制</button></div>`;
+  }
   body.innerHTML = html;
 
-  document.querySelectorAll('.copy-btn').forEach(btn => {
+  document.querySelectorAll('#addr-body .copy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       navigator.clipboard.writeText(btn.dataset.addr).then(
         () => toast('✅ 已复制: ' + btn.dataset.addr.slice(0, 16) + '…', true),
@@ -397,7 +386,7 @@ async function loadData() {
     const data = await fetchJSON('/config/wallet/data');
     renderLogin(data.login, data.status);
     renderAccounts(data.accounts);
-    renderAddresses(data.addresses);
+    renderAddresses(data.accounts);
     renderBalance(data.balance);
     renderHistory(data.history);
     renderSend(data.chains, data.address_book);
