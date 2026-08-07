@@ -541,6 +541,53 @@ class TestMergeTrackedTokens:
         assert "wallet_address" not in out["data"]["assets"][1]
 
 
+# ── CLI v4.3.1 details/tokenAssets shape ────────────────────────────
+
+
+class TestMergeRealCliShape:
+    """Real `onchainos wallet balance` output puts the detail list at
+    data.details[0].tokenAssets with fields symbol/balance/rawBalance/decimal.
+    The merge must read that shape (it was previously reading data.assets,
+    which is always empty → real balances never displayed)."""
+
+    def _real_bal(self, token_assets=None):
+        return {"status": "ok", "data": {
+            "totalValueUsd": "16.16",
+            "accountId": "acc-1",
+            "accountName": "Account 1",
+            "accountCount": 2,
+            "details": [{"tokenAssets": token_assets or []}],
+        }}
+
+    def test_reads_details_token_assets(self):
+        res = self._real_bal([{"symbol": "SOL", "balance": "1.2", "tokenPrice": "150",
+                               "usdValue": "180.00", "chainIndex": "501"}])
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
+        assets = out["data"]["assets"]
+        assert [a["symbol"] for a in assets] == ["SOL", "RENDER"]
+        assert assets[0]["amount"] == "1.2"
+        assert assets[1]["amount"] == "0"
+        assert assets[1]["tracked"] is True
+
+    def test_renderable_assets_key_written(self):
+        res = self._real_bal([{"symbol": "SOL", "balance": "1.2"}])
+        out = _merge_tracked_tokens(res, [{"symbol": "RENDER"}])
+        assert isinstance(out["data"]["assets"], list)
+        # frontend reads data.assets — make sure original details untouched
+        assert isinstance(out["data"]["details"], list)
+
+    def test_extract_balance_from_details_shape(self):
+        q = {"status": "ok", "data": {"details": [
+            {"tokenAssets": [{"symbol": "RENDER", "balance": "12.06", "rawBalance": 1206000000,
+                              "decimal": 8, "tokenPrice": "1.34", "usdValue": "16.16"}]}]}}
+        assert _extract_balance_amount(q, "RENDER") == "12.06"
+
+    def test_extract_balance_raw_decimal_fields(self):
+        q = {"status": "ok", "data": {"details": [
+            {"tokenAssets": [{"symbol": "RENDER", "rawBalance": 1206000000, "decimal": 8}]}]}}
+        assert _extract_balance_amount(q, "RENDER") == "12.06"
+
+
 # ── _extract_balance_amount ────────────────────────────────────────
 
 

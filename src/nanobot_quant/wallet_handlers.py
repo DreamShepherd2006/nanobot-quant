@@ -128,6 +128,29 @@ def _resolve_wallet_address(tokens_chain: str, addr_map: dict[str, str]) -> str:
     return ""
 
 
+def _get_token_assets(data: dict) -> list:
+    """Extract the token balance list from a `wallet balance` response data.
+
+    CLI v4.3.1 puts the detail list at ``data.details[0].tokenAssets``
+    (per-token fields: symbol/balance/rawBalance/decimal/tokenPrice/usdValue).
+    Older shapes (``data.assets`` / ``data.balances``) are kept as fallback.
+    """
+    if not isinstance(data, dict):
+        return []
+    details = data.get("details")
+    if isinstance(details, list):
+        for g in details:
+            if isinstance(g, dict):
+                ta = g.get("tokenAssets") or g.get("assets")
+                if isinstance(ta, list):
+                    return ta
+    for k in ("assets", "balances"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return v
+    return []
+
+
 def _merge_tracked_tokens(bal_res: dict, tokens: list[dict], addr_map: dict[str, str] | None = None) -> dict:
     """Append user-registered tokens (tokens.json) to balance assets.
 
@@ -135,16 +158,22 @@ def _merge_tracked_tokens(bal_res: dict, tokens: list[dict], addr_map: dict[str,
     tracked token that is missing from the response has a zero balance — we
     still show it (marked ``tracked``) so users always see the tokens they
     care about, even at 0. Pure function, unit-tested.
+
+    The merged list is written back to ``data["assets"]`` (the shape the
+    WebUI card consumes) while the original ``details`` stays untouched.
     """
     if bal_res.get("status") != "ok" or not isinstance(bal_res.get("data"), dict):
         return bal_res
     data = bal_res["data"]
-    assets = data.get("assets") or data.get("balances") or []
+    assets = _get_token_assets(data)
     if not isinstance(assets, list):
         assets = []
     known = set()
     for a in assets:
         if isinstance(a, dict):
+            # Normalize the CLI's per-token field to the card's amount field
+            if "amount" not in a and a.get("balance") not in (None, ""):
+                a["amount"] = str(a["balance"])
             sym = normalize_symbol(a.get("symbol") or a.get("token") or a.get("tokenSymbol") or "")
             if sym:
                 known.add(sym)
@@ -176,7 +205,7 @@ def _extract_balance_amount(q: dict, sym: str) -> str | None:
     data = q.get("data")
     if not isinstance(data, dict):
         return None
-    assets = data.get("assets") or data.get("balances") or []
+    assets = _get_token_assets(data)
     if not isinstance(assets, list):
         return None
     for a in assets:
@@ -194,8 +223,8 @@ def _amount_of(a: dict) -> str | None:
     amt = a.get("amount") or a.get("balance")
     if amt not in (None, ""):
         return str(amt)
-    raw = a.get("raw") or a.get("rawAmount") or a.get("raw_amount")
-    dec = a.get("decimals")
+    raw = a.get("raw") or a.get("rawAmount") or a.get("raw_amount") or a.get("rawBalance")
+    dec = a.get("decimals") or a.get("decimal")
     if raw is not None and dec is not None:
         try:
             return str(int(raw) / 10 ** int(dec))
