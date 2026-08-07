@@ -195,6 +195,38 @@ def wallet_switch(account_id: str) -> dict:
     ))
 
 
+def wallet_send(
+    chain: str,
+    to_address: str,
+    readable_amount: str,
+    contract_token: str = "",
+    from_address: str = "",
+    force: bool = False,
+) -> dict:
+    """Transfer funds from the active account to an arbitrary address.
+
+    TEE-signed and irreversible — the caller must confirm before invoking.
+    `readable_amount` is a human-readable amount (CLI converts by token
+    decimals). `contract_token` is the SPL/ERC-20 contract address for token
+    transfers; omit it to send the chain's native coin.
+    """
+    if not chain or not to_address or not readable_amount:
+        return {"status": "error", "error": "chain / to_address / readable_amount are required"}
+    args = [
+        ONCHAINOS_BIN, "wallet", "send",
+        "--chain", chain,
+        "--to", to_address,
+        "--readable-amount", readable_amount,
+    ]
+    if contract_token:
+        args += ["--contract-token", contract_token]
+    if from_address:
+        args += ["--from", from_address]
+    if force:
+        args.append("--force")
+    return _ok_data(_run_cli(args, timeout=90, label="wallet_send"))
+
+
 def get_active_wallet_address(chain: str = "solana") -> Optional[str]:
     """Resolve the active account's address for a chain (Agentic Wallet).
 
