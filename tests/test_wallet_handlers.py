@@ -13,7 +13,9 @@ from nanobot_quant.wallet_handlers import (
     _call,
     _extract_balance_amount,
     _fill_tracked_balances,
+    _merge_tracked_into_active_account,
     _merge_tracked_tokens,
+    _parse_all_accounts_balance,
     register_wallet_routes,
 )
 
@@ -740,3 +742,107 @@ class TestFillTrackedBalances:
         res = {"status": "ok", "data": {"balances": [{"symbol": "SOL", "amount": "2"}]}}
         out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
         assert [a["symbol"] for a in out["data"]["assets"]] == ["SOL", "RENDER"]
+
+# ── wallet balance --all per-account parsing ────────────────────────
+
+
+class TestParseAllAccountsBalance:
+    """`onchainos wallet balance --all` returns a map of accountId -> cache
+    entry (data list + total_value_usd). The parser must split it into
+    per-account groups and fall back gracefully on other shapes."""
+
+    def _entry(self, account_id, name, assets, total="6.56"):
+        return {
+            "updated_at": 1786123456,
+            "data": [{"accountId": account_id, "accountName": name,
+                       "tokenAssets": assets}],
+            "total_value_usd": total,
+        }
+
+    def test_map_shape(self):
+        data = {
+            "totalValueUsd": "21.56",
+            "details": {
+                "acc-1": self._entry("acc-1", "Account 1", [{"symbol": "SOL", "balance": "1"}]),
+                "acc-2": self._entry("acc-2", "Account 2", [{"symbol": "RENDER", "balance": "6.06"}]),
+            },
+        }
+        accounts, total = _parse_all_accounts_balance(data)
+        assert total == "21.56"
+        assert len(accounts) == 2
+        assert accounts[0]["account_id"] == "acc-1"
+        assert accounts[0]["account_name"] == "Account 1"
+        assert accounts[0]["total_value_usd"] == "6.56"
+        assert accounts[0]["assets"] == [{"symbol": "SOL", "balance": "1"}]
+        assert accounts[0]["is_active"] is False
+
+    def test_entry_data_missing_falls_back_to_key(self):
+        data = {"totalValueUsd": "1", "details": {"acc-x": {"updated_at": 1}}}
+        accounts, _ = _parse_all_accounts_balance(data)
+        assert len(accounts) == 1
+        assert accounts[0]["account_id"] == "acc-x"
+        assert accounts[0]["assets"] == []
+
+    def test_flat_list_shape(self):
+        data = {"totalValueUsd": "9", "details": [
+            {"accountId": "a", "accountName": "Account A", "tokenAssets": []},
+            {"accountId": "b", "tokenAssets": [{"symbol": "SOL", "balance": "2"}]},
+        ]}
+        accounts, total = _parse_all_accounts_balance(data)
+        assert total == "9"
+        assert [a["account_id"] for a in accounts] == ["a", "b"]
+        assert accounts[1]["assets"] == [{"symbol": "SOL", "balance": "2"}]
+
+    def test_single_account_fallback(self):
+        data = {"totalValueUsd": "14.62", "details": [{"tokenAssets": [{"symbol": "SOL"}]}]}
+        accounts, total = _parse_all_accounts_balance(data)
+        assert len(accounts) == 1
+        assert accounts[0]["is_active"] is True
+        assert accounts[0]["assets"] == [{"symbol": "SOL"}]
+
+    def test_non_dict_data(self):
+        assert _parse_all_accounts_balance(None) == ([], "")
+        assert _parse_all_accounts_balance([]) == ([], "")
+        assert _parse_all_accounts_balance({}) == ([], "")
+
+    def test_camelcase_entry_fields(self):
+        data = {"totalValueUsd": "3", "details": {
+            "acc-1": {"data": [{"accountId": "acc-1", "tokenAssets": []}],
+                       "totalValueUsd": "3"},
+        }}
+        accounts, _ = _parse_all_accounts_balance(data)
+        assert accounts[0]["total_value_usd"] == "3"
+
+
+class TestMergeTrackedIntoActiveAccount:
+    def _accounts(self):
+        return [
+            {"account_id": "a1", "account_name": "Account 1", "is_active": False,
+             "total_value_usd": "1", "assets": [{"symbol": "SOL", "amount": "1"}]},
+            {"account_id": "a2", "account_name": "Account 2", "is_active": True,
+             "total_value_usd": "14", "assets": [{"symbol": "RENDER", "amount": "6.06"}]},
+            {"account_id": "a3", "account_name": "Account 3", "is_active": False,
+             "total_value_usd": "8", "assets": [{"symbol": "RENDER", "amount": "6"}]},
+        ]
+
+    def test_merges_into_active_account_only(self):
+        tokens = [{"symbol": "CRCLX", "chain": "solana", "address": "XsueG8..."}]
+        accounts = _merge_tracked_into_active_account(self._accounts(), tokens)
+        by_id = {a["account_id"]: a for a in accounts}
+        # active (a2) gains the tracked zero-balance token
+        assert [a["symbol"] for a in by_id["a2"]["assets"]] == ["RENDER", "CRCLX"]
+        assert by_id["a2"]["assets"][1]["tracked"] is True
+        # other accounts keep CLI-only assets
+        assert [a["symbol"] for a in by_id["a1"]["assets"]] == ["SOL"]
+        assert [a["symbol"] for a in by_id["a3"]["assets"]] == ["RENDER"]
+
+    def test_no_active_flag_uses_first(self):
+        accounts = self._accounts()
+        for a in accounts:
+            a["is_active"] = False
+        out = _merge_tracked_into_active_account(
+            accounts, [{"symbol": "CRCLX", "chain": "solana"}])
+        assert [a["symbol"] for a in out[0]["assets"]] == ["SOL", "CRCLX"]
+
+    def test_empty_accounts(self):
+        assert _merge_tracked_into_active_account([], [{"symbol": "CRCLX"}]) == []
