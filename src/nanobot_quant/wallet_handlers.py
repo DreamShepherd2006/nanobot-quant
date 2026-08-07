@@ -167,6 +167,82 @@ def _merge_tracked_tokens(bal_res: dict, tokens: list[dict], addr_map: dict[str,
     return bal_res
 
 
+def _extract_balance_amount(q: dict, sym: str) -> str | None:
+    """Extract the readable balance for `sym` from a per-token
+    `wallet balance --token-address` response. Falls back to raw/decimals
+    conversion and to a single-entry response (per-token query)."""
+    if not isinstance(q, dict) or q.get("status") != "ok":
+        return None
+    data = q.get("data")
+    if not isinstance(data, dict):
+        return None
+    assets = data.get("assets") or data.get("balances") or []
+    if not isinstance(assets, list):
+        return None
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        if normalize_symbol(a.get("symbol") or "") == sym:
+            return _amount_of(a)
+    if len(assets) == 1 and isinstance(assets[0], dict):
+        return _amount_of(assets[0])
+    return None
+
+
+def _amount_of(a: dict) -> str | None:
+    """Readable amount from an asset entry, with raw/decimals fallback."""
+    amt = a.get("amount") or a.get("balance")
+    if amt not in (None, ""):
+        return str(amt)
+    raw = a.get("raw") or a.get("rawAmount") or a.get("raw_amount")
+    dec = a.get("decimals")
+    if raw is not None and dec is not None:
+        try:
+            return str(int(raw) / 10 ** int(dec))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+async def _fill_tracked_balances(bal_res: dict, tokens: list[dict]) -> dict:
+    """Query the real on-chain balance of tracked tokens that the wallet
+    balance summary omitted (e.g. RENDER: OKX balance detail does not list
+    every mint, but a per-token --token-address query returns it).
+
+    Only tracked entries with amount "0" and a contract address are queried;
+    failures keep the zero placeholder.
+    """
+    if bal_res.get("status") != "ok" or not isinstance(bal_res.get("data"), dict):
+        return bal_res
+    data = bal_res["data"]
+    assets = data.get("assets") or []
+    if not isinstance(assets, list):
+        return bal_res
+    to_query = []
+    for i, a in enumerate(assets):
+        if (isinstance(a, dict) and a.get("tracked") and a.get("address")
+                and a.get("amount") in (None, "", "0")):
+            to_query.append((i, normalize_symbol(a.get("symbol", "")),
+                             str(a.get("chain") or "solana"), str(a["address"])))
+    if not to_query:
+        return bal_res
+
+    async def query(idx: int, sym: str, chain: str, address: str) -> None:
+        try:
+            q = await asyncio.wait_for(
+                asyncio.to_thread(wallet_balance, chain=chain, token_address=address, force=True),
+                timeout=25,
+            )
+            amt = _extract_balance_amount(q, sym)
+            if amt is not None:
+                assets[idx]["amount"] = amt
+        except Exception:  # noqa: BLE001 — per-token probe failures keep the 0 placeholder
+            pass
+
+    await asyncio.gather(*(query(i, s, c, a) for i, s, c, a in to_query))
+    return bal_res
+
+
 # ── Route registration helper (closure pattern, mirrors live_handlers) ──
 
 
@@ -259,6 +335,10 @@ def register_wallet_routes(app, gatekeeper) -> None:
         # addr_map (from the accounts card) lets the sub-row also show the
         # wallet address of the token's chain.
         bal_res = _merge_tracked_tokens(bal_res, _read_tokens(), _chain_address_map(accounts_res))
+        # Some mints (e.g. RENDER) are missing from the balance detail even
+        # when the account holds them — probe those tracked tokens per-contract
+        # so the real quantity shows instead of a hardcoded 0.
+        bal_res = await _fill_tracked_balances(bal_res, _read_tokens())
         return JSONResponse({
             "ok": True,
             "status": status_res,

@@ -11,6 +11,8 @@ import json
 
 from nanobot_quant.wallet_handlers import (
     _call,
+    _extract_balance_amount,
+    _fill_tracked_balances,
     _merge_tracked_tokens,
     register_wallet_routes,
 )
@@ -537,6 +539,97 @@ class TestMergeTrackedTokens:
         res = self._bal([{"symbol": "SOL", "amount": "1.2"}])
         out = _merge_tracked_tokens(res, [{"symbol": "RENDER", "chain": "solana"}])
         assert "wallet_address" not in out["data"]["assets"][1]
+
+
+# ── _extract_balance_amount ────────────────────────────────────────
+
+
+class TestExtractBalanceAmount:
+    def test_matching_symbol(self):
+        q = {"status": "ok", "data": {"assets": [
+            {"symbol": "RENDER", "amount": "12.06", "decimals": 8},
+        ]}}
+        assert _extract_balance_amount(q, "RENDER") == "12.06"
+
+    def test_case_insensitive_match(self):
+        q = {"status": "ok", "data": {"assets": [{"symbol": "render", "amount": "12.06"}]}}
+        assert _extract_balance_amount(q, "RENDER") == "12.06"
+
+    def test_raw_decimals_fallback(self):
+        q = {"status": "ok", "data": {"assets": [
+            {"symbol": "RENDER", "raw": 1206000000, "decimals": 8},
+        ]}}
+        assert _extract_balance_amount(q, "RENDER") == "12.06"
+
+    def test_single_entry_fallback(self):
+        q = {"status": "ok", "data": {"assets": [{"amount": "0.001"}]}}
+        assert _extract_balance_amount(q, "SOL") == "0.001"
+
+    def test_error_response_none(self):
+        assert _extract_balance_amount({"status": "error", "error": "boom"}, "RENDER") is None
+
+    def test_empty_assets_none(self):
+        q = {"status": "ok", "data": {"assets": []}}
+        assert _extract_balance_amount(q, "RENDER") is None
+
+
+# ── _fill_tracked_balances ─────────────────────────────────────────
+
+
+class TestFillTrackedBalances:
+    def _bal(self, assets=None):
+        return {"status": "ok", "data": {"assets": assets if assets is not None else []}}
+
+    async def _run_fill(self, res, tokens=None, monkeypatch=None, fake=None):
+        from nanobot_quant import wallet_handlers as wh
+        if fake is not None:
+            monkeypatch.setattr(wh, "wallet_balance", fake)
+        return await wh._fill_tracked_balances(res, tokens or [])
+
+    def test_fills_zero_tracked(self, monkeypatch):
+        from nanobot_quant import wallet_handlers as wh
+        res = self._bal([
+            {"symbol": "SOL", "amount": "1.2"},
+            {"symbol": "RENDER", "amount": "0", "tracked": True, "address": "rndrizK..."},
+        ])
+
+        def fake(chain="", token_address="", force=False):
+            return {"status": "ok", "data": {"assets": [{"symbol": "RENDER", "amount": "12.06"}]}}
+
+        monkeypatch.setattr(wh, "wallet_balance", fake)
+        out = asyncio.run(wh._fill_tracked_balances(res, [{"symbol": "RENDER"}]))
+        by_sym = {a["symbol"]: a for a in out["data"]["assets"]}
+        assert by_sym["RENDER"]["amount"] == "12.06"
+        assert by_sym["SOL"]["amount"] == "1.2"  # untouched
+
+    def test_failure_keeps_zero(self, monkeypatch):
+        from nanobot_quant import wallet_handlers as wh
+        res = self._bal([{"symbol": "RENDER", "amount": "0", "tracked": True,
+                          "address": "rndrizK..."}])
+
+        def fake(chain="", token_address="", force=False):
+            return {"status": "error", "error": "CLI failed"}
+
+        monkeypatch.setattr(wh, "wallet_balance", fake)
+        out = asyncio.run(wh._fill_tracked_balances(res, [{"symbol": "RENDER"}]))
+        assert out["data"]["assets"][0]["amount"] == "0"
+
+    def test_skips_nonzero_and_non_tracked(self, monkeypatch):
+        from nanobot_quant import wallet_handlers as wh
+        called = []
+
+        def fake(chain="", token_address="", force=False):
+            called.append(1)
+            return {"status": "ok", "data": {"assets": []}}
+
+        monkeypatch.setattr(wh, "wallet_balance", fake)
+        res = self._bal([
+            {"symbol": "SOL", "amount": "1.2"},
+            {"symbol": "RENDER", "amount": "0", "tracked": True, "address": ""},  # no address
+        ])
+        out = asyncio.run(wh._fill_tracked_balances(res, [{"symbol": "RENDER"}]))
+        assert called == []
+        assert out["data"]["assets"][1]["amount"] == "0"
 
     def test_existing_symbol_not_duplicated(self):
         res = self._bal([{"symbol": "render", "amount": "3.5"}])  # case-insensitive match
