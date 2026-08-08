@@ -14,7 +14,7 @@ import os
 import sys
 
 
-def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool = False) -> dict:
+def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool = False, portfolio_value: float = 100000.0) -> dict:
     """Execute the trading pipeline on structured signal(s).
 
     Takes a JSON signal (from structurize_signal or run_td_sequential) and
@@ -31,6 +31,10 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
                  this returns error=needs_confirmation without executing;
                  pass confirm=true only after the user confirmed (the
                  confirmation is persisted so later runs pass automatically).
+        portfolio_value: Hypothetical portfolio value (USD) used for
+                 position sizing (default 100000 → 20% cap ≈ $20k).
+                 Pass a small value (e.g. 100 → $20 cap) for manual
+                 verification swaps to avoid large live orders.
 
     Returns:
         Pipeline execution results with risk checks and suggested orders.
@@ -125,6 +129,7 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
                 live=effective_live,
                 tokens_json=tokens_json,
                 confirm=confirm,
+                portfolio_value=portfolio_value,
             )
         finally:
             sys.stdout = _saved_stdout

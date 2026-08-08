@@ -157,6 +157,15 @@ _TOOLS = [
                     ),
                     "default": False,
                 },
+                "portfolio_value": {
+                    "type": "number",
+                    "description": (
+                        "Hypothetical portfolio value (USD) used for position sizing "
+                        "(default 100000 → 20% cap ≈ $20k). Pass a small value "
+                        "(e.g. 100 → $20 cap) for manual verification swaps."
+                    ),
+                    "default": 100000.0,
+                },
             },
             "required": ["ticker_signal_json"],
         },
