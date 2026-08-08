@@ -186,3 +186,34 @@ def test_execute_signal_direct_mode_unchanged():
     assert result.get("queued") is not True
     assert rf.called
     enq.assert_not_called()
+# ── get_execution_outcome ───────────────────────────────────────────────
+
+def test_get_execution_outcome_pending_then_done():
+    from nanobot_quant.tools import tools_execute
+
+    # loop 未运行 → loop_not_running
+    with mock.patch(
+        "nanobot_quant.execution_loop.loop_status",
+        return_value={"running": False, "stats": {}},
+    ):
+        assert tools_execute.get_execution_outcome("loop-1")["status"] == "loop_not_running"
+
+    # running 但无结果 → pending
+    with mock.patch(
+        "nanobot_quant.execution_loop.loop_status",
+        return_value={"running": True, "stats": {}},
+    ), mock.patch(
+        "nanobot_quant.execution_loop.get_outcome", return_value=None
+    ):
+        assert tools_execute.get_execution_outcome("loop-1")["status"] == "pending"
+
+    # running 且有结果 → done
+    with mock.patch(
+        "nanobot_quant.execution_loop.loop_status",
+        return_value={"running": True, "stats": {}},
+    ), mock.patch(
+        "nanobot_quant.execution_loop.get_outcome",
+        return_value={"ticker": "SOL", "risk_passed": True},
+    ):
+        res = tools_execute.get_execution_outcome("loop-1")
+        assert res["status"] == "done" and res["outcome"]["ticker"] == "SOL"

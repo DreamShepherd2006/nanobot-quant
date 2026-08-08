@@ -273,3 +273,28 @@ def _silence_lumibot_loggers() -> None:
             _lg.handlers.clear()
             _lg.propagate = True
             _lg.setLevel(logging.WARNING)
+
+def get_execution_outcome(order_id: str) -> dict:
+    """Query the outcome of a loop-mode execution (execute_signal queued).
+
+    Returns ``{"status": "pending"}`` while the StrategyExecutor loop is still
+    processing, or ``{"status": "done", "outcome": {...}}`` once finished.
+    No side effects; safe to call repeatedly.
+    """
+    from nanobot_quant.execution_loop import get_outcome, loop_status
+
+    status = loop_status()
+    if not status["running"]:
+        return {
+            "order_id": order_id,
+            "status": "loop_not_running",
+            "loop": status,
+        }
+    out = get_outcome(order_id)
+    if out is None:
+        return {
+            "order_id": order_id,
+            "status": "pending",
+            "hint": "循环尚未完成该订单（或 order_id 不存在）",
+        }
+    return {"order_id": order_id, "status": "done", "outcome": out}

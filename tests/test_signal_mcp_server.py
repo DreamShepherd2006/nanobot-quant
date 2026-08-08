@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     "execute_signal",
     "run_research_chain",
     "get_chain_result",
+    "get_execution_outcome",
     "run_backtest",
     "wallet_login_init",
     "wallet_login_poll",
@@ -48,7 +49,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_initialize_and_list_18_tools():
+def test_initialize_and_list_19_tools():
     async def scenario():
         async with stdio_client(SERVER_PARAMS) as (read, write):
             async with ClientSession(read, write) as session:
