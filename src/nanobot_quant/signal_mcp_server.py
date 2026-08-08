@@ -166,6 +166,16 @@ _TOOLS = [
                     ),
                     "default": 100000.0,
                 },
+                "quantity": {
+                    "type": ["number", "null"],
+                    "description": (
+                        "Optional explicit order quantity (float allowed, e.g. 0.058). "
+                        "When given, it overrides position sizing; portfolio_value is "
+                        "then only used for risk checks. Default null keeps the "
+                        "existing sizing behaviour."
+                    ),
+                    "default": None,
+                },
             },
             "required": ["ticker_signal_json"],
         },

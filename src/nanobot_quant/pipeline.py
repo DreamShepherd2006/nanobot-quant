@@ -375,6 +375,7 @@ def run_from_signals(
     live: bool = False,
     tokens_json: list[dict] | None = None,
     confirm: bool = False,
+    quantity: float | None = None,
 ) -> list[dict]:
     """Run risk checks + order generation on pre-computed signals.
 
@@ -389,6 +390,12 @@ def run_from_signals(
     entries (callers pass confirm=true ONLY after the user explicitly
     confirmed the entry).  Without it, such entries are rejected with
     risk_details.error="needs_confirmation" (fail-closed).
+
+    ``quantity`` optionally overrides position sizing: when given, it is
+    used directly as the order quantity (float allowed, e.g. 0.058) instead
+    of ``int(portfolio_value * max_position_pct / price)``.  Risk checks
+    (position_limit vs portfolio_value) still apply.  Default None keeps
+    the existing sizing behaviour.
 
     Returns list of dicts::
 
@@ -501,7 +508,9 @@ def run_from_signals(
 
         risk_details: dict[str, str] = {}
         risk_passed = True
-        qty = pipeline._calculate_quantity(portfolio_value, avg_price)
+        qty = quantity if quantity is not None else pipeline._calculate_quantity(portfolio_value, avg_price)
+        if quantity is not None:
+            print(f"[DIAG] run_from_signals: explicit quantity={quantity} (overrides sizing)", file=sys.stderr, flush=True)
         position_value = avg_price * qty
 
         pos_check = pipeline._risk.check_position_limit(

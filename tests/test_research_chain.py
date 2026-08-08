@@ -329,3 +329,40 @@ class TestPipelineTokenGate:
             results = pl.run_from_signals([self._signal(SOLANA_ADDR)])
         assert len(results) == 1
         assert results[0]["risk_details"] != {"error": "unsupported token"}
+    def test_explicit_quantity_overrides_sizing(self):
+        from nanobot_quant import pipeline as pl
+
+        with mock.patch(
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_ok(),
+        ):
+            results = pl.run_from_signals(
+                [self._signal("SOL")], quantity=0.058
+            )
+        assert len(results) == 1
+        r = results[0]
+        assert r["risk_details"] != {"error": "unsupported token"}
+        assert r["suggested_order"] is not None
+        assert r["suggested_order"]["quantity"] == 0.058
+        assert r["position_value"] == pytest.approx(60000.0 * 0.058)
+
+    def test_default_sizing_unchanged(self):
+        from nanobot_quant import pipeline as pl
+        from nanobot_quant.signal import TickerSignal
+
+        # low price so the default sizing (pv=100000, 20% cap) passes risk:
+        # int(100000*0.2/150)=133 → position 133*150=19950 ≤ 20000
+        sig = TickerSignal(
+            ticker="SOL", recommendation="BUY", score=6.0, price=150.0,
+            confidence=0.4, setup_buy=9, setup_sell=0, cd_buy=0, cd_sell=0,
+            tdst_support=140.0, tdst_resistance=160.0, rvol=1.2,
+        )
+        with mock.patch(
+            "nanobot_quant.onchainos_cli.resolve_token",
+            return_value=self._resolve_ok(),
+        ):
+            results = pl.run_from_signals([sig])
+        assert len(results) == 1
+        r = results[0]
+        assert r["risk_passed"] is True
+        assert r["suggested_order"]["quantity"] == 133
