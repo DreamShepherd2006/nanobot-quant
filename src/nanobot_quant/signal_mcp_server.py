@@ -1,6 +1,7 @@
 """MCP server: signal-structurizer — quant / vt_research execution tools.
 
-Protocol: stdio JSON-RPC (MCP).  No external MCP SDK required.
+Protocol: stdio JSON-RPC (MCP), built on the official `mcp` Python SDK
+(mcp.server.fastmcp.FastMCP) — same framework as squad-delegate.
 
 Tool implementations live in tools/:
   tools_wallet.py      wallet_setup, wallet_login_status, wallet_login_init, ...
@@ -12,7 +13,6 @@ Tool implementations live in tools/:
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 
@@ -34,8 +34,6 @@ SERVER_VERSION = "2.0.0"
 from nanobot_quant.tools.tools_wallet import (
     wallet_login_init,
     wallet_login_poll,
-    wallet_login_raw_diag,
-    wallet_login_status,
     wallet_payment_set,
     wallet_setup,
     wallet_status,
@@ -45,6 +43,7 @@ from nanobot_quant.tools.tools_wallet import (
     wallet_history,
     wallet_add,
     wallet_switch,
+    wallet_login_status,
 )
 from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import run_backtest
@@ -52,413 +51,118 @@ from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import execute_signal
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
 
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP(SERVER_NAME, log_level="WARNING")
+
 
 # ── Tool registry ───────────────────────────────────────────────
+# Descriptions are preserved verbatim from the pre-SDK hand-written
+# schema (tool prompt quality must not regress).  Input schemas are
+# now derived automatically from the function signatures via FastMCP.
 
-_TOOLS = [
-    {
-        "name": "run_td_sequential",
-        "description": (
-            "Run TD Sequential analysis on a Solana token. "
-            "Fetches daily K-line data from OnchainOS, "
-            "computes DeMark TD Setup/Countdown/TDST/score, "
-            "and returns a structured TickerSignal with "
-            "recommendation (BUY/SELL/HOLD), setup count, "
-            "countdown count, score, support/resistance levels."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "address": {
-                    "type": "string",
-                    "description": "Token contract address, e.g. XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
-                },
-                "chain": {
-                    "type": "string",
-                    "default": "solana",
-                    "description": "Chain: solana, arbitrum, ethereum, base, bnb, optimism, polygon",
-                },
-                "bar": {
-                    "type": "string",
-                    "default": "1D",
-                    "description": "Candle interval: 1m, 5m, 15m, 1H, 4H, 1D, 1W",
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 299,
-                    "description": "Number of candles to fetch (max 299 per call)",
-                },
-            },
-            "required": ["address"],
-        },
-    },
-    {
-        "name": "structurize_signal",
-        "description": (
-            "Convert VT Swarm investment committee debate transcript "
-            "into a structured TickerSignal JSON. Call this after every "
-            "swarm analysis to produce machine-readable signals for "
-            "the Aggregator pipeline."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "debate_text": {
-                    "type": "string",
-                    "description": "The full swarm debate transcript",
-                },
-                "ticker": {
-                    "type": "string",
-                    "description": "Ticker symbol analyzed, e.g. BTCUSDT, AAPL",
-                },
-            },
-            "required": ["debate_text", "ticker"],
-        },
-    },
-    {
-        "name": "execute_signal",
-        "description": (
-            "Execute the trading pipeline on structured signal(s). "
-            "Passes signal through Risk → Position Sizing → Order "
-            "generation. Accepts a JSON signal string (single object "
-            "or list), returns risk checks and suggested orders. "
-            "Pass live=true to attempt on-chain execution — this only "
-            "works if the WebUI live trading toggle (/config/live) is "
-            "enabled; otherwise the order stays paper-only."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "ticker_signal_json": {
-                    "type": "string",
-                    "description": (
-                        "JSON string of signal(s) — a single TickerSignal "
-                        "object or list of them. Expected fields: ticker, "
-                        "recommendation, score, price."
-                    ),
-                },
-                "live": {
-                    "type": "boolean",
-                    "description": (
-                        "Request real on-chain execution (default false). "
-                        "Effective only when the WebUI live trading toggle "
-                        "is enabled; otherwise forced to paper."
-                    ),
-                    "default": False,
-                },
-                "confirm": {
-                    "type": "boolean",
-                    "description": (
-                        "Explicit user confirmation for a questionable tokens.json "
-                        "entry (default false).  When a token needs confirmation "
-                        "this returns error=needs_confirmation without executing; "
-                        "pass confirm=true only after the user confirmed.  The "
-                        "confirmation is persisted, so later runs pass automatically."
-                    ),
-                    "default": False,
-                },
-                "portfolio_value": {
-                    "type": "number",
-                    "description": (
-                        "Hypothetical portfolio value (USD) used for position sizing "
-                        "(default 100000 → 20% cap ≈ $20k). Pass a small value "
-                        "(e.g. 100 → $20 cap) for manual verification swaps."
-                    ),
-                    "default": 100000.0,
-                },
-                "quantity": {
-                    "type": ["number", "null"],
-                    "description": (
-                        "Optional explicit order quantity (float allowed, e.g. 0.058). "
-                        "When given, it overrides position sizing; portfolio_value is "
-                        "then only used for risk checks. Default null keeps the "
-                        "existing sizing behaviour."
-                    ),
-                    "default": None,
-                },
-            },
-            "required": ["ticker_signal_json"],
-        },
-    },
-    {
-        "name": "run_backtest",
-        "description": (
-            "Run a full backtest on a token symbol. "
-            "Resolves ticker → fetches historical K-lines → runs TD Sequential "
-            "strategy → Lumibot backtest engine → returns performance metrics. "
-            "One-shot: all steps run in a single call, no LLM orchestration needed."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Token symbol, e.g. SOL, CRCLx",
-                },
-                "start": {
-                    "type": "string",
-                    "description": "Start date YYYY-MM-DD, e.g. 2026-04-01",
-                },
-                "end": {
-                    "type": "string",
-                    "description": "End date YYYY-MM-DD, e.g. 2026-07-29",
-                },
-                "quantity": {
-                    "type": "integer",
-                    "default": 10,
-                    "description": "Trade quantity per signal",
-                },
-                "source": {
-                    "type": "string",
-                    "default": "onchainos",
-                    "description": "Data source: onchainos or yfinance",
-                },
-            },
-            "required": ["symbol", "start", "end"],
-        },
-    },
-    {
-        "name": "wallet_login_init",
-        "description": (
-            "Initiate onchainos social (Google/Apple/email) wallet login. "
-            "Returns a loginUrl that the user must open in a browser. "
-            "After browser confirmation, call wallet_login_poll to complete. "
-            "Required after every Factory Rebuild (session data lost). "
-            "The keyring data is stored in ~/.onchainos/ (file-based on Linux)."
-        ),
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "wallet_login_poll",
-        "description": (
-            "Poll for social login completion. Blocks up to 310 seconds. "
-            "Call this after the user confirms login in their browser. "
-            "Returns session data on success."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "authSessionId from wallet_login_init (optional, auto-detected if omitted)",
-                },
-            },
-        },
-    },
-    {
-        "name": "wallet_payment_set",
-        "description": (
-            "Set onchainos payment default tier. Must call AFTER wallet login "
-            "is complete (wallet_login_poll succeeded). Required for Market API "
-            "tools (market_kline etc.) to work without QUOTA errors."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "tier": {
-                    "type": "string",
-                    "description": "Payment tier: basic or premium",
-                },
-            },
-            "required": ["tier"],
-        },
-    },
-    {
-        "name": "wallet_setup",
-        "description": (
-            "One-shot onchainos wallet bootstrap. Call this REPEATEDLY until phase=done. "
-            "First call starts login (returns login_url). After user authorizes in browser, "
-            "call again to complete poll + payment setup. When fully done, returns phase=done."
-        ),
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "wallet_login_status",
-        "description": (
-            "Check onchainos login and payment status without side effects. "
-            "Returns: logged_in, payment_basic, payment_premium booleans."
-        ),
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "wallet_status",
-        "description": (
-            "Show current onchainos wallet status: email, loginType, "
-            "currentAccountId, currentAccountName, accountCount, policy."
-        ),
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "wallet_addresses",
-        "description": (
-            "List wallet addresses for the current account, grouped by chain "
-            "category (XLayer, EVM, Solana). Optional --chain filter: chain "
-            "name or ID (e.g. 'solana' or '501', 'ethereum' or '1')."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "chain": {
-                    "type": "string",
-                    "description": "Chain name or ID filter, e.g. solana/501, ethereum/1",
-                },
-            },
-        },
-    },
-    {
-        "name": "wallet_balance",
-        "description": (
-            "Query onchainos wallet balances. Use all_accounts=true to query all "
-            "accounts' assets; chain filters by chain name/ID; token_address "
-            "filters by token contract (requires chain); force bypasses caches "
-            "and re-fetches from API."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "all_accounts": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Query all accounts' assets",
-                },
-                "chain": {
-                    "type": "string",
-                    "description": "Chain name or ID, e.g. solana/501",
-                },
-                "token_address": {
-                    "type": "string",
-                    "description": "Filter by token contract address (requires chain)",
-                },
-                "force": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Force refresh: bypass caches, re-fetch from API",
-                },
-            },
-        },
-    },
-    {
-        "name": "wallet_chains",
-        "description": "List all chains supported by onchainos wallet (cached locally).",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "wallet_history",
-        "description": (
-            "Query onchainos wallet transaction history. Optional filters: chain "
-            "(name/ID), address, limit (page size), page_num (page cursor)."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "chain": {
-                    "type": "string",
-                    "description": "Chain name or ID filter, e.g. solana/501",
-                },
-                "address": {
-                    "type": "string",
-                    "description": "Filter by address",
-                },
-                "limit": {
-                    "type": "string",
-                    "description": "Page size limit",
-                },
-                "page_num": {
-                    "type": "string",
-                    "description": "Page cursor",
-                },
-            },
-        },
-    },
-    {
-        "name": "wallet_add",
-        "description": "Create a new sub-wallet account (up to 50 per wallet).",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "wallet_switch",
-        "description": "Switch the active wallet account to the given account_id.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "account_id": {
-                    "type": "string",
-                    "description": "Account ID to switch to (from wallet_status / wallet_addresses)",
-                },
-            },
-            "required": ["account_id"],
-        },
-    },
-    {
-        "name": "run_research_chain",
-        "description": (
-            "All-in-one research-to-execution: starts a VT investment_committee "
-            "swarm debate, then automatically chains structurize_signal -> "
-            "run_td_sequential (TD check) -> execute_signal once the debate "
-            "completes. No further agent orchestration needed after this call. "
-            "Returns the swarm run_id immediately; the chain runs in a "
-            "background thread and its outcome is written to "
-            "<data_root>/legion/research_chains/<run_id>.json (query via "
-            "get_chain_result). Fails fast (status=error, no swarm started) "
-            "if the symbol is not a native/resolvable token on the chain."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Token symbol, e.g. BTC, SPCX, ETH-USD",
-                },
-                "chain": {
-                    "type": "string",
-                    "default": "solana",
-                    "description": "Chain for the TD technical check (default solana)",
-                },
-                "live": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Request on-chain execution (default False; still gated by the WebUI live toggle)",
-                },
-                "max_iterations": {
-                    "type": "integer",
-                    "default": 50,
-                    "description": "Max swarm iterations (default 50)",
-                },
-                "confirm": {
-                    "type": "boolean",
-                    "description": (
-                        "Explicit user confirmation for a questionable tokens.json "
-                        "entry (default false).  When a token needs confirmation "
-                        "this returns status=needs_confirmation without starting "
-                        "the swarm; pass confirm=true only after the user confirmed "
-                        "(persisted, so later runs pass automatically)."
-                    ),
-                    "default": False,
-                },
-            },
-            "required": ["symbol"],
-        },
-    },
-    {
-        "name": "get_chain_result",
-        "description": (
-            "Return the persisted outcome of a run_research_chain execution: "
-            "reads <data_root>/legion/research_chains/<run_id>.json.  Lets "
-            "agents/WebUI audit whether the debate was executed, blocked, or "
-            "still pending — without touching the swarm run directory."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "run_id": {
-                    "type": "string",
-                    "description": "Swarm run_id returned by run_research_chain",
-                },
-            },
-            "required": ["run_id"],
-        },
-    },
-]
+_TOOL_DESCRIPTIONS = {
+    "run_td_sequential": (
+        "Run TD Sequential analysis on a Solana token. "
+        "Fetches daily K-line data from OnchainOS, "
+        "computes DeMark TD Setup/Countdown/TDST/score, "
+        "and returns a structured TickerSignal with "
+        "recommendation (BUY/SELL/HOLD), setup count, "
+        "countdown count, score, support/resistance levels."
+    ),
+    "structurize_signal": (
+        "Convert VT Swarm investment committee debate transcript "
+        "into a structured TickerSignal JSON. Call this after every "
+        "swarm analysis to produce machine-readable signals for "
+        "the Aggregator pipeline."
+    ),
+    "execute_signal": (
+        "Execute the trading pipeline on structured signal(s). "
+        "Passes signal through Risk → Position Sizing → Order "
+        "generation. Accepts a JSON signal string (single object "
+        "or list), returns risk checks and suggested orders. "
+        "Pass live=true to attempt on-chain execution — this only "
+        "works if the WebUI live trading toggle (/config/live) is "
+        "enabled; otherwise the order stays paper-only."
+    ),
+    "run_backtest": (
+        "Run a full backtest on a token symbol. "
+        "Resolves ticker → fetches historical K-lines → runs TD Sequential "
+        "strategy → Lumibot backtest engine → returns performance metrics. "
+        "One-shot: all steps run in a single call, no LLM orchestration needed."
+    ),
+    "wallet_login_init": (
+        "Initiate onchainos social (Google/Apple/email) wallet login. "
+        "Returns a loginUrl that the user must open in a browser. "
+        "After browser confirmation, call wallet_login_poll to complete. "
+        "Required after every Factory Rebuild (session data lost). "
+        "The keyring data is stored in ~/.onchainos/ (file-based on Linux)."
+    ),
+    "wallet_login_poll": (
+        "Poll for social login completion. Blocks up to 310 seconds. "
+        "Call this after the user confirms login in their browser. "
+        "Returns session data on success."
+    ),
+    "wallet_payment_set": (
+        "Set onchainos payment default tier. Must call AFTER wallet login "
+        "is complete (wallet_login_poll succeeded). Required for Market API "
+        "tools (market_kline etc.) to work without QUOTA errors."
+    ),
+    "wallet_setup": (
+        "One-shot onchainos wallet bootstrap. Call this REPEATEDLY until phase=done. "
+        "First call starts login (returns login_url). After user authorizes in browser, "
+        "call again to complete poll + payment setup. When fully done, returns phase=done."
+    ),
+    "wallet_login_status": (
+        "Check onchainos login and payment status without side effects. "
+        "Returns: logged_in, payment_basic, payment_premium booleans."
+    ),
+    "wallet_status": (
+        "Show current onchainos wallet status: email, loginType, "
+        "currentAccountId, currentAccountName, accountCount, policy."
+    ),
+    "wallet_addresses": (
+        "List wallet addresses for the current account, grouped by chain "
+        "category (XLayer, EVM, Solana). Optional --chain filter: chain "
+        "name or ID (e.g. 'solana' or '501', 'ethereum' or '1')."
+    ),
+    "wallet_balance": (
+        "Query onchainos wallet balances. Use all_accounts=true to query all "
+        "accounts' assets; chain filters by chain name/ID; token_address "
+        "filters by token contract (requires chain); force bypasses caches "
+        "and re-fetches from API."
+    ),
+    "wallet_chains": (
+        "List all chains supported by onchainos wallet (cached locally)."
+    ),
+    "wallet_history": (
+        "Query onchainos wallet transaction history. Optional filters: chain "
+        "(name/ID), address, limit (page size), page_num (page cursor)."
+    ),
+    "wallet_add": (
+        "Create a new sub-wallet account (up to 50 per wallet)."
+    ),
+    "wallet_switch": (
+        "Switch the active wallet account to the given account_id."
+    ),
+    "run_research_chain": (
+        "All-in-one research-to-execution: starts a VT investment_committee "
+        "swarm debate, then automatically chains structurize_signal -> "
+        "run_td_sequential (TD check) -> execute_signal once the debate "
+        "completes. No further agent orchestration needed after this call. "
+        "Returns the swarm run_id immediately; the chain runs in a "
+        "background thread and its outcome is written to "
+        "<data_root>/legion/research_chains/<run_id>.json (query via "
+        "get_chain_result). Fails fast (status=error, no swarm started) "
+        "if the symbol is not a native/resolvable token on the chain."
+    ),
+    "get_chain_result": (
+        "Return the persisted outcome of a run_research_chain execution: "
+        "reads <data_root>/legion/research_chains/<run_id>.json.  Lets "
+        "agents/WebUI audit whether the debate was executed, blocked, or "
+        "still pending — without touching the swarm run directory."
+    ),
+}
 
 _TOOL_DISPATCH = {
     "run_td_sequential": run_td_sequential,
@@ -481,76 +185,13 @@ _TOOL_DISPATCH = {
     "wallet_switch": wallet_switch,
 }
 
-
-# ── MCP stdio JSON-RPC ──────────────────────────────────────────
-
-def _handle_request(msg: dict) -> dict | None:
-    """Handle a single JSON-RPC request. Returns response dict or None for notifications."""
-    req_id = msg.get("id")
-    method = msg.get("method", "")
-    params = msg.get("params", {})
-
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            },
-        }
-
-    if method == "notifications/initialized":
-        return None
-
-    if method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {"tools": _TOOLS},
-        }
-
-    if method == "tools/call":
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
-        handler = _TOOL_DISPATCH.get(tool_name)
-        if handler is not None:
-            result = handler(**arguments)
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}]
-                },
-            }
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
-        }
-
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {"code": -32601, "message": f"Unknown method: {method}"},
-    }
+for _tool_name, _tool_fn in _TOOL_DISPATCH.items():
+    mcp.add_tool(_tool_fn, name=_tool_name, description=_TOOL_DESCRIPTIONS[_tool_name])
 
 
 def main() -> None:
-    """Run the MCP stdio loop."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        resp = _handle_request(msg)
-        if resp is not None:
-            sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+    """Run the MCP stdio server (official mcp SDK, no banner output)."""
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
