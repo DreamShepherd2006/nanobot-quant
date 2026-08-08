@@ -73,10 +73,14 @@ class SignalExecutionStrategy:
         """
         from nanobot_quant.pipeline import run_from_signals
 
+        # execute_signal 入队的是 signal_list（list）；direct 路径/测试也可能
+        # 传单个 dict —— 归一化后透传，避免 [[list]] 嵌套导致
+        # 'list' object has no attribute 'ticker'。
+        signal_list = signal if isinstance(signal, list) else [signal]
         _saved_stdout = sys.stdout
         sys.stdout = sys.stderr
         try:
-            results = run_from_signals([signal], live=True, **kwargs)
+            results = run_from_signals(signal_list, live=True, **kwargs)
             self._outcomes[order_id] = results[0] if results else {"error": "no result"}
             self._stats["processed"] += 1
         except Exception as exc:  # noqa: BLE001 — 单信号失败不得杀死循环

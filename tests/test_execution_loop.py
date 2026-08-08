@@ -286,3 +286,26 @@ def test_strategy_queue_ready_before_initialize():
         s._drain()
     assert s.stats()["processed"] == 1
     assert s.get_outcome(order_id) == {"ticker": "SOL"}
+
+
+def test_process_accepts_signal_list(
+):
+    """回归: P1 实测 outcome error "'list' object has no attribute 'ticker'"
+    — execute_signal 入队的是 signal_list（list），_process 不能再次
+    包一层 list，必须归一化透传。"""
+    from nanobot_quant.execution_loop import SignalExecutionStrategy
+
+    s = SignalExecutionStrategy()
+    order_id = s.enqueue_signal(
+        [{"ticker": "CRCLX"}, {"ticker": "SOL"}], {"quantity": 0.05}
+    )
+    fake = [{"ticker": "CRCLX", "status": "done"}, {"ticker": "SOL", "status": "done"}]
+    with mock.patch(
+        "nanobot_quant.pipeline.run_from_signals", return_value=fake
+    ) as rf:
+        s._drain()
+
+    # 归一化后必须是原 list 透传（不再包一层）
+    assert rf.call_args.args[0] == [{"ticker": "CRCLX"}, {"ticker": "SOL"}]
+    assert s.get_outcome(order_id) == fake[0]
+    assert s.stats() == {"queued": 1, "processed": 1, "failed": 0}
