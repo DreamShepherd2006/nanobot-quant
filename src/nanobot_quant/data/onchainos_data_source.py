@@ -78,7 +78,9 @@ class OnchainOSDataSource(DataSource):
             },
             inplace=True,
         )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+        df["timestamp"] = pd.to_datetime(
+            pd.to_numeric(df["timestamp"], errors="coerce"), unit="s"
+        )
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
 
