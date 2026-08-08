@@ -126,13 +126,15 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 # ── Market ────────────────────────────────────────────────────────
 
 def get_price(symbol: str, chain: str = "solana", tokens_json: list[dict] | None = None) -> Optional[str]:
-    """Get real-time token price in USD via market kline.
+    """Get real-time token price in USD.
 
-    Uses the most recent 1D candle's close as the current price.
-    Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract address.
-    ``tokens_json`` entries are honoured for symbols outside the built-in
-    whitelist (e.g. CRCLX registered by the user) — without it, CLI-only
-    lookup misses tokens not indexed by OKX DEX token search.
+    Prefers the aggregated index price (POST /api/v6/dex/index/current-price,
+    multi-source) — works for tokens that OKX prices but that may lack
+    candle history (e.g. CRCLX).  Falls back to the most recent 1D candle
+    close.  Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract
+    address.  ``tokens_json`` entries are honoured for symbols outside the
+    built-in whitelist (e.g. CRCLX registered by the user) — without it,
+    CLI-only lookup misses tokens not indexed by OKX DEX token search.
     Returns price as string or None.
     """
     # For stablecoins, return "1"
@@ -143,12 +145,37 @@ def get_price(symbol: str, chain: str = "solana", tokens_json: list[dict] | None
     if not addr:
         return None
 
-    # kline returns list like [{ts, o, h, l, c, vol, ...}, ...]
-    # Use 1D bar to match the verified-working onchainos_data path.
+    # Prefer the aggregated index price (works for CRCLX etc.).
+    idx = get_index_price(addr, chain=chain)
+    if idx:
+        return idx
+
+    # Fallback: 1D candle close (matches the verified onchainos_data path).
     candles = get_kline(addr, bar="1D", limit=1, chain=chain)
     if candles:
         c = candles[0]
         return str(c.get("c") or c.get("close"))
+    return None
+
+
+def get_index_price(address: str, chain: str = "solana") -> Optional[str]:
+    """Get aggregated index price (multi-source) for a token address.
+
+    Runs ``onchainos market index --address <addr> --chain <chain>`` which
+    POSTs /api/v6/dex/index/current-price and prints
+    ``{"ok": true, "data": [{"price": ...}]}``.  Returns the price string
+    or None.
+    """
+    result = _run("market", "index", "--address", address, "--chain", chain)
+    if isinstance(result, dict):
+        items = result.get("data")
+        if isinstance(items, list) and items:
+            p = items[0].get("price")
+            if p is not None:
+                return str(p)
+        p = result.get("price")
+        if p is not None:
+            return str(p)
     return None
 
 
