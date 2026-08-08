@@ -76,7 +76,7 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
 RUN echo "[bust=56]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherdCD/nanobot-quant.git@cfbbded \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @cfbbded (queue in init, bust=56) (CD fork feat/execution-loop — P1 loop: balance-shape fix + WebUI exec mode switch, bust=56) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @cfbbded (CD fork feat/execution-loop — P1 loop: queue in init + balance-shape fix, bust=56) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
