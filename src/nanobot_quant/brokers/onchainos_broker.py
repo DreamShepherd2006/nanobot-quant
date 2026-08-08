@@ -87,7 +87,10 @@ class OnchainOSBroker(Broker):
         """
         symbol = order.asset.symbol
         side = order.side.lower()
-        quantity = int(order.quantity)
+        # Keep decimals: explicit quantity (e.g. 0.05 CRCLX) must not be
+        # truncated to 0 — int() turned 0.05 into 0 → swap aborted with
+        # "--readable-amount 0.000000 is too small for this token".
+        quantity = float(order.quantity)
 
         if side not in ("buy", "sell"):
             order.set_error(f"Unsupported side: {side} (only buy/sell)")
