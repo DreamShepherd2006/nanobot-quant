@@ -48,10 +48,17 @@ class OnchainOSDataSource(DataSource):
         length: int,
         timestep: str = "",
         timeshift: Optional[timedelta] = None,
-        quote=None,
+        exchange=None,
         include_after_hours: bool = True,
+        quote=None,
+        return_polars: bool = False,
     ):
-        """Fetch OHLCV kline data for *asset* and return a ``Bars`` object."""
+        """Fetch OHLCV kline data for *asset* and return a ``Bars`` object.
+
+        Signature must accept the full kwarg set lumibot v4.5.78 passes
+        (exchange / return_polars / include_after_hours / quote); polars
+        output is not supported — we always return pandas Bars.
+        """
         symbol = asset.symbol
         addr = resolve_token_address(symbol, self._tokens_json)
         if not addr:
@@ -76,7 +83,7 @@ class OnchainOSDataSource(DataSource):
         df.sort_index(inplace=True)
 
         from lumibot.entities import Bars
-        return Bars(df, self.SOURCE)
+        return Bars(df, self.SOURCE, asset)
 
     def get_last_price(
         self, asset, quote=None, exchange=None

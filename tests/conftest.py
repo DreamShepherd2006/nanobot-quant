@@ -53,11 +53,32 @@ except ImportError:
             self.quantity = quantity
             self.current_price = current_price
 
+    class _Bars:
+        def __init__(self, df, source, asset, quote=None, raw=None, return_polars=False, tzinfo=None):
+            self.df = df
+            self.source = str(source).upper()
+            self.asset = asset
+            self.symbol = getattr(asset, "symbol", "")
+            self.quote = quote
+
     _entities.Asset = _Asset
     _entities.Position = _Position
+    _entities.Bars = _Bars
+
+    # onchainos_data_source imports lumibot.data_sources.DataSource
+    _data_sources = types.ModuleType("lumibot.data_sources")
+
+    class _DataSource:
+        SOURCE = "stub"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    _data_sources.DataSource = _DataSource
 
     _lumibot.brokers = _brokers
     _lumibot.entities = _entities
+    _lumibot.data_sources = _data_sources
     _lumibot.__path__ = []  # mark as package so submodules can import
 
     sys.modules.setdefault("lumibot", _lumibot)
@@ -65,6 +86,7 @@ except ImportError:
     sys.modules.setdefault("lumibot.strategies.strategy", _strategy_mod)
     sys.modules.setdefault("lumibot.brokers", _brokers)
     sys.modules.setdefault("lumibot.entities", _entities)
+    sys.modules.setdefault("lumibot.data_sources", _data_sources)
 
 try:
     import yfinance  # noqa: F401
