@@ -78,9 +78,12 @@ class OnchainOSDataSource(DataSource):
             },
             inplace=True,
         )
-        df["timestamp"] = pd.to_datetime(
-            pd.to_numeric(df["timestamp"], errors="coerce"), unit="s"
-        )
+        ts = pd.to_numeric(df["timestamp"], errors="coerce")
+        # OKX DEX candles return epoch *milliseconds* (13-digit); keep a
+        # seconds fallback for other sources. Parsing ms as s overflows
+        # nanosecond timestamps (OutOfBoundsDatetime).
+        unit = "ms" if (ts.max() > 1e12) else "s"
+        df["timestamp"] = pd.to_datetime(ts, unit=unit, errors="coerce")
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
 

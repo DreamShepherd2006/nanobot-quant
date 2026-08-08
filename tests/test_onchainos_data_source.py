@@ -74,7 +74,7 @@ class TestMapTimestep:
 class TestGetHistoricalPrices:
     def test_returns_bars_with_asset(self, ds, monkeypatch):
         candles = [
-            {"ts": 1700000000 + i * 86400, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
+            {"ts": 1700000000000 + i * 86400000, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
             for i in range(5)
         ]
         monkeypatch.setattr(
@@ -89,6 +89,21 @@ class TestGetHistoricalPrices:
         assert bars.asset is asset
         assert len(bars.df) == 5
         assert set(bars.df.columns) >= {"open", "high", "low", "close", "volume"}
+
+    def test_accepts_seconds_timestamps(self, ds, monkeypatch):
+        candles = [
+            {"ts": 1700000000 + i * 86400, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.get_kline",
+            lambda addr, bar, limit: candles,
+        )
+        bars = ds.get_historical_prices(
+            _asset(), length=5, timestep="day", exchange=None, return_polars=False
+        )
+        assert bars is not None
+        assert len(bars.df) == 5
 
     def test_unresolvable_token_raises(self, ds, monkeypatch):
         monkeypatch.setattr(
