@@ -128,13 +128,16 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 def get_price(symbol: str, chain: str = "solana", tokens_json: list[dict] | None = None) -> Optional[str]:
     """Get real-time token price in USD.
 
-    Prefers the aggregated index price (POST /api/v6/dex/index/current-price,
-    multi-source) — works for tokens that OKX prices but that may lack
-    candle history (e.g. CRCLX).  Falls back to the most recent 1D candle
-    close.  Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract
-    address.  ``tokens_json`` entries are honoured for symbols outside the
-    built-in whitelist (e.g. CRCLX registered by the user) — without it,
-    CLI-only lookup misses tokens not indexed by OKX DEX token search.
+    Uses the official onchainos CLI pricing path — ``market price``
+    (POST /api/v6/dex/market/price, "Get token price by contract address")
+    first, then falls back to the aggregated index price
+    (``market index``, POST /api/v6/dex/index/current-price, multi-source
+    — documented at dev-docs/market/index-price).  Candle closes are NOT
+    used as prices (kline is a data endpoint, not a pricing endpoint).
+    Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract address.
+    ``tokens_json`` entries are honoured for symbols outside the built-in
+    whitelist (e.g. CRCLX registered by the user) — without it, CLI-only
+    lookup misses tokens not indexed by OKX DEX token search.
     Returns price as string or None.
     """
     # For stablecoins, return "1"
@@ -145,16 +148,38 @@ def get_price(symbol: str, chain: str = "solana", tokens_json: list[dict] | None
     if not addr:
         return None
 
-    # Prefer the aggregated index price (works for CRCLX etc.).
+    # Official pricing path: market price first, aggregated index fallback.
+    p = get_market_price(addr, chain=chain)
+    if p:
+        return p
     idx = get_index_price(addr, chain=chain)
     if idx:
         return idx
+    return None
 
-    # Fallback: 1D candle close (matches the verified onchainos_data path).
-    candles = get_kline(addr, bar="1D", limit=1, chain=chain)
-    if candles:
-        c = candles[0]
-        return str(c.get("c") or c.get("close"))
+
+def get_market_price(address: str, chain: str = "solana") -> Optional[str]:
+    """Get token market price via the official ``market price`` subcommand.
+
+    Runs ``onchainos market price --address <addr> --chain <chain>`` which
+    POSTs /api/v6/dex/market/price ("Get token price by contract address")
+    and prints ``{"ok": true, "data": [{"price": ...}]}``.  Returns the
+    price string or None (e.g. no price data for the token on this chain).
+    """
+    result = _run("market", "price", "--address", address, "--chain", chain)
+    if isinstance(result, dict):
+        items = result.get("data")
+        if isinstance(items, list) and items:
+            p = items[0].get("price")
+            if p is not None:
+                return str(p)
+        if isinstance(items, dict):
+            p = items.get("price")
+            if p is not None:
+                return str(p)
+        p = result.get("price")
+        if p is not None:
+            return str(p)
     return None
 
 
