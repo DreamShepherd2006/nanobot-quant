@@ -87,7 +87,10 @@ class OnchainOSBroker(Broker):
         """
         symbol = order.asset.symbol
         side = order.side.lower()
-        quantity = int(order.quantity)
+        # Keep decimals: explicit quantity (e.g. 0.05 CRCLX) must not be
+        # truncated to 0 — int() turned 0.05 into 0 → swap aborted with
+        # "--readable-amount 0.000000 is too small for this token".
+        quantity = float(order.quantity)
 
         if side not in ("buy", "sell"):
             order.set_error(f"Unsupported side: {side} (only buy/sell)")
@@ -118,8 +121,8 @@ class OnchainOSBroker(Broker):
         else:
             # Buy: estimate SOL needed via market price + buffer
             # Pass SYMBOLS (not addresses) — get_price uses onchainos kline which expects symbols
-            sol_price = get_token_price(from_symbol) or 1.0
-            token_price = get_token_price(to_symbol) or 0.0
+            sol_price = get_token_price(from_symbol, self._tokens_json) or 1.0
+            token_price = get_token_price(to_symbol, self._tokens_json) or 0.0
             if token_price <= 0:
                 order.set_error(self._format_err(f"Cannot get price for {symbol}"))
                 return order

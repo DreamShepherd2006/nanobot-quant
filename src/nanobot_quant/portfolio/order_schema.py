@@ -21,7 +21,7 @@ class OrderRequest:
 
     asset: str
     action: Literal["buy", "sell"]
-    quantity: int
+    quantity: float
     order_type: Literal["market", "limit", "stop"] = "market"
     price: float | None = None       # signal-price anchor (not limit price)
     reason: str = ""                  # human-readable rationale

@@ -157,6 +157,25 @@ _TOOLS = [
                     ),
                     "default": False,
                 },
+                "portfolio_value": {
+                    "type": "number",
+                    "description": (
+                        "Hypothetical portfolio value (USD) used for position sizing "
+                        "(default 100000 → 20% cap ≈ $20k). Pass a small value "
+                        "(e.g. 100 → $20 cap) for manual verification swaps."
+                    ),
+                    "default": 100000.0,
+                },
+                "quantity": {
+                    "type": ["number", "null"],
+                    "description": (
+                        "Optional explicit order quantity (float allowed, e.g. 0.058). "
+                        "When given, it overrides position sizing; portfolio_value is "
+                        "then only used for risk checks. Default null keeps the "
+                        "existing sizing behaviour."
+                    ),
+                    "default": None,
+                },
             },
             "required": ["ticker_signal_json"],
         },
