@@ -80,7 +80,10 @@ def test_defaults_match_pre_parameterisation_hardcoded():
 
 
 def test_meta_covers_all_defaults_and_two_groups():
-    assert set(PARAM_META) == set(DEFAULT_EXEC_PARAMS)
+    # execution_mode 是运行模式（非数值参数），不渲染在 WebUI 表单中，
+    # 由文件/CLI 配置（P1），后续 UI 放 /config/live 或下拉选择。
+    ui_params = {k for k in DEFAULT_EXEC_PARAMS if k != "execution_mode"}
+    assert set(PARAM_META) == ui_params
     groups = {m["group"] for m in PARAM_META.values()}
     assert groups == {"risk", "exec"}
 

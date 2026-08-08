@@ -120,6 +120,37 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
             confirm_token(bare, address=resolved.get("address"))
 
     try:
+        # ── Loop mode: queue for the StrategyExecutor loop (async) ──
+        # docs/quant-system.md §15.5.1 — execution_mode="loop" 时信号入队后
+        # 立即返回，实际执行由 execution_loop.SignalExecutionStrategy 的
+        # StrategyExecutor 主循环异步完成（与 direct 共用同一 run_from_signals
+        # live 路径，风控/门控行为完全一致）。
+        from nanobot_quant.exec_params import load_exec_params
+
+        if effective_live and load_exec_params().get("execution_mode") == "loop":
+            from nanobot_quant.execution_loop import enqueue_signal
+
+            order_id = enqueue_signal(
+                signal_list,
+                {
+                    "tokens_json": tokens_json,
+                    "confirm": confirm,
+                    "portfolio_value": portfolio_value,
+                    "quantity": quantity,
+                },
+            )
+            print(
+                f"[DIAG] execute_signal: loop mode — queued {len(signal_list)} signal(s) as {order_id}",
+                file=sys.stderr, flush=True,
+            )
+            return {
+                "queued": True,
+                "mode": "loop",
+                "order_id": order_id,
+                "count": len(signal_list),
+                "hint": "执行由循环异步完成；结果可查询 execution_loop.get_outcome(order_id)",
+            }
+
         # Route EVERYTHING (import-time AND runtime loggers) to stderr while
         # the pipeline runs. lumibot registers stdout handlers lazily during
         # LumiBot startup, so wrapping the call is the only reliable guard.

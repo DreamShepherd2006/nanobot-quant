@@ -41,7 +41,13 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ② Execution quality ──────────────────────────────────────────
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance (0.01 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
+    # ── ③ Execution mode (2026-08-08, §15.5.1) ───────────────────────
+    # direct (default): execute_signal 同步直调; loop: 信号入队异步执行。
+    "execution_mode": "direct",  # str — "direct" | "loop"
 }
+
+#: Valid execution_mode values (loop = StrategyExecutor 循环，见 execution_loop.py)。
+EXECUTION_MODES: tuple[str, ...] = ("direct", "loop")
 
 #: Human-readable bounds used by the WebUI form validation + display.
 PARAM_META: dict[str, dict[str, Any]] = {
@@ -89,6 +95,8 @@ def exec_params_path() -> Path:
 
 def validate_exec_param(key: str, value: Any) -> str | None:
     """Return an error message for an invalid value, or None if valid."""
+    if key == "execution_mode":
+        return None if value in EXECUTION_MODES else "必须是 direct 或 loop"
     meta = PARAM_META.get(key)
     if meta is None:
         return "未知参数"
@@ -122,8 +130,15 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
 
     Returns dict with "ok" and optional "error".  ``params == {"reset":
     True}`` removes the file and returns defaults (WebUI 恢复默认 button).
+
+    ``execution_mode`` is preserved across WebUI saves: the form only submits
+    the five numeric parameters, so a mode set in the file (or via CLI) must
+    not be reset to "direct" by an unrelated parameter edit.
     """
     merged = dict(DEFAULT_EXEC_PARAMS)
+    raw = _read_raw()
+    if raw is not None and raw.get("execution_mode") in EXECUTION_MODES:
+        merged["execution_mode"] = raw["execution_mode"]
     if not isinstance(params, dict):
         return {"ok": False, "error": "请求体必须为 JSON 对象"}
     if params.get("reset") is True:
@@ -133,12 +148,13 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
                 path.unlink()
         except OSError as exc:
             return {"ok": False, "error": f"重置失败: {exc}"}
-        return {"ok": True, "message": "已恢复默认执行参数", "params": merged}
+        return {"ok": True, "message": "已恢复默认执行参数", "params": dict(DEFAULT_EXEC_PARAMS)}
     for key in merged:
         if key in params:
             err = validate_exec_param(key, params[key])
             if err is not None:
-                return {"ok": False, "error": f"{PARAM_META[key]['label']}: {err}"}
+                label = PARAM_META.get(key, {}).get("label", key)
+                return {"ok": False, "error": f"{label}: {err}"}
             merged[key] = params[key]
 
     path = exec_params_path()
