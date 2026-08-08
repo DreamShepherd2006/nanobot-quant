@@ -105,6 +105,22 @@ class TestGetHistoricalPrices:
         assert bars is not None
         assert len(bars.df) == 5
 
+    def test_accepts_string_ohlcv_values(self, ds, monkeypatch):
+        candles = [
+            {"ts": 1700000000000 + i * 86400000, "o": "10.0", "h": "11.0", "l": "9.0", "c": "10.5", "vol": "100.0"}
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.get_kline",
+            lambda addr, bar, limit: candles,
+        )
+        bars = ds.get_historical_prices(
+            _asset(), length=5, timestep="day", exchange=None, return_polars=False
+        )
+        assert bars is not None
+        assert len(bars.df) == 5
+        assert bars.df["close"].dtype.kind in "fiu"  # numeric, not object
+
     def test_unresolvable_token_raises(self, ds, monkeypatch):
         monkeypatch.setattr(
             "nanobot_quant.data.onchainos_data_source.resolve_token_address",

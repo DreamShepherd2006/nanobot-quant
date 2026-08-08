@@ -78,6 +78,10 @@ class OnchainOSDataSource(DataSource):
             },
             inplace=True,
         )
+        # CLI returns OHLCV as strings — coerce to numeric before the TD
+        # engine divides Volume by vol_sma20 (str/float TypeError).
+        for col in ("open", "high", "low", "close", "volume"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
         ts = pd.to_numeric(df["timestamp"], errors="coerce")
         # OKX DEX candles return epoch *milliseconds* (13-digit); keep a
         # seconds fallback for other sources. Parsing ms as s overflows
