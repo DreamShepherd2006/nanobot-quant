@@ -25,6 +25,8 @@
   .f-std { color:#888; font-size:.8em; min-width:150px; }
   .f-hint { color:#aaa; font-size:.78em; flex:1; min-width:160px; }
   input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
+  select { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
+  .mode-card { border:1px solid #90caf9; background:#f8fbff; }
   .actions { margin:16px 0 4px; display:flex; gap:10px; align-items:center; }
   button { padding:8px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
   .btn-primary { background:#1565c0; color:#fff; }
@@ -44,9 +46,12 @@
 
 <div class="note">
   <strong>控制面设计</strong>：<code>portfolio_value</code> / <code>quantity</code> 属调用级参数（每次交易声明），保留在 MCP；
-  此处 5 个系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
-  <code>max_drawdown_pct</code> / <code>stop_loss_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）。
+  此处系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
+  <code>max_drawdown_pct</code> / <code>stop_loss_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）；
+  <code>execution_mode</code> / <code>loop_interval_seconds</code> 控制执行循环（P1 loop 模式）。
 </div>
+
+{mode_card}
 
 {groups}
 
@@ -71,6 +76,8 @@
     document.querySelectorAll('input[type=number]').forEach(function (inp) {
       params[inp.name] = parseFloat(inp.value);
     });
+    const modeSel = document.getElementById('execution_mode');
+    if (modeSel) { params['execution_mode'] = modeSel.value; }
     return params;
   }
 

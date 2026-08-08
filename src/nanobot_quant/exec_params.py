@@ -44,6 +44,8 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ③ Execution mode (2026-08-08, §15.5.1) ───────────────────────
     # direct (default): execute_signal 同步直调; loop: 信号入队异步执行。
     "execution_mode": "direct",  # str — "direct" | "loop"
+    # loop 模式后台执行循环的迭代间隔（秒），WebUI 可改，改动下一轮迭代生效。
+    "loop_interval_seconds": 5,  # int [1,300]
 }
 
 #: Valid execution_mode values (loop = StrategyExecutor 循环，见 execution_loop.py)。
@@ -71,11 +73,15 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.05,
         "label": "SOL 缓冲", "hint": "BUY 时按比例预留 SOL 覆盖 gas 与报价-成交间价格波动",
     },
+    "loop_interval_seconds": {
+        "group": "exec", "min": 1, "max": 300, "step": 1, "std": 5, "integer": True,
+        "label": "循环周期(秒)", "hint": "loop 模式后台执行循环每次迭代间隔；改动即时生效（下一轮迭代起用）",
+    },
 }
 
 GROUP_TITLES = {
     "risk": "① 风险控制（WebUI 锁死 — LLM 不可改）",
-    "exec": "② 执行质量（WebUI 锁死 — LLM 不可改）",
+    "exec": "② 执行质量与循环（WebUI 锁死 — LLM 不可改）",
 }
 
 
@@ -103,6 +109,8 @@ def validate_exec_param(key: str, value: Any) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return f"必须是数字（{meta['min']}–{meta['max']}）"
     lo, hi = meta["min"], meta["max"]
+    if meta.get("integer") and int(value) != value:
+        return f"必须是整数（{lo}–{hi}）"
     if value < lo or value > hi:
         return f"超出范围 {lo}–{hi}"
     return None

@@ -128,6 +128,58 @@ def test_strategy_empty_queue_is_noop():
     rf.assert_not_called()
 
 
+# ── loop 周期（loop_interval_seconds → sleeptime）───────────────────────
+
+def test_strategy_sleeptime_from_exec_params():
+    """initialize() 从 exec_params.json 读取循环周期。"""
+    from nanobot_quant.execution_loop import SignalExecutionStrategy
+    from nanobot_quant import exec_params as ep
+
+    s = SignalExecutionStrategy()
+    with mock.patch.object(
+        ep, "load_exec_params",
+        return_value={"loop_interval_seconds": 10},
+    ):
+        s.initialize()
+    assert s.sleeptime == "10s"
+
+
+def test_strategy_sleeptime_default_5s():
+    from nanobot_quant.execution_loop import SignalExecutionStrategy
+    from nanobot_quant import exec_params as ep
+
+    s = SignalExecutionStrategy()
+    with mock.patch.object(
+        ep, "load_exec_params",
+        return_value={"loop_interval_seconds": 5},
+    ):
+        s.initialize()
+    assert s.sleeptime == "5s"
+
+
+def test_strategy_refreshes_sleeptime_each_iteration():
+    """on_trading_iteration 每轮刷新 sleeptime → WebUI 改周期即时生效。"""
+    from nanobot_quant.execution_loop import SignalExecutionStrategy
+    from nanobot_quant import exec_params as ep
+
+    s = SignalExecutionStrategy()
+    with mock.patch.object(
+        ep, "load_exec_params",
+        return_value={"loop_interval_seconds": 5},
+    ):
+        s.initialize()
+    assert s.sleeptime == "5s"
+
+    # WebUI 把周期改为 30s → 下一轮迭代生效（无需重启循环）
+    with mock.patch.object(
+        ep, "load_exec_params",
+        return_value={"loop_interval_seconds": 30},
+    ), mock.patch("nanobot_quant.pipeline.run_from_signals") as rf:
+        s.on_trading_iteration()
+    rf.assert_not_called()
+    assert s.sleeptime == "30s"
+
+
 # ── execute_signal loop 分叉 ─────────────────────────────────────────────
 
 def test_execute_signal_loop_mode_queues_instead_of_direct_call():

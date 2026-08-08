@@ -31,7 +31,10 @@ class SignalExecutionStrategy(Strategy):
     """
 
     def initialize(self) -> None:
-        self.sleeptime = "5s"
+        from .exec_params import load_exec_params
+
+        interval = int(load_exec_params().get("loop_interval_seconds", 5))
+        self.sleeptime = f"{interval}s"
         self._signal_queue: queue.Queue[tuple[str, Any, dict]] = queue.Queue()
         self._outcomes: dict[str, dict] = {}
         self._stats = {"queued": 0, "processed": 0, "failed": 0}
@@ -55,7 +58,16 @@ class SignalExecutionStrategy(Strategy):
     # ── StrategyExecutor 主循环回调 ──────────────────────────────────────
 
     def on_trading_iteration(self) -> None:
-        """每 5 秒消费一次队列（24/7 连续市场下持续运行）。"""
+        """按 loop_interval_seconds 周期消费队列（24/7 连续市场下持续运行）。
+
+        每次迭代刷新 self.sleeptime：lumibot StrategyExecutor 在每轮迭代
+        开始时读取 strategy.sleeptime 决定下一次调度间隔，因此 WebUI 修改
+        循环周期后下一轮迭代即生效（无需重启循环）。
+        """
+        from .exec_params import load_exec_params
+
+        interval = int(load_exec_params().get("loop_interval_seconds", 5))
+        self.sleeptime = f"{interval}s"
         while True:
             try:
                 order_id, signal, kwargs = self._signal_queue.get_nowait()
@@ -103,6 +115,7 @@ def ensure_loop() -> SignalExecutionStrategy:
         from nanobot_quant.exec_params import load_exec_params
 
         exec_params = load_exec_params()
+        interval = int(exec_params.get("loop_interval_seconds", 5))
         # 循环骨架 broker：仅用于满足 StrategyExecutor 运行（market=24/7 连续市场）；
         # 实际下单仍由 run_from_signals 内部构造的同参 broker 完成（行为与 direct 一致）。
         broker = OnchainOSBroker(
@@ -119,7 +132,7 @@ def ensure_loop() -> SignalExecutionStrategy:
         )
         _loop_thread.start()
         print(
-            "[DIAG] execution_loop: StrategyExecutor loop started (daemon, 5s iteration)",
+            f"[DIAG] execution_loop: StrategyExecutor loop started (daemon, {interval}s iteration)",
             file=sys.stderr, flush=True,
         )
         return strategy
