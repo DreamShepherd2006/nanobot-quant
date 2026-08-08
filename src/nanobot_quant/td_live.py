@@ -58,7 +58,18 @@ class _TdLiveRunner:
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
-        strategy = TdSequentialStrategy()
+        broker = OnchainOSBroker(
+            tokens_json=tokens,
+            slippage=str(params["slippage"]),
+            sol_buffer_pct=float(params["sol_buffer_pct"]),
+            data_source=OnchainOSDataSource(tokens_json=tokens),
+        )
+        # lumibot Strategy.__init__ 在 broker=None 时直接 raise
+        # ("No broker is set")，必须构造时传入 broker + data_source。
+        strategy = TdSequentialStrategy(
+            broker=broker,
+            data_source=broker.data_source,
+        )
         strategy.parameters = dict(
             TdSequentialStrategy.parameters,
             **{
@@ -71,13 +82,6 @@ class _TdLiveRunner:
                 "stop_loss_pct": params["stop_loss_pct"],
             },
         )
-        broker = OnchainOSBroker(
-            tokens_json=tokens,
-            slippage=str(params["slippage"]),
-            sol_buffer_pct=float(params["sol_buffer_pct"]),
-            data_source=OnchainOSDataSource(tokens_json=tokens),
-        )
-        strategy.broker = broker
         executor = StrategyExecutor(strategy)
         executor.daemon = True
         return executor
