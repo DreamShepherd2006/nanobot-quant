@@ -23,7 +23,7 @@ import uuid
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from .onchainos_cli import normalize_symbol
+from .onchainos_cli import get_token_assets, normalize_symbol
 from .token_handlers import _read_tokens
 from .tools.tools_wallet import (
     wallet_accounts,
@@ -154,20 +154,7 @@ def _get_token_assets(data: dict) -> list:
     (per-token fields: symbol/balance/rawBalance/decimal/tokenPrice/usdValue).
     Older shapes (``data.assets`` / ``data.balances``) are kept as fallback.
     """
-    if not isinstance(data, dict):
-        return []
-    details = data.get("details")
-    if isinstance(details, list):
-        for g in details:
-            if isinstance(g, dict):
-                ta = g.get("tokenAssets") or g.get("assets")
-                if isinstance(ta, list):
-                    return ta
-    for k in ("assets", "balances"):
-        v = data.get(k)
-        if isinstance(v, list):
-            return v
-    return []
+    return get_token_assets(data)
 
 
 def _parse_all_accounts_balance(data: dict) -> tuple[list[dict], str]:
