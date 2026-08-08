@@ -369,13 +369,15 @@ def run_from_signals(
     signals: list[TickerSignal] | list[dict],
     *,
     portfolio_value: float = 100000.0,
-    max_position_pct: float = 0.20,
-    max_drawdown_pct: float = 0.15,
-    stop_loss_pct: float = 0.10,
+    max_position_pct: float | None = None,
+    max_drawdown_pct: float | None = None,
+    stop_loss_pct: float | None = None,
     live: bool = False,
     tokens_json: list[dict] | None = None,
     confirm: bool = False,
     quantity: float | None = None,
+    slippage: float | None = None,
+    sol_buffer_pct: float | None = None,
 ) -> list[dict]:
     """Run risk checks + order generation on pre-computed signals.
 
@@ -412,6 +414,30 @@ def run_from_signals(
         }]
     """
     from nanobot_quant.portfolio.order_schema import OrderRequest
+    from nanobot_quant.exec_params import load_exec_params
+
+    # System-level execution policy: values passed explicitly by the caller
+    # win; otherwise the WebUI-controlled exec_params.json applies; finally
+    # the hardcoded defaults (which match the pre-parameterisation values,
+    # so an unconfigured setup behaves exactly as before).
+    _exec = load_exec_params()
+    max_position_pct = (
+        max_position_pct if max_position_pct is not None
+        else _exec["max_position_pct"]
+    )
+    max_drawdown_pct = (
+        max_drawdown_pct if max_drawdown_pct is not None
+        else _exec["max_drawdown_pct"]
+    )
+    stop_loss_pct = (
+        stop_loss_pct if stop_loss_pct is not None
+        else _exec["stop_loss_pct"]
+    )
+    slippage = slippage if slippage is not None else _exec["slippage"]
+    sol_buffer_pct = (
+        sol_buffer_pct if sol_buffer_pct is not None
+        else _exec["sol_buffer_pct"]
+    )
 
     parsed: list[TickerSignal] = []
     for s in signals:
@@ -563,7 +589,11 @@ def run_from_signals(
 
                     sys.stdout = _saved_stdout
 
-                    broker = OnchainOSBroker(tokens_json=tokens_json or [])
+                    broker = OnchainOSBroker(
+                        tokens_json=tokens_json or [],
+                        slippage=str(slippage),
+                        sol_buffer_pct=float(sol_buffer_pct),
+                    )
 
                     asset = Asset(
                         symbol=req.asset,
