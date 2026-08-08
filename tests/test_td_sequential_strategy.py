@@ -1,0 +1,156 @@
+"""TdSequentialStrategy 参数化（P2 B2）测试 — quantity_mode / sleeptime。
+
+覆盖：
+- initialize 默认值（fixed / 10 / 1D）与参数覆盖
+- sleeptime → lumibot timestep 映射
+- BUY 信号下单量：fixed=固定 quantity；value=portfolio_value × max_position_pct
+- 风控 gate 使用实际下单量的仓位价值（非默认 quantity）
+"""
+
+from __future__ import annotations
+
+import logging
+
+import pandas as pd
+
+from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+
+def _buy_signal_closes() -> list[float]:
+    """50+ 根 bars：41 根交替震荡（不触发 setup）→ 5 根上升 → 12 根连续下跌。
+
+    连续下跌段保证 setup_buy >= 9 且 score > 0（base 变体累加计数）。
+    """
+    closes = [100.0 + (i % 2) * 2 for i in range(41)]
+    closes += [101.0, 102.0, 103.0, 104.0, 105.0]
+    closes += [100.0 - i for i in range(12)]
+    return closes
+
+
+def _make_strategy(**params) -> TdSequentialStrategy:
+    from lumibot.entities import Bars
+
+    s = TdSequentialStrategy()
+    s.parameters = dict(TdSequentialStrategy.parameters, **params)
+    s.logger = logging.getLogger("td-test")
+    s.portfolio_value = 100_000.0
+    s.cash = 100_000.0
+
+    closes = _buy_signal_closes()
+    df = pd.DataFrame(
+        {"Open": closes, "High": [c + 1 for c in closes],
+         "Low": [c - 1 for c in closes], "Close": closes,
+         "Volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
+    )
+    s._bars = Bars(df, "ONCHAIN", None)
+    s.get_position = lambda symbol: None  # 无持仓 → BUY 分支
+    s.get_historical_prices = lambda symbol, length, timestep: s._bars
+
+    captured = {}
+
+    def _create_order(asset, quantity, action):
+        captured["order"] = (asset, quantity, action)
+        return type("Order", (), {"identifier": "mock-id", "quantity": quantity})()
+
+    s.create_order = _create_order
+    s.submit_order = lambda order: captured.setdefault("submitted", order)
+    s.initialize()
+    s._captured = captured
+    return s
+
+
+# ── initialize 参数化 ────────────────────────────────────────────────────
+
+def test_initialize_defaults():
+    s = _make_strategy()
+    assert s.sleeptime == "1D"
+    assert s._timestep == "day"
+    assert s.quantity_mode == "fixed"
+    assert s._portfolio.default_quantity == 10
+
+
+def test_initialize_value_mode():
+    s = _make_strategy(quantity_mode="value")
+    assert s.quantity_mode == "value"
+    # value 模式 → 无固定默认数量 → PortfolioEngine 回退 pv × pct 算法
+    assert s._portfolio.default_quantity is None
+
+
+def test_initialize_sleeptime_mapping():
+    for sleeptime, timestep in [
+        ("1m", "minute"), ("5m", "minute"), ("15m", "minute"),
+        ("1H", "hour"), ("1D", "day"), ("1W", "week"),
+    ]:
+        s = _make_strategy(sleeptime=sleeptime)
+        assert s._timestep == timestep, f"{sleeptime} → {s._timestep}"
+
+
+def test_initialize_unknown_sleeptime_falls_back_to_day():
+    s = _make_strategy(sleeptime="4H")
+    assert s._timestep == "day"
+
+
+def test_initialize_kwargs_override_parameters():
+    s = _make_strategy()
+    # initialize 关键字参数优先于 parameters 字典
+    s.quantity_mode = "value"  # initialize() 里 `or self.parameters.get` 语义
+    s2 = _make_strategy(quantity_mode="value", sleeptime="1H")
+    assert s2.sleeptime == "1H"
+    assert s2._timestep == "hour"
+    assert s2._portfolio.default_quantity is None
+
+
+# ── BUY 下单量 ───────────────────────────────────────────────────────────
+
+def test_buy_fixed_quantity():
+    s = _make_strategy()
+    s.on_trading_iteration()
+    assert s._captured["order"][1] == 10  # fixed → 默认 quantity=10
+
+
+def test_buy_value_sizing():
+    s = _make_strategy(quantity_mode="value")
+    price = s._captured  # placeholder
+    s.on_trading_iteration()
+    asset, qty, action = s._captured["order"]
+    assert action == "buy"
+    # pv=100_000 × max_position_pct=0.20 / 最新收盘价
+    closes = _buy_signal_closes()
+    last_price = closes[-1]
+    expected = max(int(100_000 * 0.20 / last_price), 1)
+    assert qty == expected, f"qty={qty} expected={expected} (price={last_price})"
+
+
+def test_buy_value_sizing_floor_one_blocked_by_risk():
+    """极端小净值：floor 1 的仓位价值超出 max_position_pct → risk fail-closed。
+
+    pv=10 → qty=floor(10×0.20/price)=1，但 1 股价值 > pv×20% → 拒绝下单
+    （不会以超限仓位成交）。
+    """
+    s = _make_strategy(quantity_mode="value")
+    s.portfolio_value = 10.0
+    s.on_trading_iteration()
+    assert "order" not in s._captured  # risk 拦截，未产生订单
+
+
+def test_risk_gate_uses_actual_sized_quantity():
+    """value 模式下 risk gate 收到的是实际下单量的仓位价值，而非默认 quantity。"""
+    s = _make_strategy(quantity_mode="value")
+    calls = []
+
+    class _RiskSpy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def can_enter(self, **kw):
+            calls.append(kw["position_value"])
+            return self._inner.can_enter(**kw)
+
+    s._risk = _RiskSpy(s._risk)
+    s.on_trading_iteration()
+    closes = _buy_signal_closes()
+    last_price = closes[-1]
+    expected_qty = max(int(100_000 * 0.20 / last_price), 1)
+    assert calls, "risk.can_enter 未被调用"
+    assert abs(calls[0] - expected_qty * last_price) < 1e-6

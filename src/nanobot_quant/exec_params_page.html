@@ -48,7 +48,9 @@
   <strong>控制面设计</strong>：<code>portfolio_value</code> / <code>quantity</code> 属调用级参数（每次交易声明），保留在 MCP；
   此处系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
   <code>max_drawdown_pct</code> / <code>stop_loss_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）；
-  <code>execution_mode</code> / <code>loop_interval_seconds</code> 控制执行循环（P1 loop 模式）。
+  <code>execution_mode</code> / <code>loop_interval_seconds</code> 控制执行循环（P1 loop 模式）；
+  <strong>③ TD 自主运行</strong>（标的/周期/数量模式）为 P2 StrategyExecutor 主循环的系统级参数，
+  供 B3 生命周期接入后生效。
 </div>
 
 {mode_card}
@@ -76,8 +78,12 @@
     document.querySelectorAll('input[type=number]').forEach(function (inp) {
       params[inp.name] = parseFloat(inp.value);
     });
-    const modeSel = document.getElementById('execution_mode');
-    if (modeSel) { params['execution_mode'] = modeSel.value; }
+    document.querySelectorAll('input[type=text]').forEach(function (inp) {
+      params[inp.name] = inp.value.trim();
+    });
+    document.querySelectorAll('select').forEach(function (sel) {
+      params[sel.name] = sel.value;
+    });
     return params;
   }
 
