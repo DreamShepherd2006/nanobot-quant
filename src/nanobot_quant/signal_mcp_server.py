@@ -48,7 +48,7 @@ from nanobot_quant.tools.tools_wallet import (
 from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import run_backtest
 from nanobot_quant.tools.tools_structurize import structurize_signal
-from nanobot_quant.tools.tools_execute import execute_signal
+from nanobot_quant.tools.tools_execute import execute_signal, get_execution_outcome
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
 
 from mcp.server.fastmcp import FastMCP
@@ -162,6 +162,13 @@ _TOOL_DESCRIPTIONS = {
         "agents/WebUI audit whether the debate was executed, blocked, or "
         "still pending — without touching the swarm run directory."
     ),
+    "get_execution_outcome": (
+        "Query the outcome of a loop-mode execution (execute_signal with "
+        "execution_mode=loop, which returns {queued:true, order_id}). "
+        "Returns status=pending while the StrategyExecutor loop is still "
+        "processing, or status=done with the full outcome once finished. "
+        "No side effects; safe to poll."
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -170,6 +177,7 @@ _TOOL_DISPATCH = {
     "execute_signal": execute_signal,
     "run_research_chain": run_research_chain,
     "get_chain_result": get_chain_result,
+    "get_execution_outcome": get_execution_outcome,
     "run_backtest": run_backtest,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,

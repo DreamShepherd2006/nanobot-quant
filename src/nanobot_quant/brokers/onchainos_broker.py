@@ -46,6 +46,9 @@ class OnchainOSBroker(Broker):
         if "data_source" not in kwargs:
             kwargs["data_source"] = _DummyDataSource()
         super().__init__(**kwargs)
+        # Crypto is a 24/7 continuous market: keeps the StrategyExecutor loop
+        # running for execution_mode="loop" (docs/quant-system.md §15.4).
+        self.market = "24/7"
         self._tokens_json = tokens_json or []
         self._slippage = slippage
         self._sol_buffer_pct = sol_buffer_pct

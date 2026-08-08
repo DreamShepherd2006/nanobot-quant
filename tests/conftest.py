@@ -29,11 +29,42 @@ except ImportError:
     _strategy_mod.Strategy = _Strategy
     _strategies.strategy = _strategy_mod
     _lumibot.strategies = _strategies
+
+    # onchainos_broker imports lumibot.brokers.Broker (base class) and
+    # lumibot.entities.{Asset,Position} lazily in _pull_positions.
+    _brokers = types.ModuleType("lumibot.brokers")
+
+    class _Broker:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    _brokers.Broker = _Broker
+
+    _entities = types.ModuleType("lumibot.entities")
+
+    class _Asset:
+        def __init__(self, symbol="", asset_type=""):
+            self.symbol = symbol
+            self.asset_type = asset_type
+
+    class _Position:
+        def __init__(self, strategy=None, asset=None, quantity=0, current_price=0):
+            self.asset = asset
+            self.quantity = quantity
+            self.current_price = current_price
+
+    _entities.Asset = _Asset
+    _entities.Position = _Position
+
+    _lumibot.brokers = _brokers
+    _lumibot.entities = _entities
     _lumibot.__path__ = []  # mark as package so submodules can import
 
     sys.modules.setdefault("lumibot", _lumibot)
     sys.modules.setdefault("lumibot.strategies", _strategies)
     sys.modules.setdefault("lumibot.strategies.strategy", _strategy_mod)
+    sys.modules.setdefault("lumibot.brokers", _brokers)
+    sys.modules.setdefault("lumibot.entities", _entities)
 
 try:
     import yfinance  # noqa: F401

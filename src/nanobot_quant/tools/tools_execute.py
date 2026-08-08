@@ -72,14 +72,24 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
 
     try:
         raw = json.loads(ticker_signal_json)
+        # Defensive: LLM 客户端有时会把 JSON 字符串再包一层引号，
+        # 导致 json.loads 返回 str 而非 dict/list — 二次解析兜底。
+        if isinstance(raw, str):
+            raw = json.loads(raw)
     except json.JSONDecodeError:
         return {"error": "Invalid JSON input"}
 
     # Normalise to list of dicts
     signal_list: list[dict] = raw if isinstance(raw, list) else [raw]
 
-    # Validate each dict has required fields
+    # Validate each signal is a dict (nested-string / scalar input is a
+    # caller bug — fail fast with a clear message instead of a confusing
+    # AttributeError deep in the pipeline).
     for s in signal_list:
+        if not isinstance(s, dict):
+            return {
+                "error": f"Signal entries must be JSON objects, got {type(s).__name__}"
+            }
         if "ticker" not in s:
             return {"error": f"Missing 'ticker' in signal: {s}"}
 
@@ -120,6 +130,45 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
             confirm_token(bare, address=resolved.get("address"))
 
     try:
+        # ── Loop mode: queue for the StrategyExecutor loop (async) ──
+        # docs/quant-system.md §15.5.1 — execution_mode="loop" 时信号入队后
+        # 立即返回，实际执行由 execution_loop.SignalExecutionStrategy 的
+        # StrategyExecutor 主循环异步完成（与 direct 共用同一 run_from_signals
+        # live 路径，风控/门控行为完全一致）。
+        from nanobot_quant.exec_params import load_exec_params
+
+        if effective_live and load_exec_params().get("execution_mode") == "loop":
+            from nanobot_quant.execution_loop import enqueue_signal
+
+            # ensure_loop() 内部构造 Lumibot Strategy 会触发 broker 持仓拉取
+            # 与 telemetry 日志（stdout），必须像 direct 分支一样重定向到
+            # stderr，防止污染 MCP JSON-RPC stdio 通道。
+            _saved_stdout = sys.stdout
+            sys.stdout = sys.stderr
+            try:
+                order_id = enqueue_signal(
+                    signal_list,
+                    {
+                        "tokens_json": tokens_json,
+                        "confirm": confirm,
+                        "portfolio_value": portfolio_value,
+                        "quantity": quantity,
+                    },
+                )
+            finally:
+                sys.stdout = _saved_stdout
+            print(
+                f"[DIAG] execute_signal: loop mode — queued {len(signal_list)} signal(s) as {order_id}",
+                file=sys.stderr, flush=True,
+            )
+            return {
+                "queued": True,
+                "mode": "loop",
+                "order_id": order_id,
+                "count": len(signal_list),
+                "hint": "执行由循环异步完成；结果可查询 execution_loop.get_outcome(order_id)",
+            }
+
         # Route EVERYTHING (import-time AND runtime loggers) to stderr while
         # the pipeline runs. lumibot registers stdout handlers lazily during
         # LumiBot startup, so wrapping the call is the only reliable guard.
@@ -242,3 +291,28 @@ def _silence_lumibot_loggers() -> None:
             _lg.handlers.clear()
             _lg.propagate = True
             _lg.setLevel(logging.WARNING)
+
+def get_execution_outcome(order_id: str) -> dict:
+    """Query the outcome of a loop-mode execution (execute_signal queued).
+
+    Returns ``{"status": "pending"}`` while the StrategyExecutor loop is still
+    processing, or ``{"status": "done", "outcome": {...}}`` once finished.
+    No side effects; safe to call repeatedly.
+    """
+    from nanobot_quant.execution_loop import get_outcome, loop_status
+
+    status = loop_status()
+    if not status["running"]:
+        return {
+            "order_id": order_id,
+            "status": "loop_not_running",
+            "loop": status,
+        }
+    out = get_outcome(order_id)
+    if out is None:
+        return {
+            "order_id": order_id,
+            "status": "pending",
+            "hint": "循环尚未完成该订单（或 order_id 不存在）",
+        }
+    return {"order_id": order_id, "status": "done", "outcome": out}

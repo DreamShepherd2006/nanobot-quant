@@ -564,9 +564,42 @@ def get_token_price(symbol: str, tokens_json: list[dict] | None = None) -> Optio
         return None
 
 
+def get_token_assets(data) -> list:
+    """Extract the token balance list from a ``wallet balance`` response data.
+
+    CLI v4.3.1 puts the detail list at ``data.details[0].tokenAssets``
+    (per-token fields: symbol/balance/rawBalance/decimal/tokenPrice/usdValue).
+    Older shapes (``data.assets`` / ``data.balances``) are kept as fallback.
+    Non-dict entries are filtered out defensively — callers (e.g.
+    OnchainOSBroker) iterate the result with ``t.get(...)``.
+    """
+    if not isinstance(data, dict):
+        return []
+    details = data.get("details")
+    if isinstance(details, list):
+        for g in details:
+            if isinstance(g, dict):
+                ta = g.get("tokenAssets") or g.get("assets")
+                if isinstance(ta, list):
+                    return [t for t in ta if isinstance(t, dict)]
+    for k in ("assets", "balances"):
+        v = data.get(k)
+        if isinstance(v, list):
+            return [t for t in v if isinstance(t, dict)]
+    return []
+
+
 def get_wallet_balance() -> Optional[list]:
-    """Get wallet balance from onchainos. Returns list of token dicts."""
-    return _run("wallet", "balance")
+    """Get wallet balance from onchainos. Returns list of token dicts.
+
+    CLI v4.3.1 wraps the token list under ``data.details[0].tokenAssets``
+    (multi-account shapes may nest per-account groups); normalise any
+    response shape to a flat list of token dicts so callers
+    (OnchainOSBroker._pull_positions / _get_balances_at_broker) can iterate
+    safely with ``t.get(...)``.
+    """
+    data = _run("wallet", "balance")
+    return get_token_assets(data)
 
 
 def swap_quote(

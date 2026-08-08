@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
 from .exec_params import (
+    EXECUTION_MODES,
     GROUP_TITLES,
     PARAM_META,
     load_exec_params,
@@ -76,6 +77,27 @@ def _group_html(group: str, params: dict) -> str:
     return f'<div class="card"><h3>{GROUP_TITLES[group]}</h3>{fields}</div>'
 
 
+def _mode_card_html(mode: str) -> str:
+    """执行模式卡片：direct / loop 单选下拉（系统级开关，仅 Commander 可改）。"""
+    opts = "".join(
+        f'<option value="{m}" {"selected" if m == mode else ""}>'
+        f'{"⚡ 直调模式（direct）" if m == "direct" else "🔁 循环模式（loop）"}</option>'
+        for m in EXECUTION_MODES
+    )
+    return (
+        '<div class="card mode-card">'
+        '<h3>③ 执行模式</h3>'
+        '<div class="field">'
+        '<label class="f-label" for="execution_mode">执行模式</label>'
+        f'<select id="execution_mode" name="execution_mode">{opts}</select>'
+        '<span class="f-std">direct = 信号同步直调（默认）<br>loop = 信号入队，后台循环异步执行</span>'
+        '<span class="f-hint">切到 loop 后，execute_signal(live=True) 立即返回 '
+        '<code>{queued, order_id}</code>，由后台循环按下方「循环周期」消费；'
+        '风控/门控与 direct 完全一致</span>'
+        '</div></div>'
+    )
+
+
 def _render_page(params: dict, message: str = "") -> str:
     try:
         from .exec_params import exec_params_path
@@ -98,9 +120,11 @@ def _render_page(params: dict, message: str = "") -> str:
         else '<div class="banner msg hidden" id="msg"></div>'
     )
     groups = "".join(_group_html(g, params) for g in ("risk", "exec"))
+    mode_card = _mode_card_html(params.get("execution_mode", "direct"))
     return (
         _PAGE_HTML.replace("{banner}", banner)
         .replace("{msg}", msg)
+        .replace("{mode_card}", mode_card)
         .replace("{groups}", groups)
     )
 
