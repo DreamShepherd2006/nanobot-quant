@@ -77,7 +77,6 @@ def test_strategy_consumes_queue_and_records_outcome():
     from nanobot_quant.execution_loop import SignalExecutionStrategy
 
     s = SignalExecutionStrategy()
-    s.initialize()
     assert s.stats() == {"queued": 0, "processed": 0, "failed": 0}
 
     order_id = s.enqueue_signal({"ticker": "SOL"}, {"portfolio_value": 100.0})
@@ -89,7 +88,7 @@ def test_strategy_consumes_queue_and_records_outcome():
     with mock.patch(
         "nanobot_quant.pipeline.run_from_signals", return_value=[fake_result]
     ) as rf:
-        s.on_trading_iteration()
+        s._drain()
 
     rf.assert_called_once()
     assert rf.call_args.args[0] == [{"ticker": "SOL"}]  # signal_list 透传
@@ -102,14 +101,13 @@ def test_strategy_handles_exception_keeps_loop_alive():
     from nanobot_quant.execution_loop import SignalExecutionStrategy
 
     s = SignalExecutionStrategy()
-    s.initialize()
     order_id = s.enqueue_signal({"ticker": "BAD"}, {})
 
     with mock.patch(
         "nanobot_quant.pipeline.run_from_signals",
         side_effect=RuntimeError("swap failed"),
     ):
-        s.on_trading_iteration()  # 不得抛出
+        s._drain()  # 不得抛出
 
     out = s.get_outcome(order_id)
     assert out is not None and "error" in out and "swap failed" in out["error"]
@@ -120,64 +118,64 @@ def test_strategy_empty_queue_is_noop():
     from nanobot_quant.execution_loop import SignalExecutionStrategy
 
     s = SignalExecutionStrategy()
-    s.initialize()
     with mock.patch(
         "nanobot_quant.pipeline.run_from_signals"
     ) as rf:
-        s.on_trading_iteration()
+        s._drain()
     rf.assert_not_called()
 
 
-# ── loop 周期（loop_interval_seconds → sleeptime）───────────────────────
+# ── loop 周期（loop_interval_seconds → _current_interval）────────────────
 
-def test_strategy_sleeptime_from_exec_params():
-    """initialize() 从 exec_params.json 读取循环周期。"""
-    from nanobot_quant.execution_loop import SignalExecutionStrategy
+def test_current_interval_from_exec_params():
+    """_current_interval() 从 exec_params.json 读取循环周期。"""
+    from nanobot_quant import execution_loop
     from nanobot_quant import exec_params as ep
 
-    s = SignalExecutionStrategy()
     with mock.patch.object(
         ep, "load_exec_params",
         return_value={"loop_interval_seconds": 10},
     ):
-        s.initialize()
-    assert s.sleeptime == "10s"
+        assert execution_loop._current_interval() == 10
 
 
-def test_strategy_sleeptime_default_5s():
-    from nanobot_quant.execution_loop import SignalExecutionStrategy
+def test_current_interval_default_5s():
+    from nanobot_quant import execution_loop
     from nanobot_quant import exec_params as ep
 
-    s = SignalExecutionStrategy()
     with mock.patch.object(
         ep, "load_exec_params",
-        return_value={"loop_interval_seconds": 5},
+        return_value={},
     ):
-        s.initialize()
-    assert s.sleeptime == "5s"
+        assert execution_loop._current_interval() == 5
 
 
-def test_strategy_refreshes_sleeptime_each_iteration():
-    """on_trading_iteration 每轮刷新 sleeptime → WebUI 改周期即时生效。"""
-    from nanobot_quant.execution_loop import SignalExecutionStrategy
+def test_worker_drains_queue_after_sleep():
+    """_worker 每轮 sleep 后 drain 消费队列；周期每次循环重新读取。"""
+    from nanobot_quant import execution_loop
     from nanobot_quant import exec_params as ep
 
-    s = SignalExecutionStrategy()
-    with mock.patch.object(
-        ep, "load_exec_params",
-        return_value={"loop_interval_seconds": 5},
-    ):
-        s.initialize()
-    assert s.sleeptime == "5s"
+    s = execution_loop.SignalExecutionStrategy()
+    order_id = s.enqueue_signal({"ticker": "SOL"}, {})
 
-    # WebUI 把周期改为 30s → 下一轮迭代生效（无需重启循环）
     with mock.patch.object(
         ep, "load_exec_params",
         return_value={"loop_interval_seconds": 30},
-    ), mock.patch("nanobot_quant.pipeline.run_from_signals") as rf:
-        s.on_trading_iteration()
-    rf.assert_not_called()
-    assert s.sleeptime == "30s"
+    ), mock.patch(
+        "nanobot_quant.pipeline.run_from_signals",
+        return_value=[{"ticker": "SOL", "risk_passed": True}],
+    ), mock.patch(
+        "time.sleep", side_effect=[None, KeyboardInterrupt]
+    ), mock.patch.object(
+        execution_loop, "_current_interval", return_value=30
+    ):
+        try:
+            execution_loop._worker(s)
+        except KeyboardInterrupt:
+            pass
+
+    assert s.get_outcome(order_id)["risk_passed"] is True
+    assert s.stats()["processed"] == 1
 
 
 # ── execute_signal loop 分叉 ─────────────────────────────────────────────
@@ -277,7 +275,7 @@ def test_strategy_queue_ready_before_initialize():
     StrategyExecutor 回调 initialize() 才建队列。"""
     from nanobot_quant.execution_loop import SignalExecutionStrategy
 
-    s = SignalExecutionStrategy()  # 不调 initialize()
+    s = SignalExecutionStrategy()  # 队列天然就绪（__init__ 建立）
     order_id = s.enqueue_signal({"ticker": "SOL"}, {})
     assert order_id.startswith("loop-")
     assert s.stats()["queued"] == 1
@@ -285,6 +283,6 @@ def test_strategy_queue_ready_before_initialize():
     with mock.patch(
         "nanobot_quant.pipeline.run_from_signals", return_value=[{"ticker": "SOL"}]
     ):
-        s.on_trading_iteration()
+        s._drain()
     assert s.stats()["processed"] == 1
     assert s.get_outcome(order_id) == {"ticker": "SOL"}

@@ -3,11 +3,21 @@
 双执行模式:
 - direct (默认): execute_signal → pipeline.run_from_signals 同步直调（现状，零变化）
 - loop (可选): 信号入队 → 立即返回 {queued, order_id} → 本模块惰性启动的
-  SignalExecutionStrategy 在 lumibot StrategyExecutor 主循环内异步消费队列，
-  对每个信号调用与 direct 完全相同的 run_from_signals(live=True) 路径。
+  daemon 线程按 loop_interval_seconds 周期消费队列，对每个信号调用与
+  direct 完全相同的 run_from_signals(live=True) 路径。
 
 因此风控门控（resolve_token 终门 / RiskEngine / exec_params）与 direct 完全一致，
 行为等价，自研部分仅新增「队列 + 循环骨架」，不含任何交易逻辑。
+
+实现说明（v2，去掉 lumibot StrategyExecutor）:
+pipeline.run_from_signals(live=True) 完全自包含（内部自行构造 OnchainOSBroker
+与 Lumibot Order，直调 _submit_order），不需要 lumibot 主循环。早期版本用
+SignalExecutionStrategy(Strategy) + run_live 驱动，实测暴露两个问题：
+1. StrategyExecutor 主循环需要 broker.data_source.get_datetime()，骨架 broker
+   无真实 DataSource → _DummyDataSource 崩溃（on_bot_crash，策略死掉）；
+2. lumibot 主循环日志持续写 stdout，污染 MCP JSON-RPC stdio 通道。
+v2 改为纯 Python daemon 线程 + time.sleep 调度，零 lumibot 依赖，两个问题
+一并消除。
 """
 
 from __future__ import annotations
@@ -18,35 +28,19 @@ import threading
 import time
 from typing import Any
 
-from lumibot.strategies.strategy import Strategy
 
+class SignalExecutionStrategy:
+    """队列驱动的实盘信号执行器（纯 Python，不依赖 lumibot）。
 
-class SignalExecutionStrategy(Strategy):
-    """Queue-driven lumibot Strategy for live execution.
-
-    生命周期（由 StrategyExecutor 主循环驱动）:
-    - initialize(): 建立线程安全信号队列, 每 5 秒迭代一次
-    - on_trading_iteration(): 消费队列中的全部信号 → run_from_signals(live=True)
-    - get_outcome()/stats(): 供外部查询执行结果（异步语义）
+    - enqueue_signal(): 入队，立即返回 order_id（异步语义）
+    - _drain(): 消费当前队列中的全部信号 → run_from_signals(live=True)
+    - get_outcome()/stats(): 供外部查询执行结果
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # 队列在 __init__ 建立（而非 initialize()）：Lumibot 的 initialize() 要等
-        # StrategyExecutor 启动后才回调，而 ensure_loop() 返回的实例立即可入队。
-        # initialize() 只做幂等的周期刷新，避免 executor 启动时重复 initialize
-        # 清空已入队的信号。
+    def __init__(self) -> None:
         self._signal_queue: queue.Queue[tuple[str, Any, dict]] = queue.Queue()
         self._outcomes: dict[str, dict] = {}
         self._stats = {"queued": 0, "processed": 0, "failed": 0}
-
-    def initialize(self) -> None:
-        from .exec_params import load_exec_params
-
-        interval = int(load_exec_params().get("loop_interval_seconds", 5))
-        self.sleeptime = f"{interval}s"
-
-    # ── 外部注入接口（MCP execute_signal loop 分支调用） ────────────────
 
     def enqueue_signal(self, signal: Any, kwargs: dict | None = None) -> str:
         """入队一个信号（或信号列表），立即返回 order_id（异步语义）。"""
@@ -62,19 +56,8 @@ class SignalExecutionStrategy(Strategy):
     def stats(self) -> dict:
         return dict(self._stats)
 
-    # ── StrategyExecutor 主循环回调 ──────────────────────────────────────
-
-    def on_trading_iteration(self) -> None:
-        """按 loop_interval_seconds 周期消费队列（24/7 连续市场下持续运行）。
-
-        每次迭代刷新 self.sleeptime：lumibot StrategyExecutor 在每轮迭代
-        开始时读取 strategy.sleeptime 决定下一次调度间隔，因此 WebUI 修改
-        循环周期后下一轮迭代即生效（无需重启循环）。
-        """
-        from .exec_params import load_exec_params
-
-        interval = int(load_exec_params().get("loop_interval_seconds", 5))
-        self.sleeptime = f"{interval}s"
+    def _drain(self) -> None:
+        """消费当前队列中的全部信号（daemon 线程每周期调用一次）。"""
         while True:
             try:
                 order_id, signal, kwargs = self._signal_queue.get_nowait()
@@ -86,9 +69,12 @@ class SignalExecutionStrategy(Strategy):
         """单个信号的执行：复用 run_from_signals(live=True) 全链路。
 
         与 direct 模式共用同一执行路径（风控/代币门控/exec_params 行为完全一致）。
+        run_from_signals 内部 lumibot 日志走 stdout → 重定向保护 MCP JSON-RPC。
         """
         from nanobot_quant.pipeline import run_from_signals
 
+        _saved_stdout = sys.stdout
+        sys.stdout = sys.stderr
         try:
             results = run_from_signals([signal], live=True, **kwargs)
             self._outcomes[order_id] = results[0] if results else {"error": "no result"}
@@ -100,13 +86,29 @@ class SignalExecutionStrategy(Strategy):
             )
             self._outcomes[order_id] = {"error": str(exc)}
             self._stats["failed"] += 1
+        finally:
+            sys.stdout = _saved_stdout
 
 
-# ── 模块级单例：惰性启动 StrategyExecutor 循环（daemon 线程） ────────────
+# ── 模块级单例：惰性启动 daemon 循环线程 ──────────────────────────────────
 
 _loop_lock = threading.Lock()
 _loop_strategy: SignalExecutionStrategy | None = None
 _loop_thread: threading.Thread | None = None
+
+
+def _current_interval() -> int:
+    """读取当前循环周期（秒）。每次循环读取 → WebUI 修改即时生效。"""
+    from .exec_params import load_exec_params
+
+    return int(load_exec_params().get("loop_interval_seconds", 5))
+
+
+def _worker(strategy: SignalExecutionStrategy) -> None:
+    """daemon 循环：每 interval 秒醒来消费队列；周期每次循环读取。"""
+    while True:
+        time.sleep(_current_interval())
+        strategy._drain()
 
 
 def ensure_loop() -> SignalExecutionStrategy:
@@ -118,28 +120,17 @@ def ensure_loop() -> SignalExecutionStrategy:
     with _loop_lock:
         if _loop_strategy is not None and _loop_thread is not None and _loop_thread.is_alive():
             return _loop_strategy
-        from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
-        from nanobot_quant.exec_params import load_exec_params
-
-        exec_params = load_exec_params()
-        interval = int(exec_params.get("loop_interval_seconds", 5))
-        # 循环骨架 broker：仅用于满足 StrategyExecutor 运行（market=24/7 连续市场）；
-        # 实际下单仍由 run_from_signals 内部构造的同参 broker 完成（行为与 direct 一致）。
-        broker = OnchainOSBroker(
-            tokens_json=[],
-            slippage=str(exec_params.get("slippage", "0.01")),
-            sol_buffer_pct=float(exec_params.get("sol_buffer_pct", 0.05)),
-        )
-        strategy = SignalExecutionStrategy(broker=broker, name="quant-signal-execution")
+        strategy = SignalExecutionStrategy()
         _loop_strategy = strategy
         _loop_thread = threading.Thread(
-            target=strategy.run_live,
+            target=_worker,
+            args=(strategy,),
             name="quant-execution-loop",
             daemon=True,
         )
         _loop_thread.start()
         print(
-            f"[DIAG] execution_loop: StrategyExecutor loop started (daemon, {interval}s iteration)",
+            f"[DIAG] execution_loop: daemon loop started ({_current_interval()}s iteration)",
             file=sys.stderr, flush=True,
         )
         return strategy
