@@ -7,7 +7,7 @@ on each call, so changes take effect immediately — no restart required.
 
 Control-plane design (2026-08-08):
 
-- These five parameters are SYSTEM-LEVEL policy: they are locked by the
+- These parameters are SYSTEM-LEVEL policy: they are locked by the
   WebUI and are NOT exposed through MCP (LLM cannot pass them in
   execute_signal).  Only portfolio_value / quantity (call-level sizing)
   stay in the MCP schema.
@@ -18,6 +18,11 @@ Control-plane design (2026-08-08):
   paper trading today; on the execute_signal path they are formal checks
   (no position context yet) — the parameters are configured here so a
   future position-context integration picks them up automatically.
+- ``td_*`` / ``quantity_mode`` drive the TD autonomous StrategyExecutor
+  loop (P2 B3): ``td_enabled`` is the WebUI on/off switch.
+
+P1 loop mode (execution_mode / loop_interval_seconds) was retired in B3:
+execute_signal is synchronous only (direct).
 
 Missing / invalid file → DEFAULT_EXEC_PARAMS, which is byte-for-byte
 identical to the pre-parameterisation hardcoded behaviour (20% position
@@ -41,19 +46,13 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ② Execution quality ──────────────────────────────────────────
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance (0.01 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
-    # ── ③ Execution mode (2026-08-08, §15.5.1) ───────────────────────
-    # direct (default): execute_signal 同步直调; loop: 信号入队异步执行。
-    "execution_mode": "direct",  # str — "direct" | "loop"
-    # loop 模式后台执行循环的迭代间隔（秒），WebUI 可改，改动下一轮迭代生效。
-    "loop_interval_seconds": 5,  # int [1,300]
-    # ── ④ TD 自主运行（P2 B2, StrategyExecutor 主循环）───────────────
+    # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
+    "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
     "td_symbol": "SOL",        # TD 自主标的（tokens.json 登记代币 symbol）
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
-    "quantity_mode": "fixed",  # fixed=固定 quantity；value=portfolio_value × max_position_pct
+    "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
+    "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
 }
-
-#: Valid execution_mode values (loop = StrategyExecutor 循环，见 execution_loop.py)。
-EXECUTION_MODES: tuple[str, ...] = ("direct", "loop")
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
 TD_SLEEPTIMES: tuple[str, ...] = ("1m", "5m", "15m", "1H", "1D", "1W")
@@ -83,9 +82,9 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.05,
         "label": "SOL 缓冲", "hint": "BUY 时按比例预留 SOL 覆盖 gas 与报价-成交间价格波动",
     },
-    "loop_interval_seconds": {
-        "group": "exec", "min": 1, "max": 300, "step": 1, "std": 5, "integer": True,
-        "label": "循环周期(秒)", "hint": "loop 模式后台执行循环每次迭代间隔；改动即时生效（下一轮迭代起用）",
+    "td_enabled": {
+        "group": "td", "type": "bool", "std": False,
+        "label": "TD 自主运行", "hint": "开启后 TD 自主策略在 quant agent 进程内驻留 StrategyExecutor 主循环（标的/周期/数量见下）",
     },
     "td_symbol": {
         "group": "td", "type": "str", "std": "SOL",
@@ -97,7 +96,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "quantity_mode": {
         "group": "td", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
-        "label": "数量模式", "hint": "fixed=固定 quantity 股数（默认 10，回测语义不变）；value=按实时 portfolio_value × 单仓上限计算",
+        "label": "数量模式", "hint": "fixed=固定 td_quantity（默认 10，回测语义不变）；value=按实时 portfolio_value × 单仓上限计算",
+    },
+    "td_quantity": {
+        "group": "td", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
+        "label": "TD 固定数量", "hint": "quantity_mode=fixed 时的下单数量（默认 10）",
     },
 }
 
@@ -124,12 +127,12 @@ def exec_params_path() -> Path:
 
 def validate_exec_param(key: str, value: Any) -> str | None:
     """Return an error message for an invalid value, or None if valid."""
-    if key == "execution_mode":
-        return None if value in EXECUTION_MODES else "必须是 direct 或 loop"
     meta = PARAM_META.get(key)
     if meta is None:
         return "未知参数"
     vtype = meta.get("type", "float")
+    if vtype == "bool":
+        return None if isinstance(value, bool) else "必须是布尔值"
     if vtype == "enum":
         if value not in meta["enum"]:
             return f"必须是 {'/'.join(meta['enum'])} 之一"
@@ -170,15 +173,8 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
 
     Returns dict with "ok" and optional "error".  ``params == {"reset":
     True}`` removes the file and returns defaults (WebUI 恢复默认 button).
-
-    ``execution_mode`` is preserved across WebUI saves: the form only submits
-    the five numeric parameters, so a mode set in the file (or via CLI) must
-    not be reset to "direct" by an unrelated parameter edit.
     """
     merged = dict(DEFAULT_EXEC_PARAMS)
-    raw = _read_raw()
-    if raw is not None and raw.get("execution_mode") in EXECUTION_MODES:
-        merged["execution_mode"] = raw["execution_mode"]
     if not isinstance(params, dict):
         return {"ok": False, "error": "请求体必须为 JSON 对象"}
     if params.get("reset") is True:

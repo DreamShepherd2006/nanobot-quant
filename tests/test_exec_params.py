@@ -84,10 +84,9 @@ def test_defaults_match_pre_parameterisation_hardcoded():
 
 
 def test_meta_covers_all_defaults_and_three_groups():
-    # execution_mode 是运行模式（非数值参数），由页面顶部下拉单独渲染，
-    # 不进 PARAM_META 数字表单；其余默认值（含 loop_interval_seconds）全部
-    # 有元数据（min/max/group 等）。
-    ui_params = {k for k in DEFAULT_EXEC_PARAMS if k != "execution_mode"}
+    # 全部默认值（含 td 组 5 字段）都有 PARAM_META 元数据；
+    # P1 loop 模式（execution_mode/loop_interval_seconds）已随 B3 退役。
+    ui_params = set(DEFAULT_EXEC_PARAMS)
     assert set(PARAM_META) == ui_params
     groups = {m["group"] for m in PARAM_META.values()}
     assert groups == {"risk", "exec", "td"}
@@ -119,13 +118,14 @@ def test_validation_rejects_out_of_range(key, bad):
         ("stop_loss_pct", 0.05),
         ("slippage", 0.02),
         ("sol_buffer_pct", 0.10),
-        ("loop_interval_seconds", 1),
-        ("loop_interval_seconds", 5),
-        ("loop_interval_seconds", 300),
         ("td_symbol", "CRCLX"),
         ("td_sleeptime", "1H"),
         ("td_sleeptime", "1W"),
         ("quantity_mode", "value"),
+        ("td_quantity", 1),
+        ("td_quantity", 100000),
+        ("td_enabled", True),
+        ("td_enabled", False),
     ],
 )
 def test_validation_accepts_in_range(key, good):
@@ -152,26 +152,38 @@ def test_validation_rejects_bad_td_fields(key, bad):
 @pytest.mark.parametrize(
     "key,bad",
     [
-        ("loop_interval_seconds", 0),
-        ("loop_interval_seconds", 301),
-        ("loop_interval_seconds", -1),
-        ("loop_interval_seconds", "5"),
-        ("loop_interval_seconds", 5.5),
+        ("td_quantity", 0),
+        ("td_quantity", -1),
+        ("td_quantity", 100001),
+        ("td_quantity", "5"),
+        ("td_quantity", 5.5),
+        ("td_enabled", "true"),
+        ("td_enabled", 1),
     ],
 )
-def test_validation_rejects_bad_loop_interval(key, bad):
+def test_validation_rejects_bad_td_runtime_fields(key, bad):
     assert validate_exec_param(key, bad) is not None
 
 
-def test_loop_interval_default_and_roundtrip(tmp_path):
-    assert DEFAULT_EXEC_PARAMS["loop_interval_seconds"] == 5
-    res = save_exec_params({"loop_interval_seconds": 30})
+def test_td_quantity_default_and_roundtrip(tmp_path):
+    assert DEFAULT_EXEC_PARAMS["td_quantity"] == 10
+    res = save_exec_params({"td_quantity": 30})
     assert res["ok"] is True
-    assert load_exec_params()["loop_interval_seconds"] == 30
+    assert load_exec_params()["td_quantity"] == 30
     # 非法值保存被拒且不落盘
-    res2 = save_exec_params({"loop_interval_seconds": 0})
+    res2 = save_exec_params({"td_quantity": 0})
     assert res2["ok"] is False
-    assert load_exec_params()["loop_interval_seconds"] == 30
+    assert load_exec_params()["td_quantity"] == 30
+
+
+def test_td_enabled_roundtrip(tmp_path):
+    assert DEFAULT_EXEC_PARAMS["td_enabled"] is False
+    res = save_exec_params({"td_enabled": True})
+    assert res["ok"] is True
+    assert load_exec_params()["td_enabled"] is True
+    res2 = save_exec_params({"td_enabled": "yes"})
+    assert res2["ok"] is False
+    assert load_exec_params()["td_enabled"] is True
 
 
 def test_unknown_key_rejected():
@@ -283,41 +295,6 @@ def test_page_renders_td_fields(tmp_path):
     assert 'id="td_symbol"' in html
 
 
-def test_page_renders_mode_card(tmp_path):
-    """执行模式下拉随当前值渲染（direct 默认选中）。"""
-    app = _FakeApp()
-    register_exec_params_routes(app, _FakeGatekeeper())
-    page = next(fn for p, fn, m in app.routes if p == "/config/exec" and "GET" in m)
-    html = asyncio.run(page(_FakeRequest(session_user="commander"))).body.decode()
-    assert "执行模式" in html
-    assert 'id="execution_mode"' in html
-    assert 'value="direct" selected' in html
-
-
-def test_page_renders_mode_card_loop_selected(tmp_path):
-    save_exec_params(dict(DEFAULT_EXEC_PARAMS, execution_mode="loop"))
-    app = _FakeApp()
-    register_exec_params_routes(app, _FakeGatekeeper())
-    page = next(fn for p, fn, m in app.routes if p == "/config/exec" and "GET" in m)
-    html = asyncio.run(page(_FakeRequest(session_user="commander"))).body.decode()
-    assert 'value="loop" selected' in html
-
-
-def test_save_via_handler_switches_mode(tmp_path):
-    """POST 提交 execution_mode=loop → 落盘并即时生效。"""
-    app = _FakeApp()
-    gk = _FakeGatekeeper()
-    register_exec_params_routes(app, gk)
-    save = next(fn for p, fn, m in app.routes if p == "/config/exec" and "POST" in m)
-    body = dict(DEFAULT_EXEC_PARAMS, execution_mode="loop", loop_interval_seconds=15)
-    resp = asyncio.run(save(_FakeRequest(body, "commander")))
-    data = json.loads(resp.body.decode())
-    assert data["ok"] is True
-    assert load_exec_params()["execution_mode"] == "loop"
-    assert load_exec_params()["loop_interval_seconds"] == 15
-    assert any("执行参数" in log for log in gk.logs)
-
-
 def test_save_via_handler_persists(tmp_path):
     app = _FakeApp()
     gk = _FakeGatekeeper()
@@ -338,7 +315,7 @@ def test_save_via_handler_persists_td_fields(tmp_path):
     register_exec_params_routes(app, gk)
     save = next(fn for p, fn, m in app.routes if p == "/config/exec" and "POST" in m)
     body = dict(DEFAULT_EXEC_PARAMS, td_symbol="CRCLX", td_sleeptime="1H",
-                quantity_mode="value")
+                quantity_mode="value", td_quantity=25, td_enabled=True)
     resp = asyncio.run(save(_FakeRequest(body, "commander")))
     data = json.loads(resp.body.decode())
     assert data["ok"] is True
@@ -346,6 +323,8 @@ def test_save_via_handler_persists_td_fields(tmp_path):
     assert loaded["td_symbol"] == "CRCLX"
     assert loaded["td_sleeptime"] == "1H"
     assert loaded["quantity_mode"] == "value"
+    assert loaded["td_quantity"] == 25
+    assert loaded["td_enabled"] is True
     assert any("td_symbol=CRCLX" in log for log in gk.logs)
 
 

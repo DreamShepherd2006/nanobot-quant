@@ -213,6 +213,7 @@ class TdSequentialStrategy(Strategy):
                 f"TD LONG  | price={price:.2f} qty={req.quantity} "
                 f"setup_buy={setup_buy} score={score:.1f}"
             )
+            return
 
         # ── SELL signal: setup_sell >= exit_setup OR cd_sell >= exit_countdown OR stop-loss ──
         elif has_position:
@@ -249,6 +250,13 @@ class TdSequentialStrategy(Strategy):
                 self.logger.info(
                     f"TD EXIT  | price={price:.2f} qty={req.quantity} {exit_reason}"
                 )
+                return
+
+        # ── No signal this bar ──
+        self.logger.info(
+            f"TD HOLD | price={price:.4f} setup_buy={setup_buy} "
+            f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}"
+        )
 
     # ── lumibot lifecycle hooks (delegated to tracker) ──
 

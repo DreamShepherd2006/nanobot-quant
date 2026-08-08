@@ -365,6 +365,34 @@ class AnalysisPipeline:
 default_pipeline = AnalysisPipeline()
 
 
+def _position_exists(broker, symbol: str) -> bool:
+    """Chain-level position check for same-symbol dedup (P2 B3).
+
+    Returns True when the wallet already holds a non-zero balance of
+    ``symbol``.  Gas (SOL) and quote coins (USDC/USDT) are excluded — SOL
+    is always held for fees and USDC is the settlement currency, so they
+    must never block a BUY.
+
+    Uses ``_pull_positions`` (chain wallet balance) — the single source
+    of truth shared with the TD autonomous strategy.
+    """
+    if symbol.upper() in ("SOL", "USDC", "USDT"):
+        return False
+    try:
+        positions = broker._pull_positions(None)
+    except Exception:
+        # Dedup check failure must not block trading — treat as no position.
+        return False
+    target = symbol.upper()
+    for pos in positions:
+        try:
+            if pos.asset.symbol.upper() == target:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def run_from_signals(
     signals: list[TickerSignal] | list[dict],
     *,

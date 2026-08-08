@@ -46,6 +46,31 @@ class TestLiveLoopSignature:
         assert "exchange" in sig.parameters
 
 
+class TestMapTimestep:
+    """B3: timestep → OKX bar format must use 1m/5m/15m (not 1Min/5Min).
+
+    "1Min" triggered 51000 Parameter bar error in the live 5m loop.
+    """
+
+    @pytest.mark.parametrize(
+        "timestep,bar",
+        [
+            ("minute", "1m"),
+            ("5min", "5m"),
+            ("15min", "15m"),
+            ("hour", "1H"),
+            ("4hour", "4H"),
+            ("day", "1D"),
+            ("week", "1W"),
+        ],
+    )
+    def test_maps_to_okx_bar(self, timestep, bar):
+        assert OnchainOSDataSource._map_timestep(timestep) == bar
+
+    def test_unknown_falls_back_to_day(self):
+        assert OnchainOSDataSource._map_timestep("decade") == "1D"
+
+
 class TestGetHistoricalPrices:
     def test_returns_bars_with_asset(self, ds, monkeypatch):
         candles = [

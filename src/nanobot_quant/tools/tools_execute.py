@@ -130,45 +130,11 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
             confirm_token(bare, address=resolved.get("address"))
 
     try:
-        # ── Loop mode: queue for the StrategyExecutor loop (async) ──
-        # docs/quant-system.md §15.5.1 — execution_mode="loop" 时信号入队后
-        # 立即返回，实际执行由 execution_loop.SignalExecutionStrategy 的
-        # StrategyExecutor 主循环异步完成（与 direct 共用同一 run_from_signals
-        # live 路径，风控/门控行为完全一致）。
-        from nanobot_quant.exec_params import load_exec_params
+        # TD 自主循环状态同步（WebUI 保存之外的兜底：execute_signal 入口
+        # 按 exec_params 同步启停，防保存后未触发的窗口期）
+        from nanobot_quant.td_live import sync_from_params
 
-        if effective_live and load_exec_params().get("execution_mode") == "loop":
-            from nanobot_quant.execution_loop import enqueue_signal
-
-            # ensure_loop() 内部构造 Lumibot Strategy 会触发 broker 持仓拉取
-            # 与 telemetry 日志（stdout），必须像 direct 分支一样重定向到
-            # stderr，防止污染 MCP JSON-RPC stdio 通道。
-            _saved_stdout = sys.stdout
-            sys.stdout = sys.stderr
-            try:
-                order_id = enqueue_signal(
-                    signal_list,
-                    {
-                        "tokens_json": tokens_json,
-                        "confirm": confirm,
-                        "portfolio_value": portfolio_value,
-                        "quantity": quantity,
-                    },
-                )
-            finally:
-                sys.stdout = _saved_stdout
-            print(
-                f"[DIAG] execute_signal: loop mode — queued {len(signal_list)} signal(s) as {order_id}",
-                file=sys.stderr, flush=True,
-            )
-            return {
-                "queued": True,
-                "mode": "loop",
-                "order_id": order_id,
-                "count": len(signal_list),
-                "hint": "执行由循环异步完成；结果可查询 execution_loop.get_outcome(order_id)",
-            }
-
+        sync_from_params()
         # Route EVERYTHING (import-time AND runtime loggers) to stderr while
         # the pipeline runs. lumibot registers stdout handlers lazily during
         # LumiBot startup, so wrapping the call is the only reliable guard.
@@ -241,32 +207,15 @@ def _load_tokens(live: bool) -> list[dict] | None:
     """Load user-configured token mappings when live mode is requested."""
     if not live:
         return None
+    from nanobot_quant.tokens_store import load_tokens_json
 
-    paths = [
-        "/data/legion/credentials/tokens.json",
-        "/mnt/workspace/legion/credentials/tokens.json",
-    ]
-    for p in paths:
-        if os.path.isfile(p):
-            try:
-                with open(p) as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    print(
-                        f"[DIAG] execute_signal: loaded {len(data)} token(s) from {p}",
-                        file=sys.stderr, flush=True,
-                    )
-                    return data
-                print(
-                    "[DIAG] execute_signal: tokens.json not a list, ignoring",
-                    file=sys.stderr, flush=True,
-                )
-            except Exception as exc:
-                print(
-                    f"[DIAG] execute_signal: failed to read {p}: {exc}",
-                    file=sys.stderr, flush=True,
-                )
-
+    data = load_tokens_json()
+    if data:
+        print(
+            f"[DIAG] execute_signal: loaded {len(data)} token(s) from tokens.json",
+            file=sys.stderr, flush=True,
+        )
+        return data
     print(
         "[DIAG] execute_signal: no tokens.json, relying on CLI resolution",
         file=sys.stderr, flush=True,
@@ -293,26 +242,7 @@ def _silence_lumibot_loggers() -> None:
             _lg.setLevel(logging.WARNING)
 
 def get_execution_outcome(order_id: str) -> dict:
-    """Query the outcome of a loop-mode execution (execute_signal queued).
-
-    Returns ``{"status": "pending"}`` while the StrategyExecutor loop is still
-    processing, or ``{"status": "done", "outcome": {...}}`` once finished.
-    No side effects; safe to call repeatedly.
-    """
-    from nanobot_quant.execution_loop import get_outcome, loop_status
-
-    status = loop_status()
-    if not status["running"]:
-        return {
-            "order_id": order_id,
-            "status": "loop_not_running",
-            "loop": status,
-        }
-    out = get_outcome(order_id)
-    if out is None:
-        return {
-            "order_id": order_id,
-            "status": "pending",
-            "hint": "循环尚未完成该订单（或 order_id 不存在）",
-        }
-    return {"order_id": order_id, "status": "done", "outcome": out}
+    """[退役] Loop 模式已由 P2 B3 移除 — execute_signal 仅同步直调。"""
+    return {"order_id": order_id, "status": "retired",
+            "error": "loop 模式已退役（P2 B3），execute_signal 现在总是同步执行",
+            "hint": "结果直接返回在 execute_signal 的响应中"}
