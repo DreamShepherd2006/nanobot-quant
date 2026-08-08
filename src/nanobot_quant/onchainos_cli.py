@@ -125,18 +125,21 @@ def get_holders(address: str, *, include_pnl: bool = False) -> Optional[list]:
 
 # ── Market ────────────────────────────────────────────────────────
 
-def get_price(symbol: str, chain: str = "solana") -> Optional[str]:
+def get_price(symbol: str, chain: str = "solana", tokens_json: list[dict] | None = None) -> Optional[str]:
     """Get real-time token price in USD via market kline.
 
     Uses the most recent 1D candle's close as the current price.
-    Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
+    Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract address.
+    ``tokens_json`` entries are honoured for symbols outside the built-in
+    whitelist (e.g. CRCLX registered by the user) — without it, CLI-only
+    lookup misses tokens not indexed by OKX DEX token search.
     Returns price as string or None.
     """
     # For stablecoins, return "1"
     if symbol.upper() in ("USDC", "USDT"):
         return "1"
 
-    addr = resolve_token_address(symbol)
+    addr = resolve_token_address(symbol, tokens_json=tokens_json)
     if not addr:
         return None
 
@@ -493,12 +496,14 @@ def chain_results_dir(roots: tuple = ("/data", "/mnt/workspace")) -> Path:
     return d
 
 
-def get_token_price(symbol: str) -> Optional[float]:
+def get_token_price(symbol: str, tokens_json: list[dict] | None = None) -> Optional[float]:
     """Get real-time token price as float (USD).
 
-    Accepts a token SYMBOL (e.g. "SOL", "USDC"), NOT a contract address.
+    Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract address.
+    ``tokens_json`` entries are honoured for symbols outside the built-in
+    whitelist (see ``get_price``).
     """
-    raw = get_price(symbol)
+    raw = get_price(symbol, tokens_json=tokens_json)
     if raw is None:
         return None
     try:

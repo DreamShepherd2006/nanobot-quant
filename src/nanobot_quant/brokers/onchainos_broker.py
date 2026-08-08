@@ -118,8 +118,8 @@ class OnchainOSBroker(Broker):
         else:
             # Buy: estimate SOL needed via market price + buffer
             # Pass SYMBOLS (not addresses) — get_price uses onchainos kline which expects symbols
-            sol_price = get_token_price(from_symbol) or 1.0
-            token_price = get_token_price(to_symbol) or 0.0
+            sol_price = get_token_price(from_symbol, self._tokens_json) or 1.0
+            token_price = get_token_price(to_symbol, self._tokens_json) or 0.0
             if token_price <= 0:
                 order.set_error(self._format_err(f"Cannot get price for {symbol}"))
                 return order
