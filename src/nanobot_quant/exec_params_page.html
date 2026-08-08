@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>执行参数 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:860px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:16px; }
+  .banner { border-radius:6px; padding:10px 14px; margin:12px 0; font-size:.88em; }
+  .banner.default { background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; }
+  .banner.custom { background:#fff3e0; border:1px solid #ffcc80; color:#e65100; }
+  .banner.locked { background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; }
+  .banner.msg { display:block; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; }
+  .banner.msg.hidden { display:none; }
+  .banner.msg.ok { background:#e8f5e9; border-color:#a5d6a7; color:#2e7d32; }
+  .banner.msg.err { background:#fce4ec; border-color:#ef9a9a; color:#c62828; }
+  .card { background:#fff; border-radius:8px; padding:18px 16px; margin-bottom:14px; border:1px solid #e0e0e0; }
+  .card h3 { font-size:1em; margin-bottom:4px; color:#444; }
+  .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 0; border-top:1px solid #f0f0f0; }
+  .field:first-of-type { border-top:none; }
+  .f-label { width:200px; font-weight:600; font-size:.9em; }
+  .f-std { color:#888; font-size:.8em; min-width:150px; }
+  .f-hint { color:#aaa; font-size:.78em; flex:1; min-width:160px; }
+  input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
+  .actions { margin:16px 0 4px; display:flex; gap:10px; align-items:center; }
+  button { padding:8px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
+  .btn-primary { background:#1565c0; color:#fff; }
+  .btn-primary:hover { background:#0d47a1; }
+  .btn-outline { background:#fff; color:#1565c0; border:1px solid #1565c0; }
+  .btn-outline:hover { background:#e3f2fd; }
+  .note { background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:10px 14px; margin:12px 0; font-size:.85em; color:#1565c0; }
+  code { background:#eef; padding:1px 5px; border-radius:3px; font-size:.85em; }
+</style>
+</head>
+<body>
+<h1>🛡️ 执行参数</h1>
+<p class="subtitle">链上执行环节的系统级策略（WebUI 锁死 — MCP/LLM 不可修改）。修改即保存到 exec_params.json 并即时生效；默认值 = 旧版硬编码行为，未改动时零变化。</p>
+
+{banner}
+{msg}
+
+<div class="note">
+  <strong>控制面设计</strong>：<code>portfolio_value</code> / <code>quantity</code> 属调用级参数（每次交易声明），保留在 MCP；
+  此处 5 个系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
+  <code>max_drawdown_pct</code> / <code>stop_loss_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）。
+</div>
+
+{groups}
+
+<div class="actions">
+  <button class="btn-primary" id="btn-save">💾 保存参数</button>
+  <button class="btn-outline" id="btn-reset">↺ 恢复默认</button>
+</div>
+
+<script>
+(function () {
+  const msg = document.getElementById('msg');
+
+  function show(m, ok) {
+    msg.textContent = m;
+    msg.className = 'banner msg ' + (ok ? 'ok' : 'err');
+    msg.style.display = 'block';
+    setTimeout(() => { msg.style.display = 'none'; }, 4000);
+  }
+
+  async function collect() {
+    const params = {};
+    document.querySelectorAll('input[type=number]').forEach(function (inp) {
+      params[inp.name] = parseFloat(inp.value);
+    });
+    return params;
+  }
+
+  document.getElementById('btn-save').addEventListener('click', async function () {
+    const resp = await fetch('/config/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(await collect()),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      show('✅ 执行参数已保存并即时生效', true);
+    } else {
+      show('❌ ' + (data.error || '保存失败'), false);
+    }
+  });
+
+  document.getElementById('btn-reset').addEventListener('click', async function () {
+    const resp = await fetch('/config/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset: true }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      show('↺ 已恢复默认执行参数', true);
+      setTimeout(function () { location.reload(); }, 800);
+    } else {
+      show('❌ ' + (data.error || '重置失败'), false);
+    }
+  });
+})();
+</script>
+</body>
+</html>
