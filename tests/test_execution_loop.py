@@ -269,3 +269,22 @@ def test_get_execution_outcome_pending_then_done():
     ):
         res = tools_execute.get_execution_outcome("loop-1")
         assert res["status"] == "done" and res["outcome"]["ticker"] == "SOL"
+
+
+def test_strategy_queue_ready_before_initialize():
+    """回归: P1 实测 'SignalExecutionStrategy' object has no attribute
+    '_signal_queue' — ensure_loop 返回实例后立即入队，不能等 lumibot
+    StrategyExecutor 回调 initialize() 才建队列。"""
+    from nanobot_quant.execution_loop import SignalExecutionStrategy
+
+    s = SignalExecutionStrategy()  # 不调 initialize()
+    order_id = s.enqueue_signal({"ticker": "SOL"}, {})
+    assert order_id.startswith("loop-")
+    assert s.stats()["queued"] == 1
+    # 消费路径不受影响
+    with mock.patch(
+        "nanobot_quant.pipeline.run_from_signals", return_value=[{"ticker": "SOL"}]
+    ):
+        s.on_trading_iteration()
+    assert s.stats()["processed"] == 1
+    assert s.get_outcome(order_id) == {"ticker": "SOL"}

@@ -30,14 +30,21 @@ class SignalExecutionStrategy(Strategy):
     - get_outcome()/stats(): 供外部查询执行结果（异步语义）
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 队列在 __init__ 建立（而非 initialize()）：Lumibot 的 initialize() 要等
+        # StrategyExecutor 启动后才回调，而 ensure_loop() 返回的实例立即可入队。
+        # initialize() 只做幂等的周期刷新，避免 executor 启动时重复 initialize
+        # 清空已入队的信号。
+        self._signal_queue: queue.Queue[tuple[str, Any, dict]] = queue.Queue()
+        self._outcomes: dict[str, dict] = {}
+        self._stats = {"queued": 0, "processed": 0, "failed": 0}
+
     def initialize(self) -> None:
         from .exec_params import load_exec_params
 
         interval = int(load_exec_params().get("loop_interval_seconds", 5))
         self.sleeptime = f"{interval}s"
-        self._signal_queue: queue.Queue[tuple[str, Any, dict]] = queue.Queue()
-        self._outcomes: dict[str, dict] = {}
-        self._stats = {"queued": 0, "processed": 0, "failed": 0}
 
     # ── 外部注入接口（MCP execute_signal loop 分支调用） ────────────────
 
