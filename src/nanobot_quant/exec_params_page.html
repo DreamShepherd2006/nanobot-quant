@@ -25,7 +25,14 @@
   .f-std { color:#888; font-size:.8em; min-width:150px; }
   .f-hint { color:#aaa; font-size:.78em; flex:1; min-width:160px; }
   input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
+  input[type=text] { width:150px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; }
   select { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
+  .switch { position:relative; display:inline-block; width:44px; height:24px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .switch .slider { position:absolute; cursor:pointer; inset:0; background:#ccc; border-radius:24px; transition:.25s; }
+  .switch .slider:before { position:absolute; content:""; height:18px; width:18px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:.25s; }
+  .switch input:checked + .slider { background:#1565c0; }
+  .switch input:checked + .slider:before { transform:translateX(20px); }
   .mode-card { border:1px solid #90caf9; background:#f8fbff; }
   .actions { margin:16px 0 4px; display:flex; gap:10px; align-items:center; }
   button { padding:8px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
@@ -48,12 +55,10 @@
   <strong>控制面设计</strong>：<code>portfolio_value</code> / <code>quantity</code> 属调用级参数（每次交易声明），保留在 MCP；
   此处系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
   <code>max_drawdown_pct</code> / <code>stop_loss_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）；
-  <code>execution_mode</code> / <code>loop_interval_seconds</code> 控制执行循环（P1 loop 模式）；
-  <strong>③ TD 自主运行</strong>（标的/周期/数量模式）为 P2 StrategyExecutor 主循环的系统级参数，
-  供 B3 生命周期接入后生效。
+  <strong>③ TD 自主运行</strong>：<code>td_enabled</code> 为 P2 B3 StrategyExecutor 主循环的 WebUI 开关，
+  开启后在 quant agent 进程内驻留 TD 自主策略（标的/周期/数量模式见下）。
+  P1 loop 模式已退役（execute_signal 仅同步直调）。
 </div>
-
-{mode_card}
 
 {groups}
 
@@ -83,6 +88,9 @@
     });
     document.querySelectorAll('select').forEach(function (sel) {
       params[sel.name] = sel.value;
+    });
+    document.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+      params[cb.name] = cb.checked;
     });
     return params;
   }

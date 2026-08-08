@@ -1,0 +1,210 @@
+"""TD 自主 live 循环管理器（P2 B3）。
+
+在 quant agent 进程内驻留 StrategyExecutor 主循环 daemon 线程：
+
+- ``TdSequentialStrategy``（参数来自 exec_params.json：td_symbol /
+  td_sleeptime / quantity_mode / td_quantity / 风控参数）
+- ``OnchainOSBroker`` + ``OnchainOSDataSource``（B1 已修 live 兼容；
+  data_source 挂到 broker，Strategy 数据访问统一走 broker.data_source）
+- WebUI 开关 ``td_enabled`` 启停（exec_params.json）
+
+生命周期语义：
+- ``sync_from_params()``：WebUI 保存 / execute_signal 调用时同步——
+  td_enabled=True 且未运行 → 启动；False 且运行中 → 停止；
+  运行中但参数变化 → 重启（stop 旧循环 → start 新参数）。
+- ``status()``：当前循环状态（WebUI 展示）。
+
+安全说明：
+- StrategyExecutor 是 daemon Thread（lumibot 自带 stop_event），
+  stop() 设置事件后主循环 ``while ... and self.should_continue`` 退出。
+- 单例：同一时间只有一个 TD live 循环；旧线程未退出时 start() 拒绝
+  重复启动（返回 running 状态），避免双循环重复下单。
+"""
+
+from __future__ import annotations
+
+import sys
+import threading
+import time
+from typing import Any
+
+_lock = threading.Lock()
+_runner: "_TdLiveRunner | None" = None
+
+
+class _TdLiveRunner:
+    def __init__(self) -> None:
+        self._executor: Any = None
+        self._thread: threading.Thread | None = None
+        self._state: dict[str, Any] = {
+            "running": False,
+            "started_at": None,
+            "last_error": None,
+            "symbol": None,
+            "sleeptime": None,
+            "quantity_mode": None,
+        }
+
+    # ── 构造 ──────────────────────────────────────────────────────────
+    def _build_executor(self, params: dict[str, Any]) -> Any:
+        """构造 StrategyExecutor（lumibot 真包延迟导入，测试容器无 lumibot）。"""
+        from lumibot.strategies.strategy_executor import StrategyExecutor
+
+        from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+        from nanobot_quant.data.onchainos_data_source import OnchainOSDataSource
+        from nanobot_quant.strategies.td_sequential_strategy import (
+            TdSequentialStrategy,
+        )
+        from nanobot_quant.tokens_store import load_tokens_json
+
+        tokens = load_tokens_json() or []
+        strategy = TdSequentialStrategy()
+        strategy.parameters = dict(
+            TdSequentialStrategy.parameters,
+            **{
+                "symbol": params["td_symbol"],
+                "quantity": params["td_quantity"],
+                "quantity_mode": params["quantity_mode"],
+                "sleeptime": params["td_sleeptime"],
+                "max_position_pct": params["max_position_pct"],
+                "max_drawdown_pct": params["max_drawdown_pct"],
+                "stop_loss_pct": params["stop_loss_pct"],
+            },
+        )
+        broker = OnchainOSBroker(
+            tokens_json=tokens,
+            slippage=str(params["slippage"]),
+            sol_buffer_pct=float(params["sol_buffer_pct"]),
+            data_source=OnchainOSDataSource(tokens_json=tokens),
+        )
+        strategy.broker = broker
+        executor = StrategyExecutor(strategy)
+        executor.daemon = True
+        return executor
+
+    # ── 生命周期 ──────────────────────────────────────────────────────
+    def start(self, params: dict[str, Any]) -> dict[str, Any]:
+        with _lock:
+            if self._thread is not None and self._thread.is_alive():
+                # 已运行 → 返回当前状态（参数变更由 sync_from_params 先 stop）
+                return self.status()
+            try:
+                executor = self._build_executor(params)
+            except Exception as exc:  # pragma: no cover — lumibot 真包异常
+                self._state["last_error"] = str(exc)
+                self._state["running"] = False
+                print(
+                    f"[DIAG] td_live: build executor failed: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                return self.status()
+            self._executor = executor
+            t = threading.Thread(target=self._run, daemon=True, name="td-live")
+            self._thread = t
+            t.start()
+            self._state.update(
+                running=True,
+                started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+                last_error=None,
+                symbol=params["td_symbol"],
+                sleeptime=params["td_sleeptime"],
+                quantity_mode=params["quantity_mode"],
+            )
+            print(
+                f"[DIAG] td_live: StrategyExecutor started "
+                f"({params['td_symbol']} @ {params['td_sleeptime']}, "
+                f"mode={params['quantity_mode']})",
+                file=sys.stderr, flush=True,
+            )
+            return self.status()
+
+    def _run(self) -> None:
+        try:
+            # lumibot 运行时日志输出到 stdout 会污染 MCP stdio JSON-RPC 通道，
+            # 全程重定向 stdout → stderr（P1 已验证方案）。
+            _saved_stdout = sys.stdout
+            sys.stdout = sys.stderr
+            try:
+                self._executor.run()  # Thread.run → StrategyExecutor 主循环
+            finally:
+                sys.stdout = _saved_stdout
+        except Exception as exc:  # pragma: no cover — lumibot 真包异常
+            self._state["last_error"] = str(exc)
+            self._state["running"] = False
+            print(
+                f"[DIAG] td_live: executor stopped with error: {exc}",
+                file=sys.stderr, flush=True,
+            )
+
+    def stop(self) -> dict[str, Any]:
+        with _lock:
+            if self._executor is not None:
+                try:
+                    self._executor.stop()  # stop_event.set()
+                except Exception as exc:  # pragma: no cover
+                    self._state["last_error"] = str(exc)
+            self._state["running"] = False
+            print(
+                "[DIAG] td_live: StrategyExecutor stop requested",
+                file=sys.stderr, flush=True,
+            )
+            return self.status()
+
+    def status(self) -> dict[str, Any]:
+        alive = self._thread is not None and self._thread.is_alive()
+        return dict(self._state, thread_alive=alive)
+
+    # ── 参数同步 ──────────────────────────────────────────────────────
+    def sync_from_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """按 exec_params 同步启停（WebUI 保存 / execute_signal 时调用）。
+
+        td_enabled=True：未运行 → 启动；运行中且参数未变 → 保持；
+        运行中但标的/周期/模式/风控变化 → 重启（stop → start）。
+        td_enabled=False：运行中 → 停止。
+        """
+        if params.get("td_enabled"):
+            running = (
+                self._state.get("running")
+                or (self._thread is not None and self._thread.is_alive())
+            )
+            if running:
+                changed = any(
+                    self._state.get(k) != params.get(pk)
+                    for k, pk in (
+                        ("symbol", "td_symbol"),
+                        ("sleeptime", "td_sleeptime"),
+                        ("quantity_mode", "quantity_mode"),
+                    )
+                )
+                if not changed:
+                    return self.status()
+                # 参数变化 → 重启循环（先停旧的，避免双循环）
+                self.stop()
+                time.sleep(0.3)
+            return self.start(params)
+        if self._state.get("running") or (
+            self._thread is not None and self._thread.is_alive()
+        ):
+            return self.stop()
+        return self.status()
+
+
+def get_runner() -> _TdLiveRunner:
+    global _runner
+    with _lock:
+        if _runner is None:
+            _runner = _TdLiveRunner()
+        return _runner
+
+
+def sync_from_params(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """模块级入口：按 exec_params 同步 TD live 循环（幂等，可反复调用）。"""
+    if params is None:
+        from nanobot_quant.exec_params import load_exec_params
+
+        params = load_exec_params()
+    return get_runner().sync_from_params(params)
+
+
+def status() -> dict[str, Any]:
+    return get_runner().status()
