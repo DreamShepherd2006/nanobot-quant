@@ -46,10 +46,20 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "execution_mode": "direct",  # str — "direct" | "loop"
     # loop 模式后台执行循环的迭代间隔（秒），WebUI 可改，改动下一轮迭代生效。
     "loop_interval_seconds": 5,  # int [1,300]
+    # ── ④ TD 自主运行（P2 B2, StrategyExecutor 主循环）───────────────
+    "td_symbol": "SOL",        # TD 自主标的（tokens.json 登记代币 symbol）
+    "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
+    "quantity_mode": "fixed",  # fixed=固定 quantity；value=portfolio_value × max_position_pct
 }
 
 #: Valid execution_mode values (loop = StrategyExecutor 循环，见 execution_loop.py)。
 EXECUTION_MODES: tuple[str, ...] = ("direct", "loop")
+
+#: Valid TD main-loop cadences (lumibot sleeptime strings).
+TD_SLEEPTIMES: tuple[str, ...] = ("1m", "5m", "15m", "1H", "1D", "1W")
+
+#: Valid position-sizing modes for the TD autonomous strategy.
+QUANTITY_MODES: tuple[str, ...] = ("fixed", "value")
 
 #: Human-readable bounds used by the WebUI form validation + display.
 PARAM_META: dict[str, dict[str, Any]] = {
@@ -77,11 +87,24 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "exec", "min": 1, "max": 300, "step": 1, "std": 5, "integer": True,
         "label": "循环周期(秒)", "hint": "loop 模式后台执行循环每次迭代间隔；改动即时生效（下一轮迭代起用）",
     },
+    "td_symbol": {
+        "group": "td", "type": "str", "std": "SOL",
+        "label": "TD 标的", "hint": "TD 自主策略的交易标的（tokens.json 登记代币 symbol）",
+    },
+    "td_sleeptime": {
+        "group": "td", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",
+        "label": "TD 周期", "hint": "主循环周期 = lumibot sleeptime 与 K 线粒度（1D 默认）",
+    },
+    "quantity_mode": {
+        "group": "td", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
+        "label": "数量模式", "hint": "fixed=固定 quantity 股数（默认 10，回测语义不变）；value=按实时 portfolio_value × 单仓上限计算",
+    },
 }
 
 GROUP_TITLES = {
     "risk": "① 风险控制（WebUI 锁死 — LLM 不可改）",
     "exec": "② 执行质量与循环（WebUI 锁死 — LLM 不可改）",
+    "td": "③ TD 自主运行（P2 — StrategyExecutor 主循环）",
 }
 
 
@@ -106,6 +129,15 @@ def validate_exec_param(key: str, value: Any) -> str | None:
     meta = PARAM_META.get(key)
     if meta is None:
         return "未知参数"
+    vtype = meta.get("type", "float")
+    if vtype == "enum":
+        if value not in meta["enum"]:
+            return f"必须是 {'/'.join(meta['enum'])} 之一"
+        return None
+    if vtype == "str":
+        if not isinstance(value, str) or not value.strip():
+            return "不能为空"
+        return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return f"必须是数字（{meta['min']}–{meta['max']}）"
     lo, hi = meta["min"], meta["max"]

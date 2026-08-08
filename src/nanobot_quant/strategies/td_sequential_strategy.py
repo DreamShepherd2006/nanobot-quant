@@ -41,10 +41,18 @@ class TdSequentialStrategy(Strategy):
     parameters = {
         "symbol": "AAPL",
         "quantity": 10,
+        "quantity_mode": "fixed",  # "fixed" = fixed quantity; "value" = pv × pct
+        "sleeptime": "1D",         # strategy main-loop cadence ("1m"…"1W")
         "max_position_pct": 0.20,   # max % of portfolio in one position
         "max_drawdown_pct": 0.15,   # skip new entries when drawdown > 15%
         "stop_loss_pct": 0.10,      # exit when loss exceeds 10%
         **DEFAULT_TD_PARAMS,
+    }
+
+    #: sleeptime → get_historical_prices timestep (lumibot granularity names)
+    _TIMESTEP_BY_SLEEPTIME = {
+        "1m": "minute", "5m": "minute", "15m": "minute",
+        "1H": "hour", "1D": "day", "1W": "week",
     }
 
     # ── lifecycle hooks ───────────────────────────────────────────
@@ -53,16 +61,22 @@ class TdSequentialStrategy(Strategy):
         self,
         symbol: str | None = None,
         quantity: int | None = None,
+        quantity_mode: str | None = None,
+        sleeptime: str | None = None,
         max_position_pct: float | None = None,
         max_drawdown_pct: float | None = None,
     ):
-        """Called once before the backtest starts (lumibot lifecycle)."""
+        """Called once before the backtest/live loop starts (lumibot lifecycle)."""
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
         self.quantity = quantity or self.parameters.get("quantity", 10)
+        self.quantity_mode = quantity_mode or self.parameters.get("quantity_mode", "fixed")
+        self.sleeptime = sleeptime or self.parameters.get("sleeptime", "1D")
+        self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
+            self.sleeptime, "day"
+        )
         self._bars_consumed = 0  # count of bars processed
         self._min_history = 50  # minimum bars TD Seq needs for meaningful signal
         self._peak_portfolio = None  # track peak for drawdown calc
-        self.sleeptime = "1D"  # run once per trading day
 
         # Build RiskEngine from parameters
         self._risk = RiskEngine(
@@ -73,11 +87,13 @@ class TdSequentialStrategy(Strategy):
             stop_loss_pct=self.parameters.get("stop_loss_pct", 0.10),
         )
 
-        # Build PortfolioEngine for position sizing & order construction
+        # Build PortfolioEngine for position sizing & order construction.
+        # quantity_mode="value" → no fixed default → PortfolioEngine falls back
+        # to pv × max_position_pct sizing; "fixed" keeps the classic behaviour.
         self._portfolio = PortfolioEngine(
             strategy=self,
             max_position_pct=self._risk.max_position_pct,
-            default_quantity=self.quantity,
+            default_quantity=None if self.quantity_mode == "value" else self.quantity,
         )
 
         # Build OrderTracker — links Signals to lumibot Orders
@@ -101,7 +117,7 @@ class TdSequentialStrategy(Strategy):
             bars = self.get_historical_prices(
                 self.symbol,
                 length=self._bars_consumed + self._min_history,
-                timestep="day",
+                timestep=self._timestep,
             )
         except Exception:
             self._bars_consumed += 1
@@ -165,8 +181,11 @@ class TdSequentialStrategy(Strategy):
             and not has_position
             and (not tdst_filter or (support is not None and price > support))
         ):
+            # Actual order size (fixed quantity or pv × pct for value mode);
+            # the risk gate must see the real position value, not the default.
+            qty = self._portfolio.calculate_quantity(price)
             result = self._risk.can_enter(
-                position_value=self.quantity * price,
+                position_value=qty * price,
                 portfolio_value=pv,
                 peak_portfolio=self._peak_portfolio or pv,
             )
@@ -177,6 +196,7 @@ class TdSequentialStrategy(Strategy):
             reason = f"TD LONG setup_buy={setup_buy} score={score:.1f}"
             req = self._portfolio.build_buy_order(
                 self.symbol, price, reason,
+                quantity=qty,
             )
             order = self._portfolio.submit_order(req)
             if order is not None:

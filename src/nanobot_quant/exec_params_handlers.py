@@ -14,6 +14,7 @@ and the save endpoint both enforce ``is_commander``.
 
 from __future__ import annotations
 
+import json
 import os
 
 from starlette.requests import Request
@@ -38,6 +39,36 @@ def _load_template(name: str) -> str:
 _PAGE_HTML = _load_template("exec_params_page.html")
 
 
+# ── tokens.json (TD 标的候选列表) ───────────────────────────────────────
+
+def _load_token_symbols() -> list[str]:
+    """Return the list of token symbols registered in tokens.json.
+
+    Used to populate the TD 标的 dropdown.  Returns [] when the file is
+    missing/empty — the page then falls back to a plain text input.
+    """
+    for root in ("/data", "/mnt/workspace"):
+        p = os.path.join(root, "legion", "credentials", "tokens.json")
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                continue
+            syms: list[str] = []
+            for entry in data:
+                if isinstance(entry, dict):
+                    sym = str(entry.get("symbol", "")).strip()
+                    if sym:
+                        syms.append(sym)
+            if syms:
+                return sorted(set(syms))
+        except (OSError, ValueError):
+            continue
+    return []
+
+
 def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
     """Return (error_message_or_None, ok)."""
     _u = request.session.get("user")
@@ -50,11 +81,45 @@ def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
 
 # ── Page rendering ───────────────────────────────────────────────────────
 
-def _field_html(key: str, value: object) -> str:
+def _field_html(key: str, value: object, options: list[str] | None = None) -> str:
     meta = PARAM_META[key]
     label = meta.get("label", key)
     hint = meta.get("hint", "")
     std = meta.get("std", "")
+    vtype = meta.get("type", "float")
+    if vtype == "enum":
+        choices = meta["enum"]
+        opts = "".join(
+            f'<option value="{c}" {"selected" if str(value) == c else ""}>{c}</option>'
+            for c in choices
+        )
+        return (
+            f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+            f'<select id="{key}" name="{key}">{opts}</select>'
+            f'<span class="f-std">默认 {std}</span>'
+            f'<span class="f-hint">{hint}</span></div>'
+        )
+    if vtype == "str":
+        choices = options or []
+        if choices:
+            opts = "".join(
+                f'<option value="{c}" {"selected" if str(value) == c else ""}>{c}</option>'
+                for c in choices
+            )
+            if str(value) not in choices:
+                opts += f'<option value="{value}" selected>⚙️ 当前: {value}</option>'
+            return (
+                f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+                f'<select id="{key}" name="{key}">{opts}</select>'
+                f'<span class="f-std">默认 {std} · tokens.json 登记代币</span>'
+                f'<span class="f-hint">{hint}</span></div>'
+            )
+        return (
+            f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+            f'<input type="text" id="{key}" name="{key}" value="{value}">'
+            f'<span class="f-std">默认 {std}</span>'
+            f'<span class="f-hint">{hint}</span></div>'
+        )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
     return (
@@ -66,9 +131,9 @@ def _field_html(key: str, value: object) -> str:
     )
 
 
-def _group_html(group: str, params: dict) -> str:
+def _group_html(group: str, params: dict, options: dict[str, list[str]] | None = None) -> str:
     fields = "".join(
-        _field_html(k, params[k])
+        _field_html(k, params[k], (options or {}).get(k))
         for k in PARAM_META
         if PARAM_META[k].get("group") == group
     )
@@ -86,7 +151,7 @@ def _mode_card_html(mode: str) -> str:
     )
     return (
         '<div class="card mode-card">'
-        '<h3>③ 执行模式</h3>'
+        '<h3>④ 执行模式</h3>'
         '<div class="field">'
         '<label class="f-label" for="execution_mode">执行模式</label>'
         f'<select id="execution_mode" name="execution_mode">{opts}</select>'
@@ -119,7 +184,10 @@ def _render_page(params: dict, message: str = "") -> str:
         if message
         else '<div class="banner msg hidden" id="msg"></div>'
     )
-    groups = "".join(_group_html(g, params) for g in ("risk", "exec"))
+    token_opts = {"td_symbol": _load_token_symbols()}
+    groups = "".join(
+        _group_html(g, params, token_opts) for g in ("risk", "exec", "td")
+    )
     mode_card = _mode_card_html(params.get("execution_mode", "direct"))
     return (
         _PAGE_HTML.replace("{banner}", banner)
@@ -200,7 +268,10 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"drawdown={result['params'].get('max_drawdown_pct')} "
             f"stop_loss={result['params'].get('stop_loss_pct')} "
             f"slippage={result['params'].get('slippage')} "
-            f"sol_buffer={result['params'].get('sol_buffer_pct')}"
+            f"sol_buffer={result['params'].get('sol_buffer_pct')} "
+            f"td_symbol={result['params'].get('td_symbol')} "
+            f"td_sleeptime={result['params'].get('td_sleeptime')} "
+            f"quantity_mode={result['params'].get('quantity_mode')}"
         )
         return JSONResponse({"ok": True, "message": "执行参数已保存并即时生效",
                              "params": result.get("params")})

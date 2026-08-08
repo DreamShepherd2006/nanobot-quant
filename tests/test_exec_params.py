@@ -77,16 +77,20 @@ def test_defaults_match_pre_parameterisation_hardcoded():
     assert DEFAULT_EXEC_PARAMS["stop_loss_pct"] == 0.10
     assert DEFAULT_EXEC_PARAMS["slippage"] == 0.01
     assert DEFAULT_EXEC_PARAMS["sol_buffer_pct"] == 0.05
+    # TD 自主运行（P2 B2）默认值
+    assert DEFAULT_EXEC_PARAMS["td_symbol"] == "SOL"
+    assert DEFAULT_EXEC_PARAMS["td_sleeptime"] == "1D"
+    assert DEFAULT_EXEC_PARAMS["quantity_mode"] == "fixed"
 
 
-def test_meta_covers_all_defaults_and_two_groups():
+def test_meta_covers_all_defaults_and_three_groups():
     # execution_mode 是运行模式（非数值参数），由页面顶部下拉单独渲染，
     # 不进 PARAM_META 数字表单；其余默认值（含 loop_interval_seconds）全部
     # 有元数据（min/max/group 等）。
     ui_params = {k for k in DEFAULT_EXEC_PARAMS if k != "execution_mode"}
     assert set(PARAM_META) == ui_params
     groups = {m["group"] for m in PARAM_META.values()}
-    assert groups == {"risk", "exec"}
+    assert groups == {"risk", "exec", "td"}
 
 
 @pytest.mark.parametrize(
@@ -118,10 +122,31 @@ def test_validation_rejects_out_of_range(key, bad):
         ("loop_interval_seconds", 1),
         ("loop_interval_seconds", 5),
         ("loop_interval_seconds", 300),
+        ("td_symbol", "CRCLX"),
+        ("td_sleeptime", "1H"),
+        ("td_sleeptime", "1W"),
+        ("quantity_mode", "value"),
     ],
 )
 def test_validation_accepts_in_range(key, good):
     assert validate_exec_param(key, good) is None
+
+
+@pytest.mark.parametrize(
+    "key,bad",
+    [
+        ("td_symbol", ""),
+        ("td_symbol", "  "),
+        ("td_symbol", 123),
+        ("td_sleeptime", "4H"),
+        ("td_sleeptime", "1D "),
+        ("td_sleeptime", "1"),
+        ("quantity_mode", "fixedx"),
+        ("quantity_mode", "10"),
+    ],
+)
+def test_validation_rejects_bad_td_fields(key, bad):
+    assert validate_exec_param(key, bad) is not None
 
 
 @pytest.mark.parametrize(
@@ -241,7 +266,21 @@ def test_page_renders_groups_with_current_values(tmp_path):
     assert "执行参数" in html
     assert "风险控制" in html
     assert "执行质量" in html
+    assert "TD 自主运行" in html
     assert 'value="0.4"' in html  # current value rendered
+
+
+def test_page_renders_td_fields(tmp_path):
+    """TD 自主运行组渲染：周期/数量模式下拉 + 标的候选（默认值选中）。"""
+    app = _FakeApp()
+    register_exec_params_routes(app, _FakeGatekeeper())
+    page = next(fn for p, fn, m in app.routes if p == "/config/exec" and "GET" in m)
+    html = asyncio.run(page(_FakeRequest(session_user="commander"))).body.decode()
+    assert 'id="td_sleeptime"' in html
+    assert 'value="1D" selected' in html
+    assert 'id="quantity_mode"' in html
+    assert 'value="fixed" selected' in html
+    assert 'id="td_symbol"' in html
 
 
 def test_page_renders_mode_card(tmp_path):
@@ -290,6 +329,24 @@ def test_save_via_handler_persists(tmp_path):
     assert data["ok"] is True
     assert load_exec_params()["slippage"] == 0.03
     assert any("执行参数" in log for log in gk.logs)
+
+
+def test_save_via_handler_persists_td_fields(tmp_path):
+    """TD 自主运行字段通过 handler 保存并即时生效。"""
+    app = _FakeApp()
+    gk = _FakeGatekeeper()
+    register_exec_params_routes(app, gk)
+    save = next(fn for p, fn, m in app.routes if p == "/config/exec" and "POST" in m)
+    body = dict(DEFAULT_EXEC_PARAMS, td_symbol="CRCLX", td_sleeptime="1H",
+                quantity_mode="value")
+    resp = asyncio.run(save(_FakeRequest(body, "commander")))
+    data = json.loads(resp.body.decode())
+    assert data["ok"] is True
+    loaded = load_exec_params()
+    assert loaded["td_symbol"] == "CRCLX"
+    assert loaded["td_sleeptime"] == "1H"
+    assert loaded["quantity_mode"] == "value"
+    assert any("td_symbol=CRCLX" in log for log in gk.logs)
 
 
 def test_save_rejects_invalid(tmp_path):
