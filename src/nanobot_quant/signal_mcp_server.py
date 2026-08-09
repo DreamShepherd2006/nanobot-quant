@@ -163,11 +163,8 @@ _TOOL_DESCRIPTIONS = {
         "still pending — without touching the swarm run directory."
     ),
     "get_execution_outcome": (
-        "Query the outcome of a loop-mode execution (execute_signal with "
-        "execution_mode=loop, which returns {queued:true, order_id}). "
-        "Returns status=pending while the StrategyExecutor loop is still "
-        "processing, or status=done with the full outcome once finished. "
-        "No side effects; safe to poll."
+        "[退役] Loop 模式已由 P2 B3 移除 — execute_signal 现在总是同步直调，"
+        "结果直接包含在 execute_signal 的响应中。此工具仅返回 retired 说明。"
     ),
 }
 

@@ -78,7 +78,16 @@ class OnchainOSDataSource(DataSource):
             },
             inplace=True,
         )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+        # CLI returns OHLCV as strings — coerce to numeric before the TD
+        # engine divides Volume by vol_sma20 (str/float TypeError).
+        for col in ("open", "high", "low", "close", "volume"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        ts = pd.to_numeric(df["timestamp"], errors="coerce")
+        # OKX DEX candles return epoch *milliseconds* (13-digit); keep a
+        # seconds fallback for other sources. Parsing ms as s overflows
+        # nanosecond timestamps (OutOfBoundsDatetime).
+        unit = "ms" if (ts.max() > 1e12) else "s"
+        df["timestamp"] = pd.to_datetime(ts, unit=unit, errors="coerce")
         df.set_index("timestamp", inplace=True)
         df.sort_index(inplace=True)
 
@@ -99,11 +108,15 @@ class OnchainOSDataSource(DataSource):
 
     @staticmethod
     def _map_timestep(timestep: str) -> str:
-        """Map Lumibot timestep to onchainos bar format."""
+        """Map Lumibot timestep to onchainos bar format.
+
+        OKX DEX `market kline` accepts 1m/5m/15m/1H/4H/1D/1W only
+        ("1Min" triggers 51000 Parameter bar error).
+        """
         return {
-            "minute": "1Min",
-            "5min": "5Min",
-            "15min": "15Min",
+            "minute": "1m",
+            "5min": "5m",
+            "15min": "15m",
             "hour": "1H",
             "4hour": "4H",
             "day": "1D",

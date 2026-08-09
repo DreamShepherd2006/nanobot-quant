@@ -14,19 +14,18 @@ and the save endpoint both enforce ``is_commander``.
 
 from __future__ import annotations
 
-import json
 import os
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
 from .exec_params import (
-    EXECUTION_MODES,
     GROUP_TITLES,
     PARAM_META,
     load_exec_params,
     save_exec_params,
 )
+from .tokens_store import load_token_symbols
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -37,36 +36,6 @@ def _load_template(name: str) -> str:
 
 
 _PAGE_HTML = _load_template("exec_params_page.html")
-
-
-# ── tokens.json (TD 标的候选列表) ───────────────────────────────────────
-
-def _load_token_symbols() -> list[str]:
-    """Return the list of token symbols registered in tokens.json.
-
-    Used to populate the TD 标的 dropdown.  Returns [] when the file is
-    missing/empty — the page then falls back to a plain text input.
-    """
-    for root in ("/data", "/mnt/workspace"):
-        p = os.path.join(root, "legion", "credentials", "tokens.json")
-        try:
-            if not os.path.isfile(p):
-                continue
-            with open(p, encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, list):
-                continue
-            syms: list[str] = []
-            for entry in data:
-                if isinstance(entry, dict):
-                    sym = str(entry.get("symbol", "")).strip()
-                    if sym:
-                        syms.append(sym)
-            if syms:
-                return sorted(set(syms))
-        except (OSError, ValueError):
-            continue
-    return []
 
 
 def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
@@ -87,6 +56,16 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
     hint = meta.get("hint", "")
     std = meta.get("std", "")
     vtype = meta.get("type", "float")
+    if vtype == "bool":
+        checked = " checked" if value else ""
+        return (
+            f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+            f'<label class="switch">'
+            f'<input type="checkbox" id="{key}" name="{key}"{checked}>'
+            f'<span class="slider"></span></label>'
+            f'<span class="f-std">默认 {'开' if std else '关'}</span>'
+            f'<span class="f-hint">{hint}</span></div>'
+        )
     if vtype == "enum":
         choices = meta["enum"]
         opts = "".join(
@@ -142,27 +121,6 @@ def _group_html(group: str, params: dict, options: dict[str, list[str]] | None =
     return f'<div class="card"><h3>{GROUP_TITLES[group]}</h3>{fields}</div>'
 
 
-def _mode_card_html(mode: str) -> str:
-    """执行模式卡片：direct / loop 单选下拉（系统级开关，仅 Commander 可改）。"""
-    opts = "".join(
-        f'<option value="{m}" {"selected" if m == mode else ""}>'
-        f'{"⚡ 直调模式（direct）" if m == "direct" else "🔁 循环模式（loop）"}</option>'
-        for m in EXECUTION_MODES
-    )
-    return (
-        '<div class="card mode-card">'
-        '<h3>④ 执行模式</h3>'
-        '<div class="field">'
-        '<label class="f-label" for="execution_mode">执行模式</label>'
-        f'<select id="execution_mode" name="execution_mode">{opts}</select>'
-        '<span class="f-std">direct = 信号同步直调（默认）<br>loop = 信号入队，后台循环异步执行</span>'
-        '<span class="f-hint">切到 loop 后，execute_signal(live=True) 立即返回 '
-        '<code>{queued, order_id}</code>，由后台循环按下方「循环周期」消费；'
-        '风控/门控与 direct 完全一致</span>'
-        '</div></div>'
-    )
-
-
 def _render_page(params: dict, message: str = "") -> str:
     try:
         from .exec_params import exec_params_path
@@ -184,15 +142,13 @@ def _render_page(params: dict, message: str = "") -> str:
         if message
         else '<div class="banner msg hidden" id="msg"></div>'
     )
-    token_opts = {"td_symbol": _load_token_symbols()}
+    token_opts = {"td_symbol": load_token_symbols()}
     groups = "".join(
         _group_html(g, params, token_opts) for g in ("risk", "exec", "td")
     )
-    mode_card = _mode_card_html(params.get("execution_mode", "direct"))
     return (
         _PAGE_HTML.replace("{banner}", banner)
         .replace("{msg}", msg)
-        .replace("{mode_card}", mode_card)
         .replace("{groups}", groups)
     )
 
@@ -262,6 +218,17 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         if not result.get("ok"):
             return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                                 status_code=400)
+        # TD 自主循环按新参数同步启停（td_enabled 开关 + 参数热更新）
+        try:
+            from nanobot_quant.td_live import sync_from_params
+
+            td_status = sync_from_params(result["params"])
+            gatekeeper._log(
+                f"🔄 TD live 同步: running={td_status.get('running')} "
+                f"thread_alive={td_status.get('thread_alive')}"
+            )
+        except Exception as exc:
+            gatekeeper._log(f"⚠️ TD live 同步失败: {exc}")
         gatekeeper._log(
             f"🛡️ 执行参数已更新: "
             f"position={result['params'].get('max_position_pct')} "
@@ -269,9 +236,11 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"stop_loss={result['params'].get('stop_loss_pct')} "
             f"slippage={result['params'].get('slippage')} "
             f"sol_buffer={result['params'].get('sol_buffer_pct')} "
+            f"td_enabled={result['params'].get('td_enabled')} "
             f"td_symbol={result['params'].get('td_symbol')} "
             f"td_sleeptime={result['params'].get('td_sleeptime')} "
-            f"quantity_mode={result['params'].get('quantity_mode')}"
+            f"quantity_mode={result['params'].get('quantity_mode')} "
+            f"td_quantity={result['params'].get('td_quantity')}"
         )
         return JSONResponse({"ok": True, "message": "执行参数已保存并即时生效",
                              "params": result.get("params")})

@@ -119,11 +119,15 @@ class TdSequentialStrategy(Strategy):
                 length=self._bars_consumed + self._min_history,
                 timestep=self._timestep,
             )
-        except Exception:
+        except Exception as e:
+            self.logger.warning(
+                f"TD DATA ERROR | {type(e).__name__}: {e}"
+            )
             self._bars_consumed += 1
             return
 
         if bars is None or bars.df.empty:
+            self.logger.warning("TD DATA EMPTY | bars is None or empty")
             self._bars_consumed += 1
             return
 
@@ -149,6 +153,9 @@ class TdSequentialStrategy(Strategy):
 
         # ── 3. Run TD Sequential ──
         if len(df) < self._min_history:
+            self.logger.warning(
+                f"TD SKIP | bars={len(df)} < min_history={self._min_history}"
+            )
             return
 
         signal = calculate(df, params=self._td_params)
@@ -213,6 +220,7 @@ class TdSequentialStrategy(Strategy):
                 f"TD LONG  | price={price:.2f} qty={req.quantity} "
                 f"setup_buy={setup_buy} score={score:.1f}"
             )
+            return
 
         # ── SELL signal: setup_sell >= exit_setup OR cd_sell >= exit_countdown OR stop-loss ──
         elif has_position:
@@ -249,6 +257,13 @@ class TdSequentialStrategy(Strategy):
                 self.logger.info(
                     f"TD EXIT  | price={price:.2f} qty={req.quantity} {exit_reason}"
                 )
+                return
+
+        # ── No signal this bar ──
+        self.logger.info(
+            f"TD HOLD | price={price:.4f} setup_buy={setup_buy} "
+            f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}"
+        )
 
     # ── lumibot lifecycle hooks (delegated to tracker) ──
 

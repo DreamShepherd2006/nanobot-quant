@@ -46,10 +46,35 @@ class TestLiveLoopSignature:
         assert "exchange" in sig.parameters
 
 
+class TestMapTimestep:
+    """B3: timestep → OKX bar format must use 1m/5m/15m (not 1Min/5Min).
+
+    "1Min" triggered 51000 Parameter bar error in the live 5m loop.
+    """
+
+    @pytest.mark.parametrize(
+        "timestep,bar",
+        [
+            ("minute", "1m"),
+            ("5min", "5m"),
+            ("15min", "15m"),
+            ("hour", "1H"),
+            ("4hour", "4H"),
+            ("day", "1D"),
+            ("week", "1W"),
+        ],
+    )
+    def test_maps_to_okx_bar(self, timestep, bar):
+        assert OnchainOSDataSource._map_timestep(timestep) == bar
+
+    def test_unknown_falls_back_to_day(self):
+        assert OnchainOSDataSource._map_timestep("decade") == "1D"
+
+
 class TestGetHistoricalPrices:
     def test_returns_bars_with_asset(self, ds, monkeypatch):
         candles = [
-            {"ts": 1700000000 + i * 86400, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
+            {"ts": 1700000000000 + i * 86400000, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
             for i in range(5)
         ]
         monkeypatch.setattr(
@@ -64,6 +89,37 @@ class TestGetHistoricalPrices:
         assert bars.asset is asset
         assert len(bars.df) == 5
         assert set(bars.df.columns) >= {"open", "high", "low", "close", "volume"}
+
+    def test_accepts_seconds_timestamps(self, ds, monkeypatch):
+        candles = [
+            {"ts": 1700000000 + i * 86400, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.get_kline",
+            lambda addr, bar, limit: candles,
+        )
+        bars = ds.get_historical_prices(
+            _asset(), length=5, timestep="day", exchange=None, return_polars=False
+        )
+        assert bars is not None
+        assert len(bars.df) == 5
+
+    def test_accepts_string_ohlcv_values(self, ds, monkeypatch):
+        candles = [
+            {"ts": 1700000000000 + i * 86400000, "o": "10.0", "h": "11.0", "l": "9.0", "c": "10.5", "vol": "100.0"}
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.get_kline",
+            lambda addr, bar, limit: candles,
+        )
+        bars = ds.get_historical_prices(
+            _asset(), length=5, timestep="day", exchange=None, return_polars=False
+        )
+        assert bars is not None
+        assert len(bars.df) == 5
+        assert bars.df["close"].dtype.kind in "fiu"  # numeric, not object
 
     def test_unresolvable_token_raises(self, ds, monkeypatch):
         monkeypatch.setattr(
