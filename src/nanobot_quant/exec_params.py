@@ -48,7 +48,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
     "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
-    "td_symbol": "SOL",        # TD 自主标的（tokens.json 登记代币 symbol）
+    "td_symbol": "SOL",        # TD 自主标的（/config/tokens 登记代币 symbol；原生币 SOL 登记后可选）
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
     "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
     "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
@@ -88,7 +88,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "td_symbol": {
         "group": "td", "type": "str", "std": "SOL",
-        "label": "TD 标的", "hint": "TD 自主策略的交易标的（tokens.json 登记代币 symbol）",
+        "label": "TD 标的", "hint": "TD 自主策略的交易标的（/config/tokens 登记代币 symbol；SOL 登记后可选，稳定币不列入）",
     },
     "td_sleeptime": {
         "group": "td", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",

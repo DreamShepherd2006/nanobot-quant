@@ -152,16 +152,38 @@ async def token_add(request: Request) -> JSONResponse:
 
     if not symbol:
         return JSONResponse({"ok": False, "error": "symbol 不能为空"}, status_code=400)
+
+    # Native-coin handling: SOL can be registered as a TD target by symbol
+    # only (address auto-filled from the builtin whitelist, trusted).
+    # USDC/USDT are stablecoins with no analysis value — keep them out of
+    # the TD target management table.
     if symbol in _BUILTIN_TOKENS:
-        return JSONResponse({"ok": False, "error": f"{symbol} 是内建白名单代币，无需录入"}, status_code=400)
-    if not address:
+        if symbol in ("USDC", "USDT"):
+            return JSONResponse(
+                {"ok": False,
+                 "error": f"{symbol} 是稳定币，无分析价值，不需要登记为 TD 标的"},
+                status_code=400,
+            )
+        if chain != "solana":
+            return JSONResponse(
+                {"ok": False,
+                 "error": f"{symbol} 内置地址仅在 solana 链，不能登记到 {chain} 链"},
+                status_code=400,
+            )
+        address = _BUILTIN_TOKENS[symbol]
+        if not address:
+            return JSONResponse(
+                {"ok": False, "error": "address 不能为空"}, status_code=400
+            )
+    elif not address:
         return JSONResponse({"ok": False, "error": "address 不能为空"}, status_code=400)
 
     entries = _read_tokens()
     if any(str(e.get("symbol", "")).upper() == symbol for e in entries):
         return JSONResponse({"ok": False, "error": f"{symbol} 已存在，请直接编辑"}, status_code=400)
 
-    entry = {"symbol": symbol, "address": address, "chain": chain, "confirmed": False}
+    entry = {"symbol": symbol, "address": address, "chain": chain,
+             "confirmed": symbol in _BUILTIN_TOKENS}
     check = _validate_token_entry(entry, chain=chain)
     entries.append(entry)
     _write_tokens(entries)

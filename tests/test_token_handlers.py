@@ -142,12 +142,39 @@ class TestAdd:
                                  "chain": "solana"})
         assert resp.status_code == 400
 
-    def test_add_builtin_rejected(self, _isolated_tokens):
+    def test_add_builtin_sol_registered(self, _isolated_tokens):
+        """SOL (native coin) registers by symbol: address auto-filled from
+        the builtin whitelist, confirmed=True, chain forced to solana."""
         from nanobot_quant.token_handlers import token_add
 
-        resp = _call(token_add, {"symbol": "SOL", "address": SOLANA_ADDR,
+        resp = _call(token_add, {"symbol": "SOL", "address": "",
                                  "chain": "solana"})
+        assert resp.status_code == 200, resp.body
+        entries = _read_tokens()
+        assert len(entries) == 1
+        assert entries[0]["symbol"] == "SOL"
+        assert entries[0]["address"] == onchainos_cli._BUILTIN_TOKENS["SOL"]
+        assert entries[0]["chain"] == "solana"
+        assert entries[0]["confirmed"] is True
+
+    def test_add_builtin_sol_other_chain_rejected(self, _isolated_tokens):
+        from nanobot_quant.token_handlers import token_add
+
+        resp = _call(token_add, {"symbol": "SOL", "address": "",
+                                 "chain": "xlayer"})
         assert resp.status_code == 400
+        assert _read_tokens() == []
+
+    def test_add_stablecoin_rejected(self, _isolated_tokens):
+        """USDC/USDT are stablecoins — no analysis value, kept out of the
+        TD target management table."""
+        from nanobot_quant.token_handlers import token_add
+
+        for sym in ("USDC", "USDT"):
+            resp = _call(token_add, {"symbol": sym, "address": "",
+                                     "chain": "solana"})
+            assert resp.status_code == 400
+            assert b"稳定币" in resp.body
         assert _read_tokens() == []
 
     def test_add_empty_fields_rejected(self, _isolated_tokens):
