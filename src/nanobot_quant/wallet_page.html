@@ -42,7 +42,10 @@
   .acc-block { border:1px solid #e8e8e8; border-radius:8px; padding:10px 12px;
                margin-bottom:10px; background:#fafafa; }
   .acc-block:last-child { margin-bottom:0; }
-  .acc-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .acc-block.collapsed .acc-assets { display:none; }
+  .acc-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;
+                cursor:pointer; user-select:none; }
+  .acc-header .arrow { font-size:.85em; color:#999; width:14px; text-align:center; }
   .acc-header .acc-name { font-weight:600; font-size:.95em; }
   .acc-header .acc-id { font-family:ui-monospace,Menlo,monospace; font-size:.75em;
                         color:#999; }
@@ -53,6 +56,14 @@
                             border:1px solid #1565c0; border-radius:4px; cursor:pointer;
                             font-size:.75em; padding:3px 10px; }
   .acc-header .switch-acc:hover { background:#e3f2fd; }
+  .acc-block.collapsed .acc-addresses { display:none; }
+  .addr-block { border:1px solid #e8e8e8; border-radius:8px; padding:8px 12px;
+                background:#fafafa; }
+  .addr-block.collapsed .addr-list { display:none; }
+  .addr-header { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+                 cursor:pointer; user-select:none; font-size:.9em; }
+  .bal-summary { border-top:1px dashed #e0e0e0; margin:8px 0; padding-top:6px; }
+  .muted { color:#999; font-size:.85em; }
   .acc-addr { display:flex; align-items:center; gap:8px; padding:3px 0 3px 8px;
               border-left:2px solid #e0e0e0; margin-left:4px; }
   .acc-addr .chain { min-width:64px; font-weight:600; font-size:.78em; }
@@ -273,13 +284,27 @@ function renderAccounts(accounts) {
     }
     const switchBtn = acc.is_active ? '' :
       `<button class="switch-acc" data-account-id="${esc(acc.account_id)}">🔀 切换到此账户</button>`;
-    html += `<div class="acc-block">` +
-            `<div class="acc-header"><span class="acc-name">${esc(acc.account_name || acc.account_id)}</span>` +
+    const nChains = (acc.addresses || []).length;
+    html += `<div class="acc-block collapsed">` +
+            `<div class="acc-header"><span class="arrow">▸</span>` +
+            `<span class="acc-name">${esc(acc.account_name || acc.account_id)}</span>` +
             `<span class="acc-id">${esc(acc.account_id)}</span>` +
-            `${badges.join('')}${switchBtn}</div>` +
-            `${addrHtml}</div>`;
+            `${badges.join('')}` +
+            `<span class="muted">· ${nChains} 条链</span>` +
+            `${switchBtn}</div>` +
+            `<div class="acc-addresses">${addrHtml}</div></div>`;
   }
   body.innerHTML = html;
+  body.querySelectorAll('.acc-header').forEach(h => {
+    h.addEventListener('click', (ev) => {
+      // 切换按钮点击不触发折叠
+      if (ev.target.closest('.switch-acc')) return;
+      const block = h.parentElement;
+      const collapsed = block.classList.toggle('collapsed');
+      const arrow = h.querySelector('.arrow');
+      if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
+    });
+  });
   body.querySelectorAll('.switch-acc').forEach(btn => {
     btn.addEventListener('click', async () => {
       try {
@@ -309,7 +334,12 @@ function renderAddresses(accountsRes) {
     body.innerHTML = '<div class="empty">无地址数据</div>';
     return;
   }
-  let html = kvRow('账户', `${active.account_name || 'Account'}（${active.account_id}）`);
+  const n = active.addresses.length;
+  let html = `<div class="addr-block collapsed">` +
+             `<div class="addr-header"><span class="arrow">▸</span>` +
+             `账户 ${esc(active.account_name || 'Account')}（${esc(active.account_id)}）` +
+             `<span class="muted">· ${n} 条链</span></div>` +
+             `<div class="addr-list">`;
   for (const a of active.addresses) {
     const chain = a.chain || a.chain_index || '—';
     const addr = a.address || '';
@@ -318,6 +348,7 @@ function renderAddresses(accountsRes) {
             `<span class="addr">${esc(addr)}</span>` +
             `<button class="copy-btn" data-addr="${esc(addr)}">复制</button></div>`;
   }
+  html += '</div></div>';
   body.innerHTML = html;
 
   document.querySelectorAll('#addr-body .copy-btn').forEach(btn => {
@@ -326,6 +357,14 @@ function renderAddresses(accountsRes) {
         () => toast('✅ 已复制: ' + btn.dataset.addr.slice(0, 16) + '…', true),
         () => toast('❌ 复制失败', false)
       );
+    });
+  });
+  document.querySelectorAll('#addr-body .addr-header').forEach(h => {
+    h.addEventListener('click', () => {
+      const block = h.parentElement;
+      const collapsed = block.classList.toggle('collapsed');
+      const arrow = h.querySelector('.arrow');
+      if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
     });
   });
 }
@@ -372,17 +411,44 @@ function renderBalance(balRes) {
   if (total) rows += kvRow('总价值 (USD)', '$' + total);
   const accounts = d.accounts;
   if (Array.isArray(accounts) && accounts.length > 0) {
-    // --all batch mode: one block per sub-account, active one highlighted.
+    // 按币汇总（跨所有子账户）——总价值行下方固定显示，不参与账户折叠
+    const bySym = new Map();
+    for (const acc of accounts) {
+      for (const a of (acc.assets || [])) {
+        const sym = a.symbol || a.token || a.tokenSymbol || '—';
+        const qty = Number(a.amount || a.balance || a.free) || 0;
+        const usd = Number(a.usdValue || a.valueUsd || a.usd_value) || 0;
+        const e = bySym.get(sym) || { qty: 0, usd: 0 };
+        e.qty += qty;
+        e.usd += usd;
+        bySym.set(sym, e);
+      }
+    }
+    if (bySym.size) {
+      rows += '<div class="bal-summary">';
+      for (const [sym, e] of bySym) {
+        const qtyTxt = String(parseFloat(e.qty.toFixed(8)));
+        rows += kvRow(sym, `${qtyTxt}${e.usd ? ' ≈ $' + e.usd.toFixed(2) : ''}`);
+      }
+      rows += '</div>';
+    }
+    // --all batch mode: one block per sub-account. Active account expanded by
+    // default, others collapsed to a single summary row (name + badge + subtotal
+    // + asset count). Click the header to toggle.
     for (const acc of accounts) {
       const name = acc.account_name || acc.accountName || acc.account_id || '账户';
       const badge = acc.is_active ? '<span class="badge active">当前</span>' : '';
       const sub = acc.total_value_usd || acc.totalValueUsd || '';
-      rows += `<div class="acc-block"><div class="acc-header">` +
+      const assets = acc.assets || [];
+      const collapsed = acc.is_active ? '' : ' collapsed';
+      rows += `<div class="acc-block${collapsed}">` +
+              `<div class="acc-header"><span class="arrow">${acc.is_active ? '▾' : '▸'}</span>` +
               `<span class="acc-name">${esc(name)}</span> ${badge}` +
               (sub ? `<span class="muted">≈ $${Number(sub).toFixed(2)}</span>` : '') +
-              `</div>`;
-      rows += renderAssetRows(acc.assets) || '<div class="empty">无余额数据</div>';
-      rows += '</div>';
+              `<span class="muted">· ${assets.length} 项资产</span>` +
+              `</div><div class="acc-assets">`;
+      rows += renderAssetRows(assets) || '<div class="empty">无余额数据</div>';
+      rows += '</div></div>';
     }
   } else {
     const assets = d.assets || d.balances || d.data || d;
@@ -397,6 +463,14 @@ function renderBalance(balRes) {
   if (!rows) rows = '<div class="empty">无余额数据</div>';
   body.innerHTML = rows;
 
+  document.querySelectorAll('#bal-body .acc-header').forEach(h => {
+    h.addEventListener('click', () => {
+      const block = h.parentElement;
+      const collapsed = block.classList.toggle('collapsed');
+      const arrow = h.querySelector('.arrow');
+      if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
+    });
+  });
   document.querySelectorAll('#bal-body .copy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       navigator.clipboard.writeText(btn.dataset.addr).then(
