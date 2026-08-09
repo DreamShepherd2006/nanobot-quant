@@ -372,17 +372,23 @@ function renderBalance(balRes) {
   if (total) rows += kvRow('总价值 (USD)', '$' + total);
   const accounts = d.accounts;
   if (Array.isArray(accounts) && accounts.length > 0) {
-    // --all batch mode: one block per sub-account, active one highlighted.
+    // --all batch mode: one block per sub-account. Active account expanded by
+    // default, others collapsed to a single summary row (name + badge + subtotal
+    // + asset count). Click the header to toggle.
     for (const acc of accounts) {
       const name = acc.account_name || acc.accountName || acc.account_id || '账户';
       const badge = acc.is_active ? '<span class="badge active">当前</span>' : '';
       const sub = acc.total_value_usd || acc.totalValueUsd || '';
-      rows += `<div class="acc-block"><div class="acc-header">` +
+      const assets = acc.assets || [];
+      const collapsed = acc.is_active ? '' : ' collapsed';
+      rows += `<div class="acc-block${collapsed}">` +
+              `<div class="acc-header"><span class="arrow">${acc.is_active ? '▾' : '▸'}</span>` +
               `<span class="acc-name">${esc(name)}</span> ${badge}` +
               (sub ? `<span class="muted">≈ $${Number(sub).toFixed(2)}</span>` : '') +
-              `</div>`;
-      rows += renderAssetRows(acc.assets) || '<div class="empty">无余额数据</div>';
-      rows += '</div>';
+              `<span class="muted">· ${assets.length} 项资产</span>` +
+              `</div><div class="acc-assets">`;
+      rows += renderAssetRows(assets) || '<div class="empty">无余额数据</div>';
+      rows += '</div></div>';
     }
   } else {
     const assets = d.assets || d.balances || d.data || d;
@@ -397,6 +403,14 @@ function renderBalance(balRes) {
   if (!rows) rows = '<div class="empty">无余额数据</div>';
   body.innerHTML = rows;
 
+  document.querySelectorAll('#bal-body .acc-header').forEach(h => {
+    h.addEventListener('click', () => {
+      const block = h.parentElement;
+      const collapsed = block.classList.toggle('collapsed');
+      const arrow = h.querySelector('.arrow');
+      if (arrow) arrow.textContent = collapsed ? '▸' : '▾';
+    });
+  });
   document.querySelectorAll('#bal-body .copy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       navigator.clipboard.writeText(btn.dataset.addr).then(
