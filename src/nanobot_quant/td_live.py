@@ -80,11 +80,80 @@ class _TdLiveRunner:
                 "max_position_pct": params["max_position_pct"],
                 "max_drawdown_pct": params["max_drawdown_pct"],
                 "stop_loss_pct": params["stop_loss_pct"],
+                # 子钱包分批（第一版）：exit_order / take_profit_pct
+                "exit_order": params.get("exit_order", "fifo"),
+                "take_profit_pct": float(params.get("take_profit_pct", 0.0) or 0.0),
             },
         )
+        # 批次（子钱包）台账：td_batches > 1 时注入 BatchManager，
+        # 策略进入分批模式（BUY 占 slot / SELL 按 exit_order 平批 / 逐批止损止盈）。
+        td_batches = int(params.get("td_batches", 1) or 1)
+        if td_batches > 1:
+            strategy.batch_manager = self._prepare_batches(
+                td_batches, params["td_symbol"]
+            )
         executor = StrategyExecutor(strategy)
         executor.daemon = True
         return executor
+
+    def _prepare_batches(self, td_batches: int, symbol: str) -> Any:
+        """加载/创建批次台账（子钱包映射）。
+
+        batches.json 存在且 symbol 一致 → 复用（重启恢复）；否则从
+        wallets.json 取前 N 个子钱包 account_id 新建。不足 N 时按实际
+        数量建（下一 BUY 时无可用 slot 即跳过，日志告警）。
+        """
+        import sys
+
+        from nanobot_quant.batches import BatchManager
+        from nanobot_quant.tools.tools_wallet import wallet_accounts
+
+        bm = BatchManager.load()
+        if bm is not None and bm.symbol == symbol and bm.slots:
+            print(
+                f"[DIAG] td_live: batches restored ({symbol}, "
+                f"{len(bm.slots)} slots)",
+                file=sys.stderr, flush=True,
+            )
+            return bm
+        try:
+            acc = wallet_accounts()
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[DIAG] td_live: wallet_accounts failed: {exc}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        if acc.get("status") != "ok":
+            print(
+                f"[DIAG] td_live: wallet_accounts error: "
+                f"{acc.get('error')}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        ids = [
+            a["account_id"]
+            for a in acc.get("data", {}).get("accounts", [])[:td_batches]
+        ]
+        if not ids:
+            print(
+                "[DIAG] td_live: no sub-accounts in wallets.json",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        if len(ids) < td_batches:
+            print(
+                f"[DIAG] td_live: only {len(ids)} sub-accounts, "
+                f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
+                file=sys.stderr, flush=True,
+            )
+        bm = BatchManager(symbol=symbol, account_ids=ids)
+        bm.save()
+        print(
+            f"[DIAG] td_live: batches created ({symbol}, {len(ids)} slots)",
+            file=sys.stderr, flush=True,
+        )
+        return bm
 
     # ── 生命周期 ──────────────────────────────────────────────────────
     def start(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -99,6 +99,16 @@ class TdSequentialStrategy(Strategy):
         # Build OrderTracker — links Signals to lumibot Orders
         self.tracker = OrderTracker()
 
+        # ── 子钱包分批（批次=子钱包，第一版）──────────────────────────
+        # batch_manager 由 td_live 注入（None = 单仓模式，回测/现状不变）。
+        # 注入后 BUY 占用 available slot、SELL 按 exit_order 平一个批次、
+        # 止损/止盈每批独立检查——批次状态由 batches.BatchManager 维护。
+        self.batch_manager = getattr(self, "batch_manager", None)
+        self._exit_order = self.parameters.get("exit_order", "fifo")
+        self._take_profit_pct = float(
+            self.parameters.get("take_profit_pct", 0.0) or 0.0
+        )
+
         # TD algorithm params (subset of the strategy parameters dict)
         self._td_params = {
             k: self.parameters.get(k, v)
@@ -181,11 +191,18 @@ class TdSequentialStrategy(Strategy):
         tdst_filter = bool(self._td_params.get("tdst_filter", False))
         support = signal.get("tdst_support")
 
-        # ── BUY signal: setup_buy >= entry_setup, score above threshold, no position ──
+        # ── BUY signal: setup_buy >= entry_setup, score above threshold, slot available ──
+        batch_manager = getattr(self, "batch_manager", None)
+        batch_mode = batch_manager is not None
+        can_buy = (
+            batch_manager.next_buy_slot() is not None
+            if batch_mode
+            else not has_position
+        )
         if (
             setup_buy >= entry_setup
             and score > score_threshold
-            and not has_position
+            and can_buy
             and (not tdst_filter or (support is not None and price > support))
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
@@ -207,23 +224,38 @@ class TdSequentialStrategy(Strategy):
             )
             order = self._portfolio.submit_order(req)
             if order is not None:
-                self.tracker.track(
-                    order_id=order.identifier,
-                    symbol=self.symbol,
-                    action="buy",
-                    quantity=req.quantity,
-                    tag=f"signal:td-buy:{setup_buy}:{score:.1f}",
-                    signal=signal,
-                    reason=reason,
-                )
+                if batch_mode:
+                    slot = self.batch_manager.open_lot(
+                        qty=req.quantity, entry_price=price,
+                    )
+                    self.logger.info(
+                        f"TD BATCH LONG | slot={slot['slot'] if slot else '?'} "
+                        f"price={price:.2f} qty={req.quantity} "
+                        f"setup_buy={setup_buy} score={score:.1f}"
+                    )
+                else:
+                    self.tracker.track(
+                        order_id=order.identifier,
+                        symbol=self.symbol,
+                        action="buy",
+                        quantity=req.quantity,
+                        tag=f"signal:td-buy:{setup_buy}:{score:.1f}",
+                        signal=signal,
+                        reason=reason,
+                    )
             self.logger.info(
                 f"TD LONG  | price={price:.2f} qty={req.quantity} "
                 f"setup_buy={setup_buy} score={score:.1f}"
             )
             return
 
-        # ── SELL signal: setup_sell >= exit_setup OR cd_sell >= exit_countdown OR stop-loss ──
-        elif has_position:
+        # ── SELL signal / stop-loss / take-profit（分批：逐批独立）──
+        elif batch_mode or has_position:
+            if batch_mode:
+                self._handle_batch_exits(price, signal, setup_sell, cd_sell,
+                                         exit_setup, exit_countdown)
+                return
+
             position = self.get_position(self.symbol)
             exit_reason = ""
 
@@ -263,6 +295,74 @@ class TdSequentialStrategy(Strategy):
         self.logger.info(
             f"TD HOLD | price={price:.4f} setup_buy={setup_buy} "
             f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}"
+        )
+
+    # ── 分批平仓（批次=子钱包，第一版）──────────────────────────────
+    def _handle_batch_exits(
+        self,
+        price: float,
+        signal: dict,
+        setup_sell: int,
+        cd_sell: int,
+        exit_setup: int,
+        exit_countdown: int,
+    ) -> None:
+        """分批模式下的平仓逻辑：先逐批止损/止盈，再处理 TD SELL 信号。
+
+        顺序（文档 16.6）：止盈/止损逐批检查先于信号（防爆仓优先）；
+        TD SELL 信号按 exit_order 平一个 open 批次（FIFO/LIFO）。
+        每个命中批次卖出量 = 该批 lot.qty（链上实际余额由对账层处理）。
+        """
+        bm = self.batch_manager
+        # 1) 止损/止盈逐批独立检查（take_profit_pct=0 时只查止损）
+        hits = bm.check_exit(
+            price,
+            stop_loss_pct=self._risk.stop_loss_pct,
+            take_profit_pct=self._take_profit_pct,
+            order=self._exit_order,
+        )
+        for s in hits:
+            self._sell_lot(s, price, signal, s.pop("_exit_reason", "exit"))
+        # 2) TD SELL 信号 → 按 exit_order 平一个批次（止损刚平完则无批次可平）
+        if setup_sell >= exit_setup or cd_sell >= exit_countdown:
+            s = bm.pick_exit_slot(self._exit_order)
+            if s is not None:
+                reason = (
+                    f"setup_sell={setup_sell}"
+                    if setup_sell >= exit_setup
+                    else f"cd_sell={cd_sell}"
+                )
+                self._sell_lot(s, price, signal, reason)
+
+    def _sell_lot(
+        self, slot: dict, price: float, signal: dict, exit_reason: str
+    ) -> None:
+        """卖出一个批次（lot.qty），下单成功后回收 slot。
+
+        注意：lumibot 订单是异步提交——下单成功即回收（记录卖出意图），
+        链上余额与台账的偏差由对账逻辑（td_live 启动时）以链上为准修正。
+        """
+        lot = self.batch_manager.close_lot(slot["slot"])
+        if lot is None:
+            return
+        req = self._portfolio.build_sell_order(
+            self.symbol, price, exit_reason,
+            quantity=int(lot["qty"]),
+        )
+        order = self._portfolio.submit_order(req)
+        if order is not None:
+            self.tracker.track(
+                order_id=order.identifier,
+                symbol=self.symbol,
+                action="sell",
+                quantity=req.quantity,
+                tag=f"signal:td-sell:{exit_reason}",
+                signal=signal,
+                reason=exit_reason,
+            )
+        self.logger.info(
+            f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
+            f"qty={req.quantity} {exit_reason}"
         )
 
     # ── lumibot lifecycle hooks (delegated to tracker) ──

@@ -84,12 +84,12 @@ def test_defaults_match_pre_parameterisation_hardcoded():
 
 
 def test_meta_covers_all_defaults_and_three_groups():
-    # 全部默认值（含 td 组 5 字段）都有 PARAM_META 元数据；
+    # 全部默认值（含 td 组 5 字段 + batch 组 3 字段）都有 PARAM_META 元数据；
     # P1 loop 模式（execution_mode/loop_interval_seconds）已随 B3 退役。
     ui_params = set(DEFAULT_EXEC_PARAMS)
     assert set(PARAM_META) == ui_params
     groups = {m["group"] for m in PARAM_META.values()}
-    assert groups == {"risk", "exec", "td"}
+    assert groups == {"risk", "exec", "td", "batch"}
 
 
 @pytest.mark.parametrize(
