@@ -137,6 +137,44 @@ class TestDataAggregation:
 
 
 class TestOperations:
+    def test_td_locked_rejects_add_switch_send(self, monkeypatch):
+        """td_enabled=True 时子钱包写操作被 409 拒绝（互斥锁 1+2）。"""
+        monkeypatch.setattr(
+            "nanobot_quant.exec_params.load_exec_params",
+            lambda: {"td_enabled": True},
+        )
+        _, h = _make_handlers()
+        user = {"name": "commander", "commander": True}
+        for route, body in [
+            ("/config/wallet/add", {}),
+            ("/config/wallet/switch", {"account_id": "acct-2"}),
+            ("/config/wallet/send", {"chain": "sol", "symbol": "USDC",
+                                     "address": "addr", "amount": "1"}),
+            ("/config/wallet/send/confirm", {"tx_id": "tx-1"}),
+        ]:
+            resp = _run(h[route](_FakeRequest(user=user, body=body)))
+            assert resp.status_code == 409, route
+
+    def test_td_unlocked_allows_ops(self, monkeypatch):
+        """td_enabled=False（默认）时子钱包操作正常放行。"""
+        monkeypatch.setattr(
+            "nanobot_quant.exec_params.load_exec_params",
+            lambda: {"td_enabled": False},
+        )
+        captured = {}
+
+        async def _fake_call(fn, *args, **kwargs):
+            captured["fn"] = fn.__name__
+            return {"status": "ok", "data": {}}
+
+        monkeypatch.setattr("nanobot_quant.wallet_handlers._call", _fake_call)
+        _, h = _make_handlers()
+        req = _FakeRequest(user={"name": "commander", "commander": True},
+                           body={})
+        resp = _run(h["/config/wallet/add"](req))
+        assert resp.status_code == 200
+        assert captured["fn"] == "wallet_add"
+
     def test_switch_missing_account_id(self, monkeypatch):
         _, h = _make_handlers()
         req = _FakeRequest(user={"name": "commander", "commander": True}, body={})

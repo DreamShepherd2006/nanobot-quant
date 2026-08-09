@@ -401,6 +401,21 @@ def register_wallet_routes(app, gatekeeper) -> None:
             return (403, "仅 Commander 可访问")
         return None
 
+    def _td_locked() -> bool:
+        """TD 自主循环运行期间锁定子钱包操作（switch/send/add）。
+
+        1+2 组合（2026-08-09 拍板）：活跃账户（selected_account_id）是全局
+        状态，TD 循环与 WebUI 并发切换会互相踩——运行期间禁止手动切账户/
+        转账/建子钱包，需先关闭 td_enabled。
+        """
+        try:
+            from nanobot_quant.exec_params import load_exec_params
+
+            p = load_exec_params() or {}
+            return bool(p.get("td_enabled", False))
+        except Exception:  # noqa: BLE001 — 锁检查失败放行（不阻断读取类操作）
+            return False
+
     # ── Address book (persisted to {data_root}/credentials/address_book.json) ──
     # Transfer targets must be pre-registered here; the send endpoint refuses
     # any address that is not in the book (fail-closed by design).
@@ -552,6 +567,8 @@ def register_wallet_routes(app, gatekeeper) -> None:
         denied = _guard(request.session.get("user"))
         if denied:
             return JSONResponse({"ok": False, "error": denied[1]}, status_code=denied[0])
+        if _td_locked():
+            return JSONResponse({"ok": False, "error": "TD 自主循环运行中，请先在 /config/exec 关闭 td_enabled 再操作子钱包"}, status_code=409)
         result = await _call(wallet_add, timeout=60)
         return JSONResponse({"ok": result.get("status") == "ok", **result})
 
@@ -563,6 +580,8 @@ def register_wallet_routes(app, gatekeeper) -> None:
         denied = _guard(request.session.get("user"))
         if denied:
             return JSONResponse({"ok": False, "error": denied[1]}, status_code=denied[0])
+        if _td_locked():
+            return JSONResponse({"ok": False, "error": "TD 自主循环运行中，请先在 /config/exec 关闭 td_enabled 再操作子钱包"}, status_code=409)
         try:
             body = await request.json()
         except Exception:
@@ -584,6 +603,8 @@ def register_wallet_routes(app, gatekeeper) -> None:
         denied = _guard(request.session.get("user"))
         if denied:
             return JSONResponse({"ok": False, "error": denied[1]}, status_code=denied[0])
+        if _td_locked():
+            return JSONResponse({"ok": False, "error": "TD 自主循环运行中，请先在 /config/exec 关闭 td_enabled 再操作子钱包"}, status_code=409)
         try:
             body = await request.json()
         except Exception:
@@ -665,6 +686,8 @@ def register_wallet_routes(app, gatekeeper) -> None:
         denied = _guard(request.session.get("user"))
         if denied:
             return JSONResponse({"ok": False, "error": denied[1]}, status_code=denied[0])
+        if _td_locked():
+            return JSONResponse({"ok": False, "error": "TD 自主循环运行中，请先在 /config/exec 关闭 td_enabled 再操作子钱包"}, status_code=409)
         try:
             body = await request.json()
         except Exception:

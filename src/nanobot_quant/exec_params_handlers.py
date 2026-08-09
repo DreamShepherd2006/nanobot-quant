@@ -149,7 +149,8 @@ def _render_page(params: dict, message: str = "") -> str:
     token_opts = {"td_symbol": [s for s in load_token_symbols()
                                  if s not in _STABLECOINS]}
     groups = "".join(
-        _group_html(g, params, token_opts) for g in ("risk", "exec", "td")
+        _group_html(g, params, token_opts)
+        for g in ("risk", "exec", "td", "batch")
     )
     return (
         _PAGE_HTML.replace("{banner}", banner)
@@ -223,6 +224,17 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         if not result.get("ok"):
             return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                                 status_code=400)
+        # 批次（子钱包）初始化：td_batches 变更时立即补足子钱包并建映射
+        try:
+            from nanobot_quant.batches import ensure_batches
+
+            _b, _msg = ensure_batches(
+                int(result["params"].get("td_batches", 1) or 1),
+                result["params"].get("td_symbol", "SOL"),
+            )
+            gatekeeper._log(f"🧩 批次同步: {_msg}")
+        except Exception as exc:
+            gatekeeper._log(f"⚠️ 批次同步失败: {exc}")
         # TD 自主循环按新参数同步启停（td_enabled 开关 + 参数热更新）
         try:
             from nanobot_quant.td_live import sync_from_params
@@ -245,7 +257,10 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"td_symbol={result['params'].get('td_symbol')} "
             f"td_sleeptime={result['params'].get('td_sleeptime')} "
             f"quantity_mode={result['params'].get('quantity_mode')} "
-            f"td_quantity={result['params'].get('td_quantity')}"
+            f"td_quantity={result['params'].get('td_quantity')} "
+            f"td_batches={result['params'].get('td_batches')} "
+            f"exit_order={result['params'].get('exit_order')} "
+            f"take_profit={result['params'].get('take_profit_pct')}"
         )
         return JSONResponse({"ok": True, "message": "执行参数已保存并即时生效",
                              "params": result.get("params")})
