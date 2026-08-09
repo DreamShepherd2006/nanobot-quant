@@ -520,7 +520,7 @@ def is_contract_address(s: str) -> bool:
     if t.lower().startswith("0x"):
         return len(t) == 42
     base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    return len(t) in (32, 44) and all(c in base58 for c in t)
+    return 32 <= len(t) <= 44 and all(c in base58 for c in t)
 
 
 def supported_symbols(tokens_json: list[dict] | None = None) -> list[str]:
