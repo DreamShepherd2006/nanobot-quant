@@ -302,6 +302,9 @@ def resolve_token(
         {
           "ok": True/False,
           "address": str|None,
+          "chain": str,             # resolved chain — tokens.json entry
+                                    # wins over the caller default; builtin
+                                    # native coins are always "solana"
           "source": "address"|"builtin"|"tokens_json"|"cli"|None,
           "needs_confirmation": bool,   # True → caller must get explicit
                                         # user confirmation (confirm=True)
@@ -314,21 +317,22 @@ def resolve_token(
     """
     raw = normalize_symbol(symbol)
     if not raw:
-        return {"ok": False, "address": None, "source": None,
+        return {"ok": False, "address": None, "chain": chain, "source": None,
                 "needs_confirmation": False, "issue": None,
                 "confirmed": False, "category": "not_found",
                 "suggestion": None, "hint": "empty symbol"}
 
     # L0b: caller already passed a contract address → pass through
     if is_contract_address(raw):
-        return {"ok": True, "address": raw, "source": "address",
+        return {"ok": True, "address": raw, "chain": chain, "source": "address",
                 "needs_confirmation": False, "issue": None,
                 "confirmed": True, "category": None, "suggestion": None,
                 "hint": None}
 
     # L1: builtin (native coin + well-known SPL) — always trusted
     if raw in _BUILTIN_TOKENS:
-        return {"ok": True, "address": _BUILTIN_TOKENS[raw], "source": "builtin",
+        return {"ok": True, "address": _BUILTIN_TOKENS[raw],
+                "chain": "solana", "source": "builtin",
                 "needs_confirmation": False, "issue": None,
                 "confirmed": True, "category": None, "suggestion": None,
                 "hint": None}
@@ -344,14 +348,20 @@ def resolve_token(
             continue
         addr = str(entry.get("address") or "").strip()
         confirmed = bool(entry.get("confirmed", False))
-        check = _validate_token_entry(entry, chain=chain)
+        # The entry's own chain wins over the caller-provided default —
+        # tokens.json is the single managed gate that records where a
+        # target lives (e.g. SPCXB → bnb).
+        entry_chain = str(entry.get("chain") or chain).lower()
+        check = _validate_token_entry(entry, chain=entry_chain)
         if check["ok"] or confirmed:
-            return {"ok": True, "address": addr, "source": "tokens_json",
+            return {"ok": True, "address": addr, "chain": entry_chain,
+                    "source": "tokens_json",
                     "needs_confirmation": (not confirmed and not check["ok"]),
                     "issue": check["issue"],
                     "confirmed": confirmed, "category": None,
                     "suggestion": None, "hint": None}
-        return {"ok": True, "address": addr, "source": "tokens_json",
+        return {"ok": True, "address": addr, "chain": entry_chain,
+                "source": "tokens_json",
                 "needs_confirmation": True, "issue": check["issue"],
                 "confirmed": False, "category": check["category"],
                 "suggestion": None,
@@ -361,7 +371,7 @@ def resolve_token(
     # L3: CLI lookup
     addr = search_token(raw)
     if addr:
-        return {"ok": True, "address": addr, "source": "cli",
+        return {"ok": True, "address": addr, "chain": chain, "source": "cli",
                 "needs_confirmation": False, "issue": None,
                 "confirmed": True, "category": None, "suggestion": None,
                 "hint": None}
@@ -376,9 +386,9 @@ def resolve_token(
     category = "typo" if suggestion else "not_found"
     hint = _CHAIN_HINTS.get(raw) or (
         "Configure the token in WebUI 业务管理 → tokens.json "
-        "(symbol + address), or use a native token like SOL/USDC/USDT."
+        "(symbol + address + chain), or use a native token like SOL/USDC/USDT."
     )
-    return {"ok": False, "address": None, "source": None,
+    return {"ok": False, "address": None, "chain": chain, "source": None,
             "needs_confirmation": False, "issue": None,
             "confirmed": False, "category": category,
             "suggestion": suggestion, "hint": hint}
@@ -548,14 +558,16 @@ def chain_results_dir(roots: tuple = ("/data", "/mnt/workspace")) -> Path:
     return d
 
 
-def get_token_price(symbol: str, tokens_json: list[dict] | None = None) -> Optional[float]:
+def get_token_price(symbol: str, tokens_json: list[dict] | None = None,
+                    chain: str = "solana") -> Optional[float]:
     """Get real-time token price as float (USD).
 
     Accepts a token SYMBOL (e.g. "SOL", "USDC") or a contract address.
     ``tokens_json`` entries are honoured for symbols outside the built-in
-    whitelist (see ``get_price``).
+    whitelist (see ``get_price``).  ``chain`` is passed through to the
+    pricing endpoint (a tokens.json entry with its own ``chain`` wins).
     """
-    raw = get_price(symbol, tokens_json=tokens_json)
+    raw = get_price(symbol, chain=chain, tokens_json=tokens_json)
     if raw is None:
         return None
     try:

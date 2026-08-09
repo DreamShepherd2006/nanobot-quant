@@ -18,7 +18,7 @@ from nanobot_quant.onchainos_cli import (
     WSOL_ADDR,
 )
 from nanobot_quant.onchainos_errors import lookup as err_lookup
-from nanobot_quant.okx_credentials import get_chain
+from nanobot_quant.tokens_store import token_chain
 from nanobot_quant.tools.tools_wallet import get_active_wallet_address
 from lumibot.brokers import Broker
 
@@ -122,10 +122,14 @@ class OnchainOSBroker(Broker):
         if side == "sell":
             from_amount = str(quantity)
         else:
-            # Buy: estimate SOL needed via market price + buffer
-            # Pass SYMBOLS (not addresses) — get_price uses onchainos kline which expects symbols
-            sol_price = get_token_price(from_symbol, self._tokens_json) or 1.0
-            token_price = get_token_price(to_symbol, self._tokens_json) or 0.0
+            # Buy: estimate quote needed via market price + buffer.
+            # Prices follow the target chain (from/to may live on the
+            # same chain; pass chain so pricing hits the right one).
+            chain_b = token_chain(symbol, self._tokens_json)
+            sol_price = get_token_price(from_symbol, self._tokens_json,
+                                        chain=chain_b) or 1.0
+            token_price = get_token_price(to_symbol, self._tokens_json,
+                                          chain=chain_b) or 0.0
             if token_price <= 0:
                 order.set_error(self._format_err(f"Cannot get price for {symbol}"))
                 return order
@@ -133,7 +137,11 @@ class OnchainOSBroker(Broker):
             from_amount = f"{sol_needed:.6f}"
 
         # ── execute swap ───────────────────────────────────────
-        chain = get_chain()
+        # Per-target chain from the managed gate (tokens.json entry wins,
+        # default solana) — a BNB target e.g. SPCXB swaps on chain 56.
+        # Global okx.json chain is no longer used: the target's own chain
+        # is the single source of truth.
+        chain = token_chain(symbol, self._tokens_json)
         # 报价/广播地址 = Agentic Wallet 当前活跃账户（由 API Key 会话决定），
         # 非用户个人钱包地址 — 动态从钱包会话获取，避免填错地址导致报价不准
         wallet = get_active_wallet_address(chain)

@@ -66,8 +66,8 @@ def _resolve_for_table(ticker: str) -> dict:
     except OSError:
         tokens_json = None
     resolved = resolve_token(ticker, tokens_json=tokens_json)
-    # resolve_token does not echo the chain back (it is an input param,
-    # default "solana"); re-attach it for fetch_kline / display.
+    # resolve_token echoes back the resolved chain (tokens.json entry wins,
+    # default "solana"); keep the fallback for older callers.
     resolved.setdefault("chain", "solana")
     return resolved
 

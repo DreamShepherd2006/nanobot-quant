@@ -174,7 +174,7 @@ class TestAdd:
             resp = _call(token_add, {"symbol": sym, "address": "",
                                      "chain": "solana"})
             assert resp.status_code == 400
-            assert b"稳定币" in resp.body
+            assert "稳定币" in resp.body.decode()
         assert _read_tokens() == []
 
     def test_add_empty_fields_rejected(self, _isolated_tokens):

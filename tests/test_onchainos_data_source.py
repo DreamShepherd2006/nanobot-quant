@@ -79,7 +79,7 @@ class TestGetHistoricalPrices:
         ]
         monkeypatch.setattr(
             "nanobot_quant.data.onchainos_data_source.get_kline",
-            lambda addr, bar, limit: candles,
+            lambda addr, bar, limit, chain="solana": candles,
         )
         asset = _asset()
         bars = ds.get_historical_prices(
@@ -98,7 +98,7 @@ class TestGetHistoricalPrices:
         ]
         monkeypatch.setattr(
             "nanobot_quant.data.onchainos_data_source.get_kline",
-            lambda addr, bar, limit: candles,
+            lambda addr, bar, limit, chain="solana": candles,
         )
         bars = ds.get_historical_prices(
             _asset(), length=5, timestep="day", exchange=None, return_polars=False
@@ -118,7 +118,53 @@ class TestGetHistoricalPrices:
     def test_empty_kline_raises(self, ds, monkeypatch):
         monkeypatch.setattr(
             "nanobot_quant.data.onchainos_data_source.get_kline",
-            lambda addr, bar, limit: [],
+            lambda addr, bar, limit, chain="solana": [],
         )
         with pytest.raises(RuntimeError, match="No kline data returned"):
             ds.get_historical_prices(_asset(), length=5, timestep="day")
+
+    def test_forwards_entry_chain_to_kline(self, monkeypatch):
+        """Per-target chain (tokens.json entry) is forwarded to get_kline —
+        a BNB target fetches on chain 56, not solana."""
+        captured = {}
+
+        def fake_kline(addr, bar, limit, chain="solana"):
+            captured["chain"] = chain
+            return []
+
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.get_kline",
+            fake_kline,
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.token_chain",
+            lambda symbol, tokens_json: "bnb",
+        )
+        ds = OnchainOSDataSource(
+            tokens_json=[{"symbol": "SPCXB", "chain": "bnb",
+                          "address": "0xbe000000000000000000000000000000000003e1"}]
+        )
+        with pytest.raises(RuntimeError):
+            ds.get_historical_prices(_asset("SPCXB"), length=5, timestep="day")
+        assert captured["chain"] == "bnb"
+
+    def test_get_last_price_forwards_chain(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.resolve_token_address",
+            lambda symbol, tokens_json: "0xbe000000000000000000000000000000000003e1",
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.token_chain",
+            lambda symbol, tokens_json: "bnb",
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.data.onchainos_data_source.get_token_price",
+            lambda addr, chain="solana": (
+                captured.update(chain=chain) or 137.08
+            ),
+        )
+        ds = OnchainOSDataSource(tokens_json=[])
+        price = ds.get_last_price(_asset("SPCXB"))
+        assert price == 137.08
+        assert captured["chain"] == "bnb"

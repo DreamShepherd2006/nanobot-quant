@@ -52,3 +52,35 @@ def load_token_symbols() -> list[str]:
             if sym:
                 syms.add(sym)
     return sorted(syms)
+def load_token_symbols() -> list[str]:
+    """Sorted unique symbol list from tokens.json (empty when unavailable)."""
+    data = load_tokens_json()
+    if not data:
+        return []
+    syms: set[str] = set()
+    for entry in data:
+        if isinstance(entry, dict):
+            sym = str(entry.get("symbol", "")).strip()
+            if sym:
+                syms.add(sym)
+    return sorted(syms)
+
+
+def token_chain(symbol: str, tokens_json: list[dict[str, Any]] | None = None) -> str:
+    """Resolve the chain a registered token lives on.
+
+    Returns the tokens.json entry's ``chain`` (default "solana" when the
+    entry has none).  This is the single source for per-target chain
+    propagation — TD data fetching, pricing and broker swaps all use it so
+    a target like SPCXB (bnb) automatically runs on BNB Chain without a
+    separate td_chain parameter.
+    """
+    if tokens_json is None:
+        tokens_json = load_tokens_json()
+    raw = str(symbol or "").upper()
+    for entry in (tokens_json or []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("symbol", "")).upper() == raw:
+            return str(entry.get("chain") or "solana").lower()
+    return "solana"
