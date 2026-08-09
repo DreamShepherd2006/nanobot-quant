@@ -136,7 +136,7 @@ def fetch_kline(
         "--limit", str(min(limit, MAX_LIMIT)),
     ]
     data = _run_cli(args)
-    return _parse_kline_response(data)
+    return parse_kline_response(data)
 
 
 def fetch_kline_range(
@@ -190,7 +190,7 @@ def fetch_kline_range(
         "--limit", str(max(needed, 2)),
     ]
     data = _run_cli(args)
-    df = _parse_kline_response(data)
+    df = parse_kline_response(data)
     if df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
     return _trim_range([df], start, end)
@@ -217,7 +217,7 @@ def _trim_range(
     return result[(result.index >= start) & (result.index <= end)]
 
 
-def _parse_kline_response(data: dict | list) -> pd.DataFrame:
+def parse_kline_response(data: dict | list) -> pd.DataFrame:
     """Convert OnchainOS kline response to pandas DataFrame.
 
     CLI format: {"data": [{"ts": ..., "o": ..., "h": ..., "l": ..., "c": ..., "vol": ...}, ...]}

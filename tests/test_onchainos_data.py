@@ -17,7 +17,7 @@ def _mock_kline_df(n=10, start_ts=1780000000000, bar_s=86400):
         rows.append({"ts": ts, "o": 100 + i, "h": 102 + i, "l": 99 + i,
                      "c": 101 + i, "v": 1000 + i})
     data = {"code": "0", "msg": "", "data": rows}
-    return mod._parse_kline_response(json.loads(json.dumps(data)))
+    return mod.parse_kline_response(json.loads(json.dumps(data)))
 
 
 def test_fetch_kline_range_single_call_no_before(monkeypatch):
@@ -31,7 +31,7 @@ def test_fetch_kline_range_single_call_no_before(monkeypatch):
 
     df = _mock_kline_df(n=10, start_ts=int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000))
     monkeypatch.setattr(mod, "_run_cli", fake_run_cli)
-    monkeypatch.setattr(mod, "_parse_kline_response", lambda data: df)
+    monkeypatch.setattr(mod, "parse_kline_response", lambda data: df)
 
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     end = datetime(2026, 1, 10, tzinfo=timezone.utc)
@@ -49,7 +49,7 @@ def test_fetch_kline_range_limited_range_raises(monkeypatch):
     """范围需要 > MAX_LIMIT 根时：明确 ValueError，不发起分页。"""
     calls = []
     monkeypatch.setattr(mod, "_run_cli", lambda args: calls.append(args) or {})
-    monkeypatch.setattr(mod, "_parse_kline_response", lambda data: pd.DataFrame())
+    monkeypatch.setattr(mod, "parse_kline_response", lambda data: pd.DataFrame())
 
     # 90 天 1H = 2160 根 > 300
     start = datetime(2026, 5, 7, tzinfo=timezone.utc)
@@ -74,7 +74,7 @@ def test_fetch_kline_range_default_end_now(monkeypatch):
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     df = _mock_kline_df(n=10, start_ts=int(start.timestamp() * 1000))
     monkeypatch.setattr(mod, "_run_cli", lambda args: {})
-    monkeypatch.setattr(mod, "_parse_kline_response", lambda data: df)
+    monkeypatch.setattr(mod, "parse_kline_response", lambda data: df)
     out = mod.fetch_kline_range("solana", "Xaddr", start=start, bar="1D")
     assert not out.empty
     assert len(out) <= 10  # 本地裁剪到 [start, now]
