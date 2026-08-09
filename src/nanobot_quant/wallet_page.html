@@ -62,6 +62,7 @@
   .addr-block.collapsed .addr-list { display:none; }
   .addr-header { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
                  cursor:pointer; user-select:none; font-size:.9em; }
+  .bal-summary { border-top:1px dashed #e0e0e0; margin:8px 0; padding-top:6px; }
   .muted { color:#999; font-size:.85em; }
   .acc-addr { display:flex; align-items:center; gap:8px; padding:3px 0 3px 8px;
               border-left:2px solid #e0e0e0; margin-left:4px; }
@@ -410,6 +411,27 @@ function renderBalance(balRes) {
   if (total) rows += kvRow('总价值 (USD)', '$' + total);
   const accounts = d.accounts;
   if (Array.isArray(accounts) && accounts.length > 0) {
+    // 按币汇总（跨所有子账户）——总价值行下方固定显示，不参与账户折叠
+    const bySym = new Map();
+    for (const acc of accounts) {
+      for (const a of (acc.assets || [])) {
+        const sym = a.symbol || a.token || a.tokenSymbol || '—';
+        const qty = Number(a.amount || a.balance || a.free) || 0;
+        const usd = Number(a.usdValue || a.valueUsd || a.usd_value) || 0;
+        const e = bySym.get(sym) || { qty: 0, usd: 0 };
+        e.qty += qty;
+        e.usd += usd;
+        bySym.set(sym, e);
+      }
+    }
+    if (bySym.size) {
+      rows += '<div class="bal-summary">';
+      for (const [sym, e] of bySym) {
+        const qtyTxt = String(parseFloat(e.qty.toFixed(8)));
+        rows += kvRow(sym, `${qtyTxt}${e.usd ? ' ≈ $' + e.usd.toFixed(2) : ''}`);
+      }
+      rows += '</div>';
+    }
     // --all batch mode: one block per sub-account. Active account expanded by
     // default, others collapsed to a single summary row (name + badge + subtotal
     // + asset count). Click the header to toggle.
