@@ -186,3 +186,104 @@ def test_broker_positions_survive_dict_shape(monkeypatch):
     assert len(positions) == 1
     assert positions[0].asset.symbol == "RENDER"
     assert abs(positions[0].quantity - 6.06) < 1e-9
+
+def test_resolve_token_echoes_entry_chain(monkeypatch):
+    """tokens.json entry chain wins over the caller default (SPCXB → bnb)."""
+    from nanobot_quant import onchainos_cli
+
+    monkeypatch.setattr(onchainos_cli, "_validate_token_entry",
+                        lambda entry, chain="solana":
+                        {"ok": True, "issue": None, "category": None})
+    entry = {"symbol": "SPCXB", "chain": "bnb",
+             "address": "0xbe000000000000000000000000000000000003e1",
+             "confirmed": True}
+    r = onchainos_cli.resolve_token("SPCXB", tokens_json=[entry], chain="solana")
+    assert r["ok"] is True
+    assert r["chain"] == "bnb"
+    assert r["source"] == "tokens_json"
+
+
+def test_resolve_token_builtin_chain_is_solana(monkeypatch):
+    """Builtin SOL always resolves to solana regardless of caller chain."""
+    from nanobot_quant import onchainos_cli
+
+    r = onchainos_cli.resolve_token("SOL", chain="bnb")
+    assert r["ok"] is True
+    assert r["chain"] == "solana"
+
+
+def test_resolve_token_l2_validation_uses_entry_chain(monkeypatch):
+    """A bnb EVM entry passes validation under its own chain (not solana)."""
+    from nanobot_quant import onchainos_cli
+
+    entry = {"symbol": "SPCXB", "chain": "bnb",
+             "address": "0xbe000000000000000000000000000000000003e1",
+             "confirmed": False}
+    r = onchainos_cli.resolve_token("SPCXB", tokens_json=[entry], chain="solana")
+    assert r["ok"] is True          # no chain_mismatch under bnb
+    assert r["confirmed"] is False
+    assert r["chain"] == "bnb"
+
+
+def test_token_chain_returns_entry_chain():
+    from nanobot_quant.tokens_store import token_chain
+
+    entries = [{"symbol": "SPCXB", "chain": "bnb"}]
+    assert token_chain("SPCXB", entries) == "bnb"
+    assert token_chain("spcxb", entries) == "bnb"  # case-insensitive
+    assert token_chain("CRCLX", entries) == "solana"  # default
+    assert token_chain("CRCLX", []) == "solana"
+
+def test_broker_submit_uses_entry_chain(monkeypatch):
+    """Broker swaps on the target's own chain (SPCXB → bnb), not the
+    global okx.json chain."""
+    from nanobot_quant import onchainos_cli
+    from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+
+    captured = {}
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.resolve_token_address",
+        lambda symbol, tokens_json=None: "0xbe000000000000000000000000000000000003e1",
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.swap_execute",
+        lambda from_addr, to_addr, from_amount, slippage, chain="solana",
+               wallet=None: (
+            captured.update(chain=chain) or {"ok": True, "tx_id": "0xtx"}
+        ),
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.get_active_wallet_address",
+        lambda chain: "0x3ec58f7cf1daf99584281c62fb634ba5a254e8c6",
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.get_token_price",
+        lambda symbol, tokens_json=None, chain="solana": 137.08,
+    )
+
+    broker = OnchainOSBroker(
+        tokens_json=[{"symbol": "SPCXB", "chain": "bnb",
+                      "address": "0xbe000000000000000000000000000000000003e1"}],
+        slippage="0.01", sol_buffer_pct=0.05,
+    )
+    from types import SimpleNamespace
+
+    class _Order(SimpleNamespace):
+        def set_error(self, *a, **k):
+            pass
+
+        def set_identifier(self, *a, **k):
+            pass
+
+        def set_filled(self, *a, **k):
+            pass
+
+    order = _Order(
+        asset=SimpleNamespace(symbol="SPCXB"),
+        side="sell",
+        quantity=1.0,
+        quote=SimpleNamespace(symbol="USDC"),
+    )
+    result = broker._submit_order(order)
+    assert result is not None
+    assert captured["chain"] == "bnb"

@@ -59,6 +59,17 @@ class TestIsContractAddress:
         assert is_contract_address("SOL") is False
         assert is_contract_address("") is False
 
+    def test_43_char_solana_address(self):
+        """43-char base58 is a common real Solana length (So111…wSOL,
+        most mainnet accounts) — must not be rejected."""
+        assert is_contract_address("So11111111111111111111111111111111111111112") is True
+        assert is_contract_address("SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb") is True
+        assert is_contract_address("XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1") is True
+
+    def test_too_short_or_long_rejected(self):
+        assert is_contract_address("A" * 31) is False
+        assert is_contract_address("A" * 45) is False
+
 
 class TestSupportedSymbols:
     def test_native_tokens(self):

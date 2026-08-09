@@ -142,7 +142,12 @@ def _render_page(params: dict, message: str = "") -> str:
         if message
         else '<div class="banner msg hidden" id="msg"></div>'
     )
-    token_opts = {"td_symbol": load_token_symbols()}
+    # TD target options = managed tokens.json entries, minus stablecoins
+    # (no analysis value). Native coin SOL appears here once registered
+    # via /config/tokens (address auto-filled from builtin whitelist).
+    _STABLECOINS = {"USDC", "USDT"}
+    token_opts = {"td_symbol": [s for s in load_token_symbols()
+                                 if s not in _STABLECOINS]}
     groups = "".join(
         _group_html(g, params, token_opts) for g in ("risk", "exec", "td")
     )

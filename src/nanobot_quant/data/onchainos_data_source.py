@@ -18,6 +18,7 @@ from nanobot_quant.onchainos_cli import (
     get_token_price,
 )
 from nanobot_quant.onchainos_data import parse_kline_response
+from nanobot_quant.tokens_store import token_chain
 
 logger = logging.getLogger("nanobot_quant.data.onchainos")
 
@@ -64,8 +65,13 @@ class OnchainOSDataSource(DataSource):
         if not addr:
             raise ValueError(f"Cannot resolve token address for '{symbol}'")
 
+        # Per-target chain from the managed gate (tokens.json entry wins,
+        # default solana) — a BNB target e.g. SPCXB fetches on chain 56.
+        chain = token_chain(symbol, self._tokens_json)
+
         resolution = self._map_timestep(timestep or "day")
-        candles = get_kline(addr, bar=resolution, limit=min(length, 299))
+        candles = get_kline(addr, bar=resolution, limit=min(length, 299),
+                            chain=chain)
 
         if not candles:
             raise RuntimeError(f"No kline data returned for {symbol} ({addr})")
@@ -88,7 +94,8 @@ class OnchainOSDataSource(DataSource):
         addr = resolve_token_address(symbol, self._tokens_json)
         if not addr:
             return None
-        return get_token_price(addr)
+        chain = token_chain(symbol, self._tokens_json)
+        return get_token_price(addr, chain=chain)
 
     # ── helpers ───────────────────────────────────────────────────
 
