@@ -10,7 +10,6 @@ import logging
 from datetime import timedelta
 from typing import Optional
 
-import pandas as pd
 from lumibot.data_sources import DataSource
 
 from nanobot_quant.onchainos_cli import (
@@ -18,6 +17,7 @@ from nanobot_quant.onchainos_cli import (
     get_kline,
     get_token_price,
 )
+from nanobot_quant.onchainos_data import parse_kline_response
 
 logger = logging.getLogger("nanobot_quant.data.onchainos")
 
@@ -70,26 +70,12 @@ class OnchainOSDataSource(DataSource):
         if not candles:
             raise RuntimeError(f"No kline data returned for {symbol} ({addr})")
 
-        df = pd.DataFrame(candles)
-        df.rename(
-            columns={
-                "ts": "timestamp", "o": "open", "h": "high",
-                "l": "low", "c": "close", "vol": "volume",
-            },
-            inplace=True,
-        )
-        # CLI returns OHLCV as strings — coerce to numeric before the TD
-        # engine divides Volume by vol_sma20 (str/float TypeError).
-        for col in ("open", "high", "low", "close", "volume"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        ts = pd.to_numeric(df["timestamp"], errors="coerce")
-        # OKX DEX candles return epoch *milliseconds* (13-digit); keep a
-        # seconds fallback for other sources. Parsing ms as s overflows
-        # nanosecond timestamps (OutOfBoundsDatetime).
-        unit = "ms" if (ts.max() > 1e12) else "s"
-        df["timestamp"] = pd.to_datetime(ts, unit=unit, errors="coerce")
-        df.set_index("timestamp", inplace=True)
-        df.sort_index(inplace=True)
+        # Shared parser — single source of truth for the official CLI
+        # contract (string OHLCV + epoch-millisecond ts). Backtest and
+        # live loops therefore see byte-identical DataFrames.
+        df = parse_kline_response(candles)
+        if df.empty:
+            raise RuntimeError(f"No kline data returned for {symbol} ({addr})")
 
         from lumibot.entities import Bars
         return Bars(df, self.SOURCE, asset)
