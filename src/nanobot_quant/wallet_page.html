@@ -42,7 +42,10 @@
   .acc-block { border:1px solid #e8e8e8; border-radius:8px; padding:10px 12px;
                margin-bottom:10px; background:#fafafa; }
   .acc-block:last-child { margin-bottom:0; }
-  .acc-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .acc-block.collapsed .acc-assets { display:none; }
+  .acc-header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;
+                cursor:pointer; user-select:none; }
+  .acc-header .arrow { font-size:.85em; color:#999; width:14px; text-align:center; }
   .acc-header .acc-name { font-weight:600; font-size:.95em; }
   .acc-header .acc-id { font-family:ui-monospace,Menlo,monospace; font-size:.75em;
                         color:#999; }
@@ -59,6 +62,7 @@
   .addr-block.collapsed .addr-list { display:none; }
   .addr-header { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
                  cursor:pointer; user-select:none; font-size:.9em; }
+  .muted { color:#999; font-size:.85em; }
   .acc-addr { display:flex; align-items:center; gap:8px; padding:3px 0 3px 8px;
               border-left:2px solid #e0e0e0; margin-left:4px; }
   .acc-addr .chain { min-width:64px; font-weight:600; font-size:.78em; }
