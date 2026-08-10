@@ -387,31 +387,64 @@ class TdSequentialStrategy(Strategy):
         默认账户；卖出量改为 ``float(lot.qty)``（修复 int 截断小数问题，
         如 0.05 CRCLX）。lumibot 订单异步提交——下单成功即回收（记录
         卖出意图），链上余额与台账偏差由对账逻辑以链上为准修正。
+
+        2026-08-10 链上校验（缩量卖出，用户拍板）：switch 后查该账户
+        实际余额——余额 < lot.qty 按实际余额卖（不跳过、不卖空），
+        余额 0 或查询失败跳过该批并告警。
         """
         lot = self.batch_manager.close_lot(slot["slot"])
         if lot is None:
             return
-        req = self._portfolio.build_sell_order(
-            self.symbol, price, exit_reason,
-            quantity=float(lot["qty"]),
-        )
-        order = self._switch_submit_restore(
-            slot.get("account_id"),
-            lambda: self._portfolio.submit_order(req),
-        )
+        qty = float(lot["qty"])
+        aid = slot.get("account_id")
+        home = self._home_account_id()
+        switched = self._wallet_switch(aid) if aid else True
+        order = None
+        try:
+            if aid:
+                bal = self._slot_token_balance(self.symbol)
+                if bal is None or bal < 0:
+                    self.logger.warning(
+                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"链上余额查询失败"
+                    )
+                    return
+                if bal <= 0:
+                    self.logger.warning(
+                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"链上余额为 0（台账 {qty} 已释放）"
+                    )
+                    return
+                if bal < qty:
+                    self.logger.warning(
+                        f"TD BATCH EXIT SHRINK | slot={slot['slot']} "
+                        f"台账 {qty} 链上 {bal:.6f} → 缩量卖出"
+                    )
+                    qty = bal
+            req = self._portfolio.build_sell_order(
+                self.symbol, price, exit_reason,
+                quantity=qty,
+            )
+            order = self._portfolio.submit_order(req)
+        finally:
+            if switched and home and home != aid:
+                try:
+                    self._wallet_switch(home)
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning(f"TD RESTORE ERR | {exc}")
         if order is not None:
             self.tracker.track(
                 order_id=order.identifier,
                 symbol=self.symbol,
                 action="sell",
-                quantity=req.quantity,
+                quantity=qty,
                 tag=f"signal:td-sell:{exit_reason}",
                 signal=signal,
                 reason=exit_reason,
             )
         self.logger.info(
             f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
-            f"qty={req.quantity} {exit_reason}"
+            f"qty={qty} {exit_reason}"
         )
 
     # ── 真分账 v1.1：子钱包 switch / 资金检查 / 还原 ────────────────
@@ -451,17 +484,46 @@ class TdSequentialStrategy(Strategy):
     def _slot_quote_balance(self, quote_symbol: str = "USDC") -> float:
         """当前（已 switch 的）子钱包 quote 币种余额。
 
-        查询失败返回 -1（保守：调用方跳过该 slot）。
+        wallet_balance() 返回 {status, data}，真实资产在
+        data.details[0].tokenAssets —— 用 get_token_assets() 归一化
+        （修复 2026-08-10：此前误读 r["token_assets"] 恒返回 0，
+        真分账 BUY 资金检查形同虚设）。查询失败返回 -1（保守跳过）。
         """
         try:
+            from nanobot_quant.onchainos_cli import get_token_assets
             from nanobot_quant.tools.tools_wallet import wallet_balance
             r = wallet_balance() or {}
-            for a in r.get("token_assets") or []:
+            for a in get_token_assets(r.get("data") or {}):
                 if str(a.get("symbol", "")).upper() == quote_symbol.upper():
                     return float(a.get("balance") or 0)
             return 0.0
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(f"TD BALANCE ERR | {exc}")
+            return -1.0
+
+    def _slot_token_balance(self, symbol: str) -> float:
+        """当前（已 switch 的）子钱包该标的实际余额（SELL 链上校验）。
+
+        按 tokens.json 条目的合约地址匹配（原生币按 symbol）；
+        查询失败返回 -1（调用方保守跳过卖出）。
+        """
+        try:
+            from nanobot_quant.onchainos_cli import get_token_assets
+            from nanobot_quant.tokens_store import token_meta
+            from nanobot_quant.tools.tools_wallet import wallet_balance
+            meta = token_meta(symbol)
+            address = str(meta.get("address") or "")
+            r = wallet_balance() or {}
+            for a in get_token_assets(r.get("data") or {}):
+                if address:
+                    addr = str(a.get("tokenAddress") or a.get("token_address") or "")
+                    if addr.lower() == address.lower():
+                        return float(a.get("balance") or 0)
+                elif str(a.get("symbol", "")).upper() == symbol.upper():
+                    return float(a.get("balance") or 0)
+            return 0.0
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(f"TD TOKEN BALANCE ERR | {exc}")
             return -1.0
 
     def _switch_submit_restore(self, account_id: str | None, submit_fn):

@@ -184,6 +184,7 @@ async def token_add(request: Request) -> JSONResponse:
 
     entry = {"symbol": symbol, "address": address, "chain": chain,
              "confirmed": symbol in _BUILTIN_TOKENS}
+    _apply_meta_fields(entry, data)  # min_hold / cost_price（标的池编辑）
     check = _validate_token_entry(entry, chain=chain)
     entries.append(entry)
     _write_tokens(entries)
@@ -234,6 +235,7 @@ async def token_edit(request: Request) -> JSONResponse:
             entry["address"] = address
             entry["chain"] = chain
             entry["confirmed"] = False  # new address ⇒ re-confirm required
+            _apply_meta_fields(entry, data)  # min_hold / cost_price
             _write_tokens(entries)
             check = _validate_token_entry(entry, chain=chain)
             if check["ok"]:
@@ -264,6 +266,30 @@ async def token_delete(request: Request) -> JSONResponse:
 
 
 # ── Route registration helper ─────────────────────────────────────
+
+
+def _apply_meta_fields(entry: dict, data: dict) -> None:
+    """把标的池编辑的 min_hold / cost_price 写入 tokens.json 条目。
+
+    两个字段都可选：min_hold 默认 0.0（不保留）；cost_price 空/0/非法
+    时删除旧值（回退对账时当前价兜底）。"""
+    raw_hold = str(data.get("min_hold") or "").strip()
+    if raw_hold:
+        try:
+            entry["min_hold"] = max(0.0, float(raw_hold))
+        except ValueError:
+            entry["min_hold"] = 0.0
+    else:
+        entry["min_hold"] = 0.0
+    raw_cost = str(data.get("cost_price") or "").strip()
+    if raw_cost:
+        try:
+            v = float(raw_cost)
+            entry["cost_price"] = v if v > 0 else None
+        except ValueError:
+            entry.pop("cost_price", None)
+    else:
+        entry.pop("cost_price", None)
 
 
 def register_token_routes(app, gatekeeper) -> None:

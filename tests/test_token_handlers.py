@@ -111,7 +111,7 @@ class TestAdd:
         entries = _read_tokens()
         assert entries == [
             {"symbol": "WEVM", "address": SOLANA_ADDR,
-             "chain": "solana", "confirmed": False}
+             "chain": "solana", "confirmed": False, "min_hold": 0.0}
         ]
 
     def test_add_questionable_entry_flagged(self, _isolated_tokens):

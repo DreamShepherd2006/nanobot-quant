@@ -68,6 +68,7 @@ def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrate
     # 真分账 v1.1 mock：switch 成功 / 资金充足 / 还原目标固定（单测不触 CLI）
     s._wallet_switch = lambda account_id: True
     s._slot_quote_balance = lambda quote_symbol="USDC": 1e9
+    s._slot_token_balance = lambda symbol: 1e9  # 链上余额充足（缩量测试单独 mock）
     s._home_account = "acc-home"
     s._captured = captured
     return s
@@ -368,3 +369,23 @@ def test_pool_silent_when_all_hold(tmp_path):
     )
     s.on_trading_iteration()
     assert "orders" not in captured
+
+def test_batch_sell_shrinks_when_onchain_low(tmp_path):
+    """链上校验（缩量）：账户实际余额 < lot.qty → 按实际余额卖。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._slot_token_balance = lambda symbol: 3.0  # 链上只有 3
+    s.on_trading_iteration()
+    assert s._captured["order"][1] == 3.0  # 缩量卖出
+
+
+def test_batch_sell_skips_when_onchain_zero(tmp_path):
+    """链上校验：账户实际余额为 0 → 跳过该批（不卖空）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._slot_token_balance = lambda symbol: 0.0
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+    assert bm.open_slots() == []  # 台账已释放（close_lot 先行）

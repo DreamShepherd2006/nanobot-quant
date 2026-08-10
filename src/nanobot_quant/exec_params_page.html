@@ -13,6 +13,11 @@
   .banner.default { background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; }
   .banner.custom { background:#fff3e0; border:1px solid #ffcc80; color:#e65100; }
   .banner.locked { background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; }
+  .chk-group { display:flex; flex-wrap:wrap; gap:10px; margin:6px 0; }
+  .pool { display:flex; flex-direction:column; gap:4px; margin:6px 0; }
+  .pool-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .pool-meta { display:inline-flex; align-items:center; gap:4px; font-size:.82em; color:#666; }
+  .pool-meta input { width:88px; padding:2px 6px; }
   .banner.msg { display:block; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; }
   .banner.msg.hidden { display:none; }
   .banner.msg.ok { background:#e8f5e9; border-color:#a5d6a7; color:#2e7d32; }
@@ -80,7 +85,16 @@
 
   async function collect() {
     const params = {};
+    const metaMinHold = {};
+    const metaCost = {};
     document.querySelectorAll('input[type=number]').forEach(function (inp) {
+      const sym = inp.dataset.sym;
+      if (sym) {
+        // 标的池行式元数据：{symbol: value}
+        if (inp.name === 'meta_min_hold') metaMinHold[sym] = parseFloat(inp.value) || 0;
+        if (inp.name === 'meta_cost_price') metaCost[sym] = parseFloat(inp.value) || 0;
+        return;
+      }
       params[inp.name] = parseFloat(inp.value);
     });
     document.querySelectorAll('input[type=text]').forEach(function (inp) {
@@ -98,6 +112,16 @@
         params[cb.name] = cb.checked;
       }
     });
+    // 只提交勾选标的的元数据（未勾选的 min_hold/cost_price 不落盘）
+    const selected = params.td_symbols || [];
+    if (selected.length) {
+      params.meta_min_hold = {};
+      params.meta_cost_price = {};
+      selected.forEach(function (sym) {
+        if (sym in metaMinHold) params.meta_min_hold[sym] = metaMinHold[sym];
+        if (sym in metaCost) params.meta_cost_price[sym] = metaCost[sym];
+      });
+    }
     return params;
   }
 
