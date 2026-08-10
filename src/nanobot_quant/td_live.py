@@ -80,9 +80,11 @@ class _TdLiveRunner:
                 "max_position_pct": params["max_position_pct"],
                 "max_drawdown_pct": params["max_drawdown_pct"],
                 "stop_loss_pct": params["stop_loss_pct"],
-                # 子钱包分批（第一版）：exit_order / take_profit_pct
+                # 子钱包分批（真分账 v1.1）：exit_order / take_profit_pct / td_start_slot
                 "exit_order": params.get("exit_order", "fifo"),
                 "take_profit_pct": float(params.get("take_profit_pct", 0.0) or 0.0),
+                "td_start_slot": int(params.get("td_start_slot", 1) or 1),
+                "tokens_json": tokens,
             },
         )
         # 批次（子钱包）台账：td_batches > 1 时注入 BatchManager，

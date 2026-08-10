@@ -52,10 +52,11 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
     "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
     "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
-    # ── ④ 子钱包分批（批次=子钱包，2026-08-09 第一版）──────────────────
+    # ── ④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）─────────
     "td_batches": 1,            # int 1-50 — 批次/子钱包数量；1=单仓模式（现状）
     "exit_order": "fifo",      # fifo=先买先卖（默认）/ lifo=后买先卖
     "take_profit_pct": 0.0,     # 止盈线（%）；0=关闭（纯 TD SELL + 止损）
+    "td_start_slot": 1,          # int 1-50 — BUY 扫描起点（完整循环 + 起点偏移）
 }
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
@@ -122,13 +123,17 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "batch", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
         "label": "止盈线", "hint": "每批浮盈 ≥ 该值即平仓（0=关闭，纯 TD SELL + 止损；如 0.05 = 5%）",
     },
+    "td_start_slot": {
+        "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
+        "label": "建仓起始批次", "hint": "BUY 从该 slot 开始扫描（完整循环 + 起点偏移；设 3 → 3→4→5→1→2；资金不足自动跳下一 slot）",
+    },
 }
 
 GROUP_TITLES = {
     "risk": "① 风险控制（WebUI 锁死 — LLM 不可改）",
     "exec": "② 执行质量与循环（WebUI 锁死 — LLM 不可改）",
     "td": "③ TD 自主运行（P2 — StrategyExecutor 主循环）",
-    "batch": "④ 子钱包分批（批次=子钱包，2026-08-09 第一版）",
+    "batch": "④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）",
 }
 
 

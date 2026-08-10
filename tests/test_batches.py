@@ -43,6 +43,44 @@ def test_next_buy_slot_rotates_in_order(bm):
     assert bm.next_buy_slot() is None  # 全部 open
 
 
+# ── 真分账 v1.1：td_start_slot 起点偏移 / 跳 slot 扫描 ────────────────
+
+def test_next_buy_slot_start_offset(bm):
+    """起点偏移：start_slot=2 → 先返回 slot 2（完整循环 + 起点偏移）。"""
+    assert bm.next_buy_slot(start_slot=2)["slot"] == 2
+    bm.open_lot(qty=5, entry_price=100.0, slot=2)
+    # slot 2 open → 从 2 起循环：2(open) → 3 → 1
+    assert bm.next_buy_slot(start_slot=2)["slot"] == 3
+    bm.open_lot(qty=5, entry_price=100.0, slot=3)
+    assert bm.next_buy_slot(start_slot=2)["slot"] == 1
+
+
+def test_next_buy_slot_start_beyond_n(bm):
+    """起点超界（> N）截断到 N，不循环回绕。"""
+    assert bm.next_buy_slot(start_slot=99)["slot"] == 3
+    assert bm.next_buy_slot(start_slot=0)["slot"] == 1
+
+
+def test_scan_buy_slots_full_cycle_from_start(bm):
+    """scan_buy_slots(3) 顺序：3 → 1 → 2（完整循环，仅 available）。"""
+    bm.open_lot(qty=5, entry_price=100.0, slot=2)
+    slots = bm.scan_buy_slots(start_slot=3)
+    assert [s["slot"] for s in slots] == [3, 1]
+
+
+def test_scan_buy_slots_all_open_empty(bm):
+    for i in range(1, 4):
+        bm.open_lot(qty=5, entry_price=100.0, slot=i)
+    assert bm.scan_buy_slots(start_slot=1) == []
+    assert bm.scan_buy_slots(start_slot=2) == []
+
+
+def test_scan_buy_slots_empty_manager():
+    bm0 = BatchManager(symbol="X", account_ids=[], path=None)
+    assert bm0.scan_buy_slots(1) == []
+    assert bm0.next_buy_slot(1) is None
+
+
 # ── 状态机 ──────────────────────────────────────────────────────────
 
 def test_open_lot_records_lot(bm):

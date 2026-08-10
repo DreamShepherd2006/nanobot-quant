@@ -104,9 +104,29 @@ class BatchManager:
     def open_slots(self) -> list[dict[str, Any]]:
         return [s for s in self.slots if s["status"] == OPEN]
 
-    def next_buy_slot(self) -> Optional[dict[str, Any]]:
-        """BUY 目标：slot 顺序第一个 available（轮转复用）。"""
-        return next((s for s in self.slots if s["status"] == AVAILABLE), None)
+    def next_buy_slot(self, start_slot: int = 1) -> Optional[dict[str, Any]]:
+        """BUY 目标：从 start_slot（1-based）起循环扫描第一个 available。
+
+        v1.1：td_start_slot 起点偏移（完整循环 + 起点偏移，设 3 → 3→4→5→1→2）。
+        默认 start_slot=1 = 原行为（slot 顺序第一个 available）。
+        """
+        for s in self.scan_buy_slots(start_slot):
+            return s
+        return None
+
+    def scan_buy_slots(self, start_slot: int = 1) -> list[dict[str, Any]]:
+        """从 start_slot 起循环扫描的 available slot 列表（供资金不足跳 slot）。
+
+        顺序：start_slot → start_slot+1 → … → N → 1 → … → start_slot-1；
+        仅包含 status=available 的 slot（含起点 slot 已 open 时的自然跳过）。
+        """
+        n = len(self.slots)
+        if n == 0:
+            return []
+        start = max(1, int(start_slot or 1))
+        start = min(start, n)  # 超界截断到 N（不循环回绕）
+        ordered = self.slots[start - 1:] + self.slots[:start - 1]
+        return [s for s in ordered if s["status"] == AVAILABLE]
 
     def pick_exit_slot(self, order: str = "fifo") -> Optional[dict[str, Any]]:
         """平仓目标：open 批次按 exit_order 选一个。
