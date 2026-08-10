@@ -28,16 +28,54 @@ OPEN = "open"
 EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
 
 
-def batches_path() -> Path:
-    """持久化路径（与 exec_params.json 同一 credentials 目录）。"""
+def batches_path(symbol: Optional[str] = None) -> Path:
+    """持久化路径（与 exec_params.json 同一 credentials 目录）。
+
+    symbol 提供时使用 per-symbol 文件 ``batches.{symbol}.json``
+    （标的池隔离，2026-08-10 定案：多标的各自台账，open 批次不因
+    切换标的丢失）；None 时返回旧式单文件路径（兼容/迁移用）。
+    """
+    fname = f"batches.{symbol}.json" if symbol else "batches.json"
     for root in ("/data", "/mnt/workspace"):
         d = Path(root) / "legion" / "credentials"
         try:
             if d.exists():
-                return d / "batches.json"
+                return d / fname
         except OSError:
             continue
+    if symbol:
+        return Path.home() / f".batches.{symbol}.json"
     return Path.home() / ".batches.json"
+
+
+def migrate_legacy_batches() -> None:
+    """旧式单文件 batches.json → per-symbol 归档（保留历史台账）。
+
+    读旧文件取出其 symbol，rename 到 ``batches.{symbol}.json``。
+    目标已存在时不覆盖（新文件优先）。幂等：无旧文件时 no-op。
+    """
+    legacy = batches_path()  # 无 symbol → 旧式单文件路径
+    if not legacy.exists():
+        return
+    try:
+        old = BatchManager.load(path=legacy)
+        if old is None or not old.symbol or not old.slots:
+            return
+        target = batches_path(old.symbol)
+        if target.exists():
+            return
+        os.replace(legacy, target)
+    except (OSError, ValueError):
+        return
+
+
+def _load_or_migrate(symbol: str) -> Optional["BatchManager"]:
+    """per-symbol 加载；缺失时先迁移旧单文件再试一次。"""
+    bm = BatchManager.load(symbol=symbol)
+    if bm is not None and bm.slots:
+        return bm
+    migrate_legacy_batches()
+    return BatchManager.load(symbol=symbol)
 
 
 class BatchManager:
@@ -50,7 +88,7 @@ class BatchManager:
         path: Optional[Path | str] = None,
     ) -> None:
         self.symbol = symbol
-        self.path = Path(path) if path else batches_path()
+        self.path = Path(path) if path else batches_path(self.symbol)
         self.slots: list[dict[str, Any]] = []
         self._init_slots(account_ids)
 
@@ -82,9 +120,19 @@ class BatchManager:
         os.replace(tmp, self.path)
 
     @classmethod
-    def load(cls, path: Optional[Path | str] = None) -> Optional["BatchManager"]:
-        """从磁盘加载；文件缺失/损坏 → None。"""
-        p = Path(path) if path else batches_path()
+    def load(
+        cls,
+        path: Optional[Path | str] = None,
+        symbol: Optional[str] = None,
+    ) -> Optional["BatchManager"]:
+        """从磁盘加载；文件缺失/损坏 → None。
+
+        path 显式时用 path；否则 symbol 提供时读 ``batches.{symbol}.json``，
+        都不提供时读旧式 ``batches.json``。
+        """
+        if path is None:
+            path = batches_path(symbol) if symbol else batches_path()
+        p = Path(path)
         if not p.exists():
             return None
         try:
@@ -248,7 +296,7 @@ def ensure_batches(td_batches: int, symbol: str) -> tuple[Optional[BatchManager]
     """
     from .tools.tools_wallet import wallet_accounts, wallet_add, wallet_switch
 
-    bm = BatchManager.load()
+    bm = _load_or_migrate(symbol)
     if bm is not None and bm.symbol == symbol and bm.slots:
         return bm, f"复用已有批次台账（{symbol}，{len(bm.slots)} slots）"
 

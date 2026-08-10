@@ -109,10 +109,10 @@ class _TdLiveRunner:
         """
         import sys
 
-        from nanobot_quant.batches import BatchManager
+        from nanobot_quant.batches import BatchManager, _load_or_migrate
         from nanobot_quant.tools.tools_wallet import wallet_accounts
 
-        bm = BatchManager.load()
+        bm = _load_or_migrate(symbol)
         if bm is not None and bm.symbol == symbol and bm.slots:
             print(
                 f"[DIAG] td_live: batches restored ({symbol}, "

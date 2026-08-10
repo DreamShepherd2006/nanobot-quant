@@ -237,3 +237,72 @@ def test_summarize_shape(bm):
     assert rows[0]["qty"] == 5.0
     assert rows[0]["pnl_pct"] == pytest.approx(0.10)
     assert rows[1]["pnl_pct"] is None
+"""Tests for nanobot_quant.batches — 批次状态机 / FIFO/LIFO / 独立止损止盈 / 持久化."""
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from nanobot_quant.batches import (
+    BatchManager,
+    EXIT_ORDERS,
+    batches_path,
+    migrate_legacy_batches,
+)
+# ── per-symbol 台账文件（标的池隔离，2026-08-10 定案）──────────────
+
+def test_batches_path_per_symbol():
+    # 文件名规则：per-symbol 文件 batches.{symbol}.json；无 symbol → 旧式单文件
+    # （根目录不同：/data 存在时无点前缀，home 兜底有点前缀）
+    assert str(batches_path("CRCLX")).endswith("batches.CRCLX.json")
+    assert str(batches_path("RENDER")).endswith("batches.RENDER.json")
+    assert str(batches_path()).endswith("batches.json")
+
+
+def test_load_per_symbol(monkeypatch, tmp_path):
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    target = d / "batches.SPXCB.json"
+    target.write_text(json.dumps({"symbol": "SPXCB", "slots": [{"slot": 1}]}))
+    monkeypatch.setattr("nanobot_quant.batches.batches_path", lambda s=None: d / f"batches.{s}.json" if s else d / "batches.json")
+    bm = BatchManager.load(symbol="SPXCB")
+    assert bm is not None and bm.symbol == "SPXCB"
+    assert BatchManager.load(symbol="OTHER") is None
+
+
+def test_migrate_legacy_batches(monkeypatch, tmp_path):
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    legacy = d / "batches.json"
+    legacy.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 1}]}))
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None: d / f"batches.{s}.json" if s else d / "batches.json",
+    )
+    migrate_legacy_batches()
+    # 旧文件归档到 batches.CRCLX.json，原路径消失
+    assert not legacy.exists()
+    assert (d / "batches.CRCLX.json").exists()
+
+
+def test_migrate_does_not_clobber_existing(monkeypatch, tmp_path):
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    legacy = d / "batches.json"
+    legacy.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 9}]}))
+    target = d / "batches.CRCLX.json"
+    target.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 1}]}))
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None: d / f"batches.{s}.json" if s else d / "batches.json",
+    )
+    migrate_legacy_batches()
+    # 目标已存在 → 不覆盖，旧文件保留（新文件优先）
+    assert legacy.exists()
+    raw = json.loads(target.read_text())
+    assert raw["slots"][0]["slot"] == 1
+
+
