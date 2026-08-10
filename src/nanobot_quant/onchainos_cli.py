@@ -10,13 +10,53 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from nanobot_quant.onchainos_errors import lookup as err_lookup
 
 ONCHAINOS_BIN = "/usr/local/bin/onchainos"
+
+# Persistent storage for onchainos session data (survives Factory Rebuilds)
+_PERSISTENT_ONCHAINOS_DIR = "/data/legion/credentials/onchainos_sessions"
+
+
+def ensure_onchainos_dir() -> None:
+    """Symlink ~/.onchainos → persistent /data/legion/credentials/onchainos_sessions/.
+
+    After Factory Rebuild ~/.onchainos/ is wiped, but keyring.enc and
+    session.json persist under /data/.  This symlink makes wallet login
+    survive rebuilds.  Idempotent; safe to call on every CLI entry point.
+    """
+    home_onchainos = os.path.expanduser("~/.onchainos")
+
+    # Already a correct symlink → done
+    if os.path.islink(home_onchainos):
+        target = os.readlink(home_onchainos)
+        if target == _PERSISTENT_ONCHAINOS_DIR:
+            return
+        # Wrong target — remove and re-link
+        os.unlink(home_onchainos)
+    elif os.path.isdir(home_onchainos):
+        # Real directory (not a symlink) — clean up
+        import shutil
+        shutil.rmtree(home_onchainos, ignore_errors=True)
+    elif os.path.isfile(home_onchainos):
+        os.unlink(home_onchainos)
+
+    # Create persistent target if not yet exists
+    os.makedirs(_PERSISTENT_ONCHAINOS_DIR, exist_ok=True)
+
+    # Create symlink
+    os.symlink(_PERSISTENT_ONCHAINOS_DIR, home_onchainos)
+    print(
+        f"[DIAG] ensure_onchainos_dir: {home_onchainos} → {_PERSISTENT_ONCHAINOS_DIR}",
+        file=sys.stderr, flush=True,
+    )
+
 
 logger = logging.getLogger("nanobot_quant.onchainos_cli")
 

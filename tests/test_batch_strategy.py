@@ -44,6 +44,8 @@ def _sell_closes() -> list[float]:
 
 
 def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrategy:
+    # 测试 bars 54 根 < 生产默认 120 窗口 → 显式收窄到 50（旧行为）
+    params.setdefault("min_history", 50)
     s = TdSequentialStrategy()
     s.parameters = dict(TdSequentialStrategy.parameters, **params)
     s.logger = logging.getLogger("td-batch-test")
@@ -63,6 +65,10 @@ def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrate
     s.submit_order = lambda order: captured.setdefault("submitted", order)
     s.batch_manager = bm  # 注入 → 分批模式
     s.initialize()
+    # 真分账 v1.1 mock：switch 成功 / 资金充足 / 还原目标固定（单测不触 CLI）
+    s._wallet_switch = lambda account_id: True
+    s._slot_quote_balance = lambda quote_symbol="USDC": 1e9
+    s._home_account = "acc-home"
     s._captured = captured
     return s
 
@@ -196,3 +202,82 @@ def test_batch_slot_reuse_after_close(tmp_path):
     s.on_trading_iteration()  # 再 BUY
     assert "order" in s._captured
     assert bm.open_slots()[0]["slot"] == 1
+
+
+# ── 真分账 v1.1：资金不足跳 slot / 起点偏移 / switch 还原 ────────────
+
+def test_batch_buy_skips_insufficient_slot(tmp_path):
+    """slot 1 资金不足 → 跳过 → slot 2 买入（拍板 1）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    switch_calls: list[str] = []
+    s._wallet_switch = lambda account_id: (switch_calls.append(account_id), True)[1]
+
+    def _bal(quote_symbol="USDC"):
+        # slot 1（acc-1）资金不足；其余充足
+        return 0.0 if switch_calls and switch_calls[-1] == "acc-1" else 1e9
+    s._slot_quote_balance = _bal
+
+    s.on_trading_iteration()
+    assert s._captured["order"][2] == "buy"
+    open_slots = bm.open_slots()
+    assert len(open_slots) == 1
+    assert open_slots[0]["slot"] == 2  # 跳过了 slot 1
+    assert open_slots[0]["lot"]["qty"] == s._captured["order"][1]
+    # switch 序列：acc-1（查资金，不足）→ 还原 acc-home → acc-2（下单）→ 还原 acc-home
+    assert switch_calls[0] == "acc-1"
+    assert "acc-2" in switch_calls
+    assert switch_calls.count("acc-home") == 2  # 每次交易后还原
+    assert switch_calls[-1] == "acc-home"
+
+
+def test_batch_buy_all_slots_poor_skips_buy(tmp_path):
+    """全部 slot 资金不足 → 无订单（TD BATCH 跳过，slot 保持 available）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s._slot_quote_balance = lambda quote_symbol="USDC": 0.0
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+    assert all(x["status"] == "available" for x in bm.slots)
+
+
+def test_batch_buy_start_slot_offset(tmp_path):
+    """td_start_slot=2 → 第一次 BUY 落到 slot 2（拍板 3）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()), td_start_slot=2)
+    s.on_trading_iteration()
+    assert s._captured["order"][2] == "buy"
+    assert bm.open_slots()[0]["slot"] == 2
+
+
+def test_batch_buy_start_slot_wraps_after_open(tmp_path):
+    """起点 slot 已 open → 从起点循环找下一 available（2→3→1）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=100.0, entry_time="t1", slot=2)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()), td_start_slot=2)
+    s.on_trading_iteration()
+    assert len(bm.open_slots()) == 2          # 原 slot 2 + 新买入
+    assert bm.slots[2]["status"] == "open"   # 新买入落到 slot 3
+
+
+def test_batch_sell_switches_slot_and_restores(tmp_path):
+    """SELL 前 switch 到该批次子钱包，交易后还原默认账户。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=100.0, entry_time="t1")  # slot 1
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    switch_calls: list[str] = []
+    s._wallet_switch = lambda account_id: (switch_calls.append(account_id), True)[1]
+    s.on_trading_iteration()
+    assert s._captured["order"][2] == "sell"
+    assert switch_calls[0] == "acc-1"      # 平 slot 1 前 switch 到其账户
+    assert switch_calls[-1] == "acc-home"  # 交易后还原
+
+
+def test_batch_sell_float_qty_not_truncated(tmp_path):
+    """lot.qty 为小数（0.05）→ 卖出量保留小数（修复 int 截断）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=0.05, entry_price=66.0, entry_time="t1")  # 如 0.05 CRCLX
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s.on_trading_iteration()
+    assert s._captured["order"][1] == 0.05
+    assert bm.slots[0]["status"] == "available"

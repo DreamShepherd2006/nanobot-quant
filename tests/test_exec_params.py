@@ -81,15 +81,20 @@ def test_defaults_match_pre_parameterisation_hardcoded():
     assert DEFAULT_EXEC_PARAMS["td_symbol"] == "SOL"
     assert DEFAULT_EXEC_PARAMS["td_sleeptime"] == "1D"
     assert DEFAULT_EXEC_PARAMS["quantity_mode"] == "fixed"
+    # 固定 K 线窗口（方案 B，2026-08-10）：默认 120，低于 onchainos 300 上限
+    assert DEFAULT_EXEC_PARAMS["td_bars"] == 120
 
 
 def test_meta_covers_all_defaults_and_three_groups():
-    # 全部默认值（含 td 组 5 字段 + batch 组 3 字段）都有 PARAM_META 元数据；
+    # 全部默认值（含 td 组 6 字段 + batch 组 4 字段）都有 PARAM_META 元数据；
     # P1 loop 模式（execution_mode/loop_interval_seconds）已随 B3 退役。
     ui_params = set(DEFAULT_EXEC_PARAMS)
     assert set(PARAM_META) == ui_params
     groups = {m["group"] for m in PARAM_META.values()}
     assert groups == {"risk", "exec", "td", "batch"}
+    # td_bars：固定窗口，范围 20-300（onchainos CLI 单次上限）
+    bars = PARAM_META["td_bars"]
+    assert bars["min"] == 20 and bars["max"] == 300 and bars["std"] == 120
 
 
 @pytest.mark.parametrize(
