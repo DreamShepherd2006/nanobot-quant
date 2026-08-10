@@ -507,3 +507,16 @@ def test_batch_managers_injected_after_init(tmp_path):
     s.on_trading_iteration()
     assert "order" in s._captured
     assert len(bm.open_slots()) == 1  # batch 分支 open 了 slot（而非非 batch 直下单）
+
+
+def test_batch_sell_restores_lot_when_query_fails(tmp_path):
+    """链上校验：余额查询失败（状态未知）→ 跳过卖出并恢复台账
+    （fail-safe，避免 close_lot 先行释放导致账实脱节）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._slot_token_balance = lambda symbol: None  # 查询失败
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+    assert len(bm.open_slots()) == 1  # 台账保留（未释放）
+    assert bm.open_slots()[0]["lot"]["qty"] == 5.0

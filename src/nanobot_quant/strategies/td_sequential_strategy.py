@@ -443,6 +443,12 @@ class TdSequentialStrategy(Strategy):
                         f"TD BATCH EXIT SKIP | slot={slot['slot']} "
                         f"链上余额查询失败"
                     )
+                    # 查询失败 = 链上状态未知 → 恢复台账（fail-safe），
+                    # 避免 close_lot 已释放但链上仍有持仓的账实脱节
+                    self.batch_manager.open_lot(
+                        qty, lot.get("entry_price", 0.0),
+                        lot.get("entry_time"), slot=slot["slot"],
+                    )
                     return
                 if bal <= 0:
                     self.logger.warning(
