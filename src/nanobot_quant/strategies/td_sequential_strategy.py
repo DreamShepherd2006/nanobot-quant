@@ -432,6 +432,13 @@ class TdSequentialStrategy(Strategy):
                     else f"cd_sell={cd_sell}"
                 )
                 self._sell_lot(s, price, signal, reason)
+            else:
+                # 可观测性：无仓卖 9 显式提示，区分「信号未出现」与
+                # 「信号出现但无 open 批次」（fail-closed，不做空）
+                self.logger.info(
+                    f"TD SELL SKIP | 无 open 批次（setup_sell={setup_sell} "
+                    f"cd_sell={cd_sell}）"
+                )
 
     def _sell_lot(
         self, slot: dict, price: float, signal: dict, exit_reason: str
