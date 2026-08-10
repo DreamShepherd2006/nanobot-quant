@@ -45,6 +45,10 @@
   .btn-primary:hover { background:#0d47a1; }
   .btn-outline { background:#fff; color:#1565c0; border:1px solid #1565c0; }
   .btn-outline:hover { background:#e3f2fd; }
+  .pool-mv { cursor:pointer; background:#fff; color:#1565c0;
+    border:1px solid #90caf9; border-radius:4px; font-size:.8em;
+    width:22px; height:22px; line-height:1; padding:0; margin-right:2px; }
+  .pool-mv:hover { background:#e3f2fd; }
   .note { background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:10px 14px; margin:12px 0; font-size:.85em; color:#1565c0; }
   code { background:#eef; padding:1px 5px; border-radius:3px; font-size:.85em; }
 </style>
@@ -75,6 +79,20 @@
 <script>
 (function () {
   const msg = document.getElementById('msg');
+
+  function movePoolRow(row, dir) {
+    // ↑↓ 调整标的池优先级：交换 pool-row DOM 位置，保存时 collect()
+    // 按 DOM 顺序收集 td_symbols 数组 → 同 bar 多标的 Setup 9 按此顺序执行
+    const pool = row.parentElement;
+    if (!pool || !pool.classList.contains('pool')) return;
+    const rows = Array.from(pool.querySelectorAll('.pool-row'));
+    const idx = rows.indexOf(row);
+    const target = idx + dir;
+    if (target < 0 || target >= rows.length) return;
+    if (dir < 0) pool.insertBefore(row, rows[target]);
+    else pool.insertBefore(rows[target], row);
+  }
+  window.movePoolRow = movePoolRow;
 
   function show(m, ok) {
     msg.textContent = m;

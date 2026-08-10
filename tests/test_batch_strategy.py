@@ -69,6 +69,7 @@ def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrate
     s._wallet_switch = lambda account_id: True
     s._slot_quote_balance = lambda quote_symbol="USDC": 1e9
     s._slot_token_balance = lambda symbol: 1e9  # 链上余额充足（缩量测试单独 mock）
+    s._slot_portfolio_value = lambda: 1e6  # 目标 slot 账户资产充足（B 方案风控基准）
     s._home_account = "acc-home"
     s._captured = captured
     return s
@@ -335,6 +336,7 @@ def _make_pool_strategy(managers, bars_by_symbol, symbols, **params):
     # 真分账 v1.1 mock：switch 成功 / 资金充足 / 还原目标固定（单测不触 CLI）
     s._wallet_switch = lambda account_id: True
     s._slot_quote_balance = lambda quote_symbol="USDC": 1e9
+    s._slot_portfolio_value = lambda: 1e6  # 目标 slot 账户资产充足（B 方案基准）
     return s, captured
 
 
@@ -440,3 +442,51 @@ def test_home_account_id_reads_data_layer(monkeypatch):
     assert s._home_account_id() == "acc-1"
     # 缓存生效（二次调用不再解析）
     assert s._home_account == "acc-1"
+
+
+# ── B 方案风控基准（2026-08-10）：slot 子钱包资产 ─────────────────────
+
+def test_buy_min_account_value_skip(tmp_path):
+    """slot 子钱包总资产 < min_account_value → 跳过该槽（TD SLOT SKIP），不建仓。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_buy_closes()), min_account_value=50.0)
+    s._slot_portfolio_value = lambda: 11.45  # 目标 slot 只有 $11.45
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+    assert bm.open_slots() == []  # 无仓位占用
+
+
+def test_buy_value_mode_fractional_qty(tmp_path):
+    """quantity_mode=value：qty = pv_slot × max_position_pct / price（小数不取整）。
+    pv=11.45, pct=0.25, price=76.97 → qty≈0.0372（SOL 高价标的小数量）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_buy_closes()),
+        quantity_mode="value", quantity=1,
+        max_position_pct=0.25,
+    )
+    s._slot_portfolio_value = lambda: 11.45
+    # 下单价格 = 最后收盘价（100.0-13=87 区间）；构造 76.97 收盘价
+    s.on_trading_iteration()
+    assert "order" in s._captured
+    _, qty, action = s._captured["order"]
+    assert action == "buy"
+    # 价格取自 bars 收盘价（_buy_closes 最后=87.0）；value 模式小数数量
+    assert isinstance(qty, float)
+    assert qty > 0 and qty < 1  # 小数数量（非 int 截断 + max(...,1) 抬升）
+    open_slots = bm.open_slots()
+    assert len(open_slots) == 1
+    assert open_slots[0]["lot"]["qty"] == qty
+
+
+def test_buy_position_limit_based_on_slot_pv(tmp_path):
+    """position_limit 基于目标 slot 账户资产（pv_slot）而非活跃账户/全账户。
+    fixed qty=1, price=76.97, pv_slot=11.45 → pos=$77 > 25%×11.45 → BLOCK。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_buy_closes()), quantity=1, max_position_pct=0.25)
+    s._slot_portfolio_value = lambda: 11.45
+    s.on_trading_iteration()
+    assert "order" not in s._captured  # position_limit 拒绝
+    assert bm.open_slots() == []

@@ -59,6 +59,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "exit_order": "fifo",      # fifo=先买先卖（默认）/ lifo=后买先卖
     "take_profit_pct": 0.0,     # 止盈线（%）；0=关闭（纯 TD SELL + 止损）
     "td_start_slot": 1,          # int 1-50 — BUY 扫描起点（完整循环 + 起点偏移）
+    "min_account_value": 0,    # float ≥0 — BUY 门槛：目标 slot 子钱包总资产低于该值则跳过（0=关闭）
 }
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
@@ -132,6 +133,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "td_start_slot": {
         "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
         "label": "建仓起始批次", "hint": "BUY 从该 slot 开始扫描（完整循环 + 起点偏移；设 3 → 3→4→5→1→2；资金不足自动跳下一 slot）",
+    },
+    "min_account_value": {
+        "group": "batch", "min": 0, "max": 1000000, "step": 10, "std": 0,
+        "label": "子账户最小资金(USD)", "hint": "BUY 时目标 slot 子钱包总资产低于该值则跳过该槽位（TD SLOT SKIP min_account_value），避免小资金碎仓；0=关闭。SELL/止损/止盈平仓不受限（平仓永远允许）",
     },
 }
 

@@ -107,11 +107,21 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
         # / 成本价(cost_price) 输入（写入 tokens.json，见 save 的 meta 处理）。
         if key == "td_symbols":
             meta = _token_meta_map(choices, values)
+            # 优先级=池子顺序：勾选行按当前保存顺序渲染（上下移生效后可见），
+            # 未勾选行按候选顺序附加。
+            ordered = [c for c in values if c in choices] + [
+                c for c in choices if c not in values]
             rows = []
-            for c in choices:
+            for c in ordered:
                 m = meta.get(c, {})
                 rows.append(
                     f'<div class="pool-row">'
+                    f'<button class="pool-mv" type="button" '
+                    f'onclick="movePoolRow(this.closest(\'.pool-row\'), -1)" '
+                    f'title="上移（提高优先级）">↑</button>'
+                    f'<button class="pool-mv" type="button" '
+                    f'onclick="movePoolRow(this.closest(\'.pool-row\'), 1)" '
+                    f'title="下移（降低优先级）">↓</button>'
                     f'<label class="chk"><input type="checkbox" class="multi" '
                     f'name="{key}" value="{c}"'
                     f'{" checked" if c in values else ""}>{c}</label>'
@@ -135,7 +145,7 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
             return (
                 f'<div class="field"><label class="f-label">{label}</label>'
                 f'<div class="pool">{"".join(rows)}</div>'
-                f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选；保留量=每账户最低持有，成本价=天然持仓导入价）</span>'
+                f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         boxes = [

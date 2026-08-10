@@ -308,6 +308,9 @@ def test_page_renders_td_fields(tmp_path, monkeypatch):
     assert 'name="meta_min_hold"' in html
     assert 'name="meta_cost_price"' in html
     assert 'data-sym="SOL"' in html
+    # 优先级上下移按钮（2026-08-10 拍板 B）：↑↓ 调整池子顺序 → 保存即顺序
+    assert 'class="pool-mv"' in html
+    assert 'movePoolRow' in html
 
 
 def test_save_via_handler_persists(tmp_path):

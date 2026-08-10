@@ -256,6 +256,7 @@ class TdSequentialStrategy(Strategy):
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
+            # （batch 模式移入 _buy_on_slot，以目标 slot 子钱包资产为基准——B 方案）
             qty = self._portfolio.calculate_quantity(price)
             result = self._risk.can_enter(
                 position_value=qty * price,
@@ -265,27 +266,25 @@ class TdSequentialStrategy(Strategy):
             if not result.approved:
                 self.logger.info(f"TD BLOCK ({result.check_name}) | {result.reason}")
                 return
-
             reason = f"TD LONG setup_buy={setup_buy} score={score:.1f}"
-            req = self._portfolio.build_buy_order(
-                self.symbol, price, reason,
-                quantity=qty,
-            )
             if batch_mode:
-                # ── 真分账 v1.1：从 td_start_slot 扫描 → 资金检查 → switch 下单 → 还原 ──
+                # ── 真分账 v1.1（B 方案 2026-08-10）：目标 slot 子钱包为风控基准 ──
+                # position_limit/数量比例/资金检查全部基于 slot 账户资产（pv_slot），
+                # 在 _buy_on_slot 内完成（switch 后查 pv_slot）。
+                # switch 失败/低于 min_account_value/风控拒绝/USDC 不足
+                # → 返回 None → 跳下一 slot（拍板 1）。
                 executed = False
-                for cand in batch_manager.scan_buy_slots(self._start_slot):
-                    slot = cand
-                    order = self._buy_on_slot(slot, req, qty, price)
-                    if order is None:
-                        # 资金不足/查询失败 → 跳下一 slot（拍板 1）
+                for slot in batch_manager.scan_buy_slots(self._start_slot):
+                    ret = self._buy_on_slot(slot, price, reason)
+                    if ret is None:
                         continue
-                    opened = self.batch_manager.open_lot(
-                        slot=slot["slot"], qty=req.quantity, entry_price=price,
+                    order, qty = ret
+                    self.batch_manager.open_lot(
+                        slot=slot["slot"], qty=qty, entry_price=price,
                     )
                     self.logger.info(
                         f"TD BATCH LONG | slot={slot['slot']} "
-                        f"price={price:.2f} qty={req.quantity} "
+                        f"price={price:.2f} qty={qty} "
                         f"setup_buy={setup_buy} score={score:.1f}"
                     )
                     executed = True
@@ -296,6 +295,10 @@ class TdSequentialStrategy(Strategy):
                     )
                 return
             else:
+                req = self._portfolio.build_buy_order(
+                    self.symbol, price, reason,
+                    quantity=qty,
+                )
                 order = self._portfolio.submit_order(req)
                 if order is not None:
                     self.tracker.track(
@@ -581,10 +584,14 @@ class TdSequentialStrategy(Strategy):
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning(f"TD RESTORE ERR | {exc}")
 
-    def _buy_on_slot(self, slot: dict, req, qty: float, price: float):
-        """真分账 BUY：switch 到 slot 子钱包 → 资金检查 → submit → 还原。
+    def _buy_on_slot(self, slot: dict, price: float, reason: str):
+        """真分账 BUY（B 方案 2026-08-10）：switch 到 slot 子钱包 →
+        目标 slot 账户总资产（pv_slot）→ min_account_value 门槛 → qty
+        （fixed=td_quantity；value=pv_slot×max_position_pct 小数不取整）→
+        position_limit（基于 pv_slot）→ USDC 资金检查 → submit → 还原默认账户。
 
-        返回 order 或 None（资金不足/查询失败/switch 失败 → 调用方跳 slot）。
+        返回 (order, qty) 或 None（switch 失败/余额查询失败/低于资金门槛/
+        风控拒绝/USDC 不足 → 调用方跳下一 slot）。
         """
         aid = slot.get("account_id")
         home = self._home_account_id()
@@ -592,6 +599,41 @@ class TdSequentialStrategy(Strategy):
             self.logger.warning(f"TD SLOT SKIP | slot={slot['slot']} switch 失败")
             return None
         try:
+            pv_slot = self._slot_portfolio_value()
+            if pv_slot <= 0:
+                self.logger.warning(
+                    f"TD SLOT SKIP | slot={slot['slot']} 余额查询失败/为零"
+                )
+                return None
+            # 子账户最小资金门槛（BUY-only；SELL/止损/止盈平仓永远允许）
+            min_v = float(self.parameters.get("min_account_value", 0) or 0)
+            if min_v > 0 and pv_slot < min_v:
+                self.logger.warning(
+                    f"TD SLOT SKIP (min_account_value) | slot={slot['slot']} "
+                    f"pv=${pv_slot:.2f} < ${min_v:.2f}"
+                )
+                return None
+            # 数量：fixed=固定 td_quantity；value=pv_slot × max_position_pct / price
+            # （小数不取整——避免 SOL $77/CRCLX $68 等高价标的 int 截断成 0
+            #  后被 max(...,1) 抬成 1 个导致永远 BLOCK；金额驱动自动适配价格差）
+            if self.quantity_mode == "value":
+                qty = pv_slot * self._risk.max_position_pct / price if price > 0 else 0.0
+            else:
+                qty = float(self.quantity or 0)
+            if qty <= 0:
+                return None
+            result = self._risk.can_enter(
+                position_value=qty * price,
+                portfolio_value=pv_slot,
+                peak_portfolio=pv_slot,
+            )
+            if not result.approved:
+                self.logger.info(
+                    f"TD BLOCK ({result.check_name}) | slot={slot['slot']} "
+                    f"pos=${qty * price:.2f} > "
+                    f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}"
+                )
+                return None
             bal = self._slot_quote_balance("USDC")
             needed = qty * price
             if bal is None or bal < 0 or bal < needed:
@@ -600,13 +642,32 @@ class TdSequentialStrategy(Strategy):
                     f"({bal:.4f} < {needed:.4f} USDC)"
                 )
                 return None
-            return self._portfolio.submit_order(req)
+            req = self._portfolio.build_buy_order(
+                self.symbol, price, reason, quantity=qty,
+            )
+            order = self._portfolio.submit_order(req)
+            return (order, qty)
         finally:
             if home and aid and home != aid:
                 try:
                     self._wallet_switch(home)
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning(f"TD RESTORE ERR | {exc}")
+
+    def _slot_portfolio_value(self) -> float:
+        """当前活跃（=目标 slot）子钱包总资产 USD；失败返回 0（fail-closed 跳过）。
+
+        真分账 v1.1 拍板（2026-08-10，B 方案）：position_limit 与数量比例
+        以目标 slot 子钱包资产为基准——每批独立风控，避免随活跃账户漂移。
+        """
+        try:
+            from nanobot_quant.onchainos_cli import get_wallet_balance
+            assets = get_wallet_balance() or []
+            total = sum(float(a.get("usdValue") or 0) for a in assets)
+            return total
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(f"TD PV ERR | {exc}")
+            return 0.0
 
     # ── lumibot lifecycle hooks (delegated to tracker) ──
 
