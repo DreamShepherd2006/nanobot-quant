@@ -84,7 +84,10 @@ class TdSequentialStrategy(Strategy):
         # 默认 quote_asset 是 USD(forex) → resolve_token_address("USD")
         # 失败导致 "Cannot resolve addresses: X→USD"。此处显式设 USDC。
         broker = getattr(self, "broker", None)
-        if broker is not None and broker.__class__.__name__ == "OnchainOSBroker":
+        self._is_live_broker = (
+            broker is not None and broker.__class__.__name__ == "OnchainOSBroker"
+        )
+        if self._is_live_broker:
             from lumibot.entities import Asset
             self.quote_asset = Asset("USDC", asset_type="crypto")
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
@@ -187,10 +190,18 @@ class TdSequentialStrategy(Strategy):
     def _evaluate_symbol(self) -> None:
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。"""
         # ── 1. Fetch historical data ──
+        fetch_len = self._min_history
+        if self._is_live_broker:
+            # live 数据源（OKX DEX kline）会返回进行中的最后一根 bar——
+            # TD 是收盘价状态机，未完成 bar 的 close 会导致 setup 虚增/虚减
+            # （单根 setup=9 被进行中 bar 重置挤掉而错过，2026-08-11 00:23
+            # SOL 买9 未生效根因）。多拉 1 根供丢弃，信号基于最近已收盘
+            # bar——与 TD 理论（bar 收盘时判定）及回测口径一致。
+            fetch_len += 1
         try:
             bars = self.get_historical_prices(
                 self.symbol,
-                length=self._min_history,
+                length=fetch_len,
                 timestep=self._timestep,
             )
         except Exception as e:
@@ -204,6 +215,9 @@ class TdSequentialStrategy(Strategy):
             return
 
         df = bars.df.copy()
+        if self._is_live_broker and len(df) > 2:
+            # 丢弃进行中的最后一根（live 专用；回测数据源全为已收盘 bar）
+            df = df.iloc[:-1]
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {

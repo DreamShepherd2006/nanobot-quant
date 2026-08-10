@@ -593,3 +593,29 @@ def test_wallet_switch_accepts_status_ok(monkeypatch):
         "nanobot_quant.tools.tools_wallet.wallet_switch",
         lambda aid: {"ok": True, "data": None})
     assert s._wallet_switch("acc-1") is True
+
+
+def test_live_drops_in_progress_bar_for_signal(tmp_path):
+    """回归（2026-08-11 00:23 SOL 买9 未生效）：live 数据源（OKX DEX
+    kline）返回进行中的最后一根 bar——TD 收盘价状态机被未完成 bar 干扰：
+    setup=9 后一根进行中 bar 价格回升 → setup 重置 1 → 策略只看最后一根
+    → 单根 setup=9 信号被永久错过。修复：live 路径拉 length+1 并丢弃
+    最后一根（进行中），信号基于最近已收盘 bar（与 TD 理论一致）。
+    live 模式丢尾后触发 BUY；非 live（回测）不丢、尾=回升重置不触发。"""
+    closes = _buy_closes() + [100.0]  # 尾：回升到震荡高位 → setup 重置 1
+
+    # live 模式：丢弃进行中的最后一根 → 窗口尾=setup9 → BUY
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(closes))
+    s._is_live_broker = True
+    s.on_trading_iteration()
+    assert "order" in s._captured, s._captured
+    assert len(bm.open_slots()) == 1
+
+    # 非 live（回测）：55 根全用 → 窗口尾=回升（setup 重置）→ 无信号
+    bm2 = _make_bm(tmp_path)
+    s2 = _make_batch_strategy(bm2, _bars_with(closes))
+    assert s2._is_live_broker is False
+    s2.on_trading_iteration()
+    assert "order" not in s2._captured
+    assert len(bm2.open_slots()) == 0
