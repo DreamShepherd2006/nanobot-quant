@@ -494,7 +494,10 @@ class TdSequentialStrategy(Strategy):
         try:
             from nanobot_quant.tools.tools_wallet import wallet_accounts
             r = wallet_accounts() or {}
-            accs = r.get("accounts") or []
+            # wallet_accounts() 返回 {"status":"ok","data":{"accounts":[...]}}
+            # （2026-08-10：曾误读 r["accounts"] 恒为空 → home="" →
+            #  交易后不还原默认账户，活跃账户漂移留在 slot 子钱包）
+            accs = (r.get("data") or {}).get("accounts") or []
             for a in accs:
                 if a.get("is_default"):
                     self._home_account = a.get("account_id") or ""

@@ -411,3 +411,32 @@ def test_batch_sell_skips_when_onchain_zero(tmp_path):
     s.on_trading_iteration()
     assert "order" not in s._captured
     assert bm.open_slots() == []  # 台账已释放（close_lot 先行）
+
+
+def test_home_account_id_reads_data_layer(monkeypatch):
+    """_home_account_id 必须从 wallet_accounts() 的 data.accounts 读取
+    （曾误读顶层 accounts 恒空 → 交易后不还原默认账户）。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+    from nanobot_quant import tools
+
+    def fake_accounts():
+        return {
+            "status": "ok",
+            "data": {
+                "selected_account_id": "acc-2",
+                "accounts": [
+                    {"account_id": "acc-1", "account_name": "Account 1",
+                     "is_default": True, "is_active": False, "addresses": []},
+                    {"account_id": "acc-2", "account_name": "Account 2",
+                     "is_default": False, "is_active": True, "addresses": []},
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "nanobot_quant.tools.tools_wallet.wallet_accounts", fake_accounts)
+    s = TdSequentialStrategy()
+    s._home_account = None  # 模拟 initialize() 后的懒解析缓存初始态
+    assert s._home_account_id() == "acc-1"
+    # 缓存生效（二次调用不再解析）
+    assert s._home_account == "acc-1"
