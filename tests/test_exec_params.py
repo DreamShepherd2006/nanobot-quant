@@ -78,7 +78,7 @@ def test_defaults_match_pre_parameterisation_hardcoded():
     assert DEFAULT_EXEC_PARAMS["slippage"] == 0.01
     assert DEFAULT_EXEC_PARAMS["sol_buffer_pct"] == 0.05
     # TD 自主运行（P2 B2）默认值
-    assert DEFAULT_EXEC_PARAMS["td_symbol"] == "SOL"
+    assert DEFAULT_EXEC_PARAMS["td_symbols"] == ["SOL"]
     assert DEFAULT_EXEC_PARAMS["td_sleeptime"] == "1D"
     assert DEFAULT_EXEC_PARAMS["quantity_mode"] == "fixed"
     # 固定 K 线窗口（方案 B，2026-08-10）：默认 120，低于 onchainos 300 上限
@@ -123,7 +123,7 @@ def test_validation_rejects_out_of_range(key, bad):
         ("stop_loss_pct", 0.05),
         ("slippage", 0.02),
         ("sol_buffer_pct", 0.10),
-        ("td_symbol", "CRCLX"),
+        ("td_symbols", ["CRCLX"]),
         ("td_sleeptime", "1H"),
         ("td_sleeptime", "1W"),
         ("quantity_mode", "value"),
@@ -140,9 +140,9 @@ def test_validation_accepts_in_range(key, good):
 @pytest.mark.parametrize(
     "key,bad",
     [
-        ("td_symbol", ""),
-        ("td_symbol", "  "),
-        ("td_symbol", 123),
+        ("td_symbols", []),
+        ("td_symbols", ["  "]),
+        ("td_symbols", [123]),
         ("td_sleeptime", "4H"),
         ("td_sleeptime", "1D "),
         ("td_sleeptime", "1"),
@@ -297,7 +297,8 @@ def test_page_renders_td_fields(tmp_path):
     assert 'value="1D" selected' in html
     assert 'id="quantity_mode"' in html
     assert 'value="fixed" selected' in html
-    assert 'id="td_symbol"' in html
+    assert 'name="td_symbols"' in html
+    assert 'class="multi"' in html
 
 
 def test_save_via_handler_persists(tmp_path):
@@ -319,18 +320,18 @@ def test_save_via_handler_persists_td_fields(tmp_path):
     gk = _FakeGatekeeper()
     register_exec_params_routes(app, gk)
     save = next(fn for p, fn, m in app.routes if p == "/config/exec" and "POST" in m)
-    body = dict(DEFAULT_EXEC_PARAMS, td_symbol="CRCLX", td_sleeptime="1H",
+    body = dict(DEFAULT_EXEC_PARAMS, td_symbols=["CRCLX"], td_sleeptime="1H",
                 quantity_mode="value", td_quantity=25, td_enabled=True)
     resp = asyncio.run(save(_FakeRequest(body, "commander")))
     data = json.loads(resp.body.decode())
     assert data["ok"] is True
     loaded = load_exec_params()
-    assert loaded["td_symbol"] == "CRCLX"
+    assert loaded["td_symbols"] == ["CRCLX"]
     assert loaded["td_sleeptime"] == "1H"
     assert loaded["quantity_mode"] == "value"
     assert loaded["td_quantity"] == 25
     assert loaded["td_enabled"] is True
-    assert any("td_symbol=CRCLX" in log for log in gk.logs)
+    assert any("td_symbols=['CRCLX']" in log for log in gk.logs)
 
 
 def test_save_rejects_invalid(tmp_path):
@@ -458,3 +459,18 @@ def test_run_from_signals_uses_file_values(monkeypatch, tmp_path):
     assert captured.get("submitted") is True
     assert results[0]["risk_passed"] is True
     assert results[0]["tx_hash"] == "mock-tx"
+def test_load_without_file_returns_defaults(tmp_path):
+    assert load_exec_params() == DEFAULT_EXEC_PARAMS
+
+
+def test_legacy_td_symbol_migrates_to_symbols_pool(tmp_path):
+    """旧版 exec_params.json 仅有 td_symbol（单标的）→ 加载迁移为 td_symbols 列表。"""
+    exec_params_mod.exec_params_path().write_text(
+        json.dumps({"td_symbol": "CRCLX", "td_enabled": True}),
+        encoding="utf-8",
+    )
+    loaded = load_exec_params()
+    assert loaded["td_symbols"] == ["CRCLX"]
+    assert loaded["td_enabled"] is True
+    # 其余保持默认
+    assert loaded["td_bars"] == 120

@@ -68,6 +68,9 @@ class TdSequentialStrategy(Strategy):
     ):
         """Called once before the backtest/live loop starts (lumibot lifecycle)."""
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
+        # 标的池（多标的扫描，2026-08-10）：每轮遍历 symbols 算信号，
+        # 谁 Setup 9 谁执行；self.symbol 在每标的评估时切换。
+        self.symbols = list(self.parameters.get("symbols") or [self.symbol])
         self.quantity = quantity or self.parameters.get("quantity", 10)
         self.quantity_mode = quantity_mode or self.parameters.get("quantity_mode", "fixed")
         self.sleeptime = sleeptime or self.parameters.get("sleeptime", "1D")
@@ -108,7 +111,15 @@ class TdSequentialStrategy(Strategy):
         # batch_manager 由 td_live 注入（None = 单仓模式，回测/现状不变）。
         # 注入后 BUY 占用 available slot、SELL 按 exit_order 平一个批次、
         # 止损/止盈每批独立检查——批次状态由 batches.BatchManager 维护。
-        self.batch_manager = getattr(self, "batch_manager", None)
+        # 标的池（多标的）：td_live 注入 {symbol: BatchManager} 字典，
+        # 每标的评估时取出对应 manager（per-symbol 台账隔离）。
+        # 兼容单实例注入（测试/回测直接设 batch_manager）。
+        self._batch_managers = getattr(self, "batch_managers", None) or {}
+        if not self._batch_managers:
+            bm_single = getattr(self, "batch_manager", None)
+            if bm_single is not None:
+                self._batch_managers = {self.symbol: bm_single}
+        self.batch_manager = self._batch_managers.get(self.symbol)
         self._exit_order = self.parameters.get("exit_order", "fifo")
         self._take_profit_pct = float(
             self.parameters.get("take_profit_pct", 0.0) or 0.0
@@ -132,7 +143,17 @@ class TdSequentialStrategy(Strategy):
         Fetches all available historical bars up to the current bar,
         calls ``calculate()`` for the latest TD Sequential signal,
         then creates buy/sell orders based on the rules above.
+
+        标的池模式：按池子顺序（=优先级）逐标的评估，谁 Setup 9 谁执行；
+        同 bar 多标的命中按顺序全部处理（资金天然隔离）。
         """
+        for sym in self.symbols:
+            self.symbol = sym
+            self.batch_manager = self._batch_managers.get(sym)
+            self._evaluate_symbol()
+
+    def _evaluate_symbol(self) -> None:
+        """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。"""
         # ── 1. Fetch historical data ──
         try:
             bars = self.get_historical_prices(

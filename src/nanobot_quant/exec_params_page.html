@@ -90,7 +90,13 @@
       params[sel.name] = sel.value;
     });
     document.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
-      params[cb.name] = cb.checked;
+      if (cb.classList.contains('multi')) {
+        // 多选（标的池）：同名 checkbox 收集为数组
+        if (!Array.isArray(params[cb.name])) params[cb.name] = [];
+        if (cb.checked) params[cb.name].push(cb.value);
+      } else {
+        params[cb.name] = cb.checked;
+      }
     });
     return params;
   }

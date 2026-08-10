@@ -40,7 +40,7 @@ class _TdLiveRunner:
             "running": False,
             "started_at": None,
             "last_error": None,
-            "symbol": None,
+            "symbols": None,
             "sleeptime": None,
             "quantity_mode": None,
         }
@@ -73,7 +73,7 @@ class _TdLiveRunner:
         strategy.parameters = dict(
             TdSequentialStrategy.parameters,
             **{
-                "symbol": params["td_symbol"],
+                "symbols": params["td_symbols"],
                 "quantity": params["td_quantity"],
                 "quantity_mode": params["quantity_mode"],
                 "sleeptime": params["td_sleeptime"],
@@ -89,16 +89,33 @@ class _TdLiveRunner:
                 "tokens_json": tokens,
             },
         )
-        # 批次（子钱包）台账：td_batches > 1 时注入 BatchManager，
+        # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
         # 策略进入分批模式（BUY 占 slot / SELL 按 exit_order 平批 / 逐批止损止盈）。
+        # 标的池（多标的扫描）：每标的独立台账（batches.{symbol}.json）。
         td_batches = int(params.get("td_batches", 1) or 1)
+        symbols = params["td_symbols"]
         if td_batches > 1:
-            strategy.batch_manager = self._prepare_batches(
-                td_batches, params["td_symbol"]
+            strategy.batch_managers = self._prepare_all_batches(
+                td_batches, symbols
             )
         executor = StrategyExecutor(strategy)
         executor.daemon = True
         return executor
+
+    def _prepare_all_batches(
+        self, td_batches: int, symbols: list[str]
+    ) -> dict[str, Any]:
+        """为标的池中每个标的准备独立 BatchManager（per-symbol 台账）。
+
+        返回 {symbol: BatchManager}；某标的失败（钱包不可用等）时跳过
+        （该标的退回单仓模式判定——无 batch_manager 即 batch_mode=False）。
+        """
+        managers: dict[str, Any] = {}
+        for sym in symbols:
+            bm = self._prepare_batches(td_batches, sym)
+            if bm is not None:
+                managers[sym] = bm
+        return managers
 
     def _prepare_batches(self, td_batches: int, symbol: str) -> Any:
         """加载/创建批次台账（子钱包映射）。
@@ -196,13 +213,13 @@ class _TdLiveRunner:
                 running=True,
                 started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
                 last_error=None,
-                symbol=params["td_symbol"],
+                symbols=params["td_symbols"],
                 sleeptime=params["td_sleeptime"],
                 quantity_mode=params["quantity_mode"],
             )
             print(
                 f"[DIAG] td_live: StrategyExecutor started "
-                f"({params['td_symbol']} @ {params['td_sleeptime']}, "
+                f"(symbols={params['td_symbols']} @ {params['td_sleeptime']}, "
                 f"mode={params['quantity_mode']})",
                 file=sys.stderr, flush=True,
             )
@@ -280,7 +297,7 @@ class _TdLiveRunner:
                 changed = any(
                     self._state.get(k) != params.get(pk)
                     for k, pk in (
-                        ("symbol", "td_symbol"),
+                        ("symbols", "td_symbols"),
                         ("sleeptime", "td_sleeptime"),
                         ("quantity_mode", "quantity_mode"),
                     )

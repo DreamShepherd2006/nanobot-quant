@@ -99,6 +99,28 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
+    if vtype == "list":
+        # 多选 checkbox（同名 name，collect() 收集为数组）
+        choices = options or []
+        values = value if isinstance(value, list) else [value]
+        boxes = [
+            f'<label class="chk"><input type="checkbox" class="multi" name="{key}" '
+            f'value="{c}"{" checked" if c in values else ""}>{c}</label>'
+            for c in choices
+        ]
+        # 当前值里不在候选列表的（如旧值）也显示，避免保存时被静默丢弃
+        for v in values:
+            if v not in choices:
+                boxes.append(
+                    f'<label class="chk"><input type="checkbox" class="multi" '
+                    f'name="{key}" value="{v}" checked>⚙️ {v}</label>'
+                )
+        return (
+            f'<div class="field"><label class="f-label">{label}</label>'
+            f'<div class="chk-group">{"".join(boxes)}</div>'
+            f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选）</span>'
+            f'<span class="f-hint">{hint}</span></div>'
+        )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
     return (
@@ -146,8 +168,8 @@ def _render_page(params: dict, message: str = "") -> str:
     # (no analysis value). Native coin SOL appears here once registered
     # via /config/tokens (address auto-filled from builtin whitelist).
     _STABLECOINS = {"USDC", "USDT"}
-    token_opts = {"td_symbol": [s for s in load_token_symbols()
-                                 if s not in _STABLECOINS]}
+    token_opts = {"td_symbols": [s for s in load_token_symbols()
+                                  if s not in _STABLECOINS]}
     groups = "".join(
         _group_html(g, params, token_opts)
         for g in ("risk", "exec", "td", "batch")
@@ -224,15 +246,19 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         if not result.get("ok"):
             return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                                 status_code=400)
-        # 批次（子钱包）初始化：td_batches 变更时立即补足子钱包并建映射
+        # 批次（子钱包）初始化：td_batches 变更时立即补足子钱包并建映射（每标的独立台账）
         try:
             from nanobot_quant.batches import ensure_batches
 
-            _b, _msg = ensure_batches(
-                int(result["params"].get("td_batches", 1) or 1),
-                result["params"].get("td_symbol", "SOL"),
-            )
-            gatekeeper._log(f"🧩 批次同步: {_msg}")
+            _symbols = result["params"].get("td_symbols") or ["SOL"]
+            _msgs = []
+            for _sym in _symbols:
+                _b, _msg = ensure_batches(
+                    int(result["params"].get("td_batches", 1) or 1),
+                    _sym,
+                )
+                _msgs.append(f"{_sym}: {_msg}")
+            gatekeeper._log(f"🧩 批次同步: {'; '.join(_msgs)}")
         except Exception as exc:
             gatekeeper._log(f"⚠️ 批次同步失败: {exc}")
         # TD 自主循环按新参数同步启停（td_enabled 开关 + 参数热更新）
@@ -254,7 +280,7 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"slippage={result['params'].get('slippage')} "
             f"sol_buffer={result['params'].get('sol_buffer_pct')} "
             f"td_enabled={result['params'].get('td_enabled')} "
-            f"td_symbol={result['params'].get('td_symbol')} "
+            f"td_symbols={result['params'].get('td_symbols')} "
             f"td_sleeptime={result['params'].get('td_sleeptime')} "
             f"quantity_mode={result['params'].get('quantity_mode')} "
             f"td_quantity={result['params'].get('td_quantity')} "

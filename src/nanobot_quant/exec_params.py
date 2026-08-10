@@ -48,7 +48,8 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
     "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
-    "td_symbol": "SOL",        # TD 自主标的（/config/tokens 登记代币 symbol；原生币 SOL 登记后可选）
+    "td_symbols": ["SOL"],     # TD 标的池（多标的扫描，谁 Setup 9 谁执行；
+                                #   /config/tokens 登记代币 symbol，稳定币不列入）
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
     "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
     "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
@@ -95,9 +96,9 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "td", "type": "bool", "std": False,
         "label": "TD 自主运行", "hint": "开启后 TD 自主策略在 quant agent 进程内驻留 StrategyExecutor 主循环（标的/周期/数量见下）",
     },
-    "td_symbol": {
-        "group": "td", "type": "str", "std": "SOL",
-        "label": "TD 标的", "hint": "TD 自主策略的交易标的（/config/tokens 登记代币 symbol；SOL 登记后可选，稳定币不列入）",
+    "td_symbols": {
+        "group": "td", "type": "list", "std": ["SOL"],
+        "label": "TD 标的池", "hint": "多标的扫描：每轮遍历池子算 TD，谁 Setup 9 谁执行（同 bar 按池子顺序全部处理）。从 /config/tokens 登记代币选（SOL 登记后可选，稳定币不列入）",
     },
     "td_sleeptime": {
         "group": "td", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",
@@ -164,6 +165,12 @@ def validate_exec_param(key: str, value: Any) -> str | None:
     vtype = meta.get("type", "float")
     if vtype == "bool":
         return None if isinstance(value, bool) else "必须是布尔值"
+    if vtype == "list":
+        if not isinstance(value, list) or not value:
+            return "必须是非空列表"
+        if not all(isinstance(v, str) and v.strip() for v in value):
+            return "列表项必须是非空字符串"
+        return None
     if vtype == "enum":
         if value not in meta["enum"]:
             return f"必须是 {'/'.join(meta['enum'])} 之一"
@@ -196,6 +203,9 @@ def load_exec_params() -> dict[str, Any]:
     for key in merged:
         if key in raw and validate_exec_param(key, raw[key]) is None:
             merged[key] = raw[key]
+    # 迁移：旧版单标的 td_symbol → td_symbols（标的池，2026-08-10）
+    if "td_symbols" not in raw and raw.get("td_symbol"):
+        merged["td_symbols"] = [raw["td_symbol"]]
     return merged
 
 

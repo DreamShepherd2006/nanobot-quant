@@ -281,3 +281,90 @@ def test_batch_sell_float_qty_not_truncated(tmp_path):
     s.on_trading_iteration()
     assert s._captured["order"][1] == 0.05
     assert bm.slots[0]["status"] == "available"
+
+# ── 标的池（多标的扫描，批次 2，2026-08-10）──────────────────────
+
+def _make_pool_strategy(managers, bars_by_symbol, symbols, **params):
+    """多标的策略：{symbol: BatchManager} dict 注入（td_live 路径），
+    get_historical_prices 按 symbol 返回对应 bars。"""
+    params.setdefault("min_history", 50)
+    s = TdSequentialStrategy()
+    s.parameters = dict(TdSequentialStrategy.parameters, symbols=symbols, **params)
+    s.logger = logging.getLogger("td-pool-test")
+    s.portfolio_value = 100_000.0
+    s.cash = 100_000.0
+    s.get_position = lambda symbol: None
+    s.get_historical_prices = lambda symbol, length, timestep: bars_by_symbol[symbol]
+
+    captured: dict = {}
+
+    def _create_order(asset, quantity, action):
+        captured.setdefault("orders", []).append((asset, quantity, action))
+        return type("Order", (), {
+            "identifier": f"mock-{len(captured['orders'])}",
+            "quantity": quantity,
+        })()
+
+    s.create_order = _create_order
+    s.submit_order = lambda order: captured.setdefault("submitted", []).append(order)
+    s.batch_managers = managers  # {symbol: BatchManager} 注入（多标的路径）
+    s.initialize()
+    # 真分账 v1.1 mock：switch 成功 / 资金充足 / 还原目标固定（单测不触 CLI）
+    s._wallet_switch = lambda account_id: True
+    s._slot_quote_balance = lambda quote_symbol="USDC": 1e9
+    return s, captured
+
+
+def _flat_bars():
+    """长震荡序列——不触发任何 TD 信号。"""
+    closes = [100.0 + (i % 3) - 1 for i in range(60)]
+    return _bars_with(closes)
+
+
+def test_pool_single_hit_only_buys_signal_symbol(tmp_path):
+    """池中只有一个标的 Setup 9 → 仅该标的执行，其他标的静默。"""
+    bm_hit = _make_bm(tmp_path)
+    bm_silent = _make_bm(tmp_path)
+    managers = {"HIT": bm_hit, "SILENT": bm_silent}
+    s, captured = _make_pool_strategy(
+        managers,
+        {"HIT": _bars_with(_buy_closes()), "SILENT": _flat_bars()},
+        ["HIT", "SILENT"],
+    )
+    s.on_trading_iteration()
+    assert len(captured.get("orders", [])) == 1
+    asset, qty, action = captured["orders"][0]
+    assert action == "buy"
+    assert len(bm_hit.open_slots()) == 1
+    assert len(bm_silent.open_slots()) == 0
+
+
+def test_pool_both_hit_processed_in_pool_order(tmp_path):
+    """同 bar 双标的 Setup 9 → 按池子顺序（=优先级）全部处理，各自台账。"""
+    bm_a = _make_bm(tmp_path)
+    bm_b = _make_bm(tmp_path)
+    managers = {"AAA": bm_a, "BBB": bm_b}
+    s, captured = _make_pool_strategy(
+        managers,
+        {"AAA": _bars_with(_buy_closes()), "BBB": _bars_with(_buy_closes())},
+        ["AAA", "BBB"],
+    )
+    s.on_trading_iteration()
+    orders = captured.get("orders", [])
+    assert len(orders) == 2
+    # 池子顺序 AAA → BBB：AAA 先执行
+    assert len(bm_a.open_slots()) == 1
+    assert len(bm_b.open_slots()) == 1
+
+
+def test_pool_silent_when_all_hold(tmp_path):
+    """全池无信号 → 无任何下单（静默，非卡死）。"""
+    bm_a = _make_bm(tmp_path)
+    bm_b = _make_bm(tmp_path)
+    s, captured = _make_pool_strategy(
+        {"AAA": bm_a, "BBB": bm_b},
+        {"AAA": _flat_bars(), "BBB": _flat_bars()},
+        ["AAA", "BBB"],
+    )
+    s.on_trading_iteration()
+    assert "orders" not in captured
