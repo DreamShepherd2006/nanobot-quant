@@ -16,6 +16,8 @@ from typing import Optional
 
 import pandas as pd
 
+from nanobot_quant.onchainos_cli import ensure_onchainos_dir
+
 logger = logging.getLogger(__name__)
 
 MAX_LIMIT = 300  # max candles per CLI call
@@ -99,6 +101,7 @@ def _run_cli(args: list[str], timeout: int = 30) -> dict:
 
     Raises RuntimeError if the CLI fails.
     """
+    ensure_onchainos_dir()  # restore ~/.onchainos symlink after Factory Rebuild
     cmd = ["onchainos"] + args
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
