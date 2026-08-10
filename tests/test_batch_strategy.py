@@ -543,3 +543,25 @@ def test_slot_token_balance_falls_back_to_symbol(monkeypatch):
         "nanobot_quant.tokens_store.token_meta",
         lambda sym: {"address": "So11111111111111111111111111111111111111112"})
     assert abs(s._slot_token_balance("SOL") - 0.045353234) < 1e-9
+
+
+def test_batch_buy_skips_outer_risk_gate(tmp_path):
+    """回归（2026-08-10 15:00）：batch 模式外层 can_enter 曾用组合 pv + 非
+    batch qty 预检——高单价标的（CRCLX $66）在组合 $11 时被 BLOCK，永远
+    到不了 _buy_on_slot 的 slot 风控（TD SLOT SKIP 从未触发）。
+    修复：batch 模式跳过外层检查，风控全部在 _buy_on_slot 内完成。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s.portfolio_value = 10.0  # 组合极小——外层 can_enter 必拒（若被调用）
+    s._slot_quote_balance = lambda quote_symbol="USDC": 0.0  # slot 无 USDC
+    msgs: list[str] = []
+    orig_info = s.logger.info
+    s.logger.info = lambda msg, *a, **k: msgs.append(str(msg))
+    try:
+        s.on_trading_iteration()
+    finally:
+        s.logger.info = orig_info
+    assert "order" not in s._captured
+    assert not any("TD BLOCK" in m for m in msgs), msgs
+    assert any("TD SLOT SKIP" in m for m in msgs), msgs
+    assert len(bm.open_slots()) == 0

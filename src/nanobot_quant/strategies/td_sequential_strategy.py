@@ -269,15 +269,19 @@ class TdSequentialStrategy(Strategy):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
             # （batch 模式移入 _buy_on_slot，以目标 slot 子钱包资产为基准——B 方案）
+            # 外层 can_enter 仅非 batch 执行：batch 模式风控全部在 _buy_on_slot
+            # 内完成（pv_slot × max_position_pct），否则高单价标的（CRCLX $66）
+            # 在组合 $11 时被非 batch qty 预检 BLOCK，永远到不了 slot 风控
             qty = self._portfolio.calculate_quantity(price)
-            result = self._risk.can_enter(
-                position_value=qty * price,
-                portfolio_value=pv,
-                peak_portfolio=self._peak_portfolio or pv,
-            )
-            if not result.approved:
-                self.logger.info(f"TD BLOCK ({result.check_name}) | {result.reason}")
-                return
+            if not batch_mode:
+                result = self._risk.can_enter(
+                    position_value=qty * price,
+                    portfolio_value=pv,
+                    peak_portfolio=self._peak_portfolio or pv,
+                )
+                if not result.approved:
+                    self.logger.info(f"TD BLOCK ({result.check_name}) | {result.reason}")
+                    return
             reason = f"TD LONG setup_buy={setup_buy} score={score:.1f}"
             if batch_mode:
                 # ── 真分账 v1.1（B 方案 2026-08-10）：目标 slot 子钱包为风控基准 ──
