@@ -25,6 +25,19 @@ from nanobot_quant.strategies.td_sequential import calculate
 from nanobot_quant.td_params import DEFAULT_TD_PARAMS
 
 
+def _order_error(order) -> str | None:
+    """提取 lumibot Order 错误信息（兼容 .error / ._error / .status）。"""
+    if order is None:
+        return "order is None"
+    for attr in ("error", "_error", "error_message"):
+        val = getattr(order, attr, None)
+        if val:
+            return str(val)
+    if getattr(order, "status", None) == "error":
+        return "status=error"
+    return None
+
+
 class TdSequentialStrategy(Strategy):
     """A lumibot strategy that uses TD Sequential signals for trading.
 
@@ -67,6 +80,13 @@ class TdSequentialStrategy(Strategy):
         max_drawdown_pct: float | None = None,
     ):
         """Called once before the backtest/live loop starts (lumibot lifecycle)."""
+        # 链上 broker（OnchainOSBroker）：交易对必须是 X/USDC，lumibot
+        # 默认 quote_asset 是 USD(forex) → resolve_token_address("USD")
+        # 失败导致 "Cannot resolve addresses: X→USD"。此处显式设 USDC。
+        broker = getattr(self, "broker", None)
+        if broker is not None and broker.__class__.__name__ == "OnchainOSBroker":
+            from lumibot.entities import Asset
+            self.quote_asset = Asset("USDC", asset_type="crypto")
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
         # 标的池（多标的扫描，2026-08-10）：每轮遍历 symbols 算信号，
         # 谁 Setup 9 谁执行；self.symbol 在每标的评估时切换。
@@ -432,7 +452,7 @@ class TdSequentialStrategy(Strategy):
                     self._wallet_switch(home)
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning(f"TD RESTORE ERR | {exc}")
-        if order is not None:
+        if order is not None and not _order_error(order):
             self.tracker.track(
                 order_id=order.identifier,
                 symbol=self.symbol,
@@ -442,10 +462,24 @@ class TdSequentialStrategy(Strategy):
                 signal=signal,
                 reason=exit_reason,
             )
-        self.logger.info(
-            f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
-            f"qty={qty} {exit_reason}"
+            self.logger.info(
+                f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
+                f"qty={qty} {exit_reason}"
+            )
+            return
+        # 订单失败（如 quote 解析失败、资金不足）→ 恢复 slot，台账回到卖出前
+        err = _order_error(order) or "order is None"
+        self.logger.warning(
+            f"TD BATCH EXIT FAIL | slot={slot['slot']} price={price:.2f} "
+            f"qty={qty} {exit_reason} error={err}"
         )
+        try:
+            self.batch_manager.open_lot(
+                float(lot["qty"]), float(lot["entry_price"]),
+                lot.get("entry_time"), slot=slot["slot"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(f"TD LOT RESTORE ERR | {exc}")
 
     # ── 真分账 v1.1：子钱包 switch / 资金检查 / 还原 ────────────────
 

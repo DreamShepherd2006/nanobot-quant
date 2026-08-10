@@ -283,6 +283,28 @@ def test_batch_sell_float_qty_not_truncated(tmp_path):
     assert s._captured["order"][1] == 0.05
     assert bm.slots[0]["status"] == "available"
 
+
+def test_batch_sell_order_failure_restores_slot(tmp_path):
+    """订单失败（quote 解析/资金不足）→ 不 track、恢复 slot，台账回到卖出前。
+
+    2026-08-10 回归：TD BATCH EXIT 曾假报成功——close_lot 先释放 slot、
+    订单 set_error 后仍 track + 打印退出日志，链上没卖台账却已释放。
+    """
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=100.0, entry_time="t1")  # slot 1
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+
+    def _submit_failing(order):
+        order.error = "Cannot resolve addresses: SPCXB→USD"
+        s._captured.setdefault("submitted", order)
+
+    s.submit_order = _submit_failing
+    s.on_trading_iteration()
+    assert s._captured["submitted"] is not None     # 订单确实尝试提交
+    assert bm.slots[0]["status"] == "open"          # slot 已恢复
+    assert bm.slots[0]["lot"]["qty"] == 5.0         # 台账回到卖出前
+    assert s.tracker._orders == {}                  # 失败订单不 track
+
 # ── 标的池（多标的扫描，批次 2，2026-08-10）──────────────────────
 
 def _make_pool_strategy(managers, bars_by_symbol, symbols, **params):
