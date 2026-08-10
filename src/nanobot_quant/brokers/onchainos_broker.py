@@ -281,18 +281,26 @@ class OnchainOSBroker(Broker):
             symb = t.get("symbol", "")
             if symb.upper() == "SOL":
                 continue
-            bal = float(t.get("balance") or 0)
-            price = float(t.get("price") or 0)
+            try:
+                bal = float(t.get("balance") or 0)
+            except (TypeError, ValueError):
+                bal = 0.0
+            try:
+                # CLI v4.3.1 价格字段为 tokenPrice（非 price）
+                price = float(t.get("tokenPrice") or t.get("price") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
             if bal <= 0:
                 continue
-            positions.append(
-                Position(
-                    strategy=strategy,
-                    asset=Asset(symbol=symb, asset_type="crypto"),
-                    quantity=bal,
-                    current_price=price,
-                )
+            # lumibot v4.5.78 Position.__init__ 不接受 current_price 参数
+            # （注释明确：current_price 等属性须在构造后赋值）
+            pos = Position(
+                strategy=strategy,
+                asset=Asset(symbol=symb, asset_type="crypto"),
+                quantity=bal,
             )
+            pos.current_price = price
+            positions.append(pos)
         return positions
 
     def _pull_position(self, strategy, asset) -> Any:

@@ -207,8 +207,8 @@ def test_broker_positions_survive_dict_shape(monkeypatch):
                     {
                         "accountId": "a1",
                         "tokenAssets": [
-                            {"symbol": "RENDER", "balance": "6.06", "price": "1.3", "usdValue": "7.93"},
-                            {"symbol": "SOL", "balance": "0.0899", "price": "160", "usdValue": "14.4"},
+                            {"symbol": "RENDER", "balance": "6.06", "tokenPrice": "1.3", "usdValue": "7.93"},
+                            {"symbol": "SOL", "balance": "0.0899", "tokenPrice": "160", "usdValue": "14.4"},
                         ],
                     },
                 ],
@@ -222,6 +222,8 @@ def test_broker_positions_survive_dict_shape(monkeypatch):
     assert len(positions) == 1
     assert positions[0].asset.symbol == "RENDER"
     assert abs(positions[0].quantity - 6.06) < 1e-9
+    # current_price 从 tokenPrice 字段（构造后赋值，v4.5.78 签名无该参数）
+    assert abs(positions[0].current_price - 1.3) < 1e-9
 
 def test_resolve_token_echoes_entry_chain(monkeypatch):
     """tokens.json entry chain wins over the caller default (SPCXB → bnb)."""
