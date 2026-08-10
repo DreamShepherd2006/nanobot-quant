@@ -574,10 +574,15 @@ class TdSequentialStrategy(Strategy):
             r = wallet_balance() or {}
             for a in get_token_assets(r.get("data") or {}):
                 if address:
-                    addr = str(a.get("tokenAddress") or a.get("token_address") or "")
+                    addr = str(
+                        a.get("tokenAddress") or a.get("token_address") or ""
+                    )
                     if addr.lower() == address.lower():
                         return float(a.get("balance") or 0)
-                elif str(a.get("symbol", "")).upper() == symbol.upper():
+                # 地址匹配失败后必须回退 symbol 匹配：原生 SOL 的
+                # tokenAddress 恒为空字符串，而 tokens.json 登记的是
+                # wSOL 地址（So111…）——不回退则恒判 0 → SELL 误释放台账
+                if str(a.get("symbol", "")).upper() == symbol.upper():
                     return float(a.get("balance") or 0)
             return 0.0
         except Exception as exc:  # noqa: BLE001

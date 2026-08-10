@@ -520,3 +520,26 @@ def test_batch_sell_restores_lot_when_query_fails(tmp_path):
     assert "order" not in s._captured
     assert len(bm.open_slots()) == 1  # 台账保留（未释放）
     assert bm.open_slots()[0]["lot"]["qty"] == 5.0
+
+
+def test_slot_token_balance_falls_back_to_symbol(monkeypatch):
+    """原生 SOL（tokenAddress 空）vs tokens.json 登记 wSOL 地址：
+    地址匹配失败后必须回退 symbol 匹配——曾返回 0 → SELL 误判余额为 0
+    释放台账（2026-08-10 14:06 卖9 SKIP 根因）。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+    s = TdSequentialStrategy()
+
+    def fake_wallet_balance():
+        return {"ok": True, "data": {"accountId": "x", "details": [{
+            "tokenAssets": [
+                {"symbol": "SOL", "balance": "0.045353234",
+                 "tokenAddress": "", "tokenPrice": "76.5",
+                 "usdValue": "3.47"},
+            ]}]}}
+
+    monkeypatch.setattr(
+        "nanobot_quant.tools.tools_wallet.wallet_balance", fake_wallet_balance)
+    monkeypatch.setattr(
+        "nanobot_quant.tokens_store.token_meta",
+        lambda sym: {"address": "So11111111111111111111111111111111111111112"})
+    assert abs(s._slot_token_balance("SOL") - 0.045353234) < 1e-9
