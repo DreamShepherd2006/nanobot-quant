@@ -294,6 +294,8 @@ class TdSequentialStrategy(Strategy):
                     self.batch_manager.open_lot(
                         slot=slot["slot"], qty=qty, entry_price=price,
                     )
+                    # 交易状态变更立即落盘（重启不丢台账）
+                    self.batch_manager.save()
                     self.logger.info(
                         f"TD BATCH LONG | slot={slot['slot']} "
                         f"price={price:.2f} qty={qty} "
@@ -430,6 +432,8 @@ class TdSequentialStrategy(Strategy):
         lot = self.batch_manager.close_lot(slot["slot"])
         if lot is None:
             return
+        # 平仓/释放状态立即落盘（重启不丢台账）
+        self.batch_manager.save()
         qty = float(lot["qty"])
         aid = slot.get("account_id")
         home = self._home_account_id()
@@ -449,6 +453,7 @@ class TdSequentialStrategy(Strategy):
                         qty, lot.get("entry_price", 0.0),
                         lot.get("entry_time"), slot=slot["slot"],
                     )
+                    self.batch_manager.save()
                     return
                 if bal <= 0:
                     self.logger.warning(
@@ -499,6 +504,7 @@ class TdSequentialStrategy(Strategy):
                 float(lot["qty"]), float(lot["entry_price"]),
                 lot.get("entry_time"), slot=slot["slot"],
             )
+            self.batch_manager.save()
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(f"TD LOT RESTORE ERR | {exc}")
 
