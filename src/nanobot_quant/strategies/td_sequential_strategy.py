@@ -540,11 +540,17 @@ class TdSequentialStrategy(Strategy):
         return self._home_account or None
 
     def _wallet_switch(self, account_id: str) -> bool:
-        """switch 到目标子钱包（全局状态，改写 selected_account_id）。"""
+        """switch 到目标子钱包（全局状态，改写 selected_account_id）。
+
+        兼容 tools_wallet 规范化契约（{"status": "ok", ...}）与 CLI 原始
+        信封（{"ok": true, ...}）——曾只查 r.get("ok")，tools_wallet 返回
+        {"status":"ok"} 时恒判失败（TD SLOT SKIP | switch 失败误报，
+        CLI 实际已切换，2026-08-10 15:28 实测）。
+        """
         try:
             from nanobot_quant.tools.tools_wallet import wallet_switch
             r = wallet_switch(account_id)
-            return bool(r and r.get("ok", False))
+            return bool(r and (r.get("ok") or r.get("status") == "ok"))
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(f"TD SWITCH ERR | {exc}")
             return False

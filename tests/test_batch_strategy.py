@@ -565,3 +565,31 @@ def test_batch_buy_skips_outer_risk_gate(tmp_path):
     assert not any("TD BLOCK" in m for m in msgs), msgs
     assert any("TD SLOT SKIP" in m for m in msgs), msgs
     assert len(bm.open_slots()) == 0
+
+
+def test_wallet_switch_accepts_status_ok(monkeypatch):
+    """回归（2026-08-10 15:28）：tools_wallet.wallet_switch 返回规范化
+    {"status":"ok"}，_wallet_switch 只查 r.get("ok") 恒判失败 → 所有 slot
+    「TD SLOT SKIP | switch 失败」误跳过（CLI 实际已切换）。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+    s = TdSequentialStrategy()
+    calls: list[str] = []
+
+    def fake(account_id: str):
+        calls.append(account_id)
+        return {"status": "ok", "data": None}
+
+    monkeypatch.setattr("nanobot_quant.tools.tools_wallet.wallet_switch", fake)
+    assert s._wallet_switch("acc-1") is True
+    assert calls == ["acc-1"]
+
+    monkeypatch.setattr(
+        "nanobot_quant.tools.tools_wallet.wallet_switch",
+        lambda aid: {"status": "error", "error": "boom"})
+    assert s._wallet_switch("acc-1") is False
+
+    # CLI 原始信封仍兼容
+    monkeypatch.setattr(
+        "nanobot_quant.tools.tools_wallet.wallet_switch",
+        lambda aid: {"ok": True, "data": None})
+    assert s._wallet_switch("acc-1") is True
