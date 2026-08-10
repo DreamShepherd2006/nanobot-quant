@@ -99,6 +99,73 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
+    if vtype == "list":
+        # 多选 checkbox（同名 name，collect() 收集为数组）
+        choices = options or []
+        values = value if isinstance(value, list) else [value]
+        # 标的池（td_symbols）：行式编辑——每候选一行，附 保留量(min_hold)
+        # / 成本价(cost_price) 输入（写入 tokens.json，见 save 的 meta 处理）。
+        if key == "td_symbols":
+            meta = _token_meta_map(choices, values)
+            # 优先级=池子顺序：勾选行按当前保存顺序渲染（上下移生效后可见），
+            # 未勾选行按候选顺序附加。
+            ordered = [c for c in values if c in choices] + [
+                c for c in choices if c not in values]
+            rows = []
+            for c in ordered:
+                m = meta.get(c, {})
+                rows.append(
+                    f'<div class="pool-row">'
+                    f'<button class="pool-mv" type="button" '
+                    f'onclick="movePoolRow(this.closest(\'.pool-row\'), -1)" '
+                    f'title="上移（提高优先级）">↑</button>'
+                    f'<button class="pool-mv" type="button" '
+                    f'onclick="movePoolRow(this.closest(\'.pool-row\'), 1)" '
+                    f'title="下移（降低优先级）">↓</button>'
+                    f'<label class="chk"><input type="checkbox" class="multi" '
+                    f'name="{key}" value="{c}"'
+                    f'{" checked" if c in values else ""}>{c}</label>'
+                    f'<span class="pool-meta">保留量 '
+                    f'<input type="number" name="meta_min_hold" data-sym="{c}" '
+                    f'value="{m.get("min_hold", 0.0)}" min="0" step="0.001"></span>'
+                    f'<span class="pool-meta">成本价 '
+                    f'<input type="number" name="meta_cost_price" data-sym="{c}" '
+                    f'value="{m.get("cost_price", "") or ""}" min="0" '
+                    f'step="0.0001" placeholder="对账价兜底"></span>'
+                    f'</div>'
+                )
+            # 当前值里不在候选列表的（如旧值）也显示，避免保存时被静默丢弃
+            for v in values:
+                if v not in choices:
+                    rows.append(
+                        f'<div class="pool-row"><label class="chk">'
+                        f'<input type="checkbox" class="multi" name="{key}" '
+                        f'value="{v}" checked>⚙️ {v}</label></div>'
+                    )
+            return (
+                f'<div class="field"><label class="f-label">{label}</label>'
+                f'<div class="pool">{"".join(rows)}</div>'
+                f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）</span>'
+                f'<span class="f-hint">{hint}</span></div>'
+            )
+        boxes = [
+            f'<label class="chk"><input type="checkbox" class="multi" name="{key}" '
+            f'value="{c}"{" checked" if c in values else ""}>{c}</label>'
+            for c in choices
+        ]
+        # 当前值里不在候选列表的（如旧值）也显示，避免保存时被静默丢弃
+        for v in values:
+            if v not in choices:
+                boxes.append(
+                    f'<label class="chk"><input type="checkbox" class="multi" '
+                    f'name="{key}" value="{v}" checked>⚙️ {v}</label>'
+                )
+        return (
+            f'<div class="field"><label class="f-label">{label}</label>'
+            f'<div class="chk-group">{"".join(boxes)}</div>'
+            f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选）</span>'
+            f'<span class="f-hint">{hint}</span></div>'
+        )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
     return (
@@ -146,8 +213,8 @@ def _render_page(params: dict, message: str = "") -> str:
     # (no analysis value). Native coin SOL appears here once registered
     # via /config/tokens (address auto-filled from builtin whitelist).
     _STABLECOINS = {"USDC", "USDT"}
-    token_opts = {"td_symbol": [s for s in load_token_symbols()
-                                 if s not in _STABLECOINS]}
+    token_opts = {"td_symbols": [s for s in load_token_symbols()
+                                  if s not in _STABLECOINS]}
     groups = "".join(
         _group_html(g, params, token_opts)
         for g in ("risk", "exec", "td", "batch")
@@ -157,6 +224,24 @@ def _render_page(params: dict, message: str = "") -> str:
         .replace("{msg}", msg)
         .replace("{groups}", groups)
     )
+
+
+def _token_meta_map(
+    choices: list[str], values: list[str]
+) -> dict[str, dict[str, Any]]:
+    """标的池行式编辑所需元数据：{symbol: {min_hold, cost_price}}。
+
+    数据源 = tokens.json（token_meta）；缺失/未登记条目返回空 dict。
+    """
+    try:
+        from .tokens_store import token_meta
+    except Exception:
+        return {}
+    meta: dict[str, dict[str, Any]] = {}
+    for c in choices:
+        meta[c] = {"min_hold": token_meta(c).get("min_hold", 0.0),
+                   "cost_price": token_meta(c).get("cost_price")}
+    return meta
 
 
 async def _body(request: Request) -> dict | None:
@@ -190,8 +275,30 @@ async def exec_params_save(request: Request) -> JSONResponse:
     if not result.get("ok"):
         return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                             status_code=400)
+    _persist_token_meta(data)
     return JSONResponse({"ok": True, "message": "执行参数已保存并即时生效",
                          "params": result.get("params")})
+
+
+def _persist_token_meta(data: dict) -> None:
+    """把标的池行式编辑的 min_hold / cost_price 写回 tokens.json。
+
+    body 中 meta_min_hold / meta_cost_price 为 {symbol: value} 映射
+    （前端 collect() 收集），仅写有值的标的，失败静默（主保存已成功）。
+    """
+    try:
+        from .tokens_store import update_token_meta
+
+        holds = data.get("meta_min_hold") or {}
+        costs = data.get("meta_cost_price") or {}
+        for sym in set(list(holds.keys()) + list(costs.keys())):
+            update_token_meta(
+                sym,
+                min_hold=holds.get(sym),
+                cost_price=costs.get(sym),
+            )
+    except Exception:
+        pass
 
 
 # ── Route registration helper ───────────────────────────────────────────
@@ -224,15 +331,20 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         if not result.get("ok"):
             return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                                 status_code=400)
-        # 批次（子钱包）初始化：td_batches 变更时立即补足子钱包并建映射
+        _persist_token_meta(data)
+        # 批次（子钱包）初始化：td_batches 变更时立即补足子钱包并建映射（每标的独立台账）
         try:
             from nanobot_quant.batches import ensure_batches
 
-            _b, _msg = ensure_batches(
-                int(result["params"].get("td_batches", 1) or 1),
-                result["params"].get("td_symbol", "SOL"),
-            )
-            gatekeeper._log(f"🧩 批次同步: {_msg}")
+            _symbols = result["params"].get("td_symbols") or ["SOL"]
+            _msgs = []
+            for _sym in _symbols:
+                _b, _msg = ensure_batches(
+                    int(result["params"].get("td_batches", 1) or 1),
+                    _sym,
+                )
+                _msgs.append(f"{_sym}: {_msg}")
+            gatekeeper._log(f"🧩 批次同步: {'; '.join(_msgs)}")
         except Exception as exc:
             gatekeeper._log(f"⚠️ 批次同步失败: {exc}")
         # TD 自主循环按新参数同步启停（td_enabled 开关 + 参数热更新）
@@ -254,7 +366,7 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"slippage={result['params'].get('slippage')} "
             f"sol_buffer={result['params'].get('sol_buffer_pct')} "
             f"td_enabled={result['params'].get('td_enabled')} "
-            f"td_symbol={result['params'].get('td_symbol')} "
+            f"td_symbols={result['params'].get('td_symbols')} "
             f"td_sleeptime={result['params'].get('td_sleeptime')} "
             f"quantity_mode={result['params'].get('quantity_mode')} "
             f"td_quantity={result['params'].get('td_quantity')} "

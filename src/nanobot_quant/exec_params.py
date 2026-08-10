@@ -48,7 +48,8 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
     "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
-    "td_symbol": "SOL",        # TD 自主标的（/config/tokens 登记代币 symbol；原生币 SOL 登记后可选）
+    "td_symbols": ["SOL"],     # TD 标的池（多标的扫描，谁 Setup 9 谁执行；
+                                #   /config/tokens 登记代币 symbol，稳定币不列入）
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
     "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
     "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
@@ -58,6 +59,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "exit_order": "fifo",      # fifo=先买先卖（默认）/ lifo=后买先卖
     "take_profit_pct": 0.0,     # 止盈线（%）；0=关闭（纯 TD SELL + 止损）
     "td_start_slot": 1,          # int 1-50 — BUY 扫描起点（完整循环 + 起点偏移）
+    "min_account_value": 0,    # float ≥0 — BUY 门槛：目标 slot 子钱包总资产低于该值则跳过（0=关闭）
 }
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
@@ -95,9 +97,9 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "td", "type": "bool", "std": False,
         "label": "TD 自主运行", "hint": "开启后 TD 自主策略在 quant agent 进程内驻留 StrategyExecutor 主循环（标的/周期/数量见下）",
     },
-    "td_symbol": {
-        "group": "td", "type": "str", "std": "SOL",
-        "label": "TD 标的", "hint": "TD 自主策略的交易标的（/config/tokens 登记代币 symbol；SOL 登记后可选，稳定币不列入）",
+    "td_symbols": {
+        "group": "td", "type": "list", "std": ["SOL"],
+        "label": "TD 标的池", "hint": "多标的扫描：每轮遍历池子算 TD，谁 Setup 9 谁执行（同 bar 按池子顺序全部处理）。从 /config/tokens 登记代币选（SOL 登记后可选，稳定币不列入）",
     },
     "td_sleeptime": {
         "group": "td", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",
@@ -132,6 +134,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
         "label": "建仓起始批次", "hint": "BUY 从该 slot 开始扫描（完整循环 + 起点偏移；设 3 → 3→4→5→1→2；资金不足自动跳下一 slot）",
     },
+    "min_account_value": {
+        "group": "batch", "min": 0, "max": 1000000, "step": 10, "std": 0,
+        "label": "子账户最小资金(USD)", "hint": "BUY 时目标 slot 子钱包总资产低于该值则跳过该槽位（TD SLOT SKIP min_account_value），避免小资金碎仓；0=关闭。SELL/止损/止盈平仓不受限（平仓永远允许）",
+    },
 }
 
 GROUP_TITLES = {
@@ -164,6 +170,12 @@ def validate_exec_param(key: str, value: Any) -> str | None:
     vtype = meta.get("type", "float")
     if vtype == "bool":
         return None if isinstance(value, bool) else "必须是布尔值"
+    if vtype == "list":
+        if not isinstance(value, list) or not value:
+            return "必须是非空列表"
+        if not all(isinstance(v, str) and v.strip() for v in value):
+            return "列表项必须是非空字符串"
+        return None
     if vtype == "enum":
         if value not in meta["enum"]:
             return f"必须是 {'/'.join(meta['enum'])} 之一"
@@ -196,6 +208,9 @@ def load_exec_params() -> dict[str, Any]:
     for key in merged:
         if key in raw and validate_exec_param(key, raw[key]) is None:
             merged[key] = raw[key]
+    # 迁移：旧版单标的 td_symbol → td_symbols（标的池，2026-08-10）
+    if "td_symbols" not in raw and raw.get("td_symbol"):
+        merged["td_symbols"] = [raw["td_symbol"]]
     return merged
 
 

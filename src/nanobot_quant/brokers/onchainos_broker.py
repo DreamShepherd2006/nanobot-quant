@@ -6,6 +6,7 @@ Implements all 13 abstract methods of ``lumibot.brokers.Broker``.
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -224,20 +225,49 @@ class OnchainOSBroker(Broker):
         """Return (cash, positions_value, total_value) in USD."""
         balances = get_wallet_balance()
         if not balances:
+            print(
+                "[DIAG] broker balances empty → total=0 "
+                "(portfolio BLOCK 风险；见 wallet balance DIAG)",
+                file=sys.stderr, flush=True,
+            )
+            last = getattr(self, "_last_total", 0.0)
+            if last > 0:
+                print(
+                    f"[DIAG] broker balances: use last known total={last:.4f}",
+                    file=sys.stderr, flush=True,
+                )
+                return (
+                    getattr(self, "_last_cash", 0.0),
+                    getattr(self, "_last_pos", 0.0),
+                    last,
+                )
             return (0.0, 0.0, 0.0)
 
         cash = 0.0
         positions_val = 0.0
-
+        items = []
         for t in balances:
-            val = float(t.get("valueUsd") or 0)
-            symb = t.get("symbol", "").upper()
+            try:
+                # CLI v4.3.1 字段为 usdValue（老形状兼容 valueUsd）
+                val = float(t.get("usdValue") or t.get("valueUsd") or 0)
+            except (TypeError, ValueError):
+                val = 0.0
+            symb = str(t.get("symbol", "")).upper()
+            items.append(f"{symb}:{val:.2f}")
             if symb == "SOL":
                 cash = val
             else:
                 positions_val += val
 
-        return (cash, positions_val, cash + positions_val)
+        total = cash + positions_val
+        self._last_cash, self._last_pos, self._last_total = cash, positions_val, total
+        print(
+            f"[DIAG] broker balances: n={len(balances)} "
+            f"[{', '.join(items)}] cash={cash:.4f} pos={positions_val:.4f} "
+            f"total={total:.4f}",
+            file=sys.stderr, flush=True,
+        )
+        return (cash, positions_val, total)
 
     def _pull_positions(self, strategy) -> list:
         """Return current positions from onchainos wallet."""
@@ -252,18 +282,26 @@ class OnchainOSBroker(Broker):
             symb = t.get("symbol", "")
             if symb.upper() == "SOL":
                 continue
-            bal = float(t.get("balance") or 0)
-            price = float(t.get("price") or 0)
+            try:
+                bal = float(t.get("balance") or 0)
+            except (TypeError, ValueError):
+                bal = 0.0
+            try:
+                # CLI v4.3.1 价格字段为 tokenPrice（非 price）
+                price = float(t.get("tokenPrice") or t.get("price") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
             if bal <= 0:
                 continue
-            positions.append(
-                Position(
-                    strategy=strategy,
-                    asset=Asset(symbol=symb, asset_type="crypto"),
-                    quantity=bal,
-                    current_price=price,
-                )
+            # lumibot v4.5.78 Position.__init__ 不接受 current_price 参数
+            # （注释明确：current_price 等属性须在构造后赋值）
+            pos = Position(
+                strategy=strategy,
+                asset=Asset(symbol=symb, asset_type="crypto"),
+                quantity=bal,
             )
+            pos.current_price = price
+            positions.append(pos)
         return positions
 
     def _pull_position(self, strategy, asset) -> Any:

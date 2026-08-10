@@ -78,7 +78,7 @@ def test_defaults_match_pre_parameterisation_hardcoded():
     assert DEFAULT_EXEC_PARAMS["slippage"] == 0.01
     assert DEFAULT_EXEC_PARAMS["sol_buffer_pct"] == 0.05
     # TD 自主运行（P2 B2）默认值
-    assert DEFAULT_EXEC_PARAMS["td_symbol"] == "SOL"
+    assert DEFAULT_EXEC_PARAMS["td_symbols"] == ["SOL"]
     assert DEFAULT_EXEC_PARAMS["td_sleeptime"] == "1D"
     assert DEFAULT_EXEC_PARAMS["quantity_mode"] == "fixed"
     # 固定 K 线窗口（方案 B，2026-08-10）：默认 120，低于 onchainos 300 上限
@@ -123,7 +123,7 @@ def test_validation_rejects_out_of_range(key, bad):
         ("stop_loss_pct", 0.05),
         ("slippage", 0.02),
         ("sol_buffer_pct", 0.10),
-        ("td_symbol", "CRCLX"),
+        ("td_symbols", ["CRCLX"]),
         ("td_sleeptime", "1H"),
         ("td_sleeptime", "1W"),
         ("quantity_mode", "value"),
@@ -140,9 +140,9 @@ def test_validation_accepts_in_range(key, good):
 @pytest.mark.parametrize(
     "key,bad",
     [
-        ("td_symbol", ""),
-        ("td_symbol", "  "),
-        ("td_symbol", 123),
+        ("td_symbols", []),
+        ("td_symbols", ["  "]),
+        ("td_symbols", [123]),
         ("td_sleeptime", "4H"),
         ("td_sleeptime", "1D "),
         ("td_sleeptime", "1"),
@@ -287,8 +287,12 @@ def test_page_renders_groups_with_current_values(tmp_path):
     assert 'value="0.4"' in html  # current value rendered
 
 
-def test_page_renders_td_fields(tmp_path):
+def test_page_renders_td_fields(tmp_path, monkeypatch):
     """TD 自主运行组渲染：周期/数量模式下拉 + 标的候选（默认值选中）。"""
+    monkeypatch.setattr(
+        "nanobot_quant.exec_params_handlers.load_token_symbols",
+        lambda: ["SOL", "CRCLX"],
+    )
     app = _FakeApp()
     register_exec_params_routes(app, _FakeGatekeeper())
     page = next(fn for p, fn, m in app.routes if p == "/config/exec" and "GET" in m)
@@ -297,7 +301,16 @@ def test_page_renders_td_fields(tmp_path):
     assert 'value="1D" selected' in html
     assert 'id="quantity_mode"' in html
     assert 'value="fixed" selected' in html
-    assert 'id="td_symbol"' in html
+    assert 'name="td_symbols"' in html
+    assert 'class="multi"' in html
+    # 标的池行式编辑（2026-08-10）：每候选一行 + 保留量/成本价输入
+    assert 'class="pool-row"' in html
+    assert 'name="meta_min_hold"' in html
+    assert 'name="meta_cost_price"' in html
+    assert 'data-sym="SOL"' in html
+    # 优先级上下移按钮（2026-08-10 拍板 B）：↑↓ 调整池子顺序 → 保存即顺序
+    assert 'class="pool-mv"' in html
+    assert 'movePoolRow' in html
 
 
 def test_save_via_handler_persists(tmp_path):
@@ -319,18 +332,67 @@ def test_save_via_handler_persists_td_fields(tmp_path):
     gk = _FakeGatekeeper()
     register_exec_params_routes(app, gk)
     save = next(fn for p, fn, m in app.routes if p == "/config/exec" and "POST" in m)
-    body = dict(DEFAULT_EXEC_PARAMS, td_symbol="CRCLX", td_sleeptime="1H",
+    body = dict(DEFAULT_EXEC_PARAMS, td_symbols=["CRCLX"], td_sleeptime="1H",
                 quantity_mode="value", td_quantity=25, td_enabled=True)
     resp = asyncio.run(save(_FakeRequest(body, "commander")))
     data = json.loads(resp.body.decode())
     assert data["ok"] is True
     loaded = load_exec_params()
-    assert loaded["td_symbol"] == "CRCLX"
+    assert loaded["td_symbols"] == ["CRCLX"]
     assert loaded["td_sleeptime"] == "1H"
     assert loaded["quantity_mode"] == "value"
     assert loaded["td_quantity"] == 25
     assert loaded["td_enabled"] is True
-    assert any("td_symbol=CRCLX" in log for log in gk.logs)
+    assert any("td_symbols=['CRCLX']" in log for log in gk.logs)
+
+
+def test_save_persists_token_meta(tmp_path, monkeypatch):
+    """标的池行式编辑：保存时 min_hold / cost_price 写回 tokens.json。"""
+    import nanobot_quant.tokens_store as tokens_store
+
+    tok_file = tmp_path / "tokens.json"
+    tok_file.write_text(json.dumps([
+        {"symbol": "SOL", "address": "", "chain": "solana",
+         "confirmed": True},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(tokens_store, "_credentials_paths",
+                        lambda: [str(tok_file)])
+    app = _FakeApp()
+    register_exec_params_routes(app, _FakeGatekeeper())
+    save = next(fn for p, fn, m in app.routes
+                if p == "/config/exec" and "POST" in m)
+    body = dict(DEFAULT_EXEC_PARAMS, td_symbols=["SOL"],
+                meta_min_hold={"SOL": 0.01},
+                meta_cost_price={"SOL": 150.0})
+    resp = asyncio.run(save(_FakeRequest(body, "commander")))
+    assert json.loads(resp.body.decode())["ok"] is True
+    entries = json.loads(tok_file.read_text(encoding="utf-8"))
+    assert entries[0]["min_hold"] == 0.01
+    assert entries[0]["cost_price"] == 150.0
+
+
+def test_save_meta_cost_zero_clears_cost_price(tmp_path, monkeypatch):
+    """成本价清空（0）→ tokens.json 移除 cost_price（回退对账价兜底）。"""
+    import nanobot_quant.tokens_store as tokens_store
+
+    tok_file = tmp_path / "tokens.json"
+    tok_file.write_text(json.dumps([
+        {"symbol": "SOL", "address": "", "chain": "solana",
+         "confirmed": True, "cost_price": 150.0},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(tokens_store, "_credentials_paths",
+                        lambda: [str(tok_file)])
+    app = _FakeApp()
+    register_exec_params_routes(app, _FakeGatekeeper())
+    save = next(fn for p, fn, m in app.routes
+                if p == "/config/exec" and "POST" in m)
+    body = dict(DEFAULT_EXEC_PARAMS, td_symbols=["SOL"],
+                meta_min_hold={"SOL": 0.01},
+                meta_cost_price={"SOL": 0})
+    asyncio.run(save(_FakeRequest(body, "commander")))
+    entries = json.loads(tok_file.read_text(encoding="utf-8"))
+    assert "cost_price" not in entries[0]
+    assert entries[0]["min_hold"] == 0.01
 
 
 def test_save_rejects_invalid(tmp_path):
@@ -458,3 +520,18 @@ def test_run_from_signals_uses_file_values(monkeypatch, tmp_path):
     assert captured.get("submitted") is True
     assert results[0]["risk_passed"] is True
     assert results[0]["tx_hash"] == "mock-tx"
+def test_load_without_file_returns_defaults(tmp_path):
+    assert load_exec_params() == DEFAULT_EXEC_PARAMS
+
+
+def test_legacy_td_symbol_migrates_to_symbols_pool(tmp_path):
+    """旧版 exec_params.json 仅有 td_symbol（单标的）→ 加载迁移为 td_symbols 列表。"""
+    exec_params_mod.exec_params_path().write_text(
+        json.dumps({"td_symbol": "CRCLX", "td_enabled": True}),
+        encoding="utf-8",
+    )
+    loaded = load_exec_params()
+    assert loaded["td_symbols"] == ["CRCLX"]
+    assert loaded["td_enabled"] is True
+    # 其余保持默认
+    assert loaded["td_bars"] == 120

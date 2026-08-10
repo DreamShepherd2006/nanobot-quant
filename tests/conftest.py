@@ -48,10 +48,18 @@ except ImportError:
             self.asset_type = asset_type
 
     class _Position:
-        def __init__(self, strategy=None, asset=None, quantity=0, current_price=0):
+        # 与 lumibot v4.5.78 真实签名一致：无 current_price 参数
+        # （注释明确 current_price 等属性须在构造后赋值）
+        def __init__(self, strategy=None, asset=None, quantity=0,
+                     orders=None, hold=0, available=0, avg_fill_price=None):
+            self.strategy = strategy
             self.asset = asset
             self.quantity = quantity
-            self.current_price = current_price
+            self.orders = orders
+            self.hold = hold
+            self.available = available
+            self.avg_fill_price = avg_fill_price
+            self.current_price = avg_fill_price
 
     class _Bars:
         def __init__(self, df, source, asset, quote=None, raw=None, return_polars=False, tzinfo=None):

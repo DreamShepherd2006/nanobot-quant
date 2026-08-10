@@ -43,7 +43,7 @@ class _SlowStopExecutor(_FakeExecutor):
 
 def _params(**over):
     p = dict(
-        td_enabled=False, td_symbol="SOL", td_sleeptime="1D",
+        td_enabled=False, td_symbols=["SOL"], td_sleeptime="1D",
         quantity_mode="fixed", td_quantity=10,
         max_position_pct=0.20, max_drawdown_pct=0.15, stop_loss_pct=0.10,
         slippage=0.01, sol_buffer_pct=0.05,
@@ -72,7 +72,7 @@ def test_enabled_starts_loop(monkeypatch):
     runner = _fresh_runner(monkeypatch, fake)
     st = runner.sync_from_params(_params(td_enabled=True))
     assert st["running"] is True
-    assert st["symbol"] == "SOL"
+    assert st["symbols"] == ["SOL"]
     assert st["sleeptime"] == "1D"
     time.sleep(0.05)  # 给线程启动
     assert fake.running is True
@@ -93,9 +93,9 @@ def test_param_change_restarts(monkeypatch):
     runner = _fresh_runner(monkeypatch, fake)
     runner.sync_from_params(_params(td_enabled=True))
     time.sleep(0.05)
-    st = runner.sync_from_params(_params(td_enabled=True, td_symbol="CRCLX"))
+    st = runner.sync_from_params(_params(td_enabled=True, td_symbols=["CRCLX"]))
     assert st["running"] is True
-    assert st["symbol"] == "CRCLX"
+    assert st["symbols"] == ["CRCLX"]
     assert fake.stopped is True  # 旧循环已 stop
 
 
@@ -116,7 +116,7 @@ def test_status_shape(monkeypatch):
     runner = _fresh_runner(monkeypatch, fake)
     st = runner.status()
     assert "running" in st and "thread_alive" in st
-    assert "symbol" in st and "sleeptime" in st and "quantity_mode" in st
+    assert "symbols" in st and "sleeptime" in st and "quantity_mode" in st
     assert "last_error" in st
 
 
@@ -146,9 +146,9 @@ def test_param_change_waits_for_thread_exit(monkeypatch):
 
     fake2 = _FakeExecutor()
     monkeypatch.setattr(runner, "_build_executor", lambda params: fake2)
-    st = runner.sync_from_params(_params(td_enabled=True, td_symbol="CRCLX"))
+    st = runner.sync_from_params(_params(td_enabled=True, td_symbols=["CRCLX"]))
     assert st["running"] is True
-    assert st["symbol"] == "CRCLX"
+    assert st["symbols"] == ["CRCLX"]
     time.sleep(0.1)
     assert fake1.running is False  # 旧线程已退出
     assert fake2.running is True  # 新循环已启动
@@ -161,7 +161,7 @@ def test_restart_timeout_fails_closed(monkeypatch):
     runner.sync_from_params(_params(td_enabled=True))
     time.sleep(0.05)
     monkeypatch.setattr(runner, "_wait_thread_exit", lambda *a, **k: False)
-    st = runner.sync_from_params(_params(td_enabled=True, td_symbol="CRCLX"))
+    st = runner.sync_from_params(_params(td_enabled=True, td_symbols=["CRCLX"]))
     assert st["running"] is False
     assert st["last_error"]
 
@@ -177,7 +177,7 @@ def test_start_waits_when_thread_tearing_down(monkeypatch):
 
     fake2 = _FakeExecutor()
     monkeypatch.setattr(runner, "_build_executor", lambda params: fake2)
-    st = runner.start(_params(td_enabled=True, td_symbol="CRCLX"))
+    st = runner.start(_params(td_enabled=True, td_symbols=["CRCLX"]))
     assert st["running"] is True
     time.sleep(0.1)
     assert fake2.running is True
