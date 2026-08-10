@@ -6,6 +6,7 @@ Implements all 13 abstract methods of ``lumibot.brokers.Broker``.
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -224,20 +225,48 @@ class OnchainOSBroker(Broker):
         """Return (cash, positions_value, total_value) in USD."""
         balances = get_wallet_balance()
         if not balances:
+            print(
+                "[DIAG] broker balances empty → total=0 "
+                "(portfolio BLOCK 风险；见 wallet balance DIAG)",
+                file=sys.stderr, flush=True,
+            )
+            last = getattr(self, "_last_total", 0.0)
+            if last > 0:
+                print(
+                    f"[DIAG] broker balances: use last known total={last:.4f}",
+                    file=sys.stderr, flush=True,
+                )
+                return (
+                    getattr(self, "_last_cash", 0.0),
+                    getattr(self, "_last_pos", 0.0),
+                    last,
+                )
             return (0.0, 0.0, 0.0)
 
         cash = 0.0
         positions_val = 0.0
-
+        items = []
         for t in balances:
-            val = float(t.get("valueUsd") or 0)
-            symb = t.get("symbol", "").upper()
+            try:
+                val = float(t.get("valueUsd") or 0)
+            except (TypeError, ValueError):
+                val = 0.0
+            symb = str(t.get("symbol", "")).upper()
+            items.append(f"{symb}:{val:.2f}")
             if symb == "SOL":
                 cash = val
             else:
                 positions_val += val
 
-        return (cash, positions_val, cash + positions_val)
+        total = cash + positions_val
+        self._last_cash, self._last_pos, self._last_total = cash, positions_val, total
+        print(
+            f"[DIAG] broker balances: n={len(balances)} "
+            f"[{', '.join(items)}] cash={cash:.4f} pos={positions_val:.4f} "
+            f"total={total:.4f}",
+            file=sys.stderr, flush=True,
+        )
+        return (cash, positions_val, total)
 
     def _pull_positions(self, strategy) -> list:
         """Return current positions from onchainos wallet."""

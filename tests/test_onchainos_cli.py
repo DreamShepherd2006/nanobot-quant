@@ -141,12 +141,16 @@ def test_get_wallet_balance_normalises_dict_shape(monkeypatch):
     from nanobot_quant.onchainos_cli import get_wallet_balance
 
     def fake_run(*args, **_kw):
+        # 真实 CLI 信封形状：{"ok":true,"data":{"details":[...]}}
         return {
-            "details": [
-                {"accountId": "a1", "tokenAssets": [
-                    {"symbol": "RENDER", "balance": "6.06", "usdValue": "7.93"},
-                ]},
-            ],
+            "ok": True,
+            "data": {
+                "details": [
+                    {"accountId": "a1", "tokenAssets": [
+                        {"symbol": "RENDER", "balance": "6.06", "usdValue": "7.93"},
+                    ]},
+                ],
+            },
         }
 
     monkeypatch.setattr(onchainos_cli, "_run", fake_run)
@@ -154,6 +158,34 @@ def test_get_wallet_balance_normalises_dict_shape(monkeypatch):
     assert isinstance(out, list)
     assert all(isinstance(t, dict) for t in out)
     assert out[0]["symbol"] == "RENDER"
+
+
+def test_get_wallet_balance_legacy_dict_shape(monkeypatch):
+    """兼容旧形状：_run 直接返回内层 details（无信封）时同样归一化。"""
+    from nanobot_quant import onchainos_cli
+    from nanobot_quant.onchainos_cli import get_wallet_balance
+
+    def fake_run(*args, **_kw):
+        return {"details": [{"tokenAssets": [{"symbol": "SOL", "balance": "1"}]}]}
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    out = get_wallet_balance()
+    assert [t["symbol"] for t in out] == ["SOL"]
+
+
+def test_get_wallet_balance_cli_error(monkeypatch):
+    """CLI 失败（错误信封）→ 返回 [] 而非抛异常（broker 安全降级）。"""
+    from nanobot_quant import onchainos_cli
+    from nanobot_quant.onchainos_cli import get_wallet_balance
+
+    def fake_run(*args, **_kw):
+        return {
+            "_exit_code": 1,
+            "_stderr": "session expired, please login again: onchainos wallet login",
+        }
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    assert get_wallet_balance() == []
 
 
 def test_broker_positions_survive_dict_shape(monkeypatch):
@@ -167,16 +199,20 @@ def test_broker_positions_survive_dict_shape(monkeypatch):
     from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
 
     def fake_run(*args, **_kw):
+        # 真实 CLI 信封：{"ok":true,"data":{"details":[...]}}
         return {
-            "details": [
-                {
-                    "accountId": "a1",
-                    "tokenAssets": [
-                        {"symbol": "RENDER", "balance": "6.06", "price": "1.3", "usdValue": "7.93"},
-                        {"symbol": "SOL", "balance": "0.0899", "price": "160", "usdValue": "14.4"},
-                    ],
-                },
-            ],
+            "ok": True,
+            "data": {
+                "details": [
+                    {
+                        "accountId": "a1",
+                        "tokenAssets": [
+                            {"symbol": "RENDER", "balance": "6.06", "price": "1.3", "usdValue": "7.93"},
+                            {"symbol": "SOL", "balance": "0.0899", "price": "160", "usdValue": "14.4"},
+                        ],
+                    },
+                ],
+            },
         }
 
     monkeypatch.setattr(onchainos_cli, "_run", fake_run)

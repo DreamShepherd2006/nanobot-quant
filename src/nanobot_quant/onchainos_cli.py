@@ -645,13 +645,32 @@ def get_wallet_balance() -> Optional[list]:
     """Get wallet balance from onchainos. Returns list of token dicts.
 
     CLI v4.3.1 wraps the token list under ``data.details[0].tokenAssets``
-    (multi-account shapes may nest per-account groups); normalise any
-    response shape to a flat list of token dicts so callers
+    and the CLI JSON envelope wraps that under ``{"ok":true,"data":{...}}``;
+    normalise any shape to a flat list of token dicts so callers
     (OnchainOSBroker._pull_positions / _get_balances_at_broker) can iterate
     safely with ``t.get(...)``.
+
+    2026-08-10 修复：此前直接把整个 CLI 信封传给 ``get_token_assets``，
+    信封顶层没有 ``details`` 键导致恒返回 []——TD live 循环 portfolio_value
+    永远为 0（"TD BLOCK (position_limit) | portfolio value is zero"）。
     """
     data = _run("wallet", "balance")
-    return get_token_assets(data)
+    if isinstance(data, dict):
+        if "_exit_code" in data or data.get("ok") is False:
+            print(
+                f"[DIAG] wallet balance failed: {str(data)[:300]}",
+                file=sys.stderr, flush=True,
+            )
+            return []
+        if data.get("ok") is True and isinstance(data.get("data"), dict):
+            data = data["data"]  # 解包 CLI 信封 {"ok":true,"data":{...}}
+    assets = get_token_assets(data)
+    if not assets:
+        print(
+            f"[DIAG] wallet balance empty (no tokenAssets): {str(data)[:200]}",
+            file=sys.stderr, flush=True,
+        )
+    return assets
 
 
 def swap_quote(
