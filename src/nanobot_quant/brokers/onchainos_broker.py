@@ -248,7 +248,8 @@ class OnchainOSBroker(Broker):
         items = []
         for t in balances:
             try:
-                val = float(t.get("valueUsd") or 0)
+                # CLI v4.3.1 字段为 usdValue（老形状兼容 valueUsd）
+                val = float(t.get("usdValue") or t.get("valueUsd") or 0)
             except (TypeError, ValueError):
                 val = 0.0
             symb = str(t.get("symbol", "")).upper()

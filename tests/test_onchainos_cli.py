@@ -225,6 +225,52 @@ def test_broker_positions_survive_dict_shape(monkeypatch):
     # current_price 从 tokenPrice 字段（构造后赋值，v4.5.78 签名无该参数）
     assert abs(positions[0].current_price - 1.3) < 1e-9
 
+def test_broker_balances_uses_usd_value_field(monkeypatch):
+    """_get_balances_at_broker 必须用 CLI v4.3.1 的 usdValue 字段计算 total，
+    否则 portfolio_value=0 → TD BLOCK（曾读 valueUsd 恒为 0）。"""
+    from nanobot_quant import onchainos_cli
+    from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+
+    def fake_run(*args, **_kw):
+        return {
+            "ok": True,
+            "data": {
+                "details": [{"tokenAssets": [
+                    {"symbol": "RENDER", "balance": "6.06", "usdValue": "7.93"},
+                    {"symbol": "SOL", "balance": "0.0899", "usdValue": "14.4"},
+                ]}],
+            },
+        }
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    broker = OnchainOSBroker(tokens_json=[], slippage="0.01", sol_buffer_pct=0.05)
+    cash, pos, total = broker._get_balances_at_broker(None, None)
+    assert abs(cash - 14.4) < 1e-9      # SOL → cash
+    assert abs(pos - 7.93) < 1e-9       # RENDER → positions
+    assert abs(total - 22.33) < 1e-9
+
+
+def test_broker_balances_legacy_valueusd_fallback(monkeypatch):
+    """老形状 valueUsd 字段仍兼容（防御性回退）。"""
+    from nanobot_quant import onchainos_cli
+    from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+
+    def fake_run(*args, **_kw):
+        return {
+            "ok": True,
+            "data": {
+                "details": [{"tokenAssets": [
+                    {"symbol": "SOL", "balance": "1", "valueUsd": "77.0"},
+                ]}],
+            },
+        }
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    broker = OnchainOSBroker(tokens_json=[], slippage="0.01", sol_buffer_pct=0.05)
+    cash, pos, total = broker._get_balances_at_broker(None, None)
+    assert abs(total - 77.0) < 1e-9
+
+
 def test_resolve_token_echoes_entry_chain(monkeypatch):
     """tokens.json entry chain wins over the caller default (SPCXB → bnb)."""
     from nanobot_quant import onchainos_cli
