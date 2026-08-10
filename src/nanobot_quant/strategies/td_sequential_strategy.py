@@ -74,8 +74,13 @@ class TdSequentialStrategy(Strategy):
         self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
             self.sleeptime, "day"
         )
-        self._bars_consumed = 0  # count of bars processed
-        self._min_history = 50  # minimum bars TD Seq needs for meaningful signal
+        # 固定窗口：每轮拉最近 N 根 K 线（不累积增长）。
+        # N 可经 exec_params.td_bars 配置（默认 120），必须覆盖 TD
+        # 计数序列（setup 9 + countdown 13 约需 35+ 根），并低于
+        # onchainos CLI 单次 300 根上限。
+        self._min_history = int(
+            self.parameters.get("min_history", 120) or 120
+        )
         self._peak_portfolio = None  # track peak for drawdown calc
 
         # Build RiskEngine from parameters
@@ -132,23 +137,20 @@ class TdSequentialStrategy(Strategy):
         try:
             bars = self.get_historical_prices(
                 self.symbol,
-                length=self._bars_consumed + self._min_history,
+                length=self._min_history,
                 timestep=self._timestep,
             )
         except Exception as e:
             self.logger.warning(
                 f"TD DATA ERROR | {type(e).__name__}: {e}"
             )
-            self._bars_consumed += 1
             return
 
         if bars is None or bars.df.empty:
             self.logger.warning("TD DATA EMPTY | bars is None or empty")
-            self._bars_consumed += 1
             return
 
         df = bars.df.copy()
-        self._bars_consumed += 1
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {

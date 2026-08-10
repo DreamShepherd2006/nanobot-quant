@@ -44,6 +44,8 @@ def _sell_closes() -> list[float]:
 
 
 def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrategy:
+    # 测试 bars 54 根 < 生产默认 120 窗口 → 显式收窄到 50（旧行为）
+    params.setdefault("min_history", 50)
     s = TdSequentialStrategy()
     s.parameters = dict(TdSequentialStrategy.parameters, **params)
     s.logger = logging.getLogger("td-batch-test")

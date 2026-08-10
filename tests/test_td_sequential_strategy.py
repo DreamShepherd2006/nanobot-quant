@@ -30,6 +30,9 @@ def _buy_signal_closes() -> list[float]:
 def _make_strategy(**params) -> TdSequentialStrategy:
     from lumibot.entities import Bars
 
+    # 测试 bars 58 根 < 生产默认 120 窗口 → 显式收窄到 50（旧行为），
+    # 避免 TD SKIP；min_history 参数化本身由专门测试覆盖。
+    params.setdefault("min_history", 50)
     s = TdSequentialStrategy()
     s.parameters = dict(TdSequentialStrategy.parameters, **params)
     s.logger = logging.getLogger("td-test")
@@ -154,3 +157,37 @@ def test_risk_gate_uses_actual_sized_quantity():
     expected_qty = max(int(100_000 * 0.20 / last_price), 1)
     assert calls, "risk.can_enter 未被调用"
     assert abs(calls[0] - expected_qty * last_price) < 1e-6
+def test_initialize_min_history_default_120():
+    """生产默认固定窗口 120 根（方案 B，2026-08-10）。"""
+    from nanobot_quant.strategies.td_sequential_strategy import (
+        TdSequentialStrategy,
+    )
+
+    s = TdSequentialStrategy()
+    s.parameters = dict(TdSequentialStrategy.parameters)
+    s.logger = logging.getLogger("td-test")
+    s.initialize()
+    assert s._min_history == 120
+
+
+def test_initialize_min_history_from_parameters():
+    s = _make_strategy(min_history=60)
+    assert s._min_history == 60
+
+
+def test_on_trading_iteration_uses_fixed_window(monkeypatch):
+    """固定窗口：get_historical_prices 的 length = min_history（不累积增长）。"""
+    s = _make_strategy(min_history=50)
+    calls: list[int] = []
+
+    def _record(symbol, length, timestep):
+        calls.append(length)
+        return s._bars
+
+    s.get_historical_prices = _record
+    s.on_trading_iteration()
+    s.on_trading_iteration()
+    # 两轮 length 恒定 = 50（旧行为是 50、51 递增）
+    assert calls == [50, 50]
+
+

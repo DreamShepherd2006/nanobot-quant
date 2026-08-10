@@ -52,6 +52,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
     "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
     "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
+    "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
     # ── ④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）─────────
     "td_batches": 1,            # int 1-50 — 批次/子钱包数量；1=单仓模式（现状）
     "exit_order": "fifo",      # fifo=先买先卖（默认）/ lifo=后买先卖
@@ -109,6 +110,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "td_quantity": {
         "group": "td", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
         "label": "TD 固定数量", "hint": "quantity_mode=fixed 时的下单数量（默认 10）",
+    },
+    "td_bars": {
+        "group": "td", "min": 20, "max": 300, "step": 1, "std": 120, "integer": True,
+        "label": "K 线窗口", "hint": "TD 每轮拉取最近 N 根 K 线（固定窗口，不累积增长；300 = onchainos CLI 单次上限）。与分析页 K 线数设一致可完全对照",
     },
     # ── ④ 子钱包分批 ──────────────────────────────────────────────────
     "td_batches": {

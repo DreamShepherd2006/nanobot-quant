@@ -84,6 +84,8 @@ class _TdLiveRunner:
                 "exit_order": params.get("exit_order", "fifo"),
                 "take_profit_pct": float(params.get("take_profit_pct", 0.0) or 0.0),
                 "td_start_slot": int(params.get("td_start_slot", 1) or 1),
+                # 固定 K 线窗口（方案 B）：每轮拉最近 N 根，不累积增长
+                "min_history": int(params.get("td_bars", 120) or 120),
                 "tokens_json": tokens,
             },
         )
