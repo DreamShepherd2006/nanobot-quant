@@ -161,8 +161,21 @@ class _TdLiveRunner:
     def start(self, params: dict[str, Any]) -> dict[str, Any]:
         with _lock:
             if self._thread is not None and self._thread.is_alive():
-                # 已运行 → 返回当前状态（参数变更由 sync_from_params 先 stop）
-                return self.status()
+                # 已运行 → 返回当前状态（参数变更由 sync_from_params 先 stop）。
+                # 若线程处于收尾中（stop 后未退出），等待其退出再启动。
+                if not self._wait_thread_exit():
+                    self._state["last_error"] = (
+                        "旧 TD 循环线程未在超时内退出，拒绝启动新循环"
+                        "（避免双循环重复下单）"
+                    )
+                    self._state["running"] = False
+                    print(
+                        "[DIAG] td_live: old thread did not exit within "
+                        "timeout — refusing to start new loop",
+                        file=sys.stderr, flush=True,
+                    )
+                    return self.status()
+                # 等待成功后继续向下启动新循环
             try:
                 executor = self._build_executor(params)
             except Exception as exc:  # pragma: no cover — lumibot 真包异常
@@ -225,6 +238,25 @@ class _TdLiveRunner:
             )
             return self.status()
 
+    def _wait_thread_exit(self, timeout: float = 10.0) -> bool:
+        """等待旧循环线程退出（stop 后 lumibot 收尾可能 >0.3s）。
+
+        stop() 只设 stop_event，线程跑完 on_abrupt_closing / scheduler
+        清理才真正退出；start() 的 is_alive 守卫若在收尾期间被调用会
+        静默拒绝启动，导致参数变更后循环停在 running=False。
+        轮询等待线程退出（默认 10s），超时返回 False（调用方 fail-closed，
+        不启动新循环以避免双循环重复下单）。
+        """
+        t = self._thread
+        if t is None or not t.is_alive():
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not t.is_alive():
+                return True
+            time.sleep(0.1)
+        return not t.is_alive()
+
     def status(self) -> dict[str, Any]:
         alive = self._thread is not None and self._thread.is_alive()
         return dict(self._state, thread_alive=alive)
@@ -253,9 +285,21 @@ class _TdLiveRunner:
                 )
                 if not changed:
                     return self.status()
-                # 参数变化 → 重启循环（先停旧的，避免双循环）
+                # 参数变化 → 重启循环（先停旧的，避免双循环）；
+                # 等旧线程真正退出再 start，避免 is_alive 守卫挡回。
                 self.stop()
-                time.sleep(0.3)
+                if not self._wait_thread_exit():
+                    self._state["last_error"] = (
+                        "旧 TD 循环线程未在超时内退出，拒绝启动新循环"
+                        "（避免双循环重复下单）"
+                    )
+                    self._state["running"] = False
+                    print(
+                        "[DIAG] td_live: old thread did not exit within "
+                        "timeout — refusing to start new loop",
+                        file=sys.stderr, flush=True,
+                    )
+                    return self.status()
             return self.start(params)
         if self._state.get("running") or (
             self._thread is not None and self._thread.is_alive()
