@@ -156,22 +156,35 @@ class _TdLiveRunner:
                 reports.append(f"{symbol} 账户{aid[:8]} 余额查询失败: {exc}")
                 continue
             bal = 0.0
+            tok_price: float | None = None
             for a in get_token_assets(r.get("data") or {}):
-                if address:
-                    addr = str(
-                        a.get("tokenAddress") or a.get("token_address") or ""
-                    )
-                    if addr.lower() == address.lower():
-                        bal = float(a.get("balance") or 0)
-                        break
-                elif str(a.get("symbol", "")).upper() == symbol.upper():
+                addr = str(
+                    a.get("tokenAddress") or a.get("token_address") or ""
+                )
+                sym = str(a.get("symbol", "")).upper()
+                hit = False
+                if address and addr and addr.lower() == address.lower():
+                    hit = True
+                elif sym == symbol.upper():
+                    hit = True
+                if hit:
                     bal = float(a.get("balance") or 0)
+                    try:
+                        raw_px = a.get("tokenPrice") or a.get("token_price")
+                        tok_price = (
+                            float(raw_px) if raw_px not in (None, "") else None
+                        )
+                    except (TypeError, ValueError):
+                        tok_price = None
                     break
             qty = max(0.0, bal - min_hold)
             if qty <= 0:
                 continue  # 纯保留量（如 SOL 每账户 0.01 gas）→ 不动
             price = float(cost) if cost else 0.0
             note = "成本价"
+            if price <= 0 and tok_price and tok_price > 0:
+                price = tok_price
+                note = "余额价"  # wallet balance 自带价格，零额外 CLI 调用
             if price <= 0:
                 try:
                     price = float(

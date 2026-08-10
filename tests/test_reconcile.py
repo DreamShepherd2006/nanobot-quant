@@ -125,3 +125,54 @@ def test_reconcile_no_natural_position(monkeypatch):
     runner, _ = _make_runner({}, monkeypatch)
     runner._reconcile_import(bm, "CRCLX", _tokens())
     assert bm.open_slots() == []
+
+
+def test_reconcile_uses_balance_token_price(monkeypatch):
+    """余额自带 tokenPrice（wallet balance 返回）优先于额外 CLI 取价。
+
+    真实场景：RENDER/CRCLX 不在 OKX DEX 索引内，market price/index 返回
+    空导致 get_token_price 失败；但余额明细自带 tokenPrice 可用。
+    """
+    bm = _make_bm()
+    balances = {"acc-1": [{"symbol": "RENDER", "balance": "3.06",
+                           "tokenAddress": "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof",
+                           "tokenPrice": "1.2955476623805305"}]}
+    runner, _ = _make_runner(balances, monkeypatch)
+    # get_token_price 不应被调用（余额价已够用）
+    monkeypatch.setattr(
+        "nanobot_quant.onchainos_cli.get_token_price",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应调用 CLI 取价")),
+    )
+    runner._reconcile_import(
+        bm, "RENDER",
+        [{"symbol": "RENDER",
+          "address": "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof",
+          "chain": "solana", "min_hold": 0.0, "cost_price": None,
+          "confirmed": True}],
+    )
+    open_lots = bm.open_slots()
+    assert len(open_lots) == 1
+    assert abs(open_lots[0]["lot"]["entry_price"] - 1.2955476623805305) < 1e-9
+
+
+def test_reconcile_matches_native_sol_by_symbol(monkeypatch):
+    """原生 SOL：钱包余额 tokenAddress 为空，登记地址为 wSOL。
+
+    tokens.json 中 SOL 地址自动补 wSOL（So111...），链上原生 SOL
+    tokenAddress="" —— 地址匹配必然失败，必须回退 symbol 匹配。
+    """
+    bm = _make_bm()
+    balances = {"acc-1": [{"symbol": "SOL", "balance": "0.042",
+                           "tokenAddress": "", "tokenPrice": "76.84"}]}
+    runner, _ = _make_runner(balances, monkeypatch)
+    runner._reconcile_import(
+        bm, "SOL",
+        [{"symbol": "SOL",
+          "address": "So11111111111111111111111111111111111111112",
+          "chain": "solana", "min_hold": 0.01, "cost_price": None,
+          "confirmed": True}],
+    )
+    open_lots = bm.open_slots()
+    assert len(open_lots) == 1
+    assert abs(open_lots[0]["lot"]["qty"] - 0.032) < 1e-9  # 0.042 - 0.01
+    assert abs(open_lots[0]["lot"]["entry_price"] - 76.84) < 1e-9  # 余额价
