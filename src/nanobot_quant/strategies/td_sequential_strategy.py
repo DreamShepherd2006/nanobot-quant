@@ -167,6 +167,18 @@ class TdSequentialStrategy(Strategy):
         标的池模式：按池子顺序（=优先级）逐标的评估，谁 Setup 9 谁执行；
         同 bar 多标的命中按顺序全部处理（资金天然隔离）。
         """
+        # ── 批次台账实时刷新（2026-08-10 修复）────────────────────────
+        # td_live 在 Strategy 构造完成后才注入 batch_managers，而 lumibot
+        # Strategy.__init__ 先调 initialize()——initialize 快照的
+        # _batch_managers 恒为空 dict，导致 batch_mode=False，TD BUY 误走
+        # 非 batch 分支（旧 value 模式 max(int(...),1) → CRCLX 1 个 → BLOCK）。
+        # 每轮实时读取属性，多标的（batch_managers dict）与单实例注入
+        # （batch_manager）都生效。
+        self._batch_managers = getattr(self, "batch_managers", None) or {}
+        if not self._batch_managers:
+            bm_single = getattr(self, "batch_manager", None)
+            if bm_single is not None:
+                self._batch_managers = {self.symbol: bm_single}
         for sym in self.symbols:
             self.symbol = sym
             self.batch_manager = self._batch_managers.get(sym)

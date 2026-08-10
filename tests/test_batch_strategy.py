@@ -490,3 +490,20 @@ def test_buy_position_limit_based_on_slot_pv(tmp_path):
     s.on_trading_iteration()
     assert "order" not in s._captured  # position_limit 拒绝
     assert bm.open_slots() == []
+
+
+def test_batch_managers_injected_after_init(tmp_path):
+    """回归（2026-08-10）：td_live 在 Strategy 构造后注入 batch_managers，
+    lumibot __init__ 先调 initialize() 导致快照空 dict → batch_mode=False
+    → BUY 误走非 batch 分支（旧 value 模式 BLOCK）。on_trading_iteration
+    每轮实时刷新读取属性，注入后必须走 batch 分支（open slot）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    # 模拟 td_live 时序：initialize 快照为空，单数属性不存在，
+    # 构造后注入多标的 dict —— 实时刷新应读到
+    s._batch_managers = {}
+    s.batch_manager = None
+    s.batch_managers = {s.symbol: bm}
+    s.on_trading_iteration()
+    assert "order" in s._captured
+    assert len(bm.open_slots()) == 1  # batch 分支 open 了 slot（而非非 batch 直下单）
