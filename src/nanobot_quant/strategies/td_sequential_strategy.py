@@ -402,6 +402,8 @@ class TdSequentialStrategy(Strategy):
                         "order_id": pend.get("order_id", ""),
                         "chain": pend.get("chain", ""),
                         "qty": qty, "price": price, "reason": reason,
+                        "account_id": slot.get("account_id", ""),
+                        "symbol": self.symbol,
                     }
                     self.logger.info(
                         f"TD BATCH LONG PENDING | slot={slot['slot']} "
@@ -686,6 +688,8 @@ class TdSequentialStrategy(Strategy):
                 "qty": qty,
                 "price": price,
                 "exit_reason": exit_reason,
+                "account_id": slot.get("account_id", ""),
+                "symbol": self.symbol,
             }
             self.logger.info(
                 f"TD BATCH EXIT PENDING | slot={slot['slot']} price={price:.2f} "
@@ -726,86 +730,162 @@ class TdSequentialStrategy(Strategy):
         PENDING/UNKNOWN → 继续等待。
         """
         from nanobot_quant.onchainos_cli import swap_status
+        home = self._home_account_id()
         for slot_id in list(self._pending_sells):
             info = self._pending_sells[slot_id]
-            st = swap_status(
-                info.get("tx_hash", ""), info.get("order_id", ""),
-                info.get("chain", "solana"),
-            )
-            status = st.get("tx_status") if st else "UNKNOWN"
-            if status == "SUCCESS":
-                self.batch_manager.close_lot(slot_id)
-                self.batch_manager.save()
-                self.logger.info(
-                    f"TD BATCH EXIT (确认) | slot={slot_id} "
-                    f"qty={info['qty']} {info.get('exit_reason', '')}"
-                )
-                self._record(
-                    "EXIT",
-                    f"slot={slot_id} 链上确认平仓 qty={info['qty']:.6g}",
-                    slot=slot_id, qty=info.get("qty", 0),
-                    price=info.get("price", 0),
-                    direction="sell", status="ok",
-                    tx_hash=info.get("tx_hash", ""),
-                    chain=info.get("chain", ""),
-                )
-                del self._pending_sells[slot_id]
-            elif status in ("ERROR", "CANCELLED"):
+            aid = info.get("account_id", "")
+            if aid and not self._wallet_switch(aid):
                 self.logger.warning(
-                    f"TD BATCH EXIT FAIL | slot={slot_id} 链上确认失败 {status}"
+                    f"TD PENDING CHECK SKIP | slot={slot_id} switch 到账户失败"
                 )
-                self._record(
-                    "EXIT_FAIL",
-                    f"slot={slot_id} 链上确认失败 {status}",
-                    slot=slot_id, qty=info.get("qty", 0),
-                    price=info.get("price", 0),
-                    direction="sell", status="fail",
-                    tx_hash=info.get("tx_hash", ""),
-                    chain=info.get("chain", ""),
+                continue
+            try:
+                st = swap_status(
+                    info.get("tx_hash", ""), info.get("order_id", ""),
+                    info.get("chain", "solana"),
                 )
-                del self._pending_sells[slot_id]
-            # PENDING/UNKNOWN → 继续等待
-        for slot_id in list(self._pending_buys):
-            info = self._pending_buys[slot_id]
-            st = swap_status(
-                info.get("tx_hash", ""), info.get("order_id", ""),
-                info.get("chain", "solana"),
-            )
-            status = st.get("tx_status") if st else "UNKNOWN"
-            if status == "SUCCESS":
-                if self.batch_manager.open_lot(
-                    slot=slot_id, qty=info["qty"], entry_price=info["price"],
-                ):
-                    self.batch_manager.save()
+                status = st.get("tx_status") if st else "UNKNOWN"
+                if status != "SUCCESS":
                     self.logger.info(
-                        f"TD BATCH LONG (确认) | slot={slot_id} "
-                        f"qty={info['qty']} price={info['price']:.2f}"
+                        f"TD PENDING CHECK | slot={slot_id} 账户={aid[:8] or 'home'} "
+                        f"{info.get('chain')} status={status}"
+                    )
+                # 余额核对兜底（2026-08-11，对称 BUY）：卖出成交后该标的链上余额≈0——
+                # 连续 3 轮订单状态查不到 → 查 slot 账户链上余额裁决（链上真相）。
+                if status not in ("SUCCESS", "ERROR", "CANCELLED"):
+                    info["unknown_count"] = info.get("unknown_count", 0) + 1
+                    if info["unknown_count"] >= 3 and aid:
+                        bal = self._slot_token_balance(
+                            info.get("symbol", self.symbol)
+                        )
+                        if bal >= 0 and bal <= info.get("qty", 0) * 0.1:
+                            self.logger.info(
+                                f"TD PENDING BALANCE CONFIRM | slot={slot_id} "
+                                f"链上余额 {bal:.6g} ≤ 残留 {info['qty'] * 0.1:.6g} → 卖出成交"
+                            )
+                            status = "SUCCESS"
+                if status == "SUCCESS":
+                    bm = self._batch_managers.get(
+                        info.get("symbol", self.symbol)
+                    ) or self.batch_manager
+                    bm.close_lot(slot_id)
+                    bm.save()
+                    self.logger.info(
+                        f"TD BATCH EXIT (确认) | slot={slot_id} "
+                        f"qty={info['qty']} {info.get('exit_reason', '')}"
                     )
                     self._record(
-                        "LONG",
-                        f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
+                        "EXIT",
+                        f"slot={slot_id} 链上确认平仓 qty={info['qty']:.6g}",
                         slot=slot_id, qty=info.get("qty", 0),
                         price=info.get("price", 0),
-                        direction="buy", status="ok",
+                        direction="sell", status="ok",
                         tx_hash=info.get("tx_hash", ""),
                         chain=info.get("chain", ""),
                     )
-                del self._pending_buys[slot_id]
-            elif status in ("ERROR", "CANCELLED"):
+                    del self._pending_sells[slot_id]
+                elif status in ("ERROR", "CANCELLED"):
+                    self.logger.warning(
+                        f"TD BATCH EXIT FAIL | slot={slot_id} 链上确认失败 {status}"
+                    )
+                    self._record(
+                        "EXIT_FAIL",
+                        f"slot={slot_id} 链上确认失败 {status}",
+                        slot=slot_id, qty=info.get("qty", 0),
+                        price=info.get("price", 0),
+                        direction="sell", status="fail",
+                        tx_hash=info.get("tx_hash", ""),
+                        chain=info.get("chain", ""),
+                    )
+                    del self._pending_sells[slot_id]
+                # PENDING/UNKNOWN → 继续等待
+            finally:
+                if aid and home and home != aid:
+                    try:
+                        self._wallet_switch(home)
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.warning(f"TD RESTORE ERR | {exc}")
+        for slot_id in list(self._pending_buys):
+            info = self._pending_buys[slot_id]
+            aid = info.get("account_id", "")
+            if aid and not self._wallet_switch(aid):
                 self.logger.warning(
-                    f"TD BATCH BUY FAIL | slot={slot_id} 链上确认失败 {status}"
+                    f"TD PENDING CHECK SKIP | slot={slot_id} switch 到账户失败"
                 )
-                self._record(
-                    "BUY_FAIL",
-                    f"slot={slot_id} 链上确认失败 {status}",
-                    slot=slot_id, qty=info.get("qty", 0),
-                    price=info.get("price", 0),
-                    direction="buy", status="fail",
-                    tx_hash=info.get("tx_hash", ""),
-                    chain=info.get("chain", ""),
+                continue
+            try:
+                st = swap_status(
+                    info.get("tx_hash", ""), info.get("order_id", ""),
+                    info.get("chain", "solana"),
                 )
-                del self._pending_buys[slot_id]
-            # PENDING/UNKNOWN → 继续等待
+                status = st.get("tx_status") if st else "UNKNOWN"
+                if status != "SUCCESS":
+                    self.logger.info(
+                        f"TD PENDING CHECK | slot={slot_id} 账户={aid[:8] or 'home'} "
+                        f"{info.get('chain')} status={status}"
+                    )
+                # 余额核对兜底（2026-08-11）：占位 hash 或 OKX 状态回填不可靠时，
+                # 连续 3 轮查不到 → 直接查 slot 账户链上余额裁决（链上真相）。
+                if status not in ("SUCCESS", "ERROR", "CANCELLED"):
+                    info["unknown_count"] = info.get("unknown_count", 0) + 1
+                    if info["unknown_count"] >= 3 and aid:
+                        bal = self._slot_token_balance(
+                            info.get("symbol", self.symbol)
+                        )
+                        if bal >= info.get("qty", 0) * 0.9:
+                            self.logger.info(
+                                f"TD PENDING BALANCE CONFIRM | slot={slot_id} "
+                                f"链上余额 {bal:.6g} ≥ 预期 {info['qty']:.6g} → 成交"
+                            )
+                            status = "SUCCESS"
+                        elif bal >= 0:
+                            self.logger.info(
+                                f"TD PENDING BALANCE | slot={slot_id} "
+                                f"链上余额 {bal:.6g}（预期 {info['qty']:.6g}）未确认"
+                            )
+                if status == "SUCCESS":
+                    bm = self._batch_managers.get(
+                        info.get("symbol", self.symbol)
+                    ) or self.batch_manager
+                    if bm.open_lot(
+                        slot=slot_id, qty=info["qty"], entry_price=info["price"],
+                    ):
+                        bm.save()
+                        self.logger.info(
+                            f"TD BATCH LONG (确认) | slot={slot_id} "
+                            f"qty={info['qty']} price={info['price']:.2f}"
+                        )
+                        self._record(
+                            "LONG",
+                            f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
+                            slot=slot_id, qty=info.get("qty", 0),
+                            price=info.get("price", 0),
+                            direction="buy", status="ok",
+                            tx_hash=info.get("tx_hash", ""),
+                            chain=info.get("chain", ""),
+                        )
+                    del self._pending_buys[slot_id]
+                elif status in ("ERROR", "CANCELLED"):
+                    self.logger.warning(
+                        f"TD BATCH BUY FAIL | slot={slot_id} 链上确认失败 {status}"
+                    )
+                    self._record(
+                        "BUY_FAIL",
+                        f"slot={slot_id} 链上确认失败 {status}",
+                        slot=slot_id, qty=info.get("qty", 0),
+                        price=info.get("price", 0),
+                        direction="buy", status="fail",
+                        tx_hash=info.get("tx_hash", ""),
+                        chain=info.get("chain", ""),
+                    )
+                    del self._pending_buys[slot_id]
+                # PENDING/UNKNOWN → 继续等待
+            finally:
+                if aid and home and home != aid:
+                    try:
+                        self._wallet_switch(home)
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.warning(f"TD RESTORE ERR | {exc}")
 
     # ── 真分账 v1.1：子钱包 switch / 资金检查 / 还原 ────────────────
 

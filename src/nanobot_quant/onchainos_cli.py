@@ -803,26 +803,59 @@ def swap_status(
     """
     if not tx_hash and not order_id:
         return None
-    args = ["wallet", "history"]
-    if tx_hash:
-        args += ["--tx-hash", tx_hash]
-    else:
-        args += ["--order-id", order_id]
-    args += ["--chain", chain]
-    result = _run(*args, timeout=15)
-    if result is None or result.get("_exit_code") != 0:
-        return {"tx_status": "UNKNOWN", "raw": result}
-    payload = result.get("_stdout_parsed") or {}
-    data = payload.get("data") if isinstance(payload, dict) else payload
-    status = None
-    if isinstance(data, dict):
-        status = data.get("txStatus")
-    elif isinstance(data, list) and data:
-        status = data[0].get("txStatus") if isinstance(data[0], dict) else None
-    if status is None:
-        return {"tx_status": "UNKNOWN", "raw": payload}
-    s = str(status)
-    return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
+
+    def _query(flag: str, value: str) -> Optional[dict]:
+        args = ["wallet", "history", flag, value, "--chain", chain]
+        result = _run(*args, timeout=15)
+        if result is None:
+            print(
+                f"[DIAG] swap_status {flag} 无返回（CLI 调用异常/超时）",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        # 2026-08-11 根因修复：_run 成功路径返回原始 JSON（{"ok":true,...}），
+        # 没有 _exit_code 键；只有失败路径（returncode!=0）才返回带 _exit_code
+        # 的 dict。此前用 get("_exit_code") != 0 判断，None != 0 → 成功响应被
+        # 误判为失败 → detail 查询永远 UNKNOWN（09:30 事件根因）。
+        if isinstance(result, dict) and result.get("_exit_code") not in (None, 0):
+            print(
+                f"[DIAG] swap_status {flag} 失败 exit={result.get('_exit_code')} "
+                f"stdout={(result.get('_stdout') or '')[:600]!r} "
+                f"stderr={(result.get('_stderr') or '')[:300]!r}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        # 成功路径：原始 JSON（无 _stdout_parsed）；失败兼容：_stdout_parsed
+        payload = (
+            result.get("_stdout_parsed")
+            if isinstance(result, dict) and "_stdout_parsed" in result
+            else result
+        )
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        status = None
+        if isinstance(data, dict):
+            status = data.get("txStatus")
+        elif isinstance(data, list) and data:
+            status = data[0].get("txStatus") if isinstance(data[0], dict) else None
+        if status is None:
+            print(
+                f"[DIAG] swap_status {flag} 空数据 payload={str(payload)[:600]}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        s = str(status)
+        print(
+            f"[DIAG] swap_status {flag} → txStatus={s} payload={str(payload)[:400]}",
+            file=sys.stderr, flush=True,
+        )
+        return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
+
+    # 2026-08-11 双路径：tx_hash 非空先查 tx-hash（占位 UUID 查不到 →
+    # UNKNOWN/None 时 fallback 官方 order-id 路径）；tx_hash 为空直接查 order-id。
+    st = _query("--tx-hash", tx_hash) if tx_hash else None
+    if st is None and order_id:
+        st = _query("--order-id", order_id)
+    return st if st is not None else {"tx_status": "UNKNOWN", "raw": None}
 
 
 def confirm_swap_onchain(

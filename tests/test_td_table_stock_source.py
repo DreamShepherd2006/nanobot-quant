@@ -12,6 +12,7 @@ import pytest
 
 from nanobot_quant.td_table_handlers import (
     _fetch_stock_kline,
+    _fetch_stock_kline_yahoo,
     _render_history,
     _render_snapshot,
     _stock_secid,
@@ -127,8 +128,26 @@ def test_fetch_stock_kline_yahoo_fallback(monkeypatch):
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
     assert str(df.index.tz) == "America/New_York"  # yfinance exchange tz kept
     assert len(df) == 60
-    assert calls["interval"] == "1d"
-    assert calls["ticker"] == "601127.SS"
+
+
+def test_fetch_stock_kline_yahoo_minute_end_extends(monkeypatch):
+    """分钟周期 start/end 同一天时 end 必须 +1 天，否则 yfinance 区间为空
+    （2026-08-11 AAPL 5m 60 根失败根因：start=end=今天 → 空区间 → 无数据）。"""
+    import nanobot_quant.td_table_handlers as m
+
+    calls = {}
+
+    def fake_download(ticker, **kw):
+        calls.update(kw)
+        return _stock_df(n=10, tz=True)
+
+    monkeypatch.setattr(m.yf, "download", fake_download)
+    start = pd.Timestamp("2026-08-11 11:59")
+    end = pd.Timestamp("2026-08-11 21:59")
+    df = _fetch_stock_kline_yahoo("AAPL", bar="5m", limit=60, start=start, end=end)
+    assert calls["start"] == "2026-08-11"
+    assert calls["end"] == "2026-08-12"  # +1 天确保区间非空
+    assert calls["interval"] == "5m"
 
 
 def test_fetch_stock_kline_both_fail(monkeypatch):

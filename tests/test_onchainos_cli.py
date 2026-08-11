@@ -576,6 +576,21 @@ def test_swap_status_uses_wallet_history(monkeypatch):
     assert "--tx-hash" in captured["args"] and "abc123" in captured["args"]
 
 
+def test_swap_status_success_raw_json(monkeypatch):
+    """根因回归：_run 成功路径返回原始 JSON（无 _exit_code 键）——
+    此前 get('_exit_code') != 0 误判成功为失败（09:30 EXIT_PENDING 根因）。"""
+    captured = {}
+
+    def fake_run(*args, **_kw):
+        captured["args"] = args
+        return {"ok": True, "data": [{"txHash": "3n7X11Rr", "txStatus": "SUCCESS"}]}
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    st = onchainos_cli.swap_status(tx_hash="3n7X11Rr")
+    assert st["tx_status"] == "SUCCESS"
+    assert captured["args"][1] == "history"
+
+
 def test_swap_status_order_id_fallback(monkeypatch):
     """tx_hash 为空（Gas Station 先返回 orderId）→ fallback --order-id。"""
     captured = {}
