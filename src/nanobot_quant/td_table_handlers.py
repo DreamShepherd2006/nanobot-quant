@@ -192,8 +192,11 @@ def _fetch_stock_kline_yahoo(
         start = now - timedelta(seconds=span)
         end = now
     # yfinance `end` is exclusive; extend by one day so the requested end
-    # date is included.
-    end = end + timedelta(days=1) if bar in ("1D", "1W") else end
+    # date is included. 2026-08-11 修复：start/end 以日期字符串（%Y-%m-%d）
+    # 传给 yfinance（时分丢失），分钟周期（1m/5m/15m/1H）在 start/end 落
+    # 同一天时区间为空（如 21:59 查 AAPL 5m 60 根 → start=end=今天 →
+    # "yfinance 无数据"）。统一 +1 天，多余行由 tail(limit) 截断。
+    end = end + timedelta(days=1)
     df = yf.download(
         _yf_symbol(ticker),
         start=start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else start,
