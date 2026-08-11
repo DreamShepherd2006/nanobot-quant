@@ -211,6 +211,9 @@ class OnchainOSBroker(Broker):
             order.set_error(self._format_err("Swap 链上确认失败", data))
             return order
         if confirmed == "pending":
+            # 真实 lumibot v4.5.78 的 Order.custom_params 默认为 None
+            #（测试 stub 曾为 {}，stale stub 掩盖了此崩溃——2026-08-11）
+            order.custom_params = order.custom_params or {}
             order.custom_params["onchain_pending"] = {
                 "tx_hash": tx_hash,
                 "order_id": order_id,

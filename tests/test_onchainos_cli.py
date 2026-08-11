@@ -372,6 +372,74 @@ def test_broker_submit_uses_entry_chain(monkeypatch):
     result = broker._submit_order(order)
     assert result is not None
     assert captured["chain"] == "bnb"
+
+
+def test_broker_submit_pending_with_none_custom_params(monkeypatch):
+    """Regression: 真实 lumibot v4.5.78 Order.custom_params 默认为 None，
+    pending 路径写 custom_params 不得崩溃（曾 TypeError: 'NoneType' object
+    does not support item assignment——测试 stub 用 {} 掩盖了此 bug）。"""
+    from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+
+    captured = {}
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.resolve_token_address",
+        lambda symbol, tokens_json=None: "0xbe000000000000000000000000000000000003e1",
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.swap_execute",
+        lambda from_addr, to_addr, from_amount, slippage, chain="solana",
+               wallet=None: (
+            captured.update(chain=chain)
+            or {"ok": True, "data": {
+                "swapTxHash": "0xtx", "swapOrderId": "oid1",
+                "status": "submitted",
+            }}
+        ),
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.get_active_wallet_address",
+        lambda chain: "0x3ec58f7cf1daf99584281c62fb634ba5a254e8c6",
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.get_token_price",
+        lambda symbol, tokens_json=None, chain="solana": 137.08,
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.brokers.onchainos_broker.confirm_swap_onchain",
+        lambda tx_hash, order_id, chain: "pending",
+    )
+
+    broker = OnchainOSBroker(
+        tokens_json=[{"symbol": "SPCXB", "chain": "bnb",
+                      "address": "0xbe000000000000000000000000000000000003e1"}],
+        slippage="0.01", sol_buffer_pct=0.05,
+    )
+    from types import SimpleNamespace
+
+    class _Order(SimpleNamespace):
+        def set_error(self, *a, **k):
+            pass
+
+        def set_identifier(self, *a, **k):
+            pass
+
+        def set_filled(self, *a, **k):
+            pass
+
+    order = _Order(
+        asset=SimpleNamespace(symbol="SPCXB"),
+        side="sell",
+        quantity=1.0,
+        quote=SimpleNamespace(symbol="USDC"),
+        custom_params=None,  # 真实 lumibot 默认 None
+    )
+    result = broker._submit_order(order)
+    assert result is not None
+    assert result.custom_params is not None
+    assert result.custom_params["onchain_pending"] == {
+        "tx_hash": "0xtx", "order_id": "oid1", "chain": "bnb",
+    }
+    assert captured["chain"] == "bnb"
 def test_round_readable_amount(monkeypatch):
     """swap 提交前 readable-amount 舍入到 8 位小数。
 

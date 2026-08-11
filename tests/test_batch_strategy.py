@@ -45,12 +45,14 @@ def _sell_closes() -> list[float]:
 
 def _mock_order(identifier="mock-id", quantity=1.0, filled=True, error=None):
     """lumibot Order 最小 stub（2026-08-11：is_filled 镜像真实 v4.5.78
-    签名——策略 _sell_lot/_evaluate_symbol 现以 is_filled() 判断链上确认）。"""
+    签名——策略 _sell_lot/_evaluate_symbol 现以 is_filled() 判断链上确认；
+    custom_params 默认为 None 镜像真实 v4.5.78，防止 stale stub 掩盖
+    'NoneType' 崩溃）。"""
     return type("Order", (), {
         "identifier": identifier,
         "quantity": quantity,
         "error": error,
-        "custom_params": {},
+        "custom_params": None,
         "is_filled": lambda self=None: filled,
         "set_error": lambda self, e: setattr(self, "error", e),
     })()

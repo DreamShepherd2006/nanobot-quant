@@ -388,7 +388,7 @@ class TdSequentialStrategy(Strategy):
                         break
                     # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
                     # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
-                    pend = order.custom_params.get("onchain_pending") or {}
+                    pend = (order.custom_params or {}).get("onchain_pending") or {}
                     self._pending_buys[slot["slot"]] = {
                         "tx_hash": pend.get("tx_hash", ""),
                         "order_id": pend.get("order_id", ""),
@@ -662,7 +662,7 @@ class TdSequentialStrategy(Strategy):
                 return
             # 已提交未确认（PENDING）→ 台账保持 open + pending 记录，
             # 后续轮询补确认（SUCCESS 补释放；失败则保持 open 可重试）
-            pend = order.custom_params.get("onchain_pending") or {}
+            pend = (order.custom_params or {}).get("onchain_pending") or {}
             self._pending_sells[slot["slot"]] = {
                 "tx_hash": pend.get("tx_hash", ""),
                 "order_id": pend.get("order_id", ""),
