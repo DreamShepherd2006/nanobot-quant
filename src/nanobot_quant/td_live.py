@@ -89,6 +89,7 @@ class _TdLiveRunner:
                 # 固定 K 线窗口（方案 B）：每轮拉最近 N 根，不累积增长
                 "min_history": int(params.get("td_bars", 120) or 120),
                 "tokens_json": tokens,
+                "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
             },
         )
         # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
@@ -362,6 +363,11 @@ class _TdLiveRunner:
             try:
                 # 启动对账：链上天然持仓导入各标的台账（min_hold 扣减）
                 self._reconcile_all()
+                try:
+                    from nanobot_quant import td_live_state
+                    td_live_state.set_loop(True)
+                except Exception:  # noqa: BLE001
+                    pass
                 self._executor.run()  # Thread.run → StrategyExecutor 主循环
             finally:
                 sys.stdout = _saved_stdout
@@ -372,6 +378,12 @@ class _TdLiveRunner:
                 f"[DIAG] td_live: executor stopped with error: {exc}",
                 file=sys.stderr, flush=True,
             )
+        finally:
+            try:
+                from nanobot_quant import td_live_state
+                td_live_state.set_loop(False)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _reconcile_all(self) -> None:
         """对全部注入 batch_manager 的标的做启动对账（天然持仓导入）。"""

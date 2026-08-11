@@ -478,6 +478,8 @@ def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, sou
         % (" selected" if source == "onchainos" else "", " selected" if source == "stock" else "")
     )
     placeholder = "NVDA / 601127" if source == "stock" else "SOL / BTC"
+    if tab == "live":
+        return ""  # 实时监控无表单，自动轮询
     if tab == "history":
         return (
             '<form class="inline" method="get" action="/config/td-table">'
@@ -528,8 +530,13 @@ def td_table_page(request: Request) -> HTMLResponse:
 
     banner = ""
     content = ""
+    banner = ""
+    content = ""
+    frag = q.get("frag") == "1"
     if tab == "history":
         content = _render_history(ticker, bar, start, end, strategy_name, params, setup, source)
+    elif tab == "live":
+        content = _render_live(with_script=not frag)
     else:
         content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source)
 
@@ -537,10 +544,16 @@ def td_table_page(request: Request) -> HTMLResponse:
         banner = content[0]
         content = ""
 
+    if frag:
+        # 「实时监控」tab 轮询：只返回内容片段（含脚本会重复注册 setInterval）
+        return HTMLResponse(content)
+
     page = _load_template()
     page = page.replace("{strategy_label}", _esc(strategy_label))
-    page = page.replace("{snap_active}", "active" if tab != "history" else "")
+    page = page.replace("{snap_active}", "active" if tab not in ("history", "live") else "")
     page = page.replace("{hist_active}", "active" if tab == "history" else "")
+    page = page.replace("{live_active}", "active" if tab == "live" else "")
+    page = page.replace("{refresh_s}", str(_live_refresh_s()))
     page = page.replace("{ticker}", _esc(ticker))
     page = page.replace("{bar}", _esc(bar))
     page = page.replace("{limit}", str(limit))
@@ -550,6 +563,140 @@ def td_table_page(request: Request) -> HTMLResponse:
     page = page.replace("{banner}", banner)
     page = page.replace("{content}", content)
     return HTMLResponse(page)
+
+
+def _live_refresh_s() -> int:
+    """「实时监控」自动刷新间隔（exec_params.td_ui_refresh_s，默认 10s）。"""
+    try:
+        from nanobot_quant.exec_params import load_exec_params
+        return int(load_exec_params().get("td_ui_refresh_s", 10) or 10)
+    except Exception:  # noqa: BLE001
+        return 10
+
+
+def _live_cell(v: int, threshold: int) -> str:
+    """setup/cd 进度单元格：临近阈值橙色、达到/超过绿色高亮。"""
+    try:
+        v = int(v or 0)
+    except (TypeError, ValueError):
+        v = 0
+    if v >= threshold:
+        return f'<b style="color:#1b7f3d">{v}</b>'
+    if v >= max(threshold - 2, 1):
+        return f'<b style="color:#e8890c">{v}</b>'
+    return str(v)
+
+
+def _render_live(with_script: bool = True) -> str:
+    """「实时监控」tab：TD live 每轮状态 + 最近信号事件。
+
+    2026-08-11 方案 A：内存共享——TD live 循环（gatekeeper 进程内
+    StrategyExecutor）每轮写 LIVE_STATE，本 handler 同进程直接读取；
+    信号事件从事件文件（append-only JSONL）读最近 20 条。页面 JS 按
+    exec_params.td_ui_refresh_s 轮询 `?tab=live&frag=1` 刷新内容片段。
+    """
+    try:
+        from nanobot_quant import td_live_state
+        st = td_live_state.get_state()
+        events = td_live_state.load_events(20)
+    except Exception:  # noqa: BLE001
+        st = {"running": False, "symbols": {}, "updated_at": None, "next_iteration": None}
+        events = []
+
+    run_txt = "🟢 运行中" if st.get("running") else "⏹ 已停止"
+    upd = _esc(str(st.get("updated_at") or "—"))
+    nxt = _esc(str(st.get("next_iteration") or "—"))
+
+    rows = ""
+    for sym, d in sorted(st.get("symbols", {}).items()):
+        sb = d.get("setup_buy", 0)
+        ss = d.get("setup_sell", 0)
+        cdb = d.get("cd_buy", 0)
+        cds = d.get("cd_sell", 0)
+        score = d.get("score", 0)
+        price = d.get("price", 0)
+        signal = _esc(str(d.get("signal", "HOLD")))
+        note = _esc(str(d.get("note", "")))
+        if note:
+            note = f'<span class="muted"> · {note}</span>'
+        sig_cls = {
+            "LONG": "sig buy", "EXIT": "sig sell", "BUY_FAIL": "sig sell",
+            "EXIT_FAIL": "sig sell", "SKIP": "sig hold",
+            "EXIT_SKIP": "sig hold", "EXIT_SHRINK": "sig sell",
+        }.get(signal, "sig hold")
+        rows += (
+            f'<tr><td><b>{_esc(sym)}</b></td>'
+            f'<td>{_live_cell(sb, 9)}</td>'
+            f'<td>{_live_cell(ss, 9)}</td>'
+            f'<td>{_live_cell(cdb, 13)}</td>'
+            f'<td>{_live_cell(cds, 13)}</td>'
+            f'<td class="num">{float(score or 0):.1f}</td>'
+            f'<td class="num">{float(price or 0):.4f}</td>'
+            f'<td class="sig {sig_cls}">{signal}</td>'
+            f'<td class="time">{_esc(str(d.get("time", "")))}</td>'
+            f'<td>{note}</td></tr>'
+        )
+    if not rows:
+        rows = '<tr><td colspan="10" class="muted" style="text-align:left">暂无数据——TD live 循环未运行或尚未产生第一轮结果</td></tr>'
+
+    ev_rows = ""
+    for e in events:
+        ev_cls = ""
+        if e.get("event") in ("LONG",):
+            ev_cls = ' style="color:#1b7f3d"'
+        elif e.get("event") in ("EXIT",):
+            ev_cls = ' style="color:#c62828"'
+        elif e.get("event") in ("BUY_FAIL", "EXIT_FAIL"):
+            ev_cls = ' style="color:#b3261e"'
+        ev_rows += (
+            f'<tr><td class="time">{_esc(str(e.get("ts", "")))}</td>'
+            f'<td><b>{_esc(str(e.get("symbol", "")))}</b></td>'
+            f'<td{ev_cls}><b>{_esc(str(e.get("event", "")))}</b></td>'
+            f'<td class="num">{float(e.get("price", 0) or 0):.4f}</td>'
+            f'<td class="num">{float(e.get("score", 0) or 0):.1f}</td>'
+            f'<td>{_esc(str(e.get("note", "")))}</td></tr>'
+        )
+    if not ev_rows:
+        ev_rows = '<tr><td colspan="6" class="muted" style="text-align:left">暂无信号事件</td></tr>'
+
+    html = (
+        '<div class="status">'
+        f'<span>循环：<b>{run_txt}</b></span>'
+        f'<span>下一轮：{nxt}</span>'
+        f'<span>更新时间：{upd}</span>'
+        f'<span class="muted">自动刷新 {_live_refresh_s()}s · 颜色：橙=临近信号 · 绿=达到/超过阈值</span>'
+        '</div>'
+        '<div id="live-wrap">'
+        '<table>'
+        '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
+        '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
+        f'{rows}'
+        '</table>'
+        '<h4 style="margin:18px 0 8px">📜 信号历史（最近 20 条）</h4>'
+        '<table>'
+        '<tr><th>时间</th><th>标的</th><th>事件</th><th>价格</th><th>Score</th><th>备注</th></tr>'
+        f'{ev_rows}'
+        '</table>'
+        '</div>'
+    )
+    if with_script:
+        html += (
+            '<script>'
+            '(function(){'
+            '  var secs = ' + str(_live_refresh_s()) + ';'
+            '  function poll(){'
+            "    fetch('/config/td-table?tab=live&frag=1')"
+            '      .then(function(r){ return r.text(); })'
+            '      .then(function(html){'
+            "        var el = document.getElementById('live-wrap');"
+            "        if (el && html) el.innerHTML = html;"
+            '      }).catch(function(){});'
+            '  }'
+            '  setInterval(poll, secs * 1000);'
+            '})();'
+            '</script>'
+        )
+    return html
 
 
 def _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source="onchainos"):

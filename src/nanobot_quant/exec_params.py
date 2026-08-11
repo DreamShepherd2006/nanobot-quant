@@ -60,6 +60,8 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "take_profit_pct": 0.0,     # 止盈线（%）；0=关闭（纯 TD SELL + 止损）
     "td_start_slot": 1,          # int 1-50 — BUY 扫描起点（完整循环 + 起点偏移）
     "min_account_value": 0,    # float ≥0 — BUY 门槛：目标 slot 子钱包总资产低于该值则跳过（0=关闭）
+    # ── ⑤ UI ───────────────────────────────────────────────────────────
+    "td_ui_refresh_s": 10,    # int 3-300 — /config/td-table 实时监控 tab 自动刷新间隔（秒）
 }
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
@@ -137,6 +139,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "min_account_value": {
         "group": "batch", "min": 0, "max": 1000000, "step": 10, "std": 0,
         "label": "子账户最小资金(USD)", "hint": "BUY 时目标 slot 子钱包总资产低于该值则跳过该槽位（TD SLOT SKIP min_account_value），避免小资金碎仓；0=关闭。SELL/止损/止盈平仓不受限（平仓永远允许）",
+    },
+    # ── ⑤ UI ────────────────────────────────────────────────────────────
+    "td_ui_refresh_s": {
+        "group": "td", "min": 3, "max": 300, "step": 1, "std": 10, "integer": True,
+        "label": "监控刷新(秒)", "hint": "/config/td-table「实时监控」tab 自动刷新间隔",
     },
 }
 

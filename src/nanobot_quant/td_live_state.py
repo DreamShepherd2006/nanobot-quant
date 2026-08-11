@@ -1,0 +1,119 @@
+"""TD live 实时状态共享（内存 dict + 事件文件持久化）。
+
+TD live 循环（gatekeeper 进程内 StrategyExecutor）每轮把各标的的
+TD Sequential 计算结果写入内存 LIVE_STATE；/config/td-table 的
+「实时监控」tab（同进程）直接读取渲染，页面 JS 按 exec_params
+``td_ui_refresh_s`` 轮询自动刷新（2026-08-11 方案 A：内存共享）。
+
+有信号事件（LONG/SELL/EXIT/SKIP/FAIL）时追加到事件文件（append-only
+JSONL，与 exec_params.json 同一 credentials 目录），重启保留。
+事件写入仅在 TD live 模式启用（策略 ``live_mode=True``）——回测/
+纸交易进程不写文件，避免污染生产事件历史。
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+#: 内存共享状态（唯一写入方：TD live 策略循环；唯一读取方：td-table live tab）
+LIVE_STATE: dict = {
+    "running": False,
+    "next_iteration": None,
+    "symbols": {},
+    "updated_at": None,
+}
+
+_lock = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def events_path() -> Path:
+    """事件文件路径（与 exec_params.json 同一 credentials 目录）。"""
+    for root in ("/data", "/mnt/workspace"):
+        d = Path(root) / "legion" / "credentials"
+        try:
+            if d.exists():
+                return d / "td_live_events.jsonl"
+        except OSError:
+            continue
+    return Path.home() / ".td_live_events.jsonl"
+
+
+def update_symbol(symbol: str, data: dict) -> None:
+    """每轮更新某标的状态（TD 策略 _evaluate_symbol 计算后调用）。"""
+    with _lock:
+        LIVE_STATE["symbols"][symbol] = {
+            "setup_buy": data.get("setup_buy", 0) or 0,
+            "setup_sell": data.get("setup_sell", 0) or 0,
+            "cd_buy": data.get("cd_buy", 0) or 0,
+            "cd_sell": data.get("cd_sell", 0) or 0,
+            "score": data.get("score", 0) or 0,
+            "price": data.get("price", 0) or 0,
+            "signal": data.get("signal", "HOLD"),
+            "note": data.get("note", ""),
+            "time": data.get("time", ""),
+            "updated_at": _now_iso(),
+        }
+        LIVE_STATE["updated_at"] = LIVE_STATE["symbols"][symbol]["updated_at"]
+
+
+def set_loop(running: bool, next_iteration: str | None = None) -> None:
+    """更新循环运行状态（TD live 线程启动/退出时调用）。"""
+    with _lock:
+        LIVE_STATE["running"] = bool(running)
+        LIVE_STATE["next_iteration"] = next_iteration
+        LIVE_STATE["updated_at"] = _now_iso()
+
+
+def get_state() -> dict:
+    """供 td-table「实时监控」tab 读取（同进程，无 IO）。"""
+    with _lock:
+        return {
+            "running": bool(LIVE_STATE["running"]),
+            "next_iteration": LIVE_STATE["next_iteration"],
+            "updated_at": LIVE_STATE["updated_at"],
+            "symbols": dict(LIVE_STATE["symbols"]),
+        }
+
+
+def append_event(event: dict) -> None:
+    """追加信号事件到文件（LONG/SELL/EXIT/SKIP/FAIL）。"""
+    row = {
+        "ts": _now_iso(),
+        **{k: v for k, v in event.items() if k != "ts"},
+    }
+    try:
+        path = events_path()
+        with _lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # 事件写入失败不阻塞交易循环
+
+
+def load_events(n: int = 20) -> list[dict]:
+    """读最近 n 条事件（文件尾部分行读取，供 live tab 展示）。"""
+    path = events_path()
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    events: list[dict] = []
+    for line in lines[-n:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue
+    return events
