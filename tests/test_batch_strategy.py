@@ -43,6 +43,19 @@ def _sell_closes() -> list[float]:
     return _oscillate() + [100.0 + i for i in range(1, 14)]
 
 
+def _mock_order(identifier="mock-id", quantity=1.0, filled=True, error=None):
+    """lumibot Order 最小 stub（2026-08-11：is_filled 镜像真实 v4.5.78
+    签名——策略 _sell_lot/_evaluate_symbol 现以 is_filled() 判断链上确认）。"""
+    return type("Order", (), {
+        "identifier": identifier,
+        "quantity": quantity,
+        "error": error,
+        "custom_params": {},
+        "is_filled": lambda self=None: filled,
+        "set_error": lambda self, e: setattr(self, "error", e),
+    })()
+
+
 def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrategy:
     # 测试 bars 54 根 < 生产默认 120 窗口 → 显式收窄到 50（旧行为）
     params.setdefault("min_history", 50)
@@ -59,7 +72,7 @@ def _make_batch_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrate
 
     def _create_order(asset, quantity, action):
         captured["order"] = (asset, quantity, action)
-        return type("Order", (), {"identifier": "mock-id", "quantity": quantity})()
+        return _mock_order(quantity=quantity)
 
     s.create_order = _create_order
     s.submit_order = lambda order: captured.setdefault("submitted", order)
@@ -324,10 +337,9 @@ def _make_pool_strategy(managers, bars_by_symbol, symbols, **params):
 
     def _create_order(asset, quantity, action):
         captured.setdefault("orders", []).append((asset, quantity, action))
-        return type("Order", (), {
-            "identifier": f"mock-{len(captured['orders'])}",
-            "quantity": quantity,
-        })()
+        return _mock_order(
+            identifier=f"mock-{len(captured['orders'])}", quantity=quantity,
+        )
 
     s.create_order = _create_order
     s.submit_order = lambda order: captured.setdefault("submitted", []).append(order)
@@ -674,3 +686,109 @@ def test_batch_sell_shrink_keeps_min_hold(tmp_path):
     assert abs(s._captured["order"][1] - 0.01) < 1e-9  # 0.02 − 0.01
     assert bm.slots[0]["status"] == "available"
 
+
+# ── 链上成交确认（2026-08-11）：pending 台账保持 open + 补确认 ───────
+
+def test_batch_sell_pending_keeps_slot_open(tmp_path):
+    """卖出提交但链上未确认（PENDING）→ 台账保持 open + _pending_sells 记录
+    （防“提交成功但链上未成交”的账实脱管，RENDER 3.06 实证）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s.submit_order = lambda order: _mock_order(
+        quantity=order.quantity, filled=False)
+    s.on_trading_iteration()
+    # 台账保持 open（未 close，防账实脱节）
+    open_slots = bm.open_slots()
+    assert len(open_slots) == 1
+    assert open_slots[0]["lot"]["qty"] == 5.0
+    # pending 记录（供下轮补确认）
+    assert 1 in s._pending_sells
+    assert s._pending_sells[1]["qty"] == 5.0
+
+
+def test_batch_buy_pending_does_not_open_lot(tmp_path):
+    """买入提交但链上未确认（PENDING）→ 不 open_lot + _pending_buys 记录。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s.submit_order = lambda order: _mock_order(
+        quantity=order.quantity, filled=False)
+    s.on_trading_iteration()
+    assert bm.open_slots() == []  # 未确认不建仓（防幽灵仓）
+    assert 1 in s._pending_buys
+
+
+def test_check_pending_sell_confirmed_releases(monkeypatch, tmp_path):
+    """_check_pending_confirmations：SELL pending 链上确认 SUCCESS → 补 close_lot。"""
+    from nanobot_quant import onchainos_cli
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    # 手动注入 pending（模拟上轮提交未确认）
+    s._pending_sells[1] = {
+        "tx_hash": "tx1", "order_id": "", "chain": "solana",
+        "qty": 5.0, "price": 66.0, "exit_reason": "setup_sell=9",
+    }
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: {"tx_status": "SUCCESS", "raw": {}})
+    s._check_pending_confirmations()
+    assert bm.open_slots() == []  # 补确认后释放
+    assert s._pending_sells == {}
+
+
+def test_check_pending_sell_failed_keeps_open(monkeypatch, tmp_path):
+    """_check_pending_confirmations：SELL pending 链上 ERROR → 台账保持 open
+    （下轮可重试卖出），清 pending。"""
+    from nanobot_quant import onchainos_cli
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._pending_sells[1] = {
+        "tx_hash": "tx1", "order_id": "", "chain": "solana",
+        "qty": 5.0, "price": 66.0, "exit_reason": "setup_sell=9",
+    }
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: {"tx_status": "ERROR", "raw": {}})
+    s._check_pending_confirmations()
+    assert len(bm.open_slots()) == 1  # 保持 open
+    assert s._pending_sells == {}  # 清 pending（不再防重，下轮可重试卖）
+
+
+def test_check_pending_sell_still_pending_keeps_waiting(monkeypatch, tmp_path):
+    """_check_pending_confirmations：SELL pending 仍 PENDING → 继续等待。"""
+    from nanobot_quant import onchainos_cli
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._pending_sells[1] = {
+        "tx_hash": "tx1", "order_id": "", "chain": "solana",
+        "qty": 5.0, "price": 66.0, "exit_reason": "setup_sell=9",
+    }
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: {"tx_status": "PENDING", "raw": {}})
+    s._check_pending_confirmations()
+    assert len(bm.open_slots()) == 1
+    assert 1 in s._pending_sells  # 继续等
+
+
+def test_check_pending_buy_confirmed_opens(monkeypatch, tmp_path):
+    """_check_pending_confirmations：BUY pending 链上 SUCCESS → 补 open_lot。"""
+    from nanobot_quant import onchainos_cli
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s._pending_buys[1] = {
+        "tx_hash": "tx1", "order_id": "", "chain": "solana",
+        "qty": 0.0372, "price": 66.0, "reason": "setup_buy=9",
+    }
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: {"tx_status": "SUCCESS", "raw": {}})
+    s._check_pending_confirmations()
+    open_slots = bm.open_slots()
+    assert len(open_slots) == 1
+    assert open_slots[0]["slot"] == 1
+    assert open_slots[0]["lot"]["qty"] == 0.0372
+    assert s._pending_buys == {}

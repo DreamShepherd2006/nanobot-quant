@@ -367,6 +367,7 @@ def test_broker_submit_uses_entry_chain(monkeypatch):
         side="sell",
         quantity=1.0,
         quote=SimpleNamespace(symbol="USDC"),
+        custom_params={},
     )
     result = broker._submit_order(order)
     assert result is not None
@@ -482,3 +483,114 @@ def test_swap_execute_non_decimals_error_no_retry(monkeypatch):
         amount="0.0205387903892588",
     )
     assert len(calls) == 1
+
+
+# ── 链上成交确认（2026-08-11，官方 wallet history 机制）────────────
+
+def test_swap_status_uses_wallet_history(monkeypatch):
+    """swap_status 调官方 `wallet history --tx-hash` 命令并解析 txStatus。"""
+    captured = {}
+
+    def fake_run(*args, **_kw):
+        captured["args"] = args
+        return {
+            "_exit_code": 0,
+            "_stdout": '{"ok":true,"data":{"txStatus":"SUCCESS","txHash":"abc"}}',
+            "_stdout_parsed": {"ok": True, "data": {"txStatus": "SUCCESS", "txHash": "abc"}},
+            "_stderr": "", "_stderr_parsed": None,
+        }
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    st = onchainos_cli.swap_status(tx_hash="abc123")
+    assert st["tx_status"] == "SUCCESS"
+    assert captured["args"][0] == "wallet"
+    assert captured["args"][1] == "history"
+    assert "--tx-hash" in captured["args"] and "abc123" in captured["args"]
+
+
+def test_swap_status_order_id_fallback(monkeypatch):
+    """tx_hash 为空（Gas Station 先返回 orderId）→ fallback --order-id。"""
+    captured = {}
+
+    def fake_run(*args, **_kw):
+        captured["args"] = args
+        return {
+            "_exit_code": 0,
+            "_stdout": '{"ok":true,"data":{"txStatus":"PENDING"}}',
+            "_stdout_parsed": {"ok": True, "data": {"txStatus": "PENDING"}},
+            "_stderr": "", "_stderr_parsed": None,
+        }
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    st = onchainos_cli.swap_status(order_id="ord-1", chain="bnb")
+    assert st["tx_status"] == "PENDING"
+    assert "--order-id" in captured["args"]
+    assert "--chain" in captured["args"] and "bnb" in captured["args"]
+
+
+def test_swap_status_numeric_mapping(monkeypatch):
+    """数值 txStatus 映射：1/2=PENDING 3=ERROR 4=SUCCESS 6=CANCELLED。"""
+    for num, expected in [
+        ("1", "PENDING"), ("2", "PENDING"), ("3", "ERROR"),
+        ("4", "SUCCESS"), ("6", "CANCELLED"),
+    ]:
+        def fake_run(*_a, **_k):
+            return {
+                "_exit_code": 0,
+                "_stdout": f'{{"ok":true,"data":{{"txStatus":"{num}"}}}}',
+                "_stdout_parsed": {"ok": True, "data": {"txStatus": num}},
+                "_stderr": "", "_stderr_parsed": None,
+            }
+        monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+        st = onchainos_cli.swap_status(tx_hash="abc")
+        assert st["tx_status"] == expected, f"num={num}"
+
+
+def test_swap_status_cli_error_unknown(monkeypatch):
+    """CLI 查询失败 → UNKNOWN（保守：不当作成交）。"""
+    monkeypatch.setattr(
+        onchainos_cli, "_run",
+        lambda *_a, **_k: {"_exit_code": 1, "_stdout": "", "_stderr": "err"})
+    st = onchainos_cli.swap_status(tx_hash="abc")
+    assert st["tx_status"] == "UNKNOWN"
+
+
+def test_confirm_swap_onchain_success_first_try(monkeypatch):
+    """首次查询 SUCCESS → 直接 success，无重试。"""
+    calls = []
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: calls.append(1) or {"tx_status": "SUCCESS"})
+    assert onchainos_cli.confirm_swap_onchain("tx", "", "solana") == "success"
+    assert len(calls) == 1
+
+
+def test_confirm_swap_onchain_error_no_retry(monkeypatch):
+    """ERROR → error（不重试，链上已明确失败）。"""
+    calls = []
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: calls.append(1) or {"tx_status": "ERROR"})
+    assert onchainos_cli.confirm_swap_onchain("tx", "", "solana") == "error"
+    assert len(calls) == 1
+
+
+def test_confirm_swap_onchain_pending_retries_then_pending(monkeypatch):
+    """持续 PENDING → 重试 retries 次后返回 pending（由策略层补确认）。"""
+    calls = []
+    monkeypatch.setattr(
+        onchainos_cli, "swap_status",
+        lambda *_a, **_k: calls.append(1) or {"tx_status": "PENDING"})
+    monkeypatch.setattr(onchainos_cli.time, "sleep", lambda _s: None)
+    assert onchainos_cli.confirm_swap_onchain(
+        "tx", "", "solana", retries=3, delay=(0, 0, 0)) == "pending"
+    assert len(calls) == 3
+
+
+def test_confirm_swap_onchain_pending_then_success(monkeypatch):
+    """PENDING → PENDING → SUCCESS → success。"""
+    seq = [{"tx_status": "PENDING"}, {"tx_status": "PENDING"}, {"tx_status": "SUCCESS"}]
+    monkeypatch.setattr(onchainos_cli, "swap_status", lambda *_a, **_k: seq.pop(0))
+    monkeypatch.setattr(onchainos_cli.time, "sleep", lambda _s: None)
+    assert onchainos_cli.confirm_swap_onchain(
+        "tx", "", "solana", retries=3, delay=(0, 0, 0)) == "success"

@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -780,9 +781,73 @@ def _round_readable_amount(amount: str) -> str:
         return amount
 
 
-def swap_status(tx_hash: str) -> Optional[dict]:
-    """Check swap transaction status."""
-    return _run("swap", "status", "--tx-hash", tx_hash)
+# txStatus 数值映射（history.rs map_tx_status）：1/2=PENDING 3=ERROR 4=SUCCESS 6=CANCELLED
+_TX_STATUS_MAP = {
+    "1": "PENDING", "2": "PENDING", "3": "ERROR",
+    "4": "SUCCESS", "6": "CANCELLED",
+}
+
+
+def swap_status(
+    tx_hash: str = "", order_id: str = "", chain: str = "solana",
+) -> Optional[dict]:
+    """查询 swap 链上成交状态（官方 wallet history 机制，2026-08-11）。
+
+    swap.rs 的 nextSteps.checkSwapStatus 生成的就是这个命令：
+      onchainos wallet history --tx-hash <hash> --chain <chain>
+    Gas Station 广播先返回 orderId，relayer 后填充链上 hash——tx_hash
+    为空时 fallback 到 ``--order-id`` 查 /order/detail。
+
+    返回 ``{"tx_status": "SUCCESS"|"PENDING"|"ERROR"|"CANCELLED"|"UNKNOWN",
+    "raw": ...}``——UNKNOWN 表示查询失败/无状态字段。
+    """
+    if not tx_hash and not order_id:
+        return None
+    args = ["wallet", "history"]
+    if tx_hash:
+        args += ["--tx-hash", tx_hash]
+    else:
+        args += ["--order-id", order_id]
+    args += ["--chain", chain]
+    result = _run(*args, timeout=15)
+    if result is None or result.get("_exit_code") != 0:
+        return {"tx_status": "UNKNOWN", "raw": result}
+    payload = result.get("_stdout_parsed") or {}
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    status = None
+    if isinstance(data, dict):
+        status = data.get("txStatus")
+    elif isinstance(data, list) and data:
+        status = data[0].get("txStatus") if isinstance(data[0], dict) else None
+    if status is None:
+        return {"tx_status": "UNKNOWN", "raw": payload}
+    s = str(status)
+    return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
+
+
+def confirm_swap_onchain(
+    tx_hash: str, order_id: str, chain: str,
+    retries: int = 3, delay: tuple[float, ...] = (3, 5, 8),
+) -> str:
+    """轮询链上确认，返回 ``"success" / "error" / "pending"``（2026-08-11）。
+
+    链上成交确认是“区块链最有价值的地方”——CLI 的 swap 提交成功
+    （submitted_on_chain）不等同链上成交：Gas Station 广播先返回
+    orderId，relayer 后填充链上 hash，报价阶段判定失败时返回占位 hash
+    （曾致 RENDER 3.06 假成功脱管）。以官方 ``wallet history`` 的
+    txStatus 为准：SUCCESS=成交、ERROR/CANCELLED=失败、持续 PENDING=
+    待确认（由策略层后续轮询补确认）。
+    """
+    for i in range(retries):
+        st = swap_status(tx_hash, order_id, chain)
+        status = st.get("tx_status") if st else "UNKNOWN"
+        if status == "SUCCESS":
+            return "success"
+        if status in ("ERROR", "CANCELLED"):
+            return "error"
+        if i < retries - 1:
+            time.sleep(delay[i])
+    return "pending"
 
 
 # ── Extraction helpers ────────────────────────────────────────────

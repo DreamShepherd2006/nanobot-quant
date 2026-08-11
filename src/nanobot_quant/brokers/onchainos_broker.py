@@ -11,11 +11,12 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from nanobot_quant.onchainos_cli import (
+    confirm_swap_onchain,
+    get_token_price,
+    get_wallet_balance,
     resolve_token_address,
     swap_execute,
     swap_status,
-    get_wallet_balance,
-    get_token_price,
     WSOL_ADDR,
 )
 from nanobot_quant.onchainos_errors import lookup as err_lookup
@@ -177,6 +178,7 @@ class OnchainOSBroker(Broker):
 
         data = result.get("data", result) if isinstance(result.get("data"), dict) else result
         tx_hash = data.get("swapTxHash") or data.get("txHash") or ""
+        order_id = data.get("swapOrderId") or ""
         status = data.get("status", "unknown")
 
         # Accept any non-error status that indicates the swap was submitted.
@@ -196,14 +198,37 @@ class OnchainOSBroker(Broker):
                 order.set_error(self._format_err(f"Swap {status}", data))
             return order
 
-        # ── fill order ─────────────────────────────────────────
-        order.set_identifier(tx_hash)
+        # ── 链上成交确认（2026-08-11）──────────────────────────────
+        # swap 提交成功 ≠ 链上成交：Gas Station 广播先返回 orderId，relayer
+        # 后填充链上 hash；报价阶段判定失败时返回占位 hash（曾致 RENDER
+        # 3.06 假成功脱管）。以官方 `wallet history` 的 txStatus 为准：
+        # SUCCESS=成交才 set_filled；ERROR/CANCELLED=失败 set_error；持续
+        # PENDING=已提交待确认（不 filled 不 error），策略层台账保持 open
+        # + 后续轮询补确认（fail-safe，防假成功脱管）。
+        order.set_identifier(tx_hash or order_id)
+        confirmed = confirm_swap_onchain(tx_hash, order_id, chain)
+        if confirmed == "error":
+            order.set_error(self._format_err("Swap 链上确认失败", data))
+            return order
+        if confirmed == "pending":
+            order.custom_params["onchain_pending"] = {
+                "tx_hash": tx_hash,
+                "order_id": order_id,
+                "chain": chain,
+            }
+            logger.info(
+                "Swap submitted (pending on-chain confirm): tx=%s",
+                (tx_hash or order_id)[:16],
+            )
+            return order
+
+        # ── confirmed == "success"：链上已成交 ────────────────────
         order.set_filled()
 
         to_amount = float(result.get("toAmount") or 0)
         fill_price = to_amount / quantity if quantity > 0 else 0
 
-        self._tracked[tx_hash] = {
+        self._tracked[tx_hash or order_id] = {
             "symbol": symbol,
             "side": side,
             "quantity": quantity,
@@ -212,8 +237,8 @@ class OnchainOSBroker(Broker):
         }
 
         logger.info(
-            "Swap filled: %s %s %s → tx=%s price=%.4f",
-            side, quantity, symbol, tx_hash[:16], fill_price,
+            "Swap filled (on-chain confirmed): %s %s %s → tx=%s price=%.4f",
+            side, quantity, symbol, (tx_hash or order_id)[:16], fill_price,
         )
         return order
 
