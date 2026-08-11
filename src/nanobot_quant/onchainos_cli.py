@@ -788,6 +788,14 @@ _TX_STATUS_MAP = {
 }
 
 
+def is_placeholder_tx_hash(h: str) -> bool:
+    """Gas Station 广播先返回的占位 tx_hash：32 位 hex（UUID 样式），
+    非真实链上 hash——用占位 hash 查 detail 模式必然 UNKNOWN（2026-08-11）。"""
+    if not h or len(h) != 32:
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in h)
+
+
 def swap_status(
     tx_hash: str = "", order_id: str = "", chain: str = "solana",
 ) -> Optional[dict]:
