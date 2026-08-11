@@ -803,26 +803,30 @@ def swap_status(
     """
     if not tx_hash and not order_id:
         return None
-    args = ["wallet", "history"]
-    if tx_hash:
-        args += ["--tx-hash", tx_hash]
-    else:
-        args += ["--order-id", order_id]
-    args += ["--chain", chain]
-    result = _run(*args, timeout=15)
-    if result is None or result.get("_exit_code") != 0:
-        return {"tx_status": "UNKNOWN", "raw": result}
-    payload = result.get("_stdout_parsed") or {}
-    data = payload.get("data") if isinstance(payload, dict) else payload
-    status = None
-    if isinstance(data, dict):
-        status = data.get("txStatus")
-    elif isinstance(data, list) and data:
-        status = data[0].get("txStatus") if isinstance(data[0], dict) else None
-    if status is None:
-        return {"tx_status": "UNKNOWN", "raw": payload}
-    s = str(status)
-    return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
+
+    def _query(flag: str, value: str) -> Optional[dict]:
+        args = ["wallet", "history", flag, value, "--chain", chain]
+        result = _run(*args, timeout=15)
+        if result is None or result.get("_exit_code") != 0:
+            return None
+        payload = result.get("_stdout_parsed") or {}
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        status = None
+        if isinstance(data, dict):
+            status = data.get("txStatus")
+        elif isinstance(data, list) and data:
+            status = data[0].get("txStatus") if isinstance(data[0], dict) else None
+        if status is None:
+            return None
+        s = str(status)
+        return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
+
+    # 2026-08-11 双路径：tx_hash 非空先查 tx-hash（占位 UUID 查不到 →
+    # UNKNOWN/None 时 fallback 官方 order-id 路径）；tx_hash 为空直接查 order-id。
+    st = _query("--tx-hash", tx_hash) if tx_hash else None
+    if st is None and order_id:
+        st = _query("--order-id", order_id)
+    return st if st is not None else {"tx_status": "UNKNOWN", "raw": None}
 
 
 def confirm_swap_onchain(
