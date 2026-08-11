@@ -773,15 +773,15 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
         slot = e.get("slot")
         slot_txt = _esc(str(slot)) if slot not in (None, "") else "—"
         tr_rows += (
-            f'<tr><td class="time">{_esc(str(e.get("ts", "")))}</td>'
+            f'<tr><td>{tx_cell}</td>'
+            f'<td class="time">{_esc(str(e.get("ts", "")))}</td>'
             f'<td><b>{_esc(str(e.get("symbol", "")))}</b></td>'
             f'<td>{dir_txt}</td>'
             f'<td class="num">{_fmt_qty(e.get("qty"))}</td>'
             f'<td class="num">{float(e.get("price", 0) or 0):.2f}</td>'
             f'<td class="num">{slot_txt}</td>'
             f'<td style="color:{color}"><b>{badge} {_esc(str(e.get("event", "")))}</b></td>'
-            f'<td class="note">{_esc(str(e.get("note", "")))}</td>'
-            f'<td>{tx_cell}</td></tr>'
+            f'<td class="note">{_esc(str(e.get("note", "")))}</td></tr>'
         )
     if not tr_rows:
         tr_rows = ('<tr><td colspan="9" class="muted" style="text-align:left">'
@@ -822,7 +822,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
         '<table>'
-        '<tr><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>原因</th><th>tx_hash</th></tr>'
+        '<tr><th>tx_hash</th><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>原因</th></tr>'
         f'{tr_rows}'
         '</table>'
         '<h4 style="margin:18px 0 8px">📜 信号历史（最近 20 条）</h4>'
