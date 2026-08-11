@@ -176,3 +176,38 @@ def test_reconcile_matches_native_sol_by_symbol(monkeypatch):
     assert len(open_lots) == 1
     assert abs(open_lots[0]["lot"]["qty"] - 0.032) < 1e-9  # 0.042 - 0.01
     assert abs(open_lots[0]["lot"]["entry_price"] - 76.84) < 1e-9  # 余额价
+def test_reconcile_no_natural_position(monkeypatch):
+    bm = _make_bm()
+    runner, _ = _make_runner({}, monkeypatch)
+    runner._reconcile_import(bm, "CRCLX", _tokens())
+    assert bm.open_slots() == []
+
+
+def test_reconcile_skips_dust_below_threshold(monkeypatch):
+    """链上残留价值 < min_position_value → 视为 dust 不导入（slot 保持可建仓）。
+
+    2026-08-11：CRCLX A2 的 $0.13 卖出尾仓被对账当持仓导入，锁住该槽位
+    的 USDC（6.52）导致买9 无资金可用——dust 阈值修复后该槽位保持可建仓。
+    """
+    monkeypatch.setattr("nanobot_quant.td_live._dust_threshold", lambda: 1.0)
+    bm = _make_bm()
+    # 0.00202 × 66.8 ≈ $0.13 < $1.0 → 不导入
+    balances = {"acc-1": [{"symbol": "CRCLX", "balance": "0.00202",
+                           "tokenAddress": SOLANA_ADDR}]}
+    runner, _ = _make_runner(balances, monkeypatch)
+    runner._reconcile_import(bm, "CRCLX", _tokens())
+    assert bm.open_slots() == []  # slot 保持 available
+
+
+def test_reconcile_imports_above_dust_threshold(monkeypatch):
+    """持仓价值 ≥ min_position_value → 正常导入（真实仓位不被误判为 dust）。"""
+    monkeypatch.setattr("nanobot_quant.td_live._dust_threshold", lambda: 1.0)
+    bm = _make_bm()
+    # 0.0524761 × 66.8 ≈ $3.5 ≥ $1.0 → 导入
+    balances = {"acc-1": [{"symbol": "CRCLX", "balance": "0.0524761",
+                           "tokenAddress": SOLANA_ADDR}]}
+    runner, _ = _make_runner(balances, monkeypatch)
+    runner._reconcile_import(bm, "CRCLX", _tokens())
+    open_lots = bm.open_slots()
+    assert len(open_lots) == 1
+    assert open_lots[0]["slot"] == 1
