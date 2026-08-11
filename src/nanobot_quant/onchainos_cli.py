@@ -708,7 +708,7 @@ def swap_execute(
         "swap", "execute",
         "--from", from_addr,
         "--to", to_addr,
-        "--readable-amount", amount,
+        "--readable-amount", _round_readable_amount(amount),
         "--chain", chain,
     ]
     if wallet:
@@ -716,6 +716,22 @@ def swap_execute(
     if slippage:
         args += ["--slippage", slippage]
     return _run(*args, timeout=30)
+
+
+def _round_readable_amount(amount: str) -> str:
+    """readable-amount 统一舍入到 8 位小数。
+
+    2026-08-11 修复：qty = pv × max_position_pct / price 的浮点除法产生
+    15+ 位小数（如 0.042222355341467045），onchainos CLI 按 token decimals
+    校验 readable-amount，超限报错 "more decimal places than this token
+    supports (8 decimals)" 导致 swap 失败（00:44 CRCLX cd_sell=13 实证）。
+    8 位覆盖主流 SPL 代币（CRCLX/RENDER/SPCX 8 decimals）；SOL 原生币
+    9 decimals，第 9 位在实际交易金额下极少用到，8 位足够。
+    """
+    try:
+        return f"{round(float(amount), 8):.8f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return amount
 
 
 def swap_status(tx_hash: str) -> Optional[dict]:

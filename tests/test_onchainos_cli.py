@@ -371,3 +371,28 @@ def test_broker_submit_uses_entry_chain(monkeypatch):
     result = broker._submit_order(order)
     assert result is not None
     assert captured["chain"] == "bnb"
+def test_round_readable_amount(monkeypatch):
+    """swap 提交前 readable-amount 舍入到 8 位小数。
+
+    2026-08-11 回归：qty = pv × max_position_pct / price 的浮点除法产生
+    15+ 位小数（0.042222355341467045），CLI 按 token decimals（8）校验
+    拒绝执行（00:44 CRCLX cd_sell=13 实证）。舍入后不超限。
+    """
+    calls = []
+    monkeypatch.setattr(onchainos_cli, "_run", lambda *a, **k: (calls.append(a), None)[1])
+    onchainos_cli.swap_execute(
+        from_addr="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        to_addr="XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
+        amount="0.042222355341467045",
+    )
+    args = calls[0]
+    assert args[args.index("--readable-amount") + 1] == "0.04222236"
+
+    # 整数/少位数不变
+    calls.clear()
+    onchainos_cli.swap_execute(
+        from_addr="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        to_addr="XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
+        amount="1.5",
+    )
+    assert calls[0][calls[0].index("--readable-amount") + 1] == "1.5"
