@@ -619,3 +619,58 @@ def test_live_drops_in_progress_bar_for_signal(tmp_path):
     s2.on_trading_iteration()
     assert "order" not in s2._captured
     assert len(bm2.open_slots()) == 0
+
+
+def test_batch_buy_order_failure_no_open_lot(tmp_path):
+    """下单失败（如 6010 滑点保护）→ TD BATCH BUY FAIL + 不 open_lot。
+
+    2026-08-11 回归：_buy_on_slot 此前不检查 order.error，swap 失败仍
+    open_lot + 打 TD BATCH LONG，产生幽灵批次（台账有持仓、链上没有）——
+    18:16 CRCLX（客户端拦截）与 18:21 SOL（链上 6010 失败）双实证。
+    """
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+
+    def _submit_failing(order):
+        order.error = "MinReturnNotReached (6010)"
+        s._captured.setdefault("submitted", order)
+        return order
+    s.submit_order = _submit_failing
+
+    s.on_trading_iteration()
+    # 订单提交过但未成交 → 台账不 open、无 LONG 日志
+    assert s._captured.get("submitted") is not None
+    assert all(x["status"] == "available" for x in bm.slots)
+    assert not hasattr(s, "_captured_logs")
+
+
+def test_batch_sell_min_hold_skip_releases(tmp_path):
+    """链上余额 ≤ min_hold（如 SOL gas 0.01）→ 跳过卖出并释放台账。
+
+    2026-08-11：SOL 幽灵批次（台账 0.0374、链上仅 0.00947 gas）在 SELL 时
+    缩量卖出会卖光 gas——min_hold 保护：仅剩保留量视为无持仓，释放台账。
+    """
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=0.0374, entry_price=75.0, entry_time="t1")  # 幽灵 lot
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._slot_token_balance = lambda symbol: 0.00947  # 链上仅剩 gas
+    s._symbol_min_hold = lambda: 0.01
+
+    s.on_trading_iteration()
+    assert "order" not in s._captured          # 未下单（不卖 gas）
+    assert all(x["status"] == "available" for x in bm.slots)  # 台账已释放
+
+
+def test_batch_sell_shrink_keeps_min_hold(tmp_path):
+    """缩量卖出时扣除 min_hold（保留 gas），卖量 = 链上余额 − 保留量。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=0.05, entry_price=75.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._slot_token_balance = lambda symbol: 0.02  # 台账 0.05、链上 0.02
+    s._symbol_min_hold = lambda: 0.01
+
+    s.on_trading_iteration()
+    assert s._captured["order"][2] == "sell"
+    assert abs(s._captured["order"][1] - 0.01) < 1e-9  # 0.02 − 0.01
+    assert bm.slots[0]["status"] == "available"
+

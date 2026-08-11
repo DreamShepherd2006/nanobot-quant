@@ -440,6 +440,19 @@ class TdSequentialStrategy(Strategy):
                     f"cd_sell={cd_sell}）"
                 )
 
+    def _symbol_min_hold(self) -> float:
+        """当前标的的链上保留量（tokens.json min_hold，SOL 用作 gas 底线）。
+
+        对账导入时已扣减（导入量 = 余额 − min_hold），SELL 缩量卖出时
+        同样保留 min_hold，防止卖出 gas 后子钱包无法交易。
+        """
+        try:
+            from nanobot_quant.tokens_store import token_meta
+            tokens = self.parameters.get("tokens_json") or []
+            return float(token_meta(self.symbol, tokens).get("min_hold") or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     def _sell_lot(
         self, slot: dict, price: float, signal: dict, exit_reason: str
     ) -> None:
@@ -486,12 +499,24 @@ class TdSequentialStrategy(Strategy):
                         f"链上余额为 0（台账 {qty} 已释放）"
                     )
                     return
+                min_hold = self._symbol_min_hold()
+                if bal <= min_hold:
+                    # 2026-08-11 修复：链上仅剩保留量（如 SOL gas 0.01）→
+                    # 视为无持仓，跳过卖出并释放台账（防卖 gas + 自动清理
+                    # 幽灵批次——台账 open 但链上从未成交）。
+                    self.logger.warning(
+                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"链上余额 {bal:.6f} ≤ 保留量 {min_hold} "
+                        f"（台账 {qty} 已释放）"
+                    )
+                    return
                 if bal < qty:
+                    sell_qty = max(bal - min_hold, 0.0)
                     self.logger.warning(
                         f"TD BATCH EXIT SHRINK | slot={slot['slot']} "
-                        f"台账 {qty} 链上 {bal:.6f} → 缩量卖出"
+                        f"台账 {qty} 链上 {bal:.6f} → 缩量卖出 {sell_qty:.6f}"
                     )
-                    qty = bal
+                    qty = sell_qty
             req = self._portfolio.build_sell_order(
                 self.symbol, price, exit_reason,
                 quantity=qty,
@@ -706,6 +731,16 @@ class TdSequentialStrategy(Strategy):
                 self.symbol, price, reason, quantity=qty,
             )
             order = self._portfolio.submit_order(req)
+            if order is None or _order_error(order):
+                # 2026-08-11 修复：下单失败（如 6010 滑点保护、资金不足）
+                # 不得 open_lot——此前无条件 open_lot + 打 TD BATCH LONG 产生
+                # 幽灵批次（台账有持仓、链上没有），SELL 时链上校验才暴露。
+                err = _order_error(order) or "order is None"
+                self.logger.info(
+                    f"TD BATCH BUY FAIL | slot={slot['slot']} "
+                    f"price={price:.2f} qty={qty} {err}"
+                )
+                return None
             return (order, qty)
         finally:
             if home and aid and home != aid:
@@ -756,5 +791,3 @@ class TdSequentialStrategy(Strategy):
         """Called by lumibot when an order is cancelled."""
         super().on_canceled_order(order)
         self.tracker.on_cancel(order_id=order.identifier)
-
-
