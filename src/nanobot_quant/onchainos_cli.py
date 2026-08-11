@@ -807,17 +807,30 @@ def swap_status(
     def _query(flag: str, value: str) -> Optional[dict]:
         args = ["wallet", "history", flag, value, "--chain", chain]
         result = _run(*args, timeout=15)
-        if result is None or result.get("_exit_code") != 0:
-            rc = result.get("_exit_code") if result else "None"
-            out = (result.get("_stdout") or "")[:600] if result else ""
-            err = (result.get("_stderr") or "")[:300] if result else ""
+        if result is None:
             print(
-                f"[DIAG] swap_status {flag} 失败 exit={rc} "
-                f"stdout={out!r} stderr={err!r}",
+                f"[DIAG] swap_status {flag} 无返回（CLI 调用异常/超时）",
                 file=sys.stderr, flush=True,
             )
             return None
-        payload = result.get("_stdout_parsed") or {}
+        # 2026-08-11 根因修复：_run 成功路径返回原始 JSON（{"ok":true,...}），
+        # 没有 _exit_code 键；只有失败路径（returncode!=0）才返回带 _exit_code
+        # 的 dict。此前用 get("_exit_code") != 0 判断，None != 0 → 成功响应被
+        # 误判为失败 → detail 查询永远 UNKNOWN（09:30 事件根因）。
+        if isinstance(result, dict) and result.get("_exit_code") not in (None, 0):
+            print(
+                f"[DIAG] swap_status {flag} 失败 exit={result.get('_exit_code')} "
+                f"stdout={(result.get('_stdout') or '')[:600]!r} "
+                f"stderr={(result.get('_stderr') or '')[:300]!r}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        # 成功路径：原始 JSON（无 _stdout_parsed）；失败兼容：_stdout_parsed
+        payload = (
+            result.get("_stdout_parsed")
+            if isinstance(result, dict) and "_stdout_parsed" in result
+            else result
+        )
         data = payload.get("data") if isinstance(payload, dict) else payload
         status = None
         if isinstance(data, dict):

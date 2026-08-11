@@ -750,6 +750,20 @@ class TdSequentialStrategy(Strategy):
                         f"TD PENDING CHECK | slot={slot_id} 账户={aid[:8] or 'home'} "
                         f"{info.get('chain')} status={status}"
                     )
+                # 余额核对兜底（2026-08-11，对称 BUY）：卖出成交后该标的链上余额≈0——
+                # 连续 3 轮订单状态查不到 → 查 slot 账户链上余额裁决（链上真相）。
+                if status not in ("SUCCESS", "ERROR", "CANCELLED"):
+                    info["unknown_count"] = info.get("unknown_count", 0) + 1
+                    if info["unknown_count"] >= 3 and aid:
+                        bal = self._slot_token_balance(
+                            info.get("symbol", self.symbol)
+                        )
+                        if bal >= 0 and bal <= info.get("qty", 0) * 0.1:
+                            self.logger.info(
+                                f"TD PENDING BALANCE CONFIRM | slot={slot_id} "
+                                f"链上余额 {bal:.6g} ≤ 残留 {info['qty'] * 0.1:.6g} → 卖出成交"
+                            )
+                            status = "SUCCESS"
                 if status == "SUCCESS":
                     bm = self._batch_managers.get(
                         info.get("symbol", self.symbol)
