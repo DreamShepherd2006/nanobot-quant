@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -690,6 +692,26 @@ def swap_quote(
     )
 
 
+# CLI 报错样例: --readable-amount "0.02053879" has more decimal places
+#               than this token supports (6 decimals)
+_DECIMALS_ERROR_RE = re.compile(
+    r"more decimal places than this token supports \((\d+) decimals\)"
+)
+
+# 模块级 decimals 缓存：key = f"{from_addr}:{chain}" → token decimals。
+# 首次 SELL 被 CLI 拒后解析出实际 decimals 并记住，后续直接按该精度
+# 舍入，避免每笔都先试错一次（2026-08-11 SPCX 6 decimals 实证）。
+_DECIMALS_CACHE: dict[str, int] = {}
+
+
+def _round_to(amount: str, decimals: int) -> str:
+    """按 token 实际 decimals 舍入 readable-amount。"""
+    try:
+        return f"{round(float(amount), decimals):.{decimals}f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return amount
+
+
 def swap_execute(
     from_addr: str,
     to_addr: str,
@@ -703,24 +725,129 @@ def swap_execute(
     Uses ``--readable-amount`` (human-readable token amount, CLI converts
     to minimal units via token decimals). ``chain``/``wallet`` are required
     by onchainos CLI v4.3.x.
+
+    Decimals handling (2026-08-11): the CLI strictly validates readable-amount
+    against the from-token's decimals. ``_round_readable_amount`` defaults to
+    8 decimals (covers CRCLX/RENDER/SOL), but tokens like SPCX only support 6
+    decimals — the CLI then rejects the swap. On rejection we parse the
+    ``(N decimals)`` hint out of the CLI error, cache N per (from, chain) and
+    retry once with the correct precision. The decimals validation fails
+    before any on-chain broadcast, so the retry is safe (deterministic, no
+    duplicate orders).
     """
+    key = f"{from_addr}:{chain}"
+    dec = _DECIMALS_CACHE.get(key)
+    amt = _round_to(amount, dec) if dec is not None else _round_readable_amount(amount)
     args = [
         "swap", "execute",
         "--from", from_addr,
         "--to", to_addr,
-        "--readable-amount", amount,
+        "--readable-amount", amt,
         "--chain", chain,
     ]
     if wallet:
         args += ["--wallet", wallet]
     if slippage:
         args += ["--slippage", slippage]
-    return _run(*args, timeout=30)
+    result = _run(*args, timeout=30)
+    if result and result.get("_exit_code") == 1:
+        m = _DECIMALS_ERROR_RE.search(
+            f"{result.get('_stdout') or ''} {result.get('_stderr') or ''}"
+        )
+        if m:
+            dec = int(m.group(1))
+            _DECIMALS_CACHE[key] = dec
+            amt2 = _round_to(amount, dec)
+            if amt2 != amt:
+                args[args.index("--readable-amount") + 1] = amt2
+                result = _run(*args, timeout=30)
+    return result
 
 
-def swap_status(tx_hash: str) -> Optional[dict]:
-    """Check swap transaction status."""
-    return _run("swap", "status", "--tx-hash", tx_hash)
+def _round_readable_amount(amount: str) -> str:
+    """readable-amount 默认舍入到 8 位小数。
+
+    2026-08-11 修复：qty = pv × max_position_pct / price 的浮点除法产生
+    15+ 位小数（如 0.042222355341467045），onchainos CLI 按 token decimals
+    校验 readable-amount，超限报错 "more decimal places than this token
+    supports (8 decimals)" 导致 swap 失败（00:44 CRCLX cd_sell=13 实证）。
+    8 位覆盖主流 SPL（CRCLX/RENDER 8 decimals、SOL 9）；SPCX 为 6 decimals，
+    首次 SELL 被拒后由 swap_execute 的 decimals 缓存/重试机制自动适配
+    （见 _DECIMALS_CACHE）。
+    """
+    try:
+        return f"{round(float(amount), 8):.8f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return amount
+
+
+# txStatus 数值映射（history.rs map_tx_status）：1/2=PENDING 3=ERROR 4=SUCCESS 6=CANCELLED
+_TX_STATUS_MAP = {
+    "1": "PENDING", "2": "PENDING", "3": "ERROR",
+    "4": "SUCCESS", "6": "CANCELLED",
+}
+
+
+def swap_status(
+    tx_hash: str = "", order_id: str = "", chain: str = "solana",
+) -> Optional[dict]:
+    """查询 swap 链上成交状态（官方 wallet history 机制，2026-08-11）。
+
+    swap.rs 的 nextSteps.checkSwapStatus 生成的就是这个命令：
+      onchainos wallet history --tx-hash <hash> --chain <chain>
+    Gas Station 广播先返回 orderId，relayer 后填充链上 hash——tx_hash
+    为空时 fallback 到 ``--order-id`` 查 /order/detail。
+
+    返回 ``{"tx_status": "SUCCESS"|"PENDING"|"ERROR"|"CANCELLED"|"UNKNOWN",
+    "raw": ...}``——UNKNOWN 表示查询失败/无状态字段。
+    """
+    if not tx_hash and not order_id:
+        return None
+    args = ["wallet", "history"]
+    if tx_hash:
+        args += ["--tx-hash", tx_hash]
+    else:
+        args += ["--order-id", order_id]
+    args += ["--chain", chain]
+    result = _run(*args, timeout=15)
+    if result is None or result.get("_exit_code") != 0:
+        return {"tx_status": "UNKNOWN", "raw": result}
+    payload = result.get("_stdout_parsed") or {}
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    status = None
+    if isinstance(data, dict):
+        status = data.get("txStatus")
+    elif isinstance(data, list) and data:
+        status = data[0].get("txStatus") if isinstance(data[0], dict) else None
+    if status is None:
+        return {"tx_status": "UNKNOWN", "raw": payload}
+    s = str(status)
+    return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
+
+
+def confirm_swap_onchain(
+    tx_hash: str, order_id: str, chain: str,
+    retries: int = 3, delay: tuple[float, ...] = (3, 5, 8),
+) -> str:
+    """轮询链上确认，返回 ``"success" / "error" / "pending"``（2026-08-11）。
+
+    链上成交确认是“区块链最有价值的地方”——CLI 的 swap 提交成功
+    （submitted_on_chain）不等同链上成交：Gas Station 广播先返回
+    orderId，relayer 后填充链上 hash，报价阶段判定失败时返回占位 hash
+    （曾致 RENDER 3.06 假成功脱管）。以官方 ``wallet history`` 的
+    txStatus 为准：SUCCESS=成交、ERROR/CANCELLED=失败、持续 PENDING=
+    待确认（由策略层后续轮询补确认）。
+    """
+    for i in range(retries):
+        st = swap_status(tx_hash, order_id, chain)
+        status = st.get("tx_status") if st else "UNKNOWN"
+        if status == "SUCCESS":
+            return "success"
+        if status in ("ERROR", "CANCELLED"):
+            return "error"
+        if i < retries - 1:
+            time.sleep(delay[i])
+    return "pending"
 
 
 # ── Extraction helpers ────────────────────────────────────────────

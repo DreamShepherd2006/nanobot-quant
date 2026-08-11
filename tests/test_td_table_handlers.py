@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -210,3 +212,94 @@ def test_page_resolve_error_banner(monkeypatch):
     body = resp.body.decode()
     assert "标的解析失败" in body
     assert "not_found" in body
+def test_trade_rows_filter(monkeypatch):
+    """交易记录过滤：只含成交事件、最新在前、查询条件生效（方案 B）。"""
+    from nanobot_quant.td_table_handlers import _trade_rows
+
+    events = [
+        {"ts": "t1", "symbol": "CRCLX", "event": "SKIP",
+         "note": "无可用资金 slot"},
+        {"ts": "t2", "symbol": "SPCX", "event": "LONG",
+         "slot": 2, "qty": 0.021226, "price": 136.8, "direction": "buy",
+         "status": "ok", "tx_hash": "aa11"},
+        {"ts": "t3", "symbol": "CRCLX", "event": "BUY_FAIL",
+         "slot": 3, "qty": 0.04, "direction": "buy", "status": "fail"},
+        {"ts": "t4", "symbol": "RENDER", "event": "HOLD"},
+    ]
+    rows = _trade_rows(events)
+    # SKIP/HOLD 不是交易事件；最新在前（BUY_FAIL 先于 LONG）
+    assert [r["event"] for r in rows] == ["BUY_FAIL", "LONG"]
+    assert rows[0]["symbol"] == "CRCLX"
+    assert rows[1]["qty"] == 0.021226
+    assert rows[1]["tx_hash"] == "aa11"
+
+    # 查询条件：只查 SPCX
+    rows_spcx = _trade_rows(events, {"tq_sym": "spcx"})
+    assert [r["event"] for r in rows_spcx] == ["LONG"]
+
+    # 查询条件：只查失败
+    rows_fail = _trade_rows(events, {"tq_st": "fail"})
+    assert [r["event"] for r in rows_fail] == ["BUY_FAIL"]
+
+    # 查询条件：只查买入方向
+    rows_buy = _trade_rows(events, {"tq_dir": "buy"})
+    assert [r["event"] for r in rows_buy] == ["BUY_FAIL", "LONG"]
+
+    # 空事件流
+    assert _trade_rows([]) == []
+
+
+def test_render_live_contains_trade_section(monkeypatch, tmp_path: Path):
+    """实时监控 tab 渲染包含「📊 交易记录」区块与查询表单。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.append_event({
+        "symbol": "SPCX", "event": "LONG", "note": "slot=2 qty=0.021226 price=136.8",
+        "slot": 2, "qty": 0.021226, "price": 136.8, "direction": "buy",
+        "status": "ok", "tx_hash": "4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abc", "chain": "solana",
+    })
+    td_live_state.append_event({
+        "symbol": "CRCLX", "event": "BUY_FAIL", "note": "slot=3",
+        "slot": 3, "qty": 0.04, "direction": "buy", "status": "fail",
+    })
+    html = _render_live(with_script=False, tq={})
+    assert "📊 交易记录" in html
+    assert "trade-form" in html
+    assert "tq_sym" in html
+    assert "tq_n" in html
+    assert "原因" in html                    # 原因列（失败原因/成交明细）
+    assert "4xKd9aBc" in html                # tx_hash 短显
+    assert "BUY_FAIL" in html
+    assert "🟢 买" in html
+    assert "✅" in html and "❌" in html
+    # 原因列内容：成功事件显示 slot/qty/price 明细
+    assert "slot=2 qty=0.021226 price=136.8" in html
+    # tx_hash 可点击（solscan 链接）
+    assert 'href="https://solscan.io/tx/4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abc"' in html
+    assert "↗" in html
+
+
+def test_tx_cell_link_and_placeholder():
+    """tx_hash 单元格：真实 hash → 链浏览器链接；占位 UUID/空 → 纯文本。"""
+    from nanobot_quant.td_table_handlers import _tx_cell
+
+    # 空 → 纯文本占位
+    assert "muted" in _tx_cell("")
+    # 32 位 hex 占位 UUID → 不生成链接
+    ph = _tx_cell("9f3d2a1b4c5d6e7f8a9b0c1d2e3f4a5b")
+    assert "<a" not in ph
+    assert "9f3d2a1b" in ph
+    # 真实 base58 hash → solscan 链接（默认链）
+    tx = "4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijk"
+    cell = _tx_cell(tx)
+    assert f'href="https://solscan.io/tx/{tx}"' in cell
+    assert "↗" in cell
+    # 链映射：bnb → bscscan
+    cell_bnb = _tx_cell(tx, "bnb")
+    assert f'href="https://bscscan.com/tx/{tx}"' in cell_bnb
+    # 链归一化："solana" 与 "sol" 都能匹配 solscan
+    assert "solscan.io" in _tx_cell(tx, "solana")
+    assert "solscan.io" in _tx_cell(tx, "sol")

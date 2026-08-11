@@ -153,6 +153,13 @@ class TdSequentialStrategy(Strategy):
         self._start_slot = int(self.parameters.get("td_start_slot", 1) or 1)
         self._home_account = None  # str | None
         self._tokens_json = self.parameters.get("tokens_json") or {}
+        # ── 链上成交确认（2026-08-11）────────────────────────────
+        # 已提交未确认的卖出/买入：台账保持 open（fail-safe），每轮迭代
+        # 轮询官方 wallet history 补确认——SUCCESS 补释放/补建仓，
+        # ERROR/CANCELLED 记失败（可重试），彻底消除“提交成功但链上
+        # 未成交”的账实脱管（RENDER 3.06 实证）。
+        self._pending_sells: dict[int, dict] = {}
+        self._pending_buys: dict[int, dict] = {}
 
         # TD algorithm params (subset of the strategy parameters dict)
         self._td_params = {
@@ -170,6 +177,11 @@ class TdSequentialStrategy(Strategy):
         标的池模式：按池子顺序（=优先级）逐标的评估，谁 Setup 9 谁执行；
         同 bar 多标的命中按顺序全部处理（资金天然隔离）。
         """
+        # ── 链上补确认（2026-08-11）────────────────────────────────
+        # 每轮迭代先处理 pending 卖出/买入的链上确认（SUCCESS 补台账、
+        # ERROR/CANCELLED 记失败、PENDING 继续等），再评估新信号。
+        self._check_pending_confirmations()
+
         # ── 批次台账实时刷新（2026-08-10 修复）────────────────────────
         # td_live 在 Strategy 构造完成后才注入 batch_managers，而 lumibot
         # Strategy.__init__ 先调 initialize()——initialize 快照的
@@ -186,6 +198,36 @@ class TdSequentialStrategy(Strategy):
             self.symbol = sym
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
+
+    def _record(self, event: str, note: str = "", **extra) -> None:
+        """更新实时状态 signal + 追加事件历史（仅 live 模式写文件）。
+
+        2026-08-11：TD live 每轮信号动作（LONG/SELL/EXIT/SKIP/FAIL）
+        记录到内存 LIVE_STATE 与事件文件，供 /config/td-table
+        「实时监控」tab 展示。回测/纸交易（live_mode=False）只更新
+        内存、不写事件文件。
+
+        2026-08-11 方案 B：成交事件额外携带 slot/qty/price/direction/
+        status/tx_hash/chain 结构化字段，供「📊 交易记录」区块展示。
+        """
+        try:
+            from nanobot_quant import td_live_state
+            sig = getattr(self, "_last_signal", {})
+            td_live_state.update_symbol(self.symbol, {
+                **sig, "signal": event, "note": note,
+            })
+            if self.parameters.get("live_mode"):
+                td_live_state.append_event({
+                    "symbol": self.symbol, "event": event, "note": note,
+                    "price": sig.get("price", 0),
+                    "score": sig.get("score", 0),
+                    "setup_buy": sig.get("setup_buy", 0),
+                    "setup_sell": sig.get("setup_sell", 0),
+                    "cd_sell": sig.get("cd_sell", 0),
+                    **extra,
+                })
+        except Exception:  # noqa: BLE001
+            pass
 
     def _evaluate_symbol(self) -> None:
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。"""
@@ -252,6 +294,25 @@ class TdSequentialStrategy(Strategy):
         score = signal.get("score", 0) or 0
         price = signal.get("price", 0) or 0
 
+        # ── 实时状态共享（td-table「实时监控」tab，2026-08-11）──
+        # 无条件更新内存（同进程零成本）；信号动作由 _record 更新 signal。
+        self._last_signal = {
+            "setup_buy": setup_buy,
+            "setup_sell": setup_sell,
+            "cd_buy": signal.get("cd_buy", 0) or 0,
+            "cd_sell": cd_sell,
+            "score": score,
+            "price": price,
+            "time": str(df.index[-1]) if len(df) else "",
+        }
+        try:
+            from nanobot_quant import td_live_state
+            td_live_state.update_symbol(self.symbol, {
+                **self._last_signal, "signal": "HOLD",
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
         has_position = self.get_position(self.symbol) is not None
 
         # ── Update peak portfolio for drawdown tracking ──
@@ -305,19 +366,54 @@ class TdSequentialStrategy(Strategy):
                 # → 返回 None → 跳下一 slot（拍板 1）。
                 executed = False
                 for slot in batch_manager.scan_buy_slots(self._start_slot):
+                    if slot["slot"] in self._pending_buys:
+                        continue  # 该 slot 已有买入待确认，防重复买
                     ret = self._buy_on_slot(slot, price, reason)
                     if ret is None:
                         continue
                     order, qty = ret
-                    self.batch_manager.open_lot(
-                        slot=slot["slot"], qty=qty, entry_price=price,
-                    )
-                    # 交易状态变更立即落盘（重启不丢台账）
-                    self.batch_manager.save()
+                    if order.is_filled():
+                        # 链上已确认成交 → 建仓
+                        self.batch_manager.open_lot(
+                            slot=slot["slot"], qty=qty, entry_price=price,
+                        )
+                        # 交易状态变更立即落盘（重启不丢台账）
+                        self.batch_manager.save()
+                        self.logger.info(
+                            f"TD BATCH LONG | slot={slot['slot']} "
+                            f"price={price:.2f} qty={qty} "
+                            f"setup_buy={setup_buy} score={score:.1f}"
+                        )
+                        self._record(
+                            "LONG",
+                            f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
+                            slot=slot["slot"], qty=qty, price=price,
+                            direction="buy", status="ok",
+                            tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
+                            chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
+                        )
+                        executed = True
+                        break
+                    # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
+                    # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
+                    pend = (order.custom_params or {}).get("onchain_pending") or {}
+                    self._pending_buys[slot["slot"]] = {
+                        "tx_hash": pend.get("tx_hash", ""),
+                        "order_id": pend.get("order_id", ""),
+                        "chain": pend.get("chain", ""),
+                        "qty": qty, "price": price, "reason": reason,
+                    }
                     self.logger.info(
-                        f"TD BATCH LONG | slot={slot['slot']} "
-                        f"price={price:.2f} qty={qty} "
-                        f"setup_buy={setup_buy} score={score:.1f}"
+                        f"TD BATCH LONG PENDING | slot={slot['slot']} "
+                        f"price={price:.2f} qty={qty} setup_buy={setup_buy}"
+                    )
+                    self._record(
+                        "LONG_PENDING",
+                        f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
+                        slot=slot["slot"], qty=qty, price=price,
+                        direction="buy", status="pending",
+                        tx_hash=pend.get("tx_hash", ""),
+                        chain=pend.get("chain", ""),
                     )
                     executed = True
                     break
@@ -325,6 +421,7 @@ class TdSequentialStrategy(Strategy):
                     self.logger.info(
                         "TD BATCH | 无可用资金 slot，跳过 BUY（见 TD SLOT SKIP 日志）"
                     )
+                    self._record("SKIP", "无可用资金 slot，跳过 BUY")
                 return
             else:
                 req = self._portfolio.build_buy_order(
@@ -345,6 +442,10 @@ class TdSequentialStrategy(Strategy):
                 self.logger.info(
                     f"TD LONG  | price={price:.2f} qty={req.quantity} "
                     f"setup_buy={setup_buy} score={score:.1f}"
+                )
+                self._record(
+                    "LONG",
+                    f"qty={req.quantity:.6g} price={price:.2f}",
                 )
                 return
 
@@ -387,6 +488,10 @@ class TdSequentialStrategy(Strategy):
                     )
                 self.logger.info(
                     f"TD EXIT  | price={price:.2f} qty={req.quantity} {exit_reason}"
+                )
+                self._record(
+                    "EXIT",
+                    f"{exit_reason} qty={req.quantity:.6g} price={price:.2f}",
                 )
                 return
 
@@ -432,26 +537,52 @@ class TdSequentialStrategy(Strategy):
                     else f"cd_sell={cd_sell}"
                 )
                 self._sell_lot(s, price, signal, reason)
+            else:
+                # 可观测性：无仓卖 9 显式提示，区分「信号未出现」与
+                # 「信号出现但无 open 批次」（fail-closed，不做空）
+                self.logger.info(
+                    f"TD SELL SKIP | 无 open 批次（setup_sell={setup_sell} "
+                    f"cd_sell={cd_sell}）"
+                )
+
+    def _symbol_min_hold(self) -> float:
+        """当前标的的链上保留量（tokens.json min_hold，SOL 用作 gas 底线）。
+
+        对账导入时已扣减（导入量 = 余额 − min_hold），SELL 缩量卖出时
+        同样保留 min_hold，防止卖出 gas 后子钱包无法交易。
+        """
+        try:
+            from nanobot_quant.tokens_store import token_meta
+            tokens = self.parameters.get("tokens_json") or []
+            return float(token_meta(self.symbol, tokens).get("min_hold") or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
 
     def _sell_lot(
         self, slot: dict, price: float, signal: dict, exit_reason: str
     ) -> None:
-        """卖出一个批次（lot.qty），下单成功后回收 slot。
+        """卖出一个批次（lot.qty），链上确认成交后才释放 slot。
 
         v1.1 真分账：卖出前 switch 到该 slot 绑定的子钱包，交易后还原
         默认账户；卖出量改为 ``float(lot.qty)``（修复 int 截断小数问题，
-        如 0.05 CRCLX）。lumibot 订单异步提交——下单成功即回收（记录
-        卖出意图），链上余额与台账偏差由对账逻辑以链上为准修正。
+        如 0.05 CRCLX）。
 
         2026-08-10 链上校验（缩量卖出，用户拍板）：switch 后查该账户
         实际余额——余额 < lot.qty 按实际余额卖（不跳过、不卖空），
         余额 0 或查询失败跳过该批并告警。
+
+        2026-08-11 链上成交确认改造：close_lot 从“提交前”移到“链上
+        确认成交后”——以官方 `wallet history` txStatus 为准：SUCCESS
+        才 close_lot 释放；PENDING 记入 _pending_sells（台账保持 open，
+        后续轮询补确认、防重复卖）；ERROR/CANCELLED 记 EXIT_FAIL（台账
+        保持 open，下轮可重试）。彻底消除“提交成功但链上未成交”导致
+        的账实脱管（RENDER 3.06 实证）。
         """
-        lot = self.batch_manager.close_lot(slot["slot"])
+        if slot["slot"] in self._pending_sells:
+            return  # 该 slot 已有卖出待确认，防重复卖
+        lot = self.batch_manager.get_lot(slot["slot"])
         if lot is None:
             return
-        # 平仓/释放状态立即落盘（重启不丢台账）
-        self.batch_manager.save()
         qty = float(lot["qty"])
         aid = slot.get("account_id")
         home = self._home_account_id()
@@ -465,26 +596,48 @@ class TdSequentialStrategy(Strategy):
                         f"TD BATCH EXIT SKIP | slot={slot['slot']} "
                         f"链上余额查询失败"
                     )
-                    # 查询失败 = 链上状态未知 → 恢复台账（fail-safe），
-                    # 避免 close_lot 已释放但链上仍有持仓的账实脱节
-                    self.batch_manager.open_lot(
-                        qty, lot.get("entry_price", 0.0),
-                        lot.get("entry_time"), slot=slot["slot"],
-                    )
-                    self.batch_manager.save()
+                    # 查询失败 = 链上状态未知 → 台账保持 open（fail-safe），
+                    # 不释放（链上可能仍有持仓，防账实脱节）
+                    self._record("EXIT_SKIP", f"slot={slot['slot']} 链上余额查询失败")
                     return
                 if bal <= 0:
+                    # 链上无持仓 → 幽灵批次，释放台账
+                    self.batch_manager.close_lot(slot["slot"])
+                    self.batch_manager.save()
                     self.logger.warning(
                         f"TD BATCH EXIT SKIP | slot={slot['slot']} "
                         f"链上余额为 0（台账 {qty} 已释放）"
                     )
+                    self._record("EXIT_SKIP", f"slot={slot['slot']} 链上余额为 0")
+                    return
+                min_hold = self._symbol_min_hold()
+                if bal <= min_hold:
+                    # 2026-08-11 修复：链上仅剩保留量（如 SOL gas 0.01）→
+                    # 视为无持仓，跳过卖出并释放台账（防卖 gas + 自动清理
+                    # 幽灵批次——台账 open 但链上从未成交）。
+                    self.batch_manager.close_lot(slot["slot"])
+                    self.batch_manager.save()
+                    self.logger.warning(
+                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"链上余额 {bal:.6f} ≤ 保留量 {min_hold} "
+                        f"（台账 {qty} 已释放）"
+                    )
+                    self._record(
+                        "EXIT_SKIP",
+                        f"slot={slot['slot']} 链上仅剩 {bal:.6f} ≤ 保留量 {min_hold}",
+                    )
                     return
                 if bal < qty:
+                    sell_qty = max(bal - min_hold, 0.0)
                     self.logger.warning(
                         f"TD BATCH EXIT SHRINK | slot={slot['slot']} "
-                        f"台账 {qty} 链上 {bal:.6f} → 缩量卖出"
+                        f"台账 {qty} 链上 {bal:.6f} → 缩量卖出 {sell_qty:.6f}"
                     )
-                    qty = bal
+                    qty = sell_qty
+                    self._record(
+                        "EXIT_SHRINK",
+                        f"slot={slot['slot']} 台账 {qty:.6g} 链上 {bal:.6f} → 缩量",
+                    )
             req = self._portfolio.build_sell_order(
                 self.symbol, price, exit_reason,
                 quantity=qty,
@@ -497,34 +650,162 @@ class TdSequentialStrategy(Strategy):
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning(f"TD RESTORE ERR | {exc}")
         if order is not None and not _order_error(order):
-            self.tracker.track(
-                order_id=order.identifier,
-                symbol=self.symbol,
-                action="sell",
-                quantity=qty,
-                tag=f"signal:td-sell:{exit_reason}",
-                signal=signal,
-                reason=exit_reason,
-            )
+            if order.is_filled():
+                # 链上已确认成交 → 释放台账（close_lot 后置，2026-08-11）
+                self.batch_manager.close_lot(slot["slot"])
+                self.batch_manager.save()
+                self.tracker.track(
+                    order_id=order.identifier,
+                    symbol=self.symbol,
+                    action="sell",
+                    quantity=qty,
+                    tag=f"signal:td-sell:{exit_reason}",
+                    signal=signal,
+                    reason=exit_reason,
+                )
+                self.logger.info(
+                    f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
+                    f"qty={qty} {exit_reason}"
+                )
+                self._record(
+                    "EXIT",
+                    f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                    slot=slot["slot"], qty=qty, price=price,
+                    direction="sell", status="ok",
+                    tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
+                    chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
+                )
+                return
+            # 已提交未确认（PENDING）→ 台账保持 open + pending 记录，
+            # 后续轮询补确认（SUCCESS 补释放；失败则保持 open 可重试）
+            pend = (order.custom_params or {}).get("onchain_pending") or {}
+            self._pending_sells[slot["slot"]] = {
+                "tx_hash": pend.get("tx_hash", ""),
+                "order_id": pend.get("order_id", ""),
+                "chain": pend.get("chain", ""),
+                "qty": qty,
+                "price": price,
+                "exit_reason": exit_reason,
+            }
             self.logger.info(
-                f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
+                f"TD BATCH EXIT PENDING | slot={slot['slot']} price={price:.2f} "
                 f"qty={qty} {exit_reason}"
             )
+            self._record(
+                "EXIT_PENDING",
+                f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                slot=slot["slot"], qty=qty, price=price,
+                direction="sell", status="pending",
+                tx_hash=pend.get("tx_hash", ""),
+                chain=pend.get("chain", ""),
+            )
             return
-        # 订单失败（如 quote 解析失败、资金不足）→ 恢复 slot，台账回到卖出前
+        # 明确失败（quote 解析失败、资金不足、链上确认失败等）→ 台账保持
+        # open（未释放，无需恢复），下轮 setup_sell≥9 可自动重试卖出
         err = _order_error(order) or "order is None"
         self.logger.warning(
             f"TD BATCH EXIT FAIL | slot={slot['slot']} price={price:.2f} "
             f"qty={qty} {exit_reason} error={err}"
         )
-        try:
-            self.batch_manager.open_lot(
-                float(lot["qty"]), float(lot["entry_price"]),
-                lot.get("entry_time"), slot=slot["slot"],
+        _pend = ((order.custom_params or {}).get("onchain_pending") or {}) if order is not None else {}
+        self._record(
+            "EXIT_FAIL", f"slot={slot['slot']} {exit_reason} {err}",
+            slot=slot["slot"], qty=qty, price=price,
+            direction="sell", status="fail",
+            tx_hash=_pend.get("tx_hash", ""),
+            chain=_pend.get("chain", ""),
+        )
+
+    def _check_pending_confirmations(self) -> None:
+        """链上补确认（2026-08-11）：每轮迭代轮询官方 wallet history。
+
+        - SELL pending：SUCCESS → close_lot 补释放 + EXIT 记录；
+          ERROR/CANCELLED → EXIT_FAIL（台账保持 open，下轮可重试卖出）。
+        - BUY pending：SUCCESS → open_lot 补建仓 + LONG 记录；
+          ERROR/CANCELLED → BUY_FAIL（不建仓）。
+        PENDING/UNKNOWN → 继续等待。
+        """
+        from nanobot_quant.onchainos_cli import swap_status
+        for slot_id in list(self._pending_sells):
+            info = self._pending_sells[slot_id]
+            st = swap_status(
+                info.get("tx_hash", ""), info.get("order_id", ""),
+                info.get("chain", "solana"),
             )
-            self.batch_manager.save()
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning(f"TD LOT RESTORE ERR | {exc}")
+            status = st.get("tx_status") if st else "UNKNOWN"
+            if status == "SUCCESS":
+                self.batch_manager.close_lot(slot_id)
+                self.batch_manager.save()
+                self.logger.info(
+                    f"TD BATCH EXIT (确认) | slot={slot_id} "
+                    f"qty={info['qty']} {info.get('exit_reason', '')}"
+                )
+                self._record(
+                    "EXIT",
+                    f"slot={slot_id} 链上确认平仓 qty={info['qty']:.6g}",
+                    slot=slot_id, qty=info.get("qty", 0),
+                    price=info.get("price", 0),
+                    direction="sell", status="ok",
+                    tx_hash=info.get("tx_hash", ""),
+                    chain=info.get("chain", ""),
+                )
+                del self._pending_sells[slot_id]
+            elif status in ("ERROR", "CANCELLED"):
+                self.logger.warning(
+                    f"TD BATCH EXIT FAIL | slot={slot_id} 链上确认失败 {status}"
+                )
+                self._record(
+                    "EXIT_FAIL",
+                    f"slot={slot_id} 链上确认失败 {status}",
+                    slot=slot_id, qty=info.get("qty", 0),
+                    price=info.get("price", 0),
+                    direction="sell", status="fail",
+                    tx_hash=info.get("tx_hash", ""),
+                    chain=info.get("chain", ""),
+                )
+                del self._pending_sells[slot_id]
+            # PENDING/UNKNOWN → 继续等待
+        for slot_id in list(self._pending_buys):
+            info = self._pending_buys[slot_id]
+            st = swap_status(
+                info.get("tx_hash", ""), info.get("order_id", ""),
+                info.get("chain", "solana"),
+            )
+            status = st.get("tx_status") if st else "UNKNOWN"
+            if status == "SUCCESS":
+                if self.batch_manager.open_lot(
+                    slot=slot_id, qty=info["qty"], entry_price=info["price"],
+                ):
+                    self.batch_manager.save()
+                    self.logger.info(
+                        f"TD BATCH LONG (确认) | slot={slot_id} "
+                        f"qty={info['qty']} price={info['price']:.2f}"
+                    )
+                    self._record(
+                        "LONG",
+                        f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
+                        slot=slot_id, qty=info.get("qty", 0),
+                        price=info.get("price", 0),
+                        direction="buy", status="ok",
+                        tx_hash=info.get("tx_hash", ""),
+                        chain=info.get("chain", ""),
+                    )
+                del self._pending_buys[slot_id]
+            elif status in ("ERROR", "CANCELLED"):
+                self.logger.warning(
+                    f"TD BATCH BUY FAIL | slot={slot_id} 链上确认失败 {status}"
+                )
+                self._record(
+                    "BUY_FAIL",
+                    f"slot={slot_id} 链上确认失败 {status}",
+                    slot=slot_id, qty=info.get("qty", 0),
+                    price=info.get("price", 0),
+                    direction="buy", status="fail",
+                    tx_hash=info.get("tx_hash", ""),
+                    chain=info.get("chain", ""),
+                )
+                del self._pending_buys[slot_id]
+            # PENDING/UNKNOWN → 继续等待
 
     # ── 真分账 v1.1：子钱包 switch / 资金检查 / 还原 ────────────────
 
@@ -699,6 +980,23 @@ class TdSequentialStrategy(Strategy):
                 self.symbol, price, reason, quantity=qty,
             )
             order = self._portfolio.submit_order(req)
+            if order is None or _order_error(order):
+                # 2026-08-11 修复：下单失败（如 6010 滑点保护、资金不足）
+                # 不得 open_lot——此前无条件 open_lot + 打 TD BATCH LONG 产生
+                # 幽灵批次（台账有持仓、链上没有），SELL 时链上校验才暴露。
+                    err = _order_error(order) or "order is None"
+                    self.logger.info(
+                        f"TD BATCH BUY FAIL | slot={slot['slot']} "
+                        f"price={price:.2f} qty={qty} {err}"
+                    )
+                    self._record(
+                        "BUY_FAIL", f"slot={slot['slot']} {err}",
+                        slot=slot["slot"], qty=qty, price=price,
+                        direction="buy", status="fail",
+                        tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", "") if order is not None else "",
+                        chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", "") if order is not None else "",
+                    )
+                    return None
             return (order, qty)
         finally:
             if home and aid and home != aid:
@@ -749,5 +1047,3 @@ class TdSequentialStrategy(Strategy):
         """Called by lumibot when an order is cancelled."""
         super().on_canceled_order(order)
         self.tracker.on_cancel(order_id=order.identifier)
-
-

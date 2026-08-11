@@ -32,6 +32,21 @@ _lock = threading.Lock()
 _runner: "_TdLiveRunner | None" = None
 
 
+def _dust_threshold() -> float:
+    """对账导入 dust 阈值（USD）：链上持仓价值低于该值不导入。
+
+    2026-08-11：CRCLX A2 的 $0.13 卖出尾仓（dust）被对账当持仓导入，
+    锁住该槽位的 USDC（6.52）导致买9 无资金可用——dust 不占槽位。
+    0=关闭（旧行为：任何正持仓都导入）。
+    """
+    try:
+        from nanobot_quant.exec_params import load_exec_params
+
+        return float((load_exec_params() or {}).get("min_position_value") or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 class _TdLiveRunner:
     def __init__(self) -> None:
         self._executor: Any = None
@@ -89,6 +104,7 @@ class _TdLiveRunner:
                 # 固定 K 线窗口（方案 B）：每轮拉最近 N 根，不累积增长
                 "min_history": int(params.get("td_bars", 120) or 120),
                 "tokens_json": tokens,
+                "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
             },
         )
         # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
@@ -133,6 +149,7 @@ class _TdLiveRunner:
         min_hold = float(meta.get("min_hold") or 0.0)
         cost = meta.get("cost_price")
         reports: list[str] = []
+        min_pos_value = _dust_threshold()
         # 记录当前活跃账户，对账结束后还原（wallet switch 是全局状态）
         home = None
         try:
@@ -201,6 +218,16 @@ class _TdLiveRunner:
                 reports.append(
                     f"{symbol} 账户{aid[:8]} 链上 {bal}（保留 {min_hold}）"
                     f"→ 无价格，跳过导入"
+                )
+                continue
+            # dust 阈值（2026-08-11）：链上残留价值 < min_position_value
+            # 视为 dust 不导入，slot 保持可建仓——否则 $0.13 的卖出尾仓会
+            # 锁住整个槽位的 USDC，导致买9 无资金可用。
+            if min_pos_value > 0 and qty * price < min_pos_value:
+                reports.append(
+                    f"{symbol} 账户{aid[:8]} 链上 {bal}（保留 {min_hold}）→ "
+                    f"dust ${qty * price:.2f} < ${min_pos_value:g}，跳过导入"
+                    f"（slot 保持可建仓）"
                 )
                 continue
             bm.open_lot(
@@ -362,6 +389,11 @@ class _TdLiveRunner:
             try:
                 # 启动对账：链上天然持仓导入各标的台账（min_hold 扣减）
                 self._reconcile_all()
+                try:
+                    from nanobot_quant import td_live_state
+                    td_live_state.set_loop(True)
+                except Exception:  # noqa: BLE001
+                    pass
                 self._executor.run()  # Thread.run → StrategyExecutor 主循环
             finally:
                 sys.stdout = _saved_stdout
@@ -372,6 +404,12 @@ class _TdLiveRunner:
                 f"[DIAG] td_live: executor stopped with error: {exc}",
                 file=sys.stderr, flush=True,
             )
+        finally:
+            try:
+                from nanobot_quant import td_live_state
+                td_live_state.set_loop(False)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _reconcile_all(self) -> None:
         """对全部注入 batch_manager 的标的做启动对账（天然持仓导入）。"""

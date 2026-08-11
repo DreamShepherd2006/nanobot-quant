@@ -225,6 +225,18 @@ class BatchManager:
         target["status"] = AVAILABLE
         return lot
 
+    def get_lot(self, slot: int) -> Optional[dict[str, Any]]:
+        """读取 slot 当前 lot（不改变状态）。
+
+        2026-08-11 链上确认改造：卖出改为“链上确认成交后才 close_lot”，
+        提交前需读取 lot 但不释放 slot——未确认/失败时台账保持 open，
+        从根上消除“提交成功但链上未成交”导致的账实脱管。
+        """
+        target = next((s for s in self.slots if s["slot"] == slot), None)
+        if target is None or target["status"] != OPEN or target["lot"] is None:
+            return None
+        return dict(target["lot"])
+
     # ── 退出条件（独立止损/止盈，每批独立计算）────────────────────────
     def check_exit(
         self,

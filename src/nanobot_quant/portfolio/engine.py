@@ -96,13 +96,18 @@ class PortfolioEngine:
     def submit_order(self, request: OrderRequest):
         """Create a lumibot order from the request and submit it.
 
-        Returns the lumibot order object (for logging / tracking).
+        Returns the broker-processed lumibot order (2026-08-11 fix): the
+        strategy's submit_order returns the order after the broker set its
+        status (filled / error / on-chain pending confirm). Previously this
+        return value was dropped and the pristine create_order object was
+        returned — callers could never observe the on-chain confirmation
+        state, so every order looked "unfilled & no error" (= pending).
         """
         order = self._strategy.create_order(
             request.asset, request.quantity, request.action
         )
-        self._strategy.submit_order(order)
-        return order
+        submitted = self._strategy.submit_order(order)
+        return submitted if submitted is not None else order
 
     # ── position snapshot ────────────────────────────────────────
 
