@@ -808,6 +808,14 @@ def swap_status(
         args = ["wallet", "history", flag, value, "--chain", chain]
         result = _run(*args, timeout=15)
         if result is None or result.get("_exit_code") != 0:
+            rc = result.get("_exit_code") if result else "None"
+            out = (result.get("_stdout") or "")[:600] if result else ""
+            err = (result.get("_stderr") or "")[:300] if result else ""
+            print(
+                f"[DIAG] swap_status {flag} 失败 exit={rc} "
+                f"stdout={out!r} stderr={err!r}",
+                file=sys.stderr, flush=True,
+            )
             return None
         payload = result.get("_stdout_parsed") or {}
         data = payload.get("data") if isinstance(payload, dict) else payload
@@ -817,8 +825,16 @@ def swap_status(
         elif isinstance(data, list) and data:
             status = data[0].get("txStatus") if isinstance(data[0], dict) else None
         if status is None:
+            print(
+                f"[DIAG] swap_status {flag} 空数据 payload={str(payload)[:600]}",
+                file=sys.stderr, flush=True,
+            )
             return None
         s = str(status)
+        print(
+            f"[DIAG] swap_status {flag} → txStatus={s} payload={str(payload)[:400]}",
+            file=sys.stderr, flush=True,
+        )
         return {"tx_status": _TX_STATUS_MAP.get(s, s.upper()), "raw": payload}
 
     # 2026-08-11 双路径：tx_hash 非空先查 tx-hash（占位 UUID 查不到 →
