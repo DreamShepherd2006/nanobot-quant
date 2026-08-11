@@ -600,6 +600,49 @@ _STATUS_BADGE = {
     "ok": "✅", "pending": "⏳", "fail": "❌", "skip": "⏭", "shrink": "↩️",
 }
 
+# 链 → 交易浏览器 URL 模板（tx_hash 点击跳转）
+_TX_EXPLORERS = {
+    "solana": "https://solscan.io/tx/{tx}",
+    "sol": "https://solscan.io/tx/{tx}",
+    "501": "https://solscan.io/tx/{tx}",
+    "eth": "https://etherscan.io/tx/{tx}",
+    "op_eth": "https://optimistic.etherscan.io/tx/{tx}",
+    "bnb": "https://bscscan.com/tx/{tx}",
+    "56": "https://bscscan.com/tx/{tx}",
+    "xlayer": "https://explorer.xlayer.tech/tx/{tx}",
+    "196": "https://explorer.xlayer.tech/tx/{tx}",
+    "arb": "https://arbiscan.io/tx/{tx}",
+    "base": "https://basescan.org/tx/{tx}",
+    "polygon": "https://polygonscan.com/tx/{tx}",
+    "trx": "https://tronscan.org/#/transaction/{tx}",
+}
+
+
+def _tx_cell(tx, chain: str = "") -> str:
+    """tx_hash 单元格：真实链上 hash → 可点击浏览器链接，占位符/空 → 纯文本。
+
+    2026-08-11：占位 UUID（32 位 hex，上链前由 relayer 返回）不是真实
+    hash，点击会打开无效链接，故只对非 hex 长串（base58）生成链接。
+    """
+    tx = str(tx or "")
+    if not tx:
+        return '<span class="muted">—</span>'
+    if len(tx) <= 32 and all(c in "0123456789abcdefABCDEF" for c in tx):
+        return f'<span title="{_esc(tx)}">{_esc(tx[:8])}</span>'
+    chain = (chain or "").lower()
+    url = _TX_EXPLORERS.get(chain)
+    if url is None:
+        for k, v in _TX_EXPLORERS.items():
+            if k and (k in chain or chain in k):
+                url = v
+                break
+    if url is None:
+        url = _TX_EXPLORERS["solana"]
+    return (
+        f'<a href="{url.format(tx=tx)}" target="_blank" rel="noopener" '
+        f'title="{_esc(tx)}">{_esc(tx[:8])} ↗</a>'
+    )
+
 
 def _trade_rows(events: list[dict], tq: dict | None = None) -> list[dict]:
     """从事件流过滤交易记录（最新在前），支持查询条件。
@@ -726,11 +769,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
         badge = _STATUS_BADGE.get(e["status"], "·")
         color = st_color.get(e["status"], "#333")
         dir_txt = "🟢 买" if e["direction"] == "buy" else "🔴 卖"
-        tx = str(e.get("tx_hash") or "")
-        if tx:
-            tx_cell = f'<span title="{_esc(tx)}">{_esc(tx[:8])}</span>'
-        else:
-            tx_cell = '<span class="muted">—</span>'
+        tx_cell = _tx_cell(e.get("tx_hash"), str(e.get("chain") or ""))
         slot = e.get("slot")
         slot_txt = _esc(str(slot)) if slot not in (None, "") else "—"
         tr_rows += (
@@ -741,10 +780,11 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
             f'<td class="num">{float(e.get("price", 0) or 0):.2f}</td>'
             f'<td class="num">{slot_txt}</td>'
             f'<td style="color:{color}"><b>{badge} {_esc(str(e.get("event", "")))}</b></td>'
+            f'<td class="note">{_esc(str(e.get("note", "")))}</td>'
             f'<td>{tx_cell}</td></tr>'
         )
     if not tr_rows:
-        tr_rows = ('<tr><td colspan="8" class="muted" style="text-align:left">'
+        tr_rows = ('<tr><td colspan="9" class="muted" style="text-align:left">'
                    '暂无交易记录（买卖信号出现后显示）</td></tr>')
 
     tq = tq or {}
@@ -782,7 +822,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
         '<table>'
-        '<tr><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>tx_hash</th></tr>'
+        '<tr><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>原因</th><th>tx_hash</th></tr>'
         f'{tr_rows}'
         '</table>'
         '<h4 style="margin:18px 0 8px">📜 信号历史（最近 20 条）</h4>'

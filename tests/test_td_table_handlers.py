@@ -257,9 +257,9 @@ def test_render_live_contains_trade_section(monkeypatch, tmp_path: Path):
     ev_file = tmp_path / "td_live_events.jsonl"
     monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
     td_live_state.append_event({
-        "symbol": "SPCX", "event": "LONG", "note": "slot=2",
+        "symbol": "SPCX", "event": "LONG", "note": "slot=2 qty=0.021226 price=136.8",
         "slot": 2, "qty": 0.021226, "price": 136.8, "direction": "buy",
-        "status": "ok", "tx_hash": "aa11bb22",
+        "status": "ok", "tx_hash": "4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abc", "chain": "solana",
     })
     td_live_state.append_event({
         "symbol": "CRCLX", "event": "BUY_FAIL", "note": "slot=3",
@@ -270,7 +270,36 @@ def test_render_live_contains_trade_section(monkeypatch, tmp_path: Path):
     assert "trade-form" in html
     assert "tq_sym" in html
     assert "tq_n" in html
-    assert "aa11bb22" in html       # tx_hash 短显
+    assert "原因" in html                    # 原因列（失败原因/成交明细）
+    assert "4xKd9aBc" in html                # tx_hash 短显
     assert "BUY_FAIL" in html
     assert "🟢 买" in html
     assert "✅" in html and "❌" in html
+    # 原因列内容：成功事件显示 slot/qty/price 明细
+    assert "slot=2 qty=0.021226 price=136.8" in html
+    # tx_hash 可点击（solscan 链接）
+    assert 'href="https://solscan.io/tx/4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abc"' in html
+    assert "↗" in html
+
+
+def test_tx_cell_link_and_placeholder():
+    """tx_hash 单元格：真实 hash → 链浏览器链接；占位 UUID/空 → 纯文本。"""
+    from nanobot_quant.td_table_handlers import _tx_cell
+
+    # 空 → 纯文本占位
+    assert "muted" in _tx_cell("")
+    # 32 位 hex 占位 UUID → 不生成链接
+    ph = _tx_cell("9f3d2a1b4c5d6e7f8a9b0c1d2e3f4a5b")
+    assert "<a" not in ph
+    assert "9f3d2a1b" in ph
+    # 真实 base58 hash → solscan 链接（默认链）
+    tx = "4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijk"
+    cell = _tx_cell(tx)
+    assert f'href="https://solscan.io/tx/{tx}"' in cell
+    assert "↗" in cell
+    # 链映射：bnb → bscscan
+    cell_bnb = _tx_cell(tx, "bnb")
+    assert f'href="https://bscscan.com/tx/{tx}"' in cell_bnb
+    # 链归一化："solana" 与 "sol" 都能匹配 solscan
+    assert "solscan.io" in _tx_cell(tx, "solana")
+    assert "solscan.io" in _tx_cell(tx, "sol")
