@@ -100,3 +100,49 @@ def test_record_written_when_live(tmp_path: Path):
     events = td_live_state.load_events(20)
     assert len(events) == 1
     assert events[0]["event"] == "LONG"
+def test_record_written_when_live(tmp_path: Path):
+    """live_mode=True 时信号事件写入文件。"""
+    from tests.test_batch_strategy import _make_batch_strategy, _make_bm, _bars_with, _buy_closes  # noqa: PLC0415
+
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s.parameters = {**s.parameters, "live_mode": True}
+    s._record("LONG", "slot=1 qty=0.1")
+    events = td_live_state.load_events(20)
+    assert len(events) == 1
+    assert events[0]["event"] == "LONG"
+
+
+def test_record_extra_fields_written_when_live(tmp_path: Path):
+    """成交事件携带 slot/qty/direction/status/tx_hash 结构化字段（方案 B）。
+
+    2026-08-11：交易记录区块依赖这些字段呈现买卖成功/失败细节。
+    """
+    from tests.test_batch_strategy import _make_batch_strategy, _make_bm, _bars_with, _buy_closes  # noqa: PLC0415
+
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s.parameters = {**s.parameters, "live_mode": True}
+    s._record(
+        "EXIT", "slot=2 qty=0.021226",
+        slot=2, qty=0.021226, price=136.8, direction="sell", status="ok",
+        tx_hash="4xKd9aBc...", chain="solana",
+    )
+    events = td_live_state.load_events(20)
+    assert len(events) == 1
+    e = events[0]
+    assert e["event"] == "EXIT"
+    assert e["slot"] == 2
+    assert e["qty"] == 0.021226
+    assert e["direction"] == "sell"
+    assert e["status"] == "ok"
+    assert e["tx_hash"] == "4xKd9aBc..."
+    assert e["chain"] == "solana"

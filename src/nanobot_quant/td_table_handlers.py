@@ -536,7 +536,7 @@ def td_table_page(request: Request) -> HTMLResponse:
     if tab == "history":
         content = _render_history(ticker, bar, start, end, strategy_name, params, setup, source)
     elif tab == "live":
-        content = _render_live(with_script=not frag)
+        content = _render_live(with_script=not frag, tq=q)
     else:
         content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source)
 
@@ -587,7 +587,60 @@ def _live_cell(v: int, threshold: int) -> str:
     return str(v)
 
 
-def _render_live(with_script: bool = True) -> str:
+# 交易记录事件集合：事件 → (方向, 状态)
+_TRADE_EVENTS = {
+    "LONG": ("buy", "ok"), "LONG_PENDING": ("buy", "pending"),
+    "BUY_FAIL": ("buy", "fail"),
+    "EXIT": ("sell", "ok"), "EXIT_PENDING": ("sell", "pending"),
+    "EXIT_FAIL": ("sell", "fail"),
+    "EXIT_SKIP": ("sell", "skip"), "EXIT_SHRINK": ("sell", "shrink"),
+}
+
+_STATUS_BADGE = {
+    "ok": "✅", "pending": "⏳", "fail": "❌", "skip": "⏭", "shrink": "↩️",
+}
+
+
+def _trade_rows(events: list[dict], tq: dict | None = None) -> list[dict]:
+    """从事件流过滤交易记录（最新在前），支持查询条件。
+
+    2026-08-11 方案 B：成交事件（LONG/EXIT/各 PENDING/FAIL/SKIP）独立
+    成表，携带 slot/qty/tx_hash 细节；查询条件 tq_sym/tq_dir/tq_st。
+    """
+    tq = tq or {}
+    sym = (tq.get("tq_sym") or "").strip().upper()
+    qdir = (tq.get("tq_dir") or "").strip()
+    qst = (tq.get("tq_st") or "").strip()
+    rows: list[dict] = []
+    for e in events:
+        ev = str(e.get("event", ""))
+        meta = _TRADE_EVENTS.get(ev)
+        if meta is None:
+            continue
+        direction, status = meta
+        if qdir and direction != qdir:
+            continue
+        if qst and status != qst:
+            continue
+        if sym and str(e.get("symbol", "")).upper() != sym:
+            continue
+        rows.append({**e, "direction": direction, "status": status})
+    rows.reverse()  # 最新在前
+    return rows
+
+
+def _fmt_qty(q) -> str:
+    """交易数量格式化：无/零显示 —，否则 6 位有效数字。"""
+    try:
+        v = float(q or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if v <= 0:
+        return "—"
+    return f"{v:.6g}"
+
+
+def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
     """「实时监控」tab：TD live 每轮状态 + 最近信号事件。
 
     2026-08-11 方案 A：内存共享——TD live 循环（gatekeeper 进程内
@@ -598,7 +651,7 @@ def _render_live(with_script: bool = True) -> str:
     try:
         from nanobot_quant import td_live_state
         st = td_live_state.get_state()
-        events = td_live_state.load_events(20)
+        events = td_live_state.load_events(500)  # 交易记录查询需要更多历史
     except Exception:  # noqa: BLE001
         st = {"running": False, "symbols": {}, "updated_at": None, "next_iteration": None}
         events = []
@@ -659,6 +712,60 @@ def _render_live(with_script: bool = True) -> str:
     if not ev_rows:
         ev_rows = '<tr><td colspan="6" class="muted" style="text-align:left">暂无信号事件</td></tr>'
 
+    # ── 📊 交易记录（2026-08-11 方案 B）──
+    trade_rows = _trade_rows(events, tq)
+    try:
+        tr_n = min(max(int((tq or {}).get("tq_n") or 20), 1), 100)
+    except (TypeError, ValueError):
+        tr_n = 20
+    trade_rows = trade_rows[:tr_n]
+    st_color = {"ok": "#1b7f3d", "pending": "#e8890c", "fail": "#b3261e",
+                "skip": "#666", "shrink": "#1565c0"}
+    tr_rows = ""
+    for e in trade_rows:
+        badge = _STATUS_BADGE.get(e["status"], "·")
+        color = st_color.get(e["status"], "#333")
+        dir_txt = "🟢 买" if e["direction"] == "buy" else "🔴 卖"
+        tx = str(e.get("tx_hash") or "")
+        if tx:
+            tx_cell = f'<span title="{_esc(tx)}">{_esc(tx[:8])}</span>'
+        else:
+            tx_cell = '<span class="muted">—</span>'
+        slot = e.get("slot")
+        slot_txt = _esc(str(slot)) if slot not in (None, "") else "—"
+        tr_rows += (
+            f'<tr><td class="time">{_esc(str(e.get("ts", "")))}</td>'
+            f'<td><b>{_esc(str(e.get("symbol", "")))}</b></td>'
+            f'<td>{dir_txt}</td>'
+            f'<td class="num">{_fmt_qty(e.get("qty"))}</td>'
+            f'<td class="num">{float(e.get("price", 0) or 0):.2f}</td>'
+            f'<td class="num">{slot_txt}</td>'
+            f'<td style="color:{color}"><b>{badge} {_esc(str(e.get("event", "")))}</b></td>'
+            f'<td>{tx_cell}</td></tr>'
+        )
+    if not tr_rows:
+        tr_rows = ('<tr><td colspan="8" class="muted" style="text-align:left">'
+                   '暂无交易记录（买卖信号出现后显示）</td></tr>')
+
+    tq = tq or {}
+    tq_sel = lambda name, opts, cur: '<select name="%s">%s</select>' % (name, "".join(
+        f'<option value="{v}"{" selected" if v == cur else ""}>{lab}</option>'
+        for v, lab in opts))
+    tq_dir_opts = [("", "全部方向"), ("buy", "买"), ("sell", "卖")]
+    tq_st_opts = [("", "全部状态"), ("ok", "✅ 成功"), ("pending", "⏳ 待确认"),
+                  ("fail", "❌ 失败"), ("skip", "⏭ 跳过"), ("shrink", "↩️ 缩量")]
+    tq_n_opts = [("20", "20 条"), ("50", "50 条"), ("100", "100 条")]
+    trade_form = (
+        '<form class="inline" id="trade-form" onsubmit="return applyTQ()">'
+        '<label>标的</label><input name="tq_sym" value="%s" size="6" placeholder="全部">'
+        '<label>方向</label>%s<label>状态</label>%s<label>条数</label>%s'
+        '<button>查询</button></form>'
+        % (_esc(tq.get("tq_sym", "") or ""),
+           tq_sel("tq_dir", tq_dir_opts, tq.get("tq_dir", "") or ""),
+           tq_sel("tq_st", tq_st_opts, tq.get("tq_st", "") or ""),
+           tq_sel("tq_n", tq_n_opts, tq.get("tq_n", "") or "20"))
+    )
+
     html = (
         '<div class="status">'
         f'<span>循环：<b>{run_txt}</b></span>'
@@ -672,6 +779,12 @@ def _render_live(with_script: bool = True) -> str:
         '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
         f'{rows}'
         '</table>'
+        f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
+        f'{trade_form}'
+        '<table>'
+        '<tr><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>tx_hash</th></tr>'
+        f'{tr_rows}'
+        '</table>'
         '<h4 style="margin:18px 0 8px">📜 信号历史（最近 20 条）</h4>'
         '<table>'
         '<tr><th>时间</th><th>标的</th><th>事件</th><th>价格</th><th>Score</th><th>备注</th></tr>'
@@ -684,15 +797,45 @@ def _render_live(with_script: bool = True) -> str:
             '<script>'
             '(function(){'
             '  var secs = ' + str(_live_refresh_s()) + ';'
+            '  window.TQ = window.TQ || (function(){'
+            r'    var q = location.search.replace(/^\?/, "").split("&");'
+            '    var o = {};'
+            '    for (var i = 0; i < q.length; i++){'
+            '      var p = q[i].split("=");'
+            '      if (p[0].indexOf("tq_") === 0) o[p[0]] = decodeURIComponent(p[1] || "");'
+            '    }'
+            '    return o;'
+            '  })();'
+            '  function tqQS(){'
+            '    var p = [];'
+            '    for (var k in window.TQ) if (window.TQ[k]) p.push(k + "=" + encodeURIComponent(window.TQ[k]));'
+            '    return p.length ? "&" + p.join("&") : "";'
+            '  }'
             '  function poll(){'
-            "    fetch('/config/td-table?tab=live&frag=1')"
+            "    fetch('/config/td-table?tab=live&frag=1' + tqQS())"
             '      .then(function(r){ return r.text(); })'
             '      .then(function(html){'
             "        var el = document.getElementById('live-wrap');"
             "        if (el && html) el.innerHTML = html;"
             '      }).catch(function(){});'
             '  }'
+            '  window.applyTQ = function(){'
+            '    var f = document.getElementById("trade-form");'
+            '    if (f){'
+            '      ["tq_sym", "tq_dir", "tq_st", "tq_n"].forEach(function(k){'
+            '        if (f.elements[k] && f.elements[k].value) window.TQ[k] = f.elements[k].value;'
+            '        else if (f.elements[k]) delete window.TQ[k];'
+            '      });'
+            '    }'
+            '    var p = [];'
+            '    for (var k in window.TQ) if (window.TQ[k]) p.push(k + "=" + encodeURIComponent(window.TQ[k]));'
+            '    var q = p.length ? "?" + p.join("&") : "";'
+            '    try { history.replaceState(null, "", "/config/td-table?tab=live" + q); } catch(e){}'
+            '    poll();'
+            '    return false;'
+            '  };'
             '  setInterval(poll, secs * 1000);'
+            '  poll();'
             '})();'
             '</script>'
         )

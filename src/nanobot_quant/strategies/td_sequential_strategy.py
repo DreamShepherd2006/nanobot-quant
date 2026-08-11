@@ -199,13 +199,16 @@ class TdSequentialStrategy(Strategy):
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
 
-    def _record(self, event: str, note: str = "") -> None:
+    def _record(self, event: str, note: str = "", **extra) -> None:
         """更新实时状态 signal + 追加事件历史（仅 live 模式写文件）。
 
         2026-08-11：TD live 每轮信号动作（LONG/SELL/EXIT/SKIP/FAIL）
         记录到内存 LIVE_STATE 与事件文件，供 /config/td-table
         「实时监控」tab 展示。回测/纸交易（live_mode=False）只更新
         内存、不写事件文件。
+
+        2026-08-11 方案 B：成交事件额外携带 slot/qty/price/direction/
+        status/tx_hash/chain 结构化字段，供「📊 交易记录」区块展示。
         """
         try:
             from nanobot_quant import td_live_state
@@ -221,6 +224,7 @@ class TdSequentialStrategy(Strategy):
                     "setup_buy": sig.get("setup_buy", 0),
                     "setup_sell": sig.get("setup_sell", 0),
                     "cd_sell": sig.get("cd_sell", 0),
+                    **extra,
                 })
         except Exception:  # noqa: BLE001
             pass
@@ -383,6 +387,10 @@ class TdSequentialStrategy(Strategy):
                         self._record(
                             "LONG",
                             f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
+                            slot=slot["slot"], qty=qty, price=price,
+                            direction="buy", status="ok",
+                            tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
+                            chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
                         )
                         executed = True
                         break
@@ -402,6 +410,10 @@ class TdSequentialStrategy(Strategy):
                     self._record(
                         "LONG_PENDING",
                         f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
+                        slot=slot["slot"], qty=qty, price=price,
+                        direction="buy", status="pending",
+                        tx_hash=pend.get("tx_hash", ""),
+                        chain=pend.get("chain", ""),
                     )
                     executed = True
                     break
@@ -658,6 +670,10 @@ class TdSequentialStrategy(Strategy):
                 self._record(
                     "EXIT",
                     f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                    slot=slot["slot"], qty=qty, price=price,
+                    direction="sell", status="ok",
+                    tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
+                    chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
                 )
                 return
             # 已提交未确认（PENDING）→ 台账保持 open + pending 记录，
@@ -678,6 +694,10 @@ class TdSequentialStrategy(Strategy):
             self._record(
                 "EXIT_PENDING",
                 f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                slot=slot["slot"], qty=qty, price=price,
+                direction="sell", status="pending",
+                tx_hash=pend.get("tx_hash", ""),
+                chain=pend.get("chain", ""),
             )
             return
         # 明确失败（quote 解析失败、资金不足、链上确认失败等）→ 台账保持
@@ -687,7 +707,14 @@ class TdSequentialStrategy(Strategy):
             f"TD BATCH EXIT FAIL | slot={slot['slot']} price={price:.2f} "
             f"qty={qty} {exit_reason} error={err}"
         )
-        self._record("EXIT_FAIL", f"slot={slot['slot']} {exit_reason} {err}")
+        _pend = ((order.custom_params or {}).get("onchain_pending") or {}) if order is not None else {}
+        self._record(
+            "EXIT_FAIL", f"slot={slot['slot']} {exit_reason} {err}",
+            slot=slot["slot"], qty=qty, price=price,
+            direction="sell", status="fail",
+            tx_hash=_pend.get("tx_hash", ""),
+            chain=_pend.get("chain", ""),
+        )
 
     def _check_pending_confirmations(self) -> None:
         """链上补确认（2026-08-11）：每轮迭代轮询官方 wallet history。
@@ -716,13 +743,26 @@ class TdSequentialStrategy(Strategy):
                 self._record(
                     "EXIT",
                     f"slot={slot_id} 链上确认平仓 qty={info['qty']:.6g}",
+                    slot=slot_id, qty=info.get("qty", 0),
+                    price=info.get("price", 0),
+                    direction="sell", status="ok",
+                    tx_hash=info.get("tx_hash", ""),
+                    chain=info.get("chain", ""),
                 )
                 del self._pending_sells[slot_id]
             elif status in ("ERROR", "CANCELLED"):
                 self.logger.warning(
                     f"TD BATCH EXIT FAIL | slot={slot_id} 链上确认失败 {status}"
                 )
-                self._record("EXIT_FAIL", f"slot={slot_id} 链上确认失败 {status}")
+                self._record(
+                    "EXIT_FAIL",
+                    f"slot={slot_id} 链上确认失败 {status}",
+                    slot=slot_id, qty=info.get("qty", 0),
+                    price=info.get("price", 0),
+                    direction="sell", status="fail",
+                    tx_hash=info.get("tx_hash", ""),
+                    chain=info.get("chain", ""),
+                )
                 del self._pending_sells[slot_id]
             # PENDING/UNKNOWN → 继续等待
         for slot_id in list(self._pending_buys):
@@ -744,13 +784,26 @@ class TdSequentialStrategy(Strategy):
                     self._record(
                         "LONG",
                         f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
+                        slot=slot_id, qty=info.get("qty", 0),
+                        price=info.get("price", 0),
+                        direction="buy", status="ok",
+                        tx_hash=info.get("tx_hash", ""),
+                        chain=info.get("chain", ""),
                     )
                 del self._pending_buys[slot_id]
             elif status in ("ERROR", "CANCELLED"):
                 self.logger.warning(
                     f"TD BATCH BUY FAIL | slot={slot_id} 链上确认失败 {status}"
                 )
-                self._record("BUY_FAIL", f"slot={slot_id} 链上确认失败 {status}")
+                self._record(
+                    "BUY_FAIL",
+                    f"slot={slot_id} 链上确认失败 {status}",
+                    slot=slot_id, qty=info.get("qty", 0),
+                    price=info.get("price", 0),
+                    direction="buy", status="fail",
+                    tx_hash=info.get("tx_hash", ""),
+                    chain=info.get("chain", ""),
+                )
                 del self._pending_buys[slot_id]
             # PENDING/UNKNOWN → 继续等待
 
@@ -936,7 +989,13 @@ class TdSequentialStrategy(Strategy):
                         f"TD BATCH BUY FAIL | slot={slot['slot']} "
                         f"price={price:.2f} qty={qty} {err}"
                     )
-                    self._record("BUY_FAIL", f"slot={slot['slot']} {err}")
+                    self._record(
+                        "BUY_FAIL", f"slot={slot['slot']} {err}",
+                        slot=slot["slot"], qty=qty, price=price,
+                        direction="buy", status="fail",
+                        tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", "") if order is not None else "",
+                        chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", "") if order is not None else "",
+                    )
                     return None
             return (order, qty)
         finally:
