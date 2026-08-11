@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -690,6 +691,26 @@ def swap_quote(
     )
 
 
+# CLI 报错样例: --readable-amount "0.02053879" has more decimal places
+#               than this token supports (6 decimals)
+_DECIMALS_ERROR_RE = re.compile(
+    r"more decimal places than this token supports \((\d+) decimals\)"
+)
+
+# 模块级 decimals 缓存：key = f"{from_addr}:{chain}" → token decimals。
+# 首次 SELL 被 CLI 拒后解析出实际 decimals 并记住，后续直接按该精度
+# 舍入，避免每笔都先试错一次（2026-08-11 SPCX 6 decimals 实证）。
+_DECIMALS_CACHE: dict[str, int] = {}
+
+
+def _round_to(amount: str, decimals: int) -> str:
+    """按 token 实际 decimals 舍入 readable-amount。"""
+    try:
+        return f"{round(float(amount), decimals):.{decimals}f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return amount
+
+
 def swap_execute(
     from_addr: str,
     to_addr: str,
@@ -703,30 +724,55 @@ def swap_execute(
     Uses ``--readable-amount`` (human-readable token amount, CLI converts
     to minimal units via token decimals). ``chain``/``wallet`` are required
     by onchainos CLI v4.3.x.
+
+    Decimals handling (2026-08-11): the CLI strictly validates readable-amount
+    against the from-token's decimals. ``_round_readable_amount`` defaults to
+    8 decimals (covers CRCLX/RENDER/SOL), but tokens like SPCX only support 6
+    decimals — the CLI then rejects the swap. On rejection we parse the
+    ``(N decimals)`` hint out of the CLI error, cache N per (from, chain) and
+    retry once with the correct precision. The decimals validation fails
+    before any on-chain broadcast, so the retry is safe (deterministic, no
+    duplicate orders).
     """
+    key = f"{from_addr}:{chain}"
+    dec = _DECIMALS_CACHE.get(key)
+    amt = _round_to(amount, dec) if dec is not None else _round_readable_amount(amount)
     args = [
         "swap", "execute",
         "--from", from_addr,
         "--to", to_addr,
-        "--readable-amount", _round_readable_amount(amount),
+        "--readable-amount", amt,
         "--chain", chain,
     ]
     if wallet:
         args += ["--wallet", wallet]
     if slippage:
         args += ["--slippage", slippage]
-    return _run(*args, timeout=30)
+    result = _run(*args, timeout=30)
+    if result and result.get("_exit_code") == 1:
+        m = _DECIMALS_ERROR_RE.search(
+            f"{result.get('_stdout') or ''} {result.get('_stderr') or ''}"
+        )
+        if m:
+            dec = int(m.group(1))
+            _DECIMALS_CACHE[key] = dec
+            amt2 = _round_to(amount, dec)
+            if amt2 != amt:
+                args[args.index("--readable-amount") + 1] = amt2
+                result = _run(*args, timeout=30)
+    return result
 
 
 def _round_readable_amount(amount: str) -> str:
-    """readable-amount 统一舍入到 8 位小数。
+    """readable-amount 默认舍入到 8 位小数。
 
     2026-08-11 修复：qty = pv × max_position_pct / price 的浮点除法产生
     15+ 位小数（如 0.042222355341467045），onchainos CLI 按 token decimals
     校验 readable-amount，超限报错 "more decimal places than this token
     supports (8 decimals)" 导致 swap 失败（00:44 CRCLX cd_sell=13 实证）。
-    8 位覆盖主流 SPL 代币（CRCLX/RENDER/SPCX 8 decimals）；SOL 原生币
-    9 decimals，第 9 位在实际交易金额下极少用到，8 位足够。
+    8 位覆盖主流 SPL（CRCLX/RENDER 8 decimals、SOL 9）；SPCX 为 6 decimals，
+    首次 SELL 被拒后由 swap_execute 的 decimals 缓存/重试机制自动适配
+    （见 _DECIMALS_CACHE）。
     """
     try:
         return f"{round(float(amount), 8):.8f}".rstrip("0").rstrip(".")

@@ -396,3 +396,89 @@ def test_round_readable_amount(monkeypatch):
         amount="1.5",
     )
     assert calls[0][calls[0].index("--readable-amount") + 1] == "1.5"
+    assert calls[0][calls[0].index("--readable-amount") + 1] == "1.5"
+
+
+def test_swap_execute_decimals_retry(monkeypatch):
+    """SPCX 6 decimals：首次 8 位被拒 → 解析 (6 decimals) → 按 6 位重试成功。
+
+    2026-08-11 回归：SPCX setup_sell=9 平仓连续 EXIT_FAIL——CLI 拒绝
+    --readable-amount "0.02053879"（8 位小数 > 6 decimals 上限）。
+    """
+    monkeypatch.setattr(onchainos_cli, "_DECIMALS_CACHE", {})
+    calls = []
+
+    def fake_run(*args, **_kw):
+        calls.append(args)
+        if len(calls) == 1:
+            return {
+                "_exit_code": 1,
+                "_stdout": '{"ok":false,"error":"--readable-amount \\"0.02053879\\" has more decimal places than this token supports (6 decimals)"}',
+                "_stdout_parsed": {"ok": False, "error": "--readable-amount \"0.02053879\" has more decimal places than this token supports (6 decimals)"},
+                "_stderr": "",
+                "_stderr_parsed": None,
+            }
+        return {"ok": True, "data": {"swapTxHash": "tx123"}}
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    result = onchainos_cli.swap_execute(
+        from_addr="SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb",
+        to_addr="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        amount="0.0205387903892588",
+    )
+    assert len(calls) == 2
+    amt2 = calls[1][calls[1].index("--readable-amount") + 1]
+    assert amt2 == "0.020539"
+    assert result["ok"] is True
+    assert (
+        onchainos_cli._DECIMALS_CACHE["SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb:solana"]
+        == 6
+    )
+
+
+def test_swap_execute_decimals_cached_no_retry(monkeypatch):
+    """decimals 缓存后直接按 6 位提交，单次调用，无试错。"""
+    monkeypatch.setattr(
+        onchainos_cli,
+        "_DECIMALS_CACHE",
+        {"SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb:solana": 6},
+    )
+    calls = []
+
+    def fake_run(*args, **_kw):
+        calls.append(args)
+        return {"ok": True, "data": {"swapTxHash": "tx456"}}
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    onchainos_cli.swap_execute(
+        from_addr="SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb",
+        to_addr="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        amount="0.0205387903892588",
+    )
+    assert len(calls) == 1
+    amt = calls[0][calls[0].index("--readable-amount") + 1]
+    assert amt == "0.020539"
+
+
+def test_swap_execute_non_decimals_error_no_retry(monkeypatch):
+    """非 decimals 错误（如 52001 资金不足）不重试，保持单次调用。"""
+    monkeypatch.setattr(onchainos_cli, "_DECIMALS_CACHE", {})
+    calls = []
+
+    def fake_run(*args, **_kw):
+        calls.append(args)
+        return {
+            "_exit_code": 1,
+            "_stdout": '{"ok":false,"error":"[52001] Insufficient balance"}',
+            "_stdout_parsed": {"ok": False, "error": "[52001] Insufficient balance"},
+            "_stderr": "",
+            "_stderr_parsed": None,
+        }
+
+    monkeypatch.setattr(onchainos_cli, "_run", fake_run)
+    onchainos_cli.swap_execute(
+        from_addr="SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb",
+        to_addr="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        amount="0.0205387903892588",
+    )
+    assert len(calls) == 1
