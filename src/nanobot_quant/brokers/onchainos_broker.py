@@ -216,6 +216,16 @@ class OnchainOSBroker(Broker):
         # PENDING=已提交待确认（不 filled 不 error），策略层台账保持 open
         # + 后续轮询补确认（fail-safe，防假成功脱管）。
         order.set_identifier(tx_hash or order_id)
+        # 2026-08-12：统一存 pending 信息——无论 confirm 结果（success/pending），
+        # 策略层都可能走 pending 分支（lumibot v4.5.78 is_filled 与 set_filled
+        # 交互偶发不一致），pending 记录必须有 tx_hash/order_id 才能查到 detail
+        # 回写真实 hash（方案 A：TXBACK）。
+        order.custom_params = order.custom_params or {}
+        order.custom_params["onchain_pending"] = {
+            "tx_hash": tx_hash,
+            "order_id": order_id,
+            "chain": chain,
+        }
         confirmed = confirm_swap_onchain(tx_hash, order_id, chain)
         print(
             f"TD BROKER DIAG | confirm {symbol} -> {confirmed} "
@@ -226,14 +236,7 @@ class OnchainOSBroker(Broker):
             order.set_error(self._format_err("Swap 链上确认失败", data))
             return order
         if confirmed == "pending":
-            # 真实 lumibot v4.5.78 的 Order.custom_params 默认为 None
-            #（测试 stub 曾为 {}，stale stub 掩盖了此崩溃——2026-08-11）
-            order.custom_params = order.custom_params or {}
-            order.custom_params["onchain_pending"] = {
-                "tx_hash": tx_hash,
-                "order_id": order_id,
-                "chain": chain,
-            }
+            # onchain_pending 已在上面统一赋值（幂等保留）
             logger.info(
                 "Swap submitted (pending on-chain confirm): tx=%s",
                 (tx_hash or order_id)[:16],
