@@ -67,9 +67,13 @@ def test_stock_secid_mapping():
     assert _stock_secid("601127") == "1.601127"
     assert _stock_secid("000001") == "0.000001"
     assert _stock_secid("300750") == "0.300750"
+    assert _stock_secid("510050") == "1.510050"  # 沪市 ETF（上证50）
+    assert _stock_secid("159915") == "0.159915"  # 深市 ETF（创业板）
     assert _stock_secid("NVDA") == "105.NVDA"
     assert _yf_symbol("601127") == "601127.SS"
     assert _yf_symbol("000001") == "000001.SZ"
+    assert _yf_symbol("510050") == "510050.SS"
+    assert _yf_symbol("159915") == "159915.SZ"
     assert _yf_symbol("NVDA") == "NVDA"
 
 

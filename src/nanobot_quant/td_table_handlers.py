@@ -105,16 +105,18 @@ def _stock_secid(ticker: str) -> str:
 
     6-digit numeric codes are treated as A-shares (SSE ``1.`` / SZSE
     ``0.``); anything else is treated as a US symbol (``105.`` NYSE).
+    5-prefix codes are SSE ETF (510/511/560/561/588 etc.); SZSE ETF use
+    1/2/3-prefix (e.g. 159xxx) so they keep the ``0.`` branch.
     """
     if ticker.isdigit() and len(ticker) == 6:
-        return f"1.{ticker}" if ticker.startswith(("6", "9")) else f"0.{ticker}"
+        return f"1.{ticker}" if ticker.startswith(("6", "9", "5")) else f"0.{ticker}"
     return f"105.{ticker}"
 
 
 def _yf_symbol(ticker: str) -> str:
     """Map a symbol to yfinance format: 6-digit codes get .SS/.SZ suffix."""
     if ticker.isdigit() and len(ticker) == 6:
-        return f"{ticker}.SS" if ticker.startswith(("6", "9")) else f"{ticker}.SZ"
+        return f"{ticker}.SS" if ticker.startswith(("6", "9", "5")) else f"{ticker}.SZ"
     return ticker
 
 
