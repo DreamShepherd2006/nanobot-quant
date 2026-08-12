@@ -249,21 +249,27 @@ class TdSequentialStrategy(Strategy):
         d0 = data[0] if isinstance(data, list) and data else (
             data if isinstance(data, dict) else None
         )
-        # DIAG（2026-08-12）：打印每次 detail 提取的输入/输出全量，
-        # 观察 detail 响应中 txHash 字段是否稳定（决定后续是否加 list 兜底）。
+        # DIAG（2026-08-12）：把 detail 全量打出来——字段名 + 值都看，
+        # 确认 hash 到底叫 txHash 还是别的名字（不假设字段名）。
         try:
             detail_tx = str(d0.get("txHash") or "") if isinstance(d0, dict) else ""
-            d0_keys = ",".join(d0.keys()) if isinstance(d0, dict) else "-"
-            d0_json = repr(d0)[:1500] if isinstance(d0, dict) else "-"
+            if isinstance(d0, dict):
+                d0_keys = ",".join(d0.keys())
+                hash_like = {
+                    k: str(v)[:40] for k, v in d0.items()
+                    if any(w in k.lower() for w in ("hash", "tx", "order", "id"))
+                }
+                d0_json = repr(d0)
+            else:
+                d0_keys = "-"; hash_like = {}; d0_json = "-"
             self.logger.info(
                 "TD CONFIRM DETAIL | slot=%s symbol=%s status=%s in_hash=%s order_id=%s "
-                "data_len=%s keys=[%s] detail_txHash=%s placeholder_in=%s d0=%s",
+                "data_len=%s keys=[%s] hash_like=%s d0=%s",
                 info.get("slot"), info.get("symbol", self.symbol),
                 (st or {}).get("tx_status"),
                 tx_hash[:14] or "-", str(info.get("order_id") or "")[:14] or "-",
                 len(data) if isinstance(data, list) else -1,
-                d0_keys, detail_tx[:16] or "EMPTY",
-                is_placeholder_tx_hash(tx_hash), d0_json,
+                d0_keys, hash_like, d0_json,
             )
         except Exception:  # noqa: BLE001
             pass
