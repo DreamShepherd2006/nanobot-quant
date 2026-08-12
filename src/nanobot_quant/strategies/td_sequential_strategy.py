@@ -16,6 +16,8 @@ Usage::
 
 from __future__ import annotations
 
+import sys
+
 from lumibot.strategies.strategy import Strategy
 
 from nanobot_quant.order_tracker import OrderTracker
@@ -167,6 +169,21 @@ class TdSequentialStrategy(Strategy):
             for k, v in DEFAULT_TD_PARAMS.items()
         }
 
+    def _calc(self, df, news_count: int = 0) -> dict:
+        """按策略变体分发 calculate（原版 / 同花顺九转 / 富途 NINE）。
+
+        strategy_variant 由 td_live 构造时从 strategy.json 注入（方案 A，
+        2026-08-12）——TD 自主循环与策略选择页 / td-params 参数集对齐。
+        """
+        variant = str(self.parameters.get("strategy_variant", "") or "td_sequential")
+        if variant == "td_sequential_cycle":
+            from nanobot_quant.strategies.td_sequential_cycle import calculate as fn
+        elif variant == "td_sequential_futu":
+            from nanobot_quant.strategies.td_sequential_futu import calculate as fn
+        else:
+            fn = calculate  # 原版（模块级 import）
+        return fn(df, news_count=news_count, params=self._td_params)
+
     def on_trading_iteration(self):
         """Called for each bar (trading day) during the backtest.
 
@@ -300,13 +317,17 @@ class TdSequentialStrategy(Strategy):
                 timestep=self._timestep,
             )
         except Exception as e:
-            self.logger.warning(
-                f"TD DATA ERROR | {type(e).__name__}: {e}"
+            print(
+                f"[TD] DATA ERROR | {type(e).__name__}: {e}",
+                file=sys.stderr, flush=True,
             )
             return
 
         if bars is None or bars.df.empty:
-            self.logger.warning("TD DATA EMPTY | bars is None or empty")
+            print(
+                "[TD] DATA EMPTY | bars is None or empty",
+                file=sys.stderr, flush=True,
+            )
             return
 
         df = bars.df.copy()
@@ -333,12 +354,13 @@ class TdSequentialStrategy(Strategy):
 
         # ── 3. Run TD Sequential ──
         if len(df) < self._min_history:
-            self.logger.warning(
-                f"TD SKIP | bars={len(df)} < min_history={self._min_history}"
+            print(
+                f"[TD] SKIP | bars={len(df)} < min_history={self._min_history}",
+                file=sys.stderr, flush=True,
             )
             return
 
-        signal = calculate(df, params=self._td_params)
+        signal = self._calc(df)
 
         # ── 4. Evaluate signals ──
         setup_buy = signal.get("setup_buy", 0) or 0
@@ -408,7 +430,10 @@ class TdSequentialStrategy(Strategy):
                     peak_portfolio=self._peak_portfolio or pv,
                 )
                 if not result.approved:
-                    self.logger.info(f"TD BLOCK ({result.check_name}) | {result.reason}")
+                    print(
+                        f"[TD] BLOCK ({result.check_name}) | {result.reason}",
+                        file=sys.stderr, flush=True,
+                    )
                     return
             reason = f"TD LONG setup_buy={setup_buy} score={score:.1f}"
             if batch_mode:
@@ -560,9 +585,10 @@ class TdSequentialStrategy(Strategy):
                 return
 
         # ── No signal this bar ──
-        self.logger.info(
-            f"TD HOLD | price={price:.4f} setup_buy={setup_buy} "
-            f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}"
+        print(
+            f"[TD] HOLD | price={price:.4f} setup_buy={setup_buy} "
+            f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}",
+            file=sys.stderr, flush=True,
         )
 
     # ── 分批平仓（批次=子钱包，第一版）──────────────────────────────
@@ -1156,10 +1182,11 @@ class TdSequentialStrategy(Strategy):
                 peak_portfolio=pv_slot,
             )
             if not result.approved:
-                self.logger.info(
-                    f"TD BLOCK ({result.check_name}) | slot={slot['slot']} "
+                print(
+                    f"[TD] BLOCK ({result.check_name}) | slot={slot['slot']} "
                     f"pos=${qty * price:.2f} > "
-                    f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}"
+                    f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
+                    file=sys.stderr, flush=True,
                 )
                 return None
             bal = self._slot_quote_balance("USDC")
