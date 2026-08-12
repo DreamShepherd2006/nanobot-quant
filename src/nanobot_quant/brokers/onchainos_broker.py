@@ -182,11 +182,13 @@ class OnchainOSBroker(Broker):
         status = data.get("status", "unknown")
         # DIAG（2026-08-12）：打印提交响应提取——确认字段名/值
         # （官方 swap.rs 返回 txHash/orderId；Gas Station 广播 hash 未就绪时只有 orderId）
-        logger.info(
-            "TD BROKER DIAG | submit %s %s chain=%s -> tx_hash=%s order_id=%s "
-            "status=%s data_keys=%s",
-            side, symbol, chain, (tx_hash or "-")[:20], (order_id or "-")[:20],
-            status, ",".join(data.keys()) if isinstance(data, dict) else "-",
+        # 注：gatekeeper 无 logging handler，logger.info 会被丢弃——必须 print 到 stderr
+        print(
+            f"TD BROKER DIAG | submit {side} {symbol} chain={chain} -> "
+            f"tx_hash={(tx_hash or '-')[:20]} order_id={(order_id or '-')[:20]} "
+            f"status={status} data_keys="
+            f"{','.join(data.keys()) if isinstance(data, dict) else '-'}",
+            file=sys.stderr, flush=True,
         )
 
         # Accept any non-error status that indicates the swap was submitted.
@@ -215,9 +217,10 @@ class OnchainOSBroker(Broker):
         # + 后续轮询补确认（fail-safe，防假成功脱管）。
         order.set_identifier(tx_hash or order_id)
         confirmed = confirm_swap_onchain(tx_hash, order_id, chain)
-        logger.info(
-            "TD BROKER DIAG | confirm %s -> %s (tx=%s order=%s)",
-            symbol, confirmed, (tx_hash or "-")[:20], (order_id or "-")[:20],
+        print(
+            f"TD BROKER DIAG | confirm {symbol} -> {confirmed} "
+            f"(tx={(tx_hash or '-')[:20]} order={(order_id or '-')[:20]})",
+            file=sys.stderr, flush=True,
         )
         if confirmed == "error":
             order.set_error(self._format_err("Swap 链上确认失败", data))
