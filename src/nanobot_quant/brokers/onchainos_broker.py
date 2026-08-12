@@ -178,8 +178,16 @@ class OnchainOSBroker(Broker):
 
         data = result.get("data", result) if isinstance(result.get("data"), dict) else result
         tx_hash = data.get("swapTxHash") or data.get("txHash") or ""
-        order_id = data.get("swapOrderId") or ""
+        order_id = data.get("swapOrderId") or data.get("orderId") or ""
         status = data.get("status", "unknown")
+        # DIAG（2026-08-12）：打印提交响应提取——确认字段名/值
+        # （官方 swap.rs 返回 txHash/orderId；Gas Station 广播 hash 未就绪时只有 orderId）
+        logger.info(
+            "TD BROKER DIAG | submit %s %s chain=%s -> tx_hash=%s order_id=%s "
+            "status=%s data_keys=%s",
+            side, symbol, chain, (tx_hash or "-")[:20], (order_id or "-")[:20],
+            status, ",".join(data.keys()) if isinstance(data, dict) else "-",
+        )
 
         # Accept any non-error status that indicates the swap was submitted.
         reject_statuses = {"error", "failed", "rejected", "canceled", "cancelled"}
@@ -207,6 +215,10 @@ class OnchainOSBroker(Broker):
         # + 后续轮询补确认（fail-safe，防假成功脱管）。
         order.set_identifier(tx_hash or order_id)
         confirmed = confirm_swap_onchain(tx_hash, order_id, chain)
+        logger.info(
+            "TD BROKER DIAG | confirm %s -> %s (tx=%s order=%s)",
+            symbol, confirmed, (tx_hash or "-")[:20], (order_id or "-")[:20],
+        )
         if confirmed == "error":
             order.set_error(self._format_err("Swap 链上确认失败", data))
             return order

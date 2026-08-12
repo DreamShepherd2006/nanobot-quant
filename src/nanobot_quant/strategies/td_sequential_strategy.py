@@ -450,6 +450,14 @@ class TdSequentialStrategy(Strategy):
                     # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
                     # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
                     pend = (order.custom_params or {}).get("onchain_pending") or {}
+                    # DIAG（2026-08-12）：打印提交后 pending 记录——确认 tx_hash/order_id
+                    self.logger.info(
+                        "TD BUY SUBMIT | slot=%s symbol=%s tx_hash=%s order_id=%s chain=%s",
+                        slot["slot"], self.symbol,
+                        (pend.get("tx_hash") or "-")[:20],
+                        (pend.get("order_id") or "-")[:20],
+                        pend.get("chain", ""),
+                    )
                     self._pending_buys[slot["slot"]] = {
                         "tx_hash": pend.get("tx_hash", ""),
                         "order_id": pend.get("order_id", ""),
@@ -873,6 +881,31 @@ class TdSequentialStrategy(Strategy):
                     info.get("chain", "solana"),
                 )
                 status = st.get("tx_status") if st else "UNKNOWN"
+                # DIAG（2026-08-12）：打印每次 BUY pending 检查的 detail——确认
+                # txHash 提取/回写（方案 A：SUCCESS 时回写真实 hash，确认事件显示）
+                try:
+                    from nanobot_quant.onchainos_cli import is_placeholder_tx_hash as _ph
+                    _raw = (st or {}).get("raw") or {}
+                    _data = _raw.get("data")
+                    _d0 = _data[0] if isinstance(_data, list) and _data else (
+                        _data if isinstance(_data, dict) else None
+                    )
+                    _dtx = str(_d0.get("txHash") or "") if isinstance(_d0, dict) else ""
+                    self.logger.info(
+                        "TD PENDING DIAG | slot=%s symbol=%s status=%s in_tx=%s "
+                        "detail_txHash=%s placeholder=%s",
+                        slot_id, info.get("symbol", self.symbol), status,
+                        (info.get("tx_hash") or "-")[:16],
+                        _dtx[:16] or "EMPTY", _ph(info.get("tx_hash") or ""),
+                    )
+                    if status == "SUCCESS" and _dtx and not _ph(_dtx):
+                        info["tx_hash"] = _dtx  # 回写真实 hash——确认事件显示真实
+                        self.logger.info(
+                            "TD PENDING TXBACK | slot=%s tx_hash -> %s",
+                            slot_id, _dtx,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
                 if status != "SUCCESS":
                     self.logger.info(
                         f"TD PENDING CHECK | slot={slot_id} 账户={aid[:8] or 'home'} "
