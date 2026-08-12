@@ -4,7 +4,7 @@
 不模拟成交。双 tab：
 
 - Tab ① 实时快照：最近 N 根 K 线的 setup/countdown/TDST/score 轨迹，
-  高亮信号行（count == setup_period）与 setup 启动行（count == 1）。
+  高亮信号行（setup 达 entry_setup/exit_setup 阈值）与 setup 启动行（count == 1）。
 - Tab ② 历史区间分析：任意起止区间内**所有** K 线 + 9 信号回溯统计
   （每个 count==setup 信号未来 3/5/10 根涨跌，聚合方向胜率）。
 
