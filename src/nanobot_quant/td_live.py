@@ -67,9 +67,11 @@ class _TdLiveRunner:
 
         from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
         from nanobot_quant.data.onchainos_data_source import OnchainOSDataSource
+        from nanobot_quant.strategies.registry import load_selected
         from nanobot_quant.strategies.td_sequential_strategy import (
             TdSequentialStrategy,
         )
+        from nanobot_quant.td_params import load_td_params
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
@@ -85,6 +87,12 @@ class _TdLiveRunner:
             broker=broker,
             data_source=broker.data_source,
         )
+        # 方案 A（2026-08-12）：TD 循环与策略选择页 / td-params 参数集对齐——
+        # ① 按 strategy.json 注入 strategy_variant（_calc 分发原版/cycle/futu）；
+        # ② merge load_td_params(strategy) 的算法参数（entry_setup 等）进
+        #    strategy.parameters——td-params 页面的修改对 TD 自主循环生效。
+        strategy_name = load_selected()
+        td_params = load_td_params(strategy_name)
         strategy.parameters = dict(
             TdSequentialStrategy.parameters,
             **{
@@ -105,7 +113,20 @@ class _TdLiveRunner:
                 "min_history": int(params.get("td_bars", 120) or 120),
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
+                "strategy_variant": strategy_name,
             },
+            **td_params,
+        )
+        # DIAG（2026-08-12）：验证方案 A 参数 merge——strategy.json 变体 +
+        # td-params 阈值对 TD 自主循环生效（重启后首次构造时打印一次）。
+        print(
+            f"[DIAG] td_live 参数: strategy={strategy_name} "
+            f"entry_setup={strategy.parameters.get('entry_setup')} "
+            f"exit_setup={strategy.parameters.get('exit_setup')} "
+            f"setup_period={strategy.parameters.get('setup_period')} "
+            f"compare_length={strategy.parameters.get('compare_length')} "
+            f"symbols={params['td_symbols']} sleeptime={params['td_sleeptime']}",
+            file=sys.stderr, flush=True,
         )
         # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
         # 策略进入分批模式（BUY 占 slot / SELL 按 exit_order 平批 / 逐批止损止盈）。

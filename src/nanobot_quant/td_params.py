@@ -103,15 +103,33 @@ WEIGHT_KEYS = ("weight_setup", "weight_countdown", "weight_tdst",
 # ── Path / load / save ───────────────────────────────────────────────────
 
 def td_params_path() -> Path:
-    """Path to the persisted td_params.json (WebUI 业务管理 → TD 参数)."""
+    """Path to the persisted td_params.json (WebUI 业务管理 → TD 参数).
+
+    2026-08-12：与 okx.json / tokens.json / live.json / exec_params.json 统一
+    存到 ``{data_root}/legion/credentials/`` 配置持久化目录（Factory Rebuild
+    保留）。旧路径 ``{data_root}/legion/td_params.json`` 由 ``_read_raw()``
+    一次性迁移（读旧写新）。
+    """
     for root in ("/data", "/mnt/workspace"):
-        d = Path(root) / "legion"
+        d = Path(root) / "legion" / "credentials"
         try:
             if d.exists():
                 return d / "td_params.json"
         except OSError:
             continue
     return Path.home() / ".td_params.json"
+
+
+def _legacy_td_params_path() -> Path | None:
+    """2026-08-12 迁移前的旧路径（{root}/legion/td_params.json）。"""
+    for root in ("/data", "/mnt/workspace"):
+        p = Path(root) / "legion" / "td_params.json"
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return None
 
 
 def load_td_params(strategy: str | None = None) -> dict[str, Any]:
@@ -226,11 +244,30 @@ def _defaults_for(strategy: str) -> dict[str, Any]:
 
 
 def _read_raw() -> dict | None:
-    """Parse td_params.json; None when missing or invalid JSON."""
+    """Parse td_params.json; None when missing or invalid JSON.
+
+    优先 credentials/ 新路径；旧路径（legion/td_params.json）存在时一次性
+    迁移（读旧写新），保留已保存的参数（如 entry_setup=6）。
+    """
+    new_path = td_params_path()
     try:
-        raw = json.loads(td_params_path().read_text(encoding="utf-8"))
+        raw = json.loads(new_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        legacy = _legacy_td_params_path()
+        if legacy is None:
+            return None
+        try:
+            raw = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        try:  # 迁移：写新路径（旧文件保留——保守）
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            new_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     return raw if isinstance(raw, dict) else None
 
 
