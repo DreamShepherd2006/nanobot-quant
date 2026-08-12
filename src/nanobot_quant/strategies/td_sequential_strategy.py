@@ -244,12 +244,30 @@ class TdSequentialStrategy(Strategy):
         """
         from nanobot_quant.onchainos_cli import is_placeholder_tx_hash
         tx_hash = str(info.get("tx_hash") or "")
+        raw = (st or {}).get("raw") or {}
+        data = raw.get("data")
+        d0 = data[0] if isinstance(data, list) and data else (
+            data if isinstance(data, dict) else None
+        )
+        # DIAG（2026-08-12）：打印每次 detail 提取的输入/输出全量，
+        # 观察 detail 响应中 txHash 字段是否稳定（决定后续是否加 list 兜底）。
         try:
-            raw = (st or {}).get("raw") or {}
-            data = raw.get("data")
-            d0 = data[0] if isinstance(data, list) and data else (
-                data if isinstance(data, dict) else None
+            detail_tx = str(d0.get("txHash") or "") if isinstance(d0, dict) else ""
+            d0_keys = ",".join(d0.keys()) if isinstance(d0, dict) else "-"
+            d0_json = repr(d0)[:1500] if isinstance(d0, dict) else "-"
+            self.logger.info(
+                "TD CONFIRM DETAIL | slot=%s symbol=%s status=%s in_hash=%s order_id=%s "
+                "data_len=%s keys=[%s] detail_txHash=%s placeholder_in=%s d0=%s",
+                info.get("slot"), info.get("symbol", self.symbol),
+                (st or {}).get("tx_status"),
+                tx_hash[:14] or "-", str(info.get("order_id") or "")[:14] or "-",
+                len(data) if isinstance(data, list) else -1,
+                d0_keys, detail_tx[:16] or "EMPTY",
+                is_placeholder_tx_hash(tx_hash), d0_json,
             )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             if isinstance(d0, dict) and d0.get("txHash"):
                 real = str(d0["txHash"])
                 if real and not is_placeholder_tx_hash(real):
