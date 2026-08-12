@@ -318,14 +318,14 @@ class TdSequentialStrategy(Strategy):
             )
         except Exception as e:
             print(
-                f"[TD] DATA ERROR | {type(e).__name__}: {e}",
+                f"[TD] DATA ERROR | symbol={self.symbol} {type(e).__name__}: {e}",
                 file=sys.stderr, flush=True,
             )
             return
 
         if bars is None or bars.df.empty:
             print(
-                "[TD] DATA EMPTY | bars is None or empty",
+                f"[TD] DATA EMPTY | symbol={self.symbol} bars is None or empty",
                 file=sys.stderr, flush=True,
             )
             return
@@ -355,7 +355,7 @@ class TdSequentialStrategy(Strategy):
         # ── 3. Run TD Sequential ──
         if len(df) < self._min_history:
             print(
-                f"[TD] SKIP | bars={len(df)} < min_history={self._min_history}",
+                f"[TD] SKIP | symbol={self.symbol} bars={len(df)} < min_history={self._min_history}",
                 file=sys.stderr, flush=True,
             )
             return
@@ -431,7 +431,7 @@ class TdSequentialStrategy(Strategy):
                 )
                 if not result.approved:
                     print(
-                        f"[TD] BLOCK ({result.check_name}) | {result.reason}",
+                        f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} {result.reason}",
                         file=sys.stderr, flush=True,
                     )
                     return
@@ -458,7 +458,7 @@ class TdSequentialStrategy(Strategy):
                         # 交易状态变更立即落盘（重启不丢台账）
                         self.batch_manager.save()
                         self.logger.info(
-                            f"TD BATCH LONG | slot={slot['slot']} "
+                            f"TD BATCH LONG | symbol={self.symbol} slot={slot['slot']} "
                             f"price={price:.2f} qty={qty} "
                             f"setup_buy={setup_buy} score={score:.1f}"
                         )
@@ -493,7 +493,7 @@ class TdSequentialStrategy(Strategy):
                         "symbol": self.symbol,
                     }
                     self.logger.info(
-                        f"TD BATCH LONG PENDING | slot={slot['slot']} "
+                        f"TD BATCH LONG PENDING | symbol={self.symbol} slot={slot['slot']} "
                         f"price={price:.2f} qty={qty} setup_buy={setup_buy}"
                     )
                     self._record(
@@ -508,7 +508,7 @@ class TdSequentialStrategy(Strategy):
                     break
                 if not executed:
                     self.logger.info(
-                        "TD BATCH | 无可用资金 slot，跳过 BUY（见 TD SLOT SKIP 日志）"
+                        f"TD BATCH | symbol={self.symbol} 无可用资金 slot，跳过 BUY（见 TD SLOT SKIP 日志）"
                     )
                     self._record("SKIP", "无可用资金 slot，跳过 BUY")
                 return
@@ -529,7 +529,7 @@ class TdSequentialStrategy(Strategy):
                         reason=reason,
                     )
                 self.logger.info(
-                    f"TD LONG  | price={price:.2f} qty={req.quantity} "
+                    f"TD LONG  | symbol={self.symbol} price={price:.2f} qty={req.quantity} "
                     f"setup_buy={setup_buy} score={score:.1f}"
                 )
                 self._record(
@@ -576,7 +576,7 @@ class TdSequentialStrategy(Strategy):
                         reason=exit_reason,
                     )
                 self.logger.info(
-                    f"TD EXIT  | price={price:.2f} qty={req.quantity} {exit_reason}"
+                    f"TD EXIT  | symbol={self.symbol} price={price:.2f} qty={req.quantity} {exit_reason}"
                 )
                 self._record(
                     "EXIT",
@@ -586,7 +586,7 @@ class TdSequentialStrategy(Strategy):
 
         # ── No signal this bar ──
         print(
-            f"[TD] HOLD | price={price:.4f} setup_buy={setup_buy} "
+            f"[TD] HOLD | symbol={self.symbol} price={price:.4f} setup_buy={setup_buy} "
             f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}",
             file=sys.stderr, flush=True,
         )
@@ -631,7 +631,7 @@ class TdSequentialStrategy(Strategy):
                 # 可观测性：无仓卖 9 显式提示，区分「信号未出现」与
                 # 「信号出现但无 open 批次」（fail-closed，不做空）
                 self.logger.info(
-                    f"TD SELL SKIP | 无 open 批次（setup_sell={setup_sell} "
+                    f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
                     f"cd_sell={cd_sell}）"
                 )
 
@@ -683,7 +683,7 @@ class TdSequentialStrategy(Strategy):
                 bal = self._slot_token_balance(self.symbol)
                 if bal is None or bal < 0:
                     self.logger.warning(
-                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"TD BATCH EXIT SKIP | symbol={self.symbol} slot={slot['slot']} "
                         f"链上余额查询失败"
                     )
                     # 查询失败 = 链上状态未知 → 台账保持 open（fail-safe），
@@ -695,7 +695,7 @@ class TdSequentialStrategy(Strategy):
                     self.batch_manager.close_lot(slot["slot"])
                     self.batch_manager.save()
                     self.logger.warning(
-                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"TD BATCH EXIT SKIP | symbol={self.symbol} slot={slot['slot']} "
                         f"链上余额为 0（台账 {qty} 已释放）"
                     )
                     self._record("EXIT_SKIP", f"slot={slot['slot']} 链上余额为 0")
@@ -708,7 +708,7 @@ class TdSequentialStrategy(Strategy):
                     self.batch_manager.close_lot(slot["slot"])
                     self.batch_manager.save()
                     self.logger.warning(
-                        f"TD BATCH EXIT SKIP | slot={slot['slot']} "
+                        f"TD BATCH EXIT SKIP | symbol={self.symbol} slot={slot['slot']} "
                         f"链上余额 {bal:.6f} ≤ 保留量 {min_hold} "
                         f"（台账 {qty} 已释放）"
                     )
@@ -720,7 +720,7 @@ class TdSequentialStrategy(Strategy):
                 if bal < qty:
                     sell_qty = max(bal - min_hold, 0.0)
                     self.logger.warning(
-                        f"TD BATCH EXIT SHRINK | slot={slot['slot']} "
+                        f"TD BATCH EXIT SHRINK | symbol={self.symbol} slot={slot['slot']} "
                         f"台账 {qty} 链上 {bal:.6f} → 缩量卖出 {sell_qty:.6f}"
                     )
                     qty = sell_qty
@@ -738,7 +738,7 @@ class TdSequentialStrategy(Strategy):
                 try:
                     self._wallet_switch(home)
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.warning(f"TD RESTORE ERR | {exc}")
+                    self.logger.warning(f"TD RESTORE ERR | symbol={self.symbol} {exc}")
         if order is not None and not _order_error(order):
             if order.is_filled():
                 # 链上已确认成交 → 释放台账（close_lot 后置，2026-08-11）
@@ -754,7 +754,7 @@ class TdSequentialStrategy(Strategy):
                     reason=exit_reason,
                 )
                 self.logger.info(
-                    f"TD BATCH EXIT | slot={slot['slot']} price={price:.2f} "
+                    f"TD BATCH EXIT | symbol={self.symbol} slot={slot['slot']} price={price:.2f} "
                     f"qty={qty} {exit_reason}"
                 )
                 self._record(
@@ -781,7 +781,7 @@ class TdSequentialStrategy(Strategy):
                 "symbol": self.symbol,
             }
             self.logger.info(
-                f"TD BATCH EXIT PENDING | slot={slot['slot']} price={price:.2f} "
+                f"TD BATCH EXIT PENDING | symbol={self.symbol} slot={slot['slot']} price={price:.2f} "
                 f"qty={qty} {exit_reason}"
             )
             self._record(
@@ -797,7 +797,7 @@ class TdSequentialStrategy(Strategy):
         # open（未释放，无需恢复），下轮 setup_sell≥9 可自动重试卖出
         err = _order_error(order) or "order is None"
         self.logger.warning(
-            f"TD BATCH EXIT FAIL | slot={slot['slot']} price={price:.2f} "
+            f"TD BATCH EXIT FAIL | symbol={self.symbol} slot={slot['slot']} price={price:.2f} "
             f"qty={qty} {exit_reason} error={err}"
         )
         _pend = ((order.custom_params or {}).get("onchain_pending") or {}) if order is not None else {}
@@ -1136,7 +1136,7 @@ class TdSequentialStrategy(Strategy):
                 try:
                     self._wallet_switch(home)
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.warning(f"TD RESTORE ERR | {exc}")
+                    self.logger.warning(f"TD RESTORE ERR | symbol={self.symbol} {exc}")
 
     def _buy_on_slot(self, slot: dict, price: float, reason: str):
         """真分账 BUY（B 方案 2026-08-10）：switch 到 slot 子钱包 →
@@ -1150,20 +1150,20 @@ class TdSequentialStrategy(Strategy):
         aid = slot.get("account_id")
         home = self._home_account_id()
         if aid and not self._wallet_switch(aid):
-            self.logger.warning(f"TD SLOT SKIP | slot={slot['slot']} switch 失败")
+            self.logger.warning(f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} switch 失败")
             return None
         try:
             pv_slot = self._slot_portfolio_value()
             if pv_slot <= 0:
                 self.logger.warning(
-                    f"TD SLOT SKIP | slot={slot['slot']} 余额查询失败/为零"
+                    f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 余额查询失败/为零"
                 )
                 return None
             # 子账户最小资金门槛（BUY-only；SELL/止损/止盈平仓永远允许）
             min_v = float(self.parameters.get("min_account_value", 0) or 0)
             if min_v > 0 and pv_slot < min_v:
                 self.logger.warning(
-                    f"TD SLOT SKIP (min_account_value) | slot={slot['slot']} "
+                    f"TD SLOT SKIP (min_account_value) | symbol={self.symbol} slot={slot['slot']} "
                     f"pv=${pv_slot:.2f} < ${min_v:.2f}"
                 )
                 return None
@@ -1183,7 +1183,7 @@ class TdSequentialStrategy(Strategy):
             )
             if not result.approved:
                 print(
-                    f"[TD] BLOCK ({result.check_name}) | slot={slot['slot']} "
+                    f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} slot={slot['slot']} "
                     f"pos=${qty * price:.2f} > "
                     f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
                     file=sys.stderr, flush=True,
@@ -1193,7 +1193,7 @@ class TdSequentialStrategy(Strategy):
             needed = qty * price
             if bal is None or bal < 0 or bal < needed:
                 self.logger.warning(
-                    f"TD SLOT SKIP | slot={slot['slot']} 资金不足 "
+                    f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 资金不足 "
                     f"({bal:.4f} < {needed:.4f} USDC)"
                 )
                 return None
@@ -1224,7 +1224,7 @@ class TdSequentialStrategy(Strategy):
                 try:
                     self._wallet_switch(home)
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.warning(f"TD RESTORE ERR | {exc}")
+                    self.logger.warning(f"TD RESTORE ERR | symbol={self.symbol} {exc}")
 
     def _slot_portfolio_value(self) -> float:
         """当前活跃（=目标 slot）子钱包总资产 USD；失败返回 0（fail-closed 跳过）。
