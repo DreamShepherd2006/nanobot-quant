@@ -77,6 +77,43 @@ def test_stock_secid_mapping():
     assert _yf_symbol("NVDA") == "NVDA"
 
 
+def test_trade_signal_row_thresholds():
+    """方案A（#14）：信号判定镜像执行层——setup >= entry_setup/exit_setup。"""
+    from nanobot_quant.td_table_handlers import _trade_signal_row
+    # 提前入场：entry_setup=6 时 setup_buy=7 即 BUY（不再等 9）
+    assert _trade_signal_row(
+        {"buy_setup_count": 7, "sell_setup_count": 2, "sell_countdown_count": 0}, 6, 6, 13) == "BUY (Setup Complete)"
+    # 平仓：setup_sell >= exit_setup
+    assert _trade_signal_row(
+        {"buy_setup_count": 3, "sell_setup_count": 6, "sell_countdown_count": 0}, 6, 6, 13) == "SELL (Setup Complete)"
+    # 平仓：cd_sell >= exit_countdown
+    assert _trade_signal_row(
+        {"buy_setup_count": 3, "sell_setup_count": 4, "sell_countdown_count": 13}, 6, 6, 13) == "SELL (Setup Complete)"
+    # 均低于阈值 → HOLD
+    assert _trade_signal_row(
+        {"buy_setup_count": 5, "sell_setup_count": 5, "sell_countdown_count": 0}, 6, 6, 13) == "HOLD"
+    # 原版默认（entry=exit=9）：==9 才算信号——标准行为保持
+    assert _trade_signal_row(
+        {"buy_setup_count": 9, "sell_setup_count": 0, "sell_countdown_count": 0}, 9, 9, 13) == "BUY (Setup Complete)"
+    assert _trade_signal_row(
+        {"buy_setup_count": 8, "sell_setup_count": 0, "sell_countdown_count": 0}, 9, 9, 13) == "HOLD"
+
+
+def test_apply_trade_signal_overrides_recommendation():
+    """方案A（#14）：disp recommendation 列被覆盖为执行层口径。"""
+    import pandas as pd
+    from nanobot_quant.td_table_handlers import _apply_trade_signal
+    disp = pd.DataFrame({
+        "buy_setup_count": [7, 2, 3],
+        "sell_setup_count": [1, 6, 4],
+        "sell_countdown_count": [0, 0, 13],
+        "recommendation": ["HOLD", "HOLD", "HOLD"],
+    })
+    out = _apply_trade_signal(disp, 6, 6, 13)
+    assert list(out["recommendation"]) == [
+        "BUY (Setup Complete)", "SELL (Setup Complete)", "SELL (Setup Complete)"]
+
+
 def test_fetch_stock_kline_eastmoney_parse(monkeypatch):
     """东财主源（A 股 secid=1.）：JSON klines → 小写列/Asia/Shanghai aware/行数。"""
     import nanobot_quant.td_table_handlers as m

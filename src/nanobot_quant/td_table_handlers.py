@@ -252,6 +252,34 @@ def _display(df: pd.DataFrame, fallback_tz: str = "UTC") -> pd.DataFrame:
     return out
 
 
+def _trade_signal_row(row, entry_setup: int, exit_setup: int, exit_cd: int) -> str:
+    """镜像执行层（td_sequential_strategy）的信号判定：setup >= 入场/出场阈值。
+
+    方案A（2026-08-12）：td-table 展示层与实盘行为一致——LONG 入场
+    setup_buy >= entry_setup；LONG 出场 setup_sell >= exit_setup 或
+    cd_sell >= exit_countdown（只做多，无做空）。
+    """
+    try:
+        sb = int(row.get("buy_setup_count", 0) or 0)
+        ss = int(row.get("sell_setup_count", 0) or 0)
+        cds = int(row.get("sell_countdown_count", 0) or 0)
+    except (TypeError, ValueError):
+        return "HOLD"
+    if sb >= entry_setup:
+        return "BUY (Setup Complete)"
+    if ss >= exit_setup or cds >= exit_cd:
+        return "SELL (Setup Complete)"
+    return "HOLD"
+
+
+def _apply_trade_signal(disp, entry_setup: int, exit_setup: int, exit_cd: int):
+    """覆盖 recommendation 列为执行层口径（td-table 展示与实盘一致）。"""
+    if "recommendation" in disp.columns:
+        disp["recommendation"] = disp.apply(
+            lambda r: _trade_signal_row(r, entry_setup, exit_setup, exit_cd), axis=1)
+    return disp
+
+
 def _fmt_price(v) -> str:
     """Compact price formatting (2 dp for typical values, up to 6 for tiny)."""
     try:
@@ -401,7 +429,8 @@ def _build_headers(has_cd: bool, has_tdst: bool, has_score: bool) -> str:
     return "".join(f"<th>{h}</th>" for h in heads)
 
 
-def _render_status(df: pd.DataFrame, setup: int, strategy_label: str) -> str:
+def _render_status(df: pd.DataFrame, setup: int, strategy_label: str,
+                   entry_setup: int = 9, exit_setup: int = 9, exit_cd: int = 13) -> str:
     last = df.iloc[-1]
     b, s = int(last["buy_setup_count"]), int(last["sell_setup_count"])
     price = _fmt_price(last["Close"])
@@ -409,8 +438,8 @@ def _render_status(df: pd.DataFrame, setup: int, strategy_label: str) -> str:
     parts = [
         f"<b>{_esc(strategy_label)}</b>",
         f"最新收盘 <b>{price}</b>",
-        f"Buy Setup <b class=\"setup buy\">{b}/{setup}</b>",
-        f"Sell Setup <b class=\"setup sell\">{s}/{setup}</b>",
+        f"Buy Setup <b class=\"setup buy\">{b}/{setup}</b>（≥{entry_setup} 触发）",
+        f"Sell Setup <b class=\"setup sell\">{s}/{setup}</b>（≥{exit_setup} 或 CD≥{exit_cd} 触发）",
         f"当前信号 <b>{_esc(sig)}</b>" if sig != "HOLD" else "当前信号 <b>—</b>",
     ]
     return '<div class="status">' + " ｜ ".join(parts) + "</div>"
@@ -532,6 +561,9 @@ def td_table_page(request: Request) -> HTMLResponse:
     strategy_label = get_strategy(strategy_name).label
     params = load_td_params(strategy_name)
     setup = int(params.get("setup_period", 9))
+    entry_setup = int(params.get("entry_setup", 9))
+    exit_setup = int(params.get("exit_setup", 9))
+    exit_cd = int(params.get("exit_countdown", 13))
 
     banner = ""
     content = ""
@@ -539,11 +571,11 @@ def td_table_page(request: Request) -> HTMLResponse:
     content = ""
     frag = q.get("frag") == "1"
     if tab == "history":
-        content = _render_history(ticker, bar, start, end, strategy_name, params, setup, source)
+        content = _render_history(ticker, bar, start, end, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source)
     elif tab == "live":
-        content = _render_live(with_script=not frag, tq=q)
+        content = _render_live(with_script=not frag, tq=q, entry_setup=entry_setup, exit_setup=exit_setup, exit_cd=exit_cd)
     else:
-        content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source)
+        content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source)
 
     if isinstance(content, tuple):  # (error_html,)
         banner = content[0]
@@ -688,14 +720,22 @@ def _fmt_qty(q) -> str:
     return f"{v:.6g}"
 
 
-def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
+def _render_live(with_script: bool = True, tq: dict | None = None,
+                 entry_setup=None, exit_setup=None, exit_cd=None) -> str:
     """「实时监控」tab：TD live 每轮状态 + 最近信号事件。
 
     2026-08-11 方案 A：内存共享——TD live 循环（gatekeeper 进程内
     StrategyExecutor）每轮写 LIVE_STATE，本 handler 同进程直接读取；
     信号事件从事件文件（append-only JSONL）读最近 20 条。页面 JS 按
     exec_params.td_ui_refresh_s 轮询 `?tab=live&frag=1` 刷新内容片段。
+    2026-08-12 方案A：setup 进度高亮阈值改读 entry_setup/exit_setup/
+    exit_countdown（与执行层一致）。
     """
+    if entry_setup is None:
+        p = load_td_params(load_selected())
+        entry_setup = int(p.get("entry_setup", 9))
+        exit_setup = int(p.get("exit_setup", 9))
+        exit_cd = int(p.get("exit_countdown", 13))
     try:
         from nanobot_quant import td_live_state
         st = td_live_state.get_state()
@@ -727,10 +767,10 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
         }.get(signal, "sig hold")
         rows += (
             f'<tr><td><b>{_esc(sym)}</b></td>'
-            f'<td>{_live_cell(sb, 9)}</td>'
-            f'<td>{_live_cell(ss, 9)}</td>'
+            f'<td>{_live_cell(sb, entry_setup)}</td>'
+            f'<td>{_live_cell(ss, exit_setup)}</td>'
             f'<td>{_live_cell(cdb, 13)}</td>'
-            f'<td>{_live_cell(cds, 13)}</td>'
+            f'<td>{_live_cell(cds, exit_cd)}</td>'
             f'<td class="num">{float(score or 0):.1f}</td>'
             f'<td class="num">{float(price or 0):.4f}</td>'
             f'<td class="sig {sig_cls}">{signal}</td>'
@@ -887,7 +927,9 @@ def _render_live(with_script: bool = True, tq: dict | None = None) -> str:
     return html
 
 
-def _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source="onchainos"):
+def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
+                     entry_setup=None, exit_setup=None, exit_cd=None,
+                     source="onchainos"):
     if source == "stock":
         try:
             df = _fetch_stock_kline(ticker, bar=bar, limit=limit)
@@ -913,11 +955,16 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source="o
 
     seq = _engine_run(df, strategy_name, params)
     disp = _display(seq)
+    if entry_setup is None:
+        entry_setup = int(params.get("entry_setup", 9))
+        exit_setup = int(params.get("exit_setup", 9))
+        exit_cd = int(params.get("exit_countdown", 13))
+    disp = _apply_trade_signal(disp, entry_setup, exit_setup, exit_cd)
     has_cd = "buy_countdown_count" in disp.columns and disp["buy_countdown_count"].abs().sum() > 0
     has_tdst = "tdst_support" in disp.columns and disp["tdst_support"].notna().any()
     has_score = "combined_score" in disp.columns
 
-    status = _render_status(disp, setup, strategy_name)
+    status = _render_status(disp, setup, strategy_name, entry_setup, exit_setup, exit_cd)
     table = ('<table><thead><tr>%s</tr></thead><tbody>\n%s\n</tbody></table>'
              % (_build_headers(has_cd, has_tdst, has_score),
                 _build_rows(disp, setup)))
@@ -927,7 +974,9 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup, source="o
     return status + hint + table
 
 
-def _render_history(ticker, bar, start, end, strategy_name, params, setup, source="onchainos"):
+def _render_history(ticker, bar, start, end, strategy_name, params, setup,
+                    entry_setup=None, exit_setup=None, exit_cd=None,
+                    source="onchainos"):
     try:
         start_dt = datetime.strptime(start, "%Y-%m-%d")
         end_dt = datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)
@@ -959,6 +1008,11 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup, sourc
 
     seq = _engine_run(df, strategy_name, params)
     disp = _display(seq)
+    if entry_setup is None:
+        entry_setup = int(params.get("entry_setup", 9))
+        exit_setup = int(params.get("exit_setup", 9))
+        exit_cd = int(params.get("exit_countdown", 13))
+    disp = _apply_trade_signal(disp, entry_setup, exit_setup, exit_cd)
     has_cd = "buy_countdown_count" in disp.columns and disp["buy_countdown_count"].abs().sum() > 0
     has_tdst = "tdst_support" in disp.columns and disp["tdst_support"].notna().any()
     has_score = "combined_score" in disp.columns
@@ -967,8 +1021,8 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup, sourc
     table = ('<table><thead><tr>%s</tr></thead><tbody>\n%s\n</tbody></table>'
              % (_build_headers(has_cd, has_tdst, has_score), _build_rows(disp, setup)))
     stats = _render_stats_table(rows, agg)
-    hint = ('<div class="banner info">%s ~ %s 共 %d 根 %s K 线 · 数据来源 %s · 9 信号 %d 个 · 胜率统计仅含区间内可观察完整后续的信号。</div>'
-            % (_esc(start), _esc(end), len(disp), _esc(bar), src_label, len(rows)))
+    hint = ('<div class="banner info">%s ~ %s 共 %d 根 %s K 线 · 数据来源 %s · %d 信号 %d 个 · 胜率统计仅含区间内可观察完整后续的信号。</div>'
+            % (_esc(start), _esc(end), len(disp), _esc(bar), src_label, setup, len(rows)))
     return hint + table + stats
 
 
