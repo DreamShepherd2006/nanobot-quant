@@ -44,7 +44,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "max_drawdown_pct": 0.15,   # float (0,1] — account drawdown threshold
     "stop_loss_pct": 0.10,      # float (0,1] — per-position stop-loss
     # ── ② Execution quality ──────────────────────────────────────────
-    "slippage": 0.01,           # float [0,1) — swap slippage tolerance (0.01 = 1%)
+    "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
     "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
@@ -90,7 +90,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "slippage": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.01,
-        "label": "滑点容忍", "hint": "swap 滑点容忍（0.01=1%）；过小易滑点超限失败（82112），过大成交价劣",
+        "label": "滑点容忍", "hint": "swap 滑点容忍（百分比，1=1%，如 0.5=0.5%）；过小易滑点超限失败（82112），过大成交价劣",
     },
     "sol_buffer_pct": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.05,

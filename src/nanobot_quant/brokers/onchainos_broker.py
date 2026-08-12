@@ -33,7 +33,7 @@ class OnchainOSBroker(Broker):
     Parameters:
         tokens_json: User-configured token mappings from tokens.json.
             Each entry: ``{"symbol": "...", "address": "...", "chain": "solana"}``.
-        slippage: Default slippage tolerance (0.01 = 1%).
+        slippage: Default slippage tolerance in percent (1 = 1%, "0.5" = 0.5%).
         sol_buffer_pct: Extra SOL buffer on buy orders to absorb price movement
             between quote and execution (default 0.05 = 5%).
     """
