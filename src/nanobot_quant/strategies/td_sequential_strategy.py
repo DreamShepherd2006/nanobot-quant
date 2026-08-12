@@ -199,7 +199,7 @@ class TdSequentialStrategy(Strategy):
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
 
-    def _record(self, event: str, note: str = "", **extra) -> None:
+    def _record(self, event: str, note: str = "", *, symbol=None, **extra) -> None:
         """更新实时状态 signal + 追加事件历史（仅 live 模式写文件）。
 
         2026-08-11：TD live 每轮信号动作（LONG/SELL/EXIT/SKIP/FAIL）
@@ -209,16 +209,21 @@ class TdSequentialStrategy(Strategy):
 
         2026-08-11 方案 B：成交事件额外携带 slot/qty/price/direction/
         status/tx_hash/chain 结构化字段，供「📊 交易记录」区块展示。
+
+        2026-08-11 修复：确认路径（pending 检查在主循环、self.symbol 可能
+        是其他标的）必须显式传 symbol，否则事件标的错（15:49:01 CRCLX
+        确认被记成 RENDER）。
         """
         try:
             from nanobot_quant import td_live_state
             sig = getattr(self, "_last_signal", {})
-            td_live_state.update_symbol(self.symbol, {
+            sym = symbol or self.symbol
+            td_live_state.update_symbol(sym, {
                 **sig, "signal": event, "note": note,
             })
             if self.parameters.get("live_mode"):
                 td_live_state.append_event({
-                    "symbol": self.symbol, "event": event, "note": note,
+                    "symbol": sym, "event": event, "note": note,
                     "price": sig.get("price", 0),
                     "score": sig.get("score", 0),
                     "setup_buy": sig.get("setup_buy", 0),
@@ -228,6 +233,54 @@ class TdSequentialStrategy(Strategy):
                 })
         except Exception:  # noqa: BLE001
             pass
+
+    def _confirmed_tx_hash(self, info: dict, st) -> str:
+        """确认路径的真实 tx_hash（2026-08-11 拍板：只做 detail 提取，
+        不做额外补查——保持简单）。
+
+        取 detail 响应的 data[0].txHash（非占位 UUID 直接用，SELL 确认
+        场景零额外调用）；占位 UUID/查询失败返回空（事件显示「—」，
+        不阻塞确认）。
+        """
+        from nanobot_quant.onchainos_cli import is_placeholder_tx_hash
+        tx_hash = str(info.get("tx_hash") or "")
+        raw = (st or {}).get("raw") or {}
+        data = raw.get("data")
+        d0 = data[0] if isinstance(data, list) and data else (
+            data if isinstance(data, dict) else None
+        )
+        # DIAG（2026-08-12）：把 detail 全量打出来——字段名 + 值都看，
+        # 确认 hash 到底叫 txHash 还是别的名字（不假设字段名）。
+        try:
+            detail_tx = str(d0.get("txHash") or "") if isinstance(d0, dict) else ""
+            if isinstance(d0, dict):
+                d0_keys = ",".join(d0.keys())
+                hash_like = {
+                    k: str(v)[:40] for k, v in d0.items()
+                    if any(w in k.lower() for w in ("hash", "tx", "order", "id"))
+                }
+                d0_json = repr(d0)
+            else:
+                d0_keys = "-"; hash_like = {}; d0_json = "-"
+            self.logger.info(
+                "TD CONFIRM DETAIL | slot=%s symbol=%s status=%s in_hash=%s order_id=%s "
+                "data_len=%s keys=[%s] hash_like=%s d0=%s",
+                info.get("slot"), info.get("symbol", self.symbol),
+                (st or {}).get("tx_status"),
+                tx_hash[:14] or "-", str(info.get("order_id") or "")[:14] or "-",
+                len(data) if isinstance(data, list) else -1,
+                d0_keys, hash_like, d0_json,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if isinstance(d0, dict) and d0.get("txHash"):
+                real = str(d0["txHash"])
+                if real and not is_placeholder_tx_hash(real):
+                    return real
+        except Exception:  # noqa: BLE001
+            pass
+        return tx_hash if not is_placeholder_tx_hash(tx_hash) else ""
 
     def _evaluate_symbol(self) -> None:
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。"""
@@ -397,7 +450,16 @@ class TdSequentialStrategy(Strategy):
                     # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
                     # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
                     pend = (order.custom_params or {}).get("onchain_pending") or {}
+                    # DIAG（2026-08-12）：打印提交后 pending 记录——确认 tx_hash/order_id
+                    self.logger.info(
+                        "TD BUY SUBMIT | slot=%s symbol=%s tx_hash=%s order_id=%s chain=%s",
+                        slot["slot"], self.symbol,
+                        (pend.get("tx_hash") or "-")[:20],
+                        (pend.get("order_id") or "-")[:20],
+                        pend.get("chain", ""),
+                    )
                     self._pending_buys[slot["slot"]] = {
+                        "slot": slot["slot"],
                         "tx_hash": pend.get("tx_hash", ""),
                         "order_id": pend.get("order_id", ""),
                         "chain": pend.get("chain", ""),
@@ -682,6 +744,7 @@ class TdSequentialStrategy(Strategy):
             # 后续轮询补确认（SUCCESS 补释放；失败则保持 open 可重试）
             pend = (order.custom_params or {}).get("onchain_pending") or {}
             self._pending_sells[slot["slot"]] = {
+                "slot": slot["slot"],
                 "tx_hash": pend.get("tx_hash", ""),
                 "order_id": pend.get("order_id", ""),
                 "chain": pend.get("chain", ""),
@@ -745,6 +808,30 @@ class TdSequentialStrategy(Strategy):
                     info.get("chain", "solana"),
                 )
                 status = st.get("tx_status") if st else "UNKNOWN"
+                # DIAG（2026-08-12）：SELL 对称——打印 pending 检查 detail + SUCCESS 回写
+                try:
+                    from nanobot_quant.onchainos_cli import is_placeholder_tx_hash as _ph
+                    _raw = (st or {}).get("raw") or {}
+                    _data = _raw.get("data")
+                    _d0 = _data[0] if isinstance(_data, list) and _data else (
+                        _data if isinstance(_data, dict) else None
+                    )
+                    _dtx = str(_d0.get("txHash") or "") if isinstance(_d0, dict) else ""
+                    self.logger.info(
+                        "TD PENDING DIAG | slot=%s symbol=%s side=SELL status=%s in_tx=%s "
+                        "detail_txHash=%s placeholder=%s",
+                        slot_id, info.get("symbol", self.symbol), status,
+                        (info.get("tx_hash") or "-")[:16],
+                        _dtx[:16] or "EMPTY", _ph(info.get("tx_hash") or ""),
+                    )
+                    if status == "SUCCESS" and _dtx and not _ph(_dtx):
+                        info["tx_hash"] = _dtx  # 回写真实 hash——确认事件显示真实
+                        self.logger.info(
+                            "TD PENDING TXBACK | slot=%s side=SELL tx_hash -> %s",
+                            slot_id, _dtx,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
                 if status != "SUCCESS":
                     self.logger.info(
                         f"TD PENDING CHECK | slot={slot_id} 账户={aid[:8] or 'home'} "
@@ -777,10 +864,11 @@ class TdSequentialStrategy(Strategy):
                     self._record(
                         "EXIT",
                         f"slot={slot_id} 链上确认平仓 qty={info['qty']:.6g}",
+                        symbol=info.get("symbol", self.symbol),
                         slot=slot_id, qty=info.get("qty", 0),
                         price=info.get("price", 0),
                         direction="sell", status="ok",
-                        tx_hash=info.get("tx_hash", ""),
+                        tx_hash=self._confirmed_tx_hash(info, st),
                         chain=info.get("chain", ""),
                     )
                     del self._pending_sells[slot_id]
@@ -819,6 +907,31 @@ class TdSequentialStrategy(Strategy):
                     info.get("chain", "solana"),
                 )
                 status = st.get("tx_status") if st else "UNKNOWN"
+                # DIAG（2026-08-12）：打印每次 BUY pending 检查的 detail——确认
+                # txHash 提取/回写（方案 A：SUCCESS 时回写真实 hash，确认事件显示）
+                try:
+                    from nanobot_quant.onchainos_cli import is_placeholder_tx_hash as _ph
+                    _raw = (st or {}).get("raw") or {}
+                    _data = _raw.get("data")
+                    _d0 = _data[0] if isinstance(_data, list) and _data else (
+                        _data if isinstance(_data, dict) else None
+                    )
+                    _dtx = str(_d0.get("txHash") or "") if isinstance(_d0, dict) else ""
+                    self.logger.info(
+                        "TD PENDING DIAG | slot=%s symbol=%s status=%s in_tx=%s "
+                        "detail_txHash=%s placeholder=%s",
+                        slot_id, info.get("symbol", self.symbol), status,
+                        (info.get("tx_hash") or "-")[:16],
+                        _dtx[:16] or "EMPTY", _ph(info.get("tx_hash") or ""),
+                    )
+                    if status == "SUCCESS" and _dtx and not _ph(_dtx):
+                        info["tx_hash"] = _dtx  # 回写真实 hash——确认事件显示真实
+                        self.logger.info(
+                            "TD PENDING TXBACK | slot=%s tx_hash -> %s",
+                            slot_id, _dtx,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
                 if status != "SUCCESS":
                     self.logger.info(
                         f"TD PENDING CHECK | slot={slot_id} 账户={aid[:8] or 'home'} "
@@ -856,14 +969,15 @@ class TdSequentialStrategy(Strategy):
                             f"qty={info['qty']} price={info['price']:.2f}"
                         )
                         self._record(
-                            "LONG",
-                            f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
-                            slot=slot_id, qty=info.get("qty", 0),
-                            price=info.get("price", 0),
-                            direction="buy", status="ok",
-                            tx_hash=info.get("tx_hash", ""),
-                            chain=info.get("chain", ""),
-                        )
+                                "LONG",
+                                f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
+                                symbol=info.get("symbol", self.symbol),
+                                slot=slot_id, qty=info.get("qty", 0),
+                                price=info.get("price", 0),
+                                direction="buy", status="ok",
+                                tx_hash=self._confirmed_tx_hash(info, st),
+                                chain=info.get("chain", ""),
+                            )
                     del self._pending_buys[slot_id]
                 elif status in ("ERROR", "CANCELLED"):
                     self.logger.warning(

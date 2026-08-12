@@ -191,3 +191,75 @@ def test_on_trading_iteration_uses_fixed_window(monkeypatch):
     assert calls == [50, 50]
 
 
+
+
+# ── 2026-08-11 事件展示修复：symbol 显式传 + tx_hash detail 提取 ──
+
+def _record_strategy(monkeypatch) -> tuple[TdSequentialStrategy, dict]:
+    """构造轻量策略 + mock td_live_state，捕获 update_symbol/append_event。"""
+    import nanobot_quant.td_live_state as tls
+    captured: dict = {}
+    monkeypatch.setattr(tls, "update_symbol",
+                        lambda sym, data=None, **kw: captured.setdefault("upd", sym))
+    monkeypatch.setattr(tls, "append_event",
+                        lambda ev: captured.setdefault("ev", ev))
+    s = TdSequentialStrategy()
+    s.symbol = "RENDER"
+    s.parameters = {"live_mode": True}
+    s._last_signal = {}
+    return s, captured
+
+
+def test_record_symbol_override(monkeypatch):
+    """确认路径显式传 symbol → 事件/状态用该 symbol（非 self.symbol）。
+
+    回归 15:49:01：CRCLX 确认被记成 RENDER（确认跑在主循环、
+    self.symbol 是当前迭代标的）。
+    """
+    s, captured = _record_strategy(monkeypatch)
+    s._record("LONG", "note", symbol="CRCLX")
+    assert captured["upd"] == "CRCLX"
+    assert captured["ev"]["symbol"] == "CRCLX"
+
+
+def test_record_defaults_to_self_symbol(monkeypatch):
+    """未显式传 symbol 时回退 self.symbol（标的循环内记录不受影响）。"""
+    s, captured = _record_strategy(monkeypatch)
+    s._record("LONG", "note")
+    assert captured["upd"] == "RENDER"
+    assert captured["ev"]["symbol"] == "RENDER"
+
+
+def test_confirmed_tx_hash_from_detail():
+    """detail 响应 data[0].txHash 非占位 → 直接返回（SELL 场景零额外调用）。"""
+    s = TdSequentialStrategy()
+    s.symbol = "CRCLX"
+    real = "5xNq3aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef"
+    st = {"tx_status": "SUCCESS", "raw": {"data": [{"txHash": real}]}}
+    assert s._confirmed_tx_hash({"tx_hash": ""}, st) == real
+
+
+def test_confirmed_tx_hash_placeholder_returns_empty():
+    """占位 UUID（detail 查不到）→ 返回空（事件显示 —，不阻塞确认）。"""
+    s = TdSequentialStrategy()
+    s.symbol = "CRCLX"
+    placeholder = "58a1b2c3d4e5f60718293a4b5c6d7e8f"
+    st = {"tx_status": "UNKNOWN", "raw": {"data": []}}
+    assert s._confirmed_tx_hash({"tx_hash": placeholder}, st) == ""
+
+
+def test_confirmed_tx_hash_keeps_real_pending_hash():
+    """pending 已是真实 hash 且 detail 无响应 → 保留原值。"""
+    s = TdSequentialStrategy()
+    s.symbol = "CRCLX"
+    real = "5xNq3aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef"
+    assert s._confirmed_tx_hash({"tx_hash": real}, None) == real
+
+
+def test_is_placeholder_tx_hash():
+    """32-hex UUID（Gas Station 占位）识别。"""
+    from nanobot_quant.onchainos_cli import is_placeholder_tx_hash
+    assert is_placeholder_tx_hash("58a1b2c3d4e5f60718293a4b5c6d7e8f") is True
+    assert is_placeholder_tx_hash(
+        "5xNq3aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef") is False
+    assert is_placeholder_tx_hash("") is False
