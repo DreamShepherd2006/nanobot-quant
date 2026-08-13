@@ -117,3 +117,44 @@ def load_events(n: int = 20) -> list[dict]:
         except ValueError:
             continue
     return events
+_STABLE_SYMS = ("USDC", "USDT", "USDG")
+
+
+def compute_actual_price(d0: dict) -> float | None:
+    """从 swap_status 确认数据算实际成交价（稳定币计价规则）。
+
+    2026-08-13 方案 B：系统交易恒以稳定币计价（broker quote=USDC）——
+    找 input/output 里的稳定币（USDC/USDT/USDG）作分子、另一侧数量作
+    分母 → 价格 = 稳定币金额 / 数量。无稳定币或两侧均稳定币（方向无法
+    唯一确定）→ 返回 None。
+    """
+    try:
+        if not isinstance(d0, dict):
+            return None
+        stab_amt, other_amt = 0.0, 0.0
+        n_stab = n_other = 0
+        for key in ("input", "output"):
+            v = d0.get(key)
+            if not isinstance(v, list):
+                continue
+            for item in v:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "")
+                try:
+                    amt = float(item.get("amount") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not name or amt <= 0:
+                    continue
+                if any(s in name.upper() for s in _STABLE_SYMS):
+                    stab_amt += amt
+                    n_stab += 1
+                else:
+                    other_amt += amt
+                    n_other += 1
+        if n_stab == 1 and n_other == 1 and stab_amt > 0 and other_amt > 0:
+            return stab_amt / other_amt
+        return None
+    except Exception:  # noqa: BLE001
+        return None

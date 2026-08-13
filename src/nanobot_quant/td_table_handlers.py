@@ -835,12 +835,14 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f'<td>{dir_txt}</td>'
             f'<td class="num">{_fmt_qty(e.get("qty"))}</td>'
             f'<td class="num">{float(e.get("price", 0) or 0):.2f}</td>'
+            f'<td class="num">{_actual_price_cell(e.get("actual_price"))}</td>'
+            f'<td class="num">{_slip_cell(e.get("actual_price"), e.get("price"))}</td>'
             f'<td class="num">{slot_txt}</td>'
             f'<td style="color:{color}"><b>{badge} {_esc(str(e.get("event", "")))}</b></td>'
             f'<td class="note">{_esc(str(e.get("note", "")))}</td></tr>'
         )
     if not tr_rows:
-        tr_rows = ('<tr><td colspan="9" class="muted" style="text-align:left">'
+        tr_rows = ('<tr><td colspan="11" class="muted" style="text-align:left">'
                    '暂无交易记录（买卖信号出现后显示）</td></tr>')
 
     tq = tq or {}
@@ -878,6 +880,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         % (_esc(sq_sym), sq_sel("sq_ev", sq_ev_opts, sq_ev),
            sq_sel("sq_n", sq_n_opts, str(sq_n)))
     )
+
     html = (
         '<div class="status">'
         f'<span>循环：<b>{run_txt}</b></span>'
@@ -894,7 +897,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
         '<table>'
-        '<tr><th>tx_hash</th><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>原因</th></tr>'
+        '<tr><th>tx_hash</th><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr>'
         f'{tr_rows}'
         '</table>'
         f'<h4 style="margin:18px 0 8px">📜 信号历史（最近 {sq_n} 条）</h4>'
@@ -1075,3 +1078,24 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
 def register_td_table_routes(app, gatekeeper) -> None:
     """Mount /config/td-table routes (called from nanobot-legion)."""
     app.get("/config/td-table")(td_table_page)
+def _actual_price_cell(ap) -> str:
+    """实际成交价单元格：无/无效 → —。"""
+    try:
+        f = float(ap)
+    except (TypeError, ValueError):
+        return "—"
+    if f <= 0:
+        return "—"
+    return _fmt_price(f)
+
+
+def _slip_cell(ap, strat_p) -> str:
+    """滑点单元格：(实际价 − 策略价) / 策略价 × 100，带符号；口径含市场波动。"""
+    try:
+        ap_f = float(ap)
+        sp_f = float(strat_p or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if ap_f <= 0 or sp_f <= 0:
+        return "—"
+    return f"{(ap_f - sp_f) / sp_f * 100:+.2f}%"
