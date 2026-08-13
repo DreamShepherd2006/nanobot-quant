@@ -246,20 +246,16 @@ class OnchainOSBroker(Broker):
         # ── confirmed == "success"：链上已成交 ────────────────────
         order.set_filled()
 
-        to_amount = float(result.get("toAmount") or 0)
-        fill_price = to_amount / quantity if quantity > 0 else 0
-
         self._tracked[tx_hash or order_id] = {
             "symbol": symbol,
             "side": side,
             "quantity": quantity,
-            "fill_price": fill_price,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
 
         logger.info(
-            "Swap filled (on-chain confirmed): %s %s %s → tx=%s price=%.4f",
-            side, quantity, symbol, (tx_hash or order_id)[:16], fill_price,
+            "Swap filled (on-chain confirmed): %s %s %s → tx=%s",
+            side, quantity, symbol, (tx_hash or order_id)[:16],
         )
         return order
 
