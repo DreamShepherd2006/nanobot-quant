@@ -253,6 +253,7 @@ class TdSequentialStrategy(Strategy):
 
     def _confirmed_tx_hash(self, info: dict, st) -> str:
         """确认路径的真实 tx_hash（2026-08-11 拍板：只做 detail 提取，
+
         不做额外补查——保持简单）。
 
         取 detail 响应的 data[0].txHash（非占位 UUID 直接用，SELL 确认
@@ -893,6 +894,7 @@ class TdSequentialStrategy(Strategy):
                         symbol=info.get("symbol", self.symbol),
                         slot=slot_id, qty=info.get("qty", 0),
                         price=info.get("price", 0),
+                        actual_price=self._actual_price_from_st(st),
                         direction="sell", status="ok",
                         tx_hash=self._confirmed_tx_hash(info, st),
                         chain=info.get("chain", ""),
@@ -1000,6 +1002,7 @@ class TdSequentialStrategy(Strategy):
                                 symbol=info.get("symbol", self.symbol),
                                 slot=slot_id, qty=info.get("qty", 0),
                                 price=info.get("price", 0),
+                                actual_price=self._actual_price_from_st(st),
                                 direction="buy", status="ok",
                                 tx_hash=self._confirmed_tx_hash(info, st),
                                 chain=info.get("chain", ""),
@@ -1268,3 +1271,67 @@ class TdSequentialStrategy(Strategy):
         """Called by lumibot when an order is cancelled."""
         super().on_canceled_order(order)
         self.tracker.on_cancel(order_id=order.identifier)
+    def _actual_price_from_st(self, st) -> float | None:
+        """从 swap_status 确认数据提取 input/output → 稳定币规则实际成交价。
+
+        2026-08-13 方案 B：交易恒以稳定币计价（broker quote=USDC）——
+        找 input/output 里的稳定币作分子、另一侧数量作分母。无/歧义 → None。
+        """
+        try:
+            from nanobot_quant import td_live_state
+            _raw = (st or {}).get("raw") or {}
+            _data = _raw.get("data")
+            _d0 = _data[0] if isinstance(_data, list) and _data else (
+                _data if isinstance(_data, dict) else None
+            )
+            return td_live_state.compute_actual_price(_d0)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _confirmed_tx_hash(self, info: dict, st) -> str:
+        """确认路径的真实 tx_hash（2026-08-11 拍板：只做 detail 提取，
+        不做额外补查——保持简单）。
+
+        取 detail 响应的 data[0].txHash（非占位 UUID 直接用，SELL 确认
+        场景零额外调用）；占位 UUID/查询失败返回空（事件显示「—」，
+        不阻塞确认）。
+        """
+        from nanobot_quant.onchainos_cli import is_placeholder_tx_hash
+        tx_hash = str(info.get("tx_hash") or "")
+        raw = (st or {}).get("raw") or {}
+        data = raw.get("data")
+        d0 = data[0] if isinstance(data, list) and data else (
+            data if isinstance(data, dict) else None
+        )
+        # DIAG（2026-08-12）：把 detail 全量打出来——字段名 + 值都看，
+        # 确认 hash 到底叫 txHash 还是别的名字（不假设字段名）。
+        try:
+            detail_tx = str(d0.get("txHash") or "") if isinstance(d0, dict) else ""
+            if isinstance(d0, dict):
+                d0_keys = ",".join(d0.keys())
+                hash_like = {
+                    k: str(v)[:40] for k, v in d0.items()
+                    if any(w in k.lower() for w in ("hash", "tx", "order", "id"))
+                }
+                d0_json = repr(d0)
+            else:
+                d0_keys = "-"; hash_like = {}; d0_json = "-"
+            self.logger.info(
+                "TD CONFIRM DETAIL | slot=%s symbol=%s status=%s in_hash=%s order_id=%s "
+                "data_len=%s keys=[%s] hash_like=%s d0=%s",
+                info.get("slot"), info.get("symbol", self.symbol),
+                (st or {}).get("tx_status"),
+                tx_hash[:14] or "-", str(info.get("order_id") or "")[:14] or "-",
+                len(data) if isinstance(data, list) else -1,
+                d0_keys, hash_like, d0_json,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if isinstance(d0, dict) and d0.get("txHash"):
+                real = str(d0["txHash"])
+                if real and not is_placeholder_tx_hash(real):
+                    return real
+        except Exception:  # noqa: BLE001
+            pass
+        return tx_hash if not is_placeholder_tx_hash(tx_hash) else ""
