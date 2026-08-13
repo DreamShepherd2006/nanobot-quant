@@ -780,8 +780,19 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     if not rows:
         rows = '<tr><td colspan="10" class="muted" style="text-align:left">暂无数据——TD live 循环未运行或尚未产生第一轮结果</td></tr>'
 
+    # ── 📜 信号历史（最近 N 条，最新在上；支持 sq_n/sq_sym/sq_ev 过滤）──
+    try:
+        sq_n = min(max(int((tq or {}).get("sq_n") or 20), 1), 200)
+    except (TypeError, ValueError):
+        sq_n = 20
+    sq_sym = (tq.get("sq_sym") or "").strip().upper()
+    sq_ev = (tq.get("sq_ev") or "").strip()
+    events_sig = [e for e in events
+                  if (not sq_sym or str(e.get("symbol", "")).upper() == sq_sym)
+                  and (not sq_ev or str(e.get("event", "")) == sq_ev)]
+    events_sig = events_sig[::-1][:sq_n]
     ev_rows = ""
-    for e in events:
+    for e in events_sig:
         ev_cls = ""
         if e.get("event") in ("LONG",):
             ev_cls = ' style="color:#1b7f3d"'
@@ -851,6 +862,22 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
            tq_sel("tq_n", tq_n_opts, tq.get("tq_n", "") or "20"))
     )
 
+    sq_ev_opts = [("", "全部"), ("LONG", "买"), ("LONG_PENDING", "买待确认"),
+                  ("EXIT", "卖"), ("EXIT_PENDING", "卖待确认"),
+                  ("EXIT_FAIL", "卖失败"), ("EXIT_SKIP", "卖跳过"), ("EXIT_SHRINK", "缩量"),
+                  ("BUY_FAIL", "买失败"), ("SKIP", "跳过")]
+    sq_sel = lambda name, opts, cur: '<select name="%s">%s</select>' % (name, "".join(
+        f'<option value="{v}"{" selected" if v == cur else ""}>{lab}</option>'
+        for v, lab in opts))
+    sq_n_opts = [("20", "20 条"), ("50", "50 条"), ("100", "100 条")]
+    sig_form = (
+        '<form class="inline" id="sig-form" onsubmit="return applySQ()">'
+        '<label>标的</label><input name="sq_sym" value="%s" size="6" placeholder="全部">'
+        '<label>事件</label>%s<label>条数</label>%s'
+        '<button>查询</button></form>'
+        % (_esc(sq_sym), sq_sel("sq_ev", sq_ev_opts, sq_ev),
+           sq_sel("sq_n", sq_n_opts, str(sq_n)))
+    )
     html = (
         '<div class="status">'
         f'<span>循环：<b>{run_txt}</b></span>'
@@ -870,7 +897,8 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         '<tr><th>tx_hash</th><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>slot</th><th>状态</th><th>原因</th></tr>'
         f'{tr_rows}'
         '</table>'
-        '<h4 style="margin:18px 0 8px">📜 信号历史（最近 20 条）</h4>'
+        f'<h4 style="margin:18px 0 8px">📜 信号历史（最近 {sq_n} 条）</h4>'
+        f'{sig_form}'
         '<table>'
         '<tr><th>时间</th><th>标的</th><th>事件</th><th>价格</th><th>Score</th><th>备注</th></tr>'
         f'{ev_rows}'
@@ -887,7 +915,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '    var o = {};'
             '    for (var i = 0; i < q.length; i++){'
             '      var p = q[i].split("=");'
-            '      if (p[0].indexOf("tq_") === 0) o[p[0]] = decodeURIComponent(p[1] || "");'
+            '      if (p[0].indexOf("tq_") === 0 || p[0].indexOf("sq_") === 0) o[p[0]] = decodeURIComponent(p[1] || "");'
             '    }'
             '    return o;'
             '  })();'
@@ -908,6 +936,21 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '    var f = document.getElementById("trade-form");'
             '    if (f){'
             '      ["tq_sym", "tq_dir", "tq_st", "tq_n"].forEach(function(k){'
+            '        if (f.elements[k] && f.elements[k].value) window.TQ[k] = f.elements[k].value;'
+            '        else if (f.elements[k]) delete window.TQ[k];'
+            '      });'
+            '    }'
+            '    var p = [];'
+            '    for (var k in window.TQ) if (window.TQ[k]) p.push(k + "=" + encodeURIComponent(window.TQ[k]));'
+            '    var q = p.length ? "?" + p.join("&") : "";'
+            '    try { history.replaceState(null, "", "/config/td-table?tab=live" + q); } catch(e){}'
+            '    poll();'
+            '    return false;'
+            '  };'
+            '  window.applySQ = function(){'
+            '    var f = document.getElementById("sig-form");'
+            '    if (f){'
+            '      ["sq_sym", "sq_ev", "sq_n"].forEach(function(k){'
             '        if (f.elements[k] && f.elements[k].value) window.TQ[k] = f.elements[k].value;'
             '        else if (f.elements[k]) delete window.TQ[k];'
             '      });'
