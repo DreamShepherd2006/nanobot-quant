@@ -780,8 +780,10 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     if not rows:
         rows = '<tr><td colspan="10" class="muted" style="text-align:left">暂无数据——TD live 循环未运行或尚未产生第一轮结果</td></tr>'
 
+    # ── 📜 信号历史（最近 20 条，最新在上）──
+    events_sig = td_live_state.load_events(20)[::-1]
     ev_rows = ""
-    for e in events:
+    for e in events_sig:
         ev_cls = ""
         if e.get("event") in ("LONG",):
             ev_cls = ' style="color:#1b7f3d"'
