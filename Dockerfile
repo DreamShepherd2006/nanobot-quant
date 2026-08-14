@@ -73,9 +73,9 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-# ⚠️ CD fork 验证 pin: feat/cex-p2 (CEX P2: execution_channel + Gate 凭证页) — merge 后切回上游
-RUN echo "[bust=86]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-quant.git@2f2587e \
+# ⚠️ CD fork 验证 pin: feat/cex-p2 (CEX P2 修复: currency_pair 下划线格式) — merge 后切回上游
+RUN echo "[bust=87]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherdCD/nanobot-quant.git@7351c02 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
     && echo "✅ nanobot-quant @e10bb00 (CD fork feat/cex-channel — CEX execution channel P1, bust=85) + vibe-trading @v0.1.12"
 
