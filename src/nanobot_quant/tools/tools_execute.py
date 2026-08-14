@@ -140,6 +140,12 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
         # LumiBot startup, so wrapping the call is the only reliable guard.
         from contextlib import redirect_stdout
 
+        # Disable lumibot runtime telemetry (background thread emitting
+        # LUMIBOT_TELEMETRY lines every interval via a stdout-bound handler —
+        # redirect_stdout cannot touch it because the StreamHandler captured
+        # the original stdout object at import time).
+        os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
+
         _saved_stdout = sys.stdout
         sys.stdout = sys.stderr
         try:
@@ -153,6 +159,11 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
             )
         finally:
             sys.stdout = _saved_stdout
+            # lumibot is imported lazily inside run_from_signals; the earlier
+            # _silence_lumibot_loggers() call ran before any lumibot logger
+            # existed. Clean up now that import + broker construction happened
+            # (drops stdout handlers, sets WARNING level).
+            _silence_lumibot_loggers()
         summary: dict = {"results": results, "count": len(results)}
 
         if live and not webui_live:
