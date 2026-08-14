@@ -178,9 +178,10 @@ class CexBroker(Broker):
         closest to fill), OKX CEX as fallback; 0.0 when both fail."""
         pair = gate_pair(symbol, self._tokens_json)
         try:
-            code, data = self._request("GET", f"/api/v4/spot/tickers/{pair}")
-            if code == 200 and isinstance(data, dict):
-                last = float(data.get("last") or 0)
+            # Gate tickers endpoint is list-based: GET /spot/tickers?currency_pair=PAIR
+            code, data = self._request("GET", "/api/v4/spot/tickers", query=f"currency_pair={pair}")
+            if code == 200 and isinstance(data, list) and data:
+                last = float(data[0].get("last") or 0)
                 if last > 0:
                     return last
         except Exception as e:

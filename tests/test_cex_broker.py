@@ -189,11 +189,12 @@ class TestSubmitOrder:
             raise RuntimeError("okx unavailable")
 
         monkeypatch.setattr(mod, "fetch_ticker", boom)  # module namespace, not okx_cex_data
-        state = _fake_request(monkeypatch, [(200, {"last": "67.2"})])
+        state = _fake_request(monkeypatch, [(200, [{"last": "67.2"}])])
         b = _broker()
         assert b._price_of("CRCLX") == 67.2
         method, path, query, body = state["calls"][0]
-        assert method == "GET" and "tickers/CRCLX_USDT" in path
+        assert method == "GET" and path == "/api/v4/spot/tickers"
+        assert "currency_pair=CRCLX_USDT" in query
 
     def test_price_of_okx_ticker_first(self, monkeypatch):
         # Gate ticker returns 0 → OKX CEX fallback
