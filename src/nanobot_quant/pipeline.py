@@ -657,7 +657,13 @@ def run_from_signals(
                         or getattr(lumibot_order, '_error', '')
                         or ''
                     )
-                    broker_status = lumibot_order.status if hasattr(lumibot_order, 'status') else "unknown"
+                    # lumibot v4.5.78 set_filled() 不更新 order.status（只设 event），
+                    # set_error() 才更新 status="error"——成交判定必须以 is_filled() 为准，
+                    # 否则 broker_status 恒为初始 "unprocessed"（CEX/DEX 共有的显示 bug）。
+                    if hasattr(lumibot_order, "is_filled") and lumibot_order.is_filled():
+                        broker_status = "filled"
+                    else:
+                        broker_status = getattr(lumibot_order, "status", "unknown") or "unknown"
                     if order_error:
                         broker_status = f"{broker_status}: {order_error}"
                     print(f"[DIAG] run_from_signals: {ticker} → {broker_status} tx={tx_hash} err={order_error!r}",

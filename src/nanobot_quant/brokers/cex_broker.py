@@ -329,6 +329,7 @@ class CexBroker(Broker):
         )
         if status == "filled":
             order.set_filled()
+            order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步（OrderStatus.FILLED="fill"）
             self._tracked[oid] = {
                 "symbol": symbol, "pair": pair, "side": side,
                 "quantity": quantity, "filled": filled,
@@ -445,6 +446,7 @@ class CexBroker(Broker):
         )
         if status == "filled":
             order.set_filled()
+            order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步
         elif status == "cancelled":
             order.set_canceled()
         return order

@@ -245,6 +245,7 @@ class OnchainOSBroker(Broker):
 
         # ── confirmed == "success"：链上已成交 ────────────────────
         order.set_filled()
+        order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步
 
         self._tracked[tx_hash or order_id] = {
             "symbol": symbol,
