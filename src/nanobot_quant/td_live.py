@@ -75,12 +75,26 @@ class _TdLiveRunner:
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
-        broker = OnchainOSBroker(
-            tokens_json=tokens,
-            slippage=str(params["slippage"]),
-            sol_buffer_pct=float(params["sol_buffer_pct"]),
-            data_source=OnchainOSDataSource(tokens_json=tokens),
-        )
+        # 执行通道（2026-08-14，P2）：cex=Gate.io 交易所（K 线联动 OKX CEX
+        # 公共端点）；dex=链上 DEX（默认，OnchainOS 子钱包）。只影响之后
+        # 的新下单，不迁移持仓。
+        channel = str(params.get("execution_channel", "dex"))
+        if channel == "cex":
+            from nanobot_quant.brokers.cex_broker import CexBroker
+            from nanobot_quant.data.cex_data_source import CexDataSource
+
+            broker = CexBroker(
+                tokens_json=tokens,
+                slippage=str(params["slippage"]),
+                data_source=CexDataSource(tokens_json=tokens),
+            )
+        else:
+            broker = OnchainOSBroker(
+                tokens_json=tokens,
+                slippage=str(params["slippage"]),
+                sol_buffer_pct=float(params["sol_buffer_pct"]),
+                data_source=OnchainOSDataSource(tokens_json=tokens),
+            )
         # lumibot Strategy.__init__ 在 broker=None 时直接 raise
         # ("No broker is set")，必须构造时传入 broker + data_source。
         strategy = TdSequentialStrategy(

@@ -22,6 +22,10 @@ try:
 except ImportError:
     pass
 try:
+    from . import gate_spec  # noqa: F401
+except ImportError:
+    pass
+try:
     from . import mcp_spec  # noqa: F401
 except ImportError:
     pass

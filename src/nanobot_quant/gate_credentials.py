@@ -49,7 +49,12 @@ def _credential_paths() -> list[str]:
 
 
 def load_gate_credentials() -> Optional[dict]:
-    """Load gate.json; return None when missing/unreadable."""
+    """Load gate.json; return None when missing/unreadable.
+
+    Supports both nested (main/sub_accounts, P1 CLI 形态) and flat
+    (WebUI 凭证表单形态：{api_key, api_secret, uid}) layouts — flat is
+    normalised to the nested layout so consumers need one shape.
+    """
     for p in _credential_paths():
         try:
             if not os.path.isfile(p):
@@ -58,6 +63,9 @@ def load_gate_credentials() -> Optional[dict]:
                 data = json.load(f)
             if isinstance(data, dict) and "main" in data:
                 return data
+            # flat（WebUI 写入形态）→ 归一化为主键 + 空子账号
+            if isinstance(data, dict) and data.get("api_key"):
+                return {"main": data, "sub_accounts": {}}
         except (OSError, ValueError):
             continue
     return None
@@ -86,7 +94,7 @@ def get_api_credentials(
         raise KeyError(
             f"sub-account {sub_account!r} not in gate.json (have: {sorted(subs)})"
         )
-    return creds.get("main") or {}
+    return creds.get("main") or creds
 
 
 def load_tokens_json() -> list[dict]:
@@ -108,7 +116,12 @@ def load_tokens_json() -> list[dict]:
 
 
 def gate_pair(symbol: str, tokens_json: Optional[list[dict]] = None) -> str:
-    """Gate spot pair for a symbol: CRCLX -> CRCLXUSDT (tokens.json gate_symbol wins)."""
+    """Gate spot pair for a symbol: CRCLX -> CRCLX_USDT (tokens.json gate_symbol wins).
+
+    Gate API uses ``BASE_QUOTE`` with an underscore (``BTC_USDT``), unlike
+    OKX (``BTC-USDT``) or Binance (``BTCUSDT``). Any input separator is
+    normalised away before rebuilding the underscore form.
+    """
     sym = str(symbol).upper().strip()
     tokens_json = tokens_json if tokens_json is not None else load_tokens_json()
     for e in tokens_json:
@@ -117,8 +130,10 @@ def gate_pair(symbol: str, tokens_json: Optional[list[dict]] = None) -> str:
             if gs:
                 sym = gs
             break
-    sym = sym.replace("-", "")
-    return sym if sym.endswith("USDT") else f"{sym}USDT"
+    base = sym.replace("-", "").replace("_", "")
+    if base.endswith("USDT"):
+        base = base[:-4]
+    return f"{base}_USDT"
 
 
 def okx_ticker(symbol: str, tokens_json: Optional[list[dict]] = None) -> str:

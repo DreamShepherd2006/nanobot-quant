@@ -14,9 +14,17 @@ Tool implementations live in tools/:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 # ── Suppress library stdout during imports ──────────────────────
+# Disable lumibot runtime telemetry at the MCP-server process level: the
+# emitter spawns a background thread writing LUMIBOT_TELEMETRY lines through
+# a stdout-bound logging handler, which corrupts the stdio JSON-RPC channel.
+# The env toggle is the only reliable kill-switch (handler-level cleanup is
+# order-dependent because lumibot imports lazily inside tool calls).
+os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
+
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
 # Clear handlers on the ENTIRE lumibot logger tree (sub-loggers like
 # lumibot.brokers.broker register their own stdout handlers, polluting

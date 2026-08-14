@@ -109,6 +109,8 @@ def test_meta_covers_all_defaults_and_three_groups():
         ("sol_buffer_pct", 1.5),
         ("sol_buffer_pct", "0.05"),
         ("max_position_pct", True),
+        ("execution_channel", "coinbase"),
+        ("execution_channel", "dex_onchain"),
     ],
 )
 def test_validation_rejects_out_of_range(key, bad):
@@ -131,6 +133,8 @@ def test_validation_rejects_out_of_range(key, bad):
         ("td_quantity", 100000),
         ("td_enabled", True),
         ("td_enabled", False),
+        ("execution_channel", "dex"),
+        ("execution_channel", "cex"),
     ],
 )
 def test_validation_accepts_in_range(key, good):
@@ -282,7 +286,7 @@ def test_page_renders_groups_with_current_values(tmp_path):
     html = resp.body.decode()
     assert "执行参数" in html
     assert "风险控制" in html
-    assert "执行质量" in html
+    assert "执行通道" in html
     assert "TD 自主运行" in html
     assert 'value="0.4"' in html  # current value rendered
 

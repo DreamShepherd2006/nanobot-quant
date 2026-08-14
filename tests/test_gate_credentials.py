@@ -37,16 +37,19 @@ CREDS = {
 
 class TestGatePair:
     def test_default_pair(self):
-        assert gate_pair("CRCLX", []) == "CRCLXUSDT"
+        assert gate_pair("CRCLX", []) == "CRCLX_USDT"
 
     def test_tokens_mapping(self):
-        assert gate_pair("CRCLX", TOKENS) == "CRCLXUSDT"
+        assert gate_pair("CRCLX", TOKENS) == "CRCLX_USDT"
 
     def test_dash_normalized(self):
-        assert gate_pair("CRCLX-USDT", []) == "CRCLXUSDT"
+        assert gate_pair("CRCLX-USDT", []) == "CRCLX_USDT"
 
     def test_already_usdt(self):
-        assert gate_pair("CRCLXUSDT", []) == "CRCLXUSDT"
+        assert gate_pair("CRCLXUSDT", []) == "CRCLX_USDT"
+
+    def test_underscore_passthrough(self):
+        assert gate_pair("CRCLX_USDT", []) == "CRCLX_USDT"
 
 
 class TestOkxTicker:
@@ -87,6 +90,38 @@ class TestCredentials:
             lambda: ["/nonexistent/gate.json"],
         )
         assert load_gate_credentials() is None
+
+
+class TestFlatCredentials:
+    """P2: WebUI 凭证表单写入 flat gate.json → 归一化 nested（main 键）。"""
+
+    def test_flat_normalised_to_main(self, monkeypatch, tmp_path):
+        import json
+
+        p = tmp_path / "gate.json"
+        p.write_text(
+            json.dumps({"api_key": "k", "api_secret": "s", "uid": "15119093"})
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.gate_credentials._credential_paths",
+            lambda: [str(p)],
+        )
+        creds = load_gate_credentials()
+        assert creds["main"] == {"api_key": "k", "api_secret": "s", "uid": "15119093"}
+        assert creds["sub_accounts"] == {}
+        # flat 兜底：get_api_credentials 在 creds 无 main 键时直接透传
+        assert get_api_credentials(creds) == {
+            "api_key": "k",
+            "api_secret": "s",
+            "uid": "15119093",
+        }
+
+    def test_nested_untouched(self):
+        assert get_api_credentials(CREDS) == CREDS["main"]
+
+    def test_flat_direct_get_api_credentials(self):
+        flat = {"api_key": "k", "api_secret": "s", "uid": "15119093"}
+        assert get_api_credentials(flat) == flat
 
 
 class TestFetchSpotBalances:

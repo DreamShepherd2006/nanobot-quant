@@ -46,6 +46,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ② Execution quality ──────────────────────────────────────────
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
+    "execution_channel": "dex", # enum — dex=链上 DEX(OnchainOS, 默认)；cex=Gate.io 交易所
     # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
     "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
     "td_symbols": ["SOL"],     # TD 标的池（多标的扫描，谁 Setup 9 谁执行；
@@ -74,6 +75,9 @@ QUANTITY_MODES: tuple[str, ...] = ("fixed", "value")
 #: Valid batch exit orders.
 EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
 
+#: Valid execution channels (DEX on-chain vs CEX exchange).
+EXECUTION_CHANNELS: tuple[str, ...] = ("dex", "cex")
+
 #: Human-readable bounds used by the WebUI form validation + display.
 PARAM_META: dict[str, dict[str, Any]] = {
     "max_position_pct": {
@@ -94,7 +98,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "sol_buffer_pct": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.05,
-        "label": "SOL 缓冲", "hint": "BUY 时按比例预留 SOL 覆盖 gas 与报价-成交间价格波动",
+        "label": "SOL 缓冲", "hint": "BUY 时按比例预留 SOL 覆盖 gas 与报价-成交间价格波动（仅 DEX 通道）",
+    },
+    "execution_channel": {
+        "group": "exec", "type": "enum", "enum": list(EXECUTION_CHANNELS), "std": "dex",
+        "label": "执行通道", "hint": "dex=链上 DEX（OnchainOS 子钱包，默认）；cex=Gate.io 交易所（子账号，需在凭证管理配置 Gate API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到 cex 时 TD 循环 K 线数据源联动切换为 OKX CEX 公共端点",
     },
     "td_enabled": {
         "group": "td", "type": "bool", "std": False,
@@ -155,7 +163,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
 
 GROUP_TITLES = {
     "risk": "① 风险控制（WebUI 锁死 — LLM 不可改）",
-    "exec": "② 执行质量与循环（WebUI 锁死 — LLM 不可改）",
+    "exec": "② 执行通道与质量（WebUI 锁死 — LLM 不可改）",
     "td": "③ TD 自主运行（P2 — StrategyExecutor 主循环）",
     "batch": "④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）",
 }

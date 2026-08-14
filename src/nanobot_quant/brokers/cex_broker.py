@@ -104,6 +104,33 @@ class CexBroker(Broker):
     #  Helpers
     # ═══════════════════════════════════════════════════════════
 
+    # Gate pair metadata cache (amount_precision / min_quote_amount / trade_status)
+    _pair_meta_cache: dict[str, tuple[float, dict]] = {}
+    _PAIR_META_TTL = 300.0
+
+    def _pair_meta(self, pair: str) -> dict:
+        """Gate spot pair metadata; {} on any failure (validation then skipped)."""
+        now = time.time()
+        cached = self._pair_meta_cache.get(pair)
+        if cached and now - cached[0] < self._PAIR_META_TTL:
+            return cached[1]
+        meta: dict = {}
+        try:
+            code, data = self._request(
+                "GET", f"/api/v4/spot/currency_pairs/{pair}",
+            )
+            if code == 200 and isinstance(data, dict):
+                meta = {
+                    "amount_precision": int(data.get("amount_precision") or 0),
+                    "quote_precision": int(data.get("precision") or 0),
+                    "min_quote_amount": float(data.get("min_quote_amount") or 0),
+                    "trade_status": str(data.get("trade_status") or ""),
+                }
+        except Exception as e:
+            print(f"[DIAG] CEX pair meta error {pair}: {e}", file=sys.stderr, flush=True)
+        self._pair_meta_cache[pair] = (now, meta)
+        return meta
+
     @staticmethod
     def _format_err(prefix: str, payload: Any = None) -> str:
         """Build a readable error string, keeping platform error codes intact."""
@@ -129,7 +156,7 @@ class CexBroker(Broker):
             "GET", f"{_SPOT_ORDERS_PATH}/{order_id}",
             query=f"currency_pair={pair}",
         )
-        if code != 200:
+        if code < 200 or code >= 300:
             return "submitted", 0.0, 0.0, 0.0
         status = str(data.get("status") or "").lower()
         filled = float(data.get("filled_amount") or 0)
@@ -147,12 +174,37 @@ class CexBroker(Broker):
         return "submitted", filled, left, avg
 
     def _price_of(self, symbol: str) -> float:
-        """Current price from OKX CEX (data side), 0 on failure."""
+        """Current price for order sizing. Gate ticker first (same-exchange,
+        closest to fill), OKX CEX as fallback; 0.0 when both fail."""
+        pair = gate_pair(symbol, self._tokens_json)
+        try:
+            # Gate tickers endpoint is list-based: GET /spot/tickers?currency_pair=PAIR
+            code, data = self._request("GET", "/api/v4/spot/tickers", query=f"currency_pair={pair}")
+            if code == 200 and isinstance(data, list) and data:
+                last = float(data[0].get("last") or 0)
+                if last > 0:
+                    print(f"[DIAG] CEX price {symbol}: gate ticker {pair} last={last} (http {code})",
+                          file=sys.stderr, flush=True)
+                    return last
+                print(f"[DIAG] CEX price {symbol}: gate ticker {pair} empty last "
+                      f"(http {code}, data={str(data)[:80]})", file=sys.stderr, flush=True)
+            else:
+                print(f"[DIAG] CEX price {symbol}: gate ticker {pair} failed "
+                      f"(http {code}, data={str(data)[:80]})", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[DIAG] CEX price {symbol}: gate ticker {pair} error: {e}", file=sys.stderr, flush=True)
         try:
             t = fetch_ticker(okx_ticker(symbol, self._tokens_json))
-            return float(t.get("last") or 0)
-        except Exception:
-            return 0.0
+            px = float(t.get("last") or 0)
+            if px > 0:
+                print(f"[DIAG] CEX price {symbol}: okx ticker last={px}", file=sys.stderr, flush=True)
+                return px
+            print(f"[DIAG] CEX price {symbol}: okx ticker empty (t={str(t)[:80]})", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[DIAG] CEX price {symbol}: okx ticker error: {e}", file=sys.stderr, flush=True)
+        print(f"[DIAG] CEX price {symbol}: NO PRICE (gate+okx both failed) → fail-closed",
+              file=sys.stderr, flush=True)
+        return 0.0
 
     def _balances(self) -> dict[str, dict]:
         """Available+locked balances keyed by currency (this broker's account)."""
@@ -185,18 +237,67 @@ class CexBroker(Broker):
             return order
 
         pair = gate_pair(symbol, self._tokens_json)
+
+        # ── Pair-level pre-flight (fail-closed, explicit errors) ─────
+        meta = self._pair_meta(pair)
+        if not meta:
+            msg = f"Gate {pair} pair metadata unavailable — refusing to place order"
+            order.set_error(msg)
+            print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                  file=sys.stderr, flush=True)
+            return order
+        status = meta.get("trade_status", "")
+        if status and status != "tradable":
+            order.set_error(f"Gate pair {pair} not tradable (trade_status={status})")
+            return order
+        ap = int(meta.get("amount_precision") or 0)  # base 数量精度（market SELL）
+        qp = int(meta.get("quote_precision") or 0)   # quote 金额精度（market BUY）
+        min_quote = float(meta.get("min_quote_amount") or 0)
+
+        # Gate market order semantics (官方 spec): buy → amount = quote 金额 (USDT),
+        # sell → amount = base 数量 (CRCLX).
+        px = self._price_of(symbol)
+        if side == "buy":
+            if px <= 0:
+                msg = f"Gate {pair} cannot place market buy: no price for {symbol}"
+                order.set_error(msg)
+                print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                      file=sys.stderr, flush=True)
+                return order
+            if min_quote > 0 and quantity * px < min_quote:
+                msg = (
+                    f"Gate {pair} below min order amount {min_quote:g} USDT "
+                    f"(qty {quantity} x {px:.2f} = ${quantity * px:.2f})"
+                )
+                order.set_error(msg)
+                print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                      file=sys.stderr, flush=True)
+                return order
+            amount_str = f"{quantity * px:.{qp}f}" if qp > 0 else f"{quantity * px:.8f}"
+        else:
+            if min_quote > 0 and px > 0 and quantity * px < min_quote:
+                msg = (
+                    f"Gate {pair} below min order amount {min_quote:g} USDT "
+                    f"(qty {quantity} x {px:.2f} = ${quantity * px:.2f})"
+                )
+                order.set_error(msg)
+                print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                      file=sys.stderr, flush=True)
+                return order
+            amount_str = f"{quantity:.{ap}f}" if ap > 0 else f"{quantity:.8f}"
+
         client_oid = f"nq{int(time.time())}{os.urandom(3).hex()}"
         body = json.dumps({
             "currency_pair": pair,
             "side": side,
             "type": "market",
-            "amount": f"{quantity:.8f}",
+            "amount": amount_str,
             "time_in_force": "ioc",
             "text": f"t-{client_oid}",
         }, separators=(",", ":"))
 
         code, data = self._request("POST", _SPOT_ORDERS_PATH, body=body)
-        if code != 200:
+        if code < 200 or code >= 300:  # Gate returns 201 Created on success
             msg = self._format_err(f"Gate create_order failed: {pair} {side} {quantity}", data)
             order.set_error(msg)
             print(f"CEX BROKER DIAG | submit FAIL {side} {quantity} {symbol}@{pair}: {msg}",
@@ -213,7 +314,14 @@ class CexBroker(Broker):
         }
 
         # ── status confirmation ──────────────────────────────────
-        status, filled, left, avg = self._query_order(oid, pair)
+        # Gate 市价单结算异步：下单后立即查询可能仍 open（实测 SELL 查询时
+        # 未 closed → broker_status=unprocessed），轮询等待 closed（上限 ~5s）。
+        status, filled, left, avg = "submitted", 0.0, 0.0, 0.0
+        for _ in range(10):
+            status, filled, left, avg = self._query_order(oid, pair)
+            if status != "submitted":
+                break
+            time.sleep(0.5)
         print(
             f"CEX BROKER DIAG | submit {side} {quantity} {symbol}@{pair} "
             f"oid={oid[:12]} status={status} filled={filled} left={left} avg={avg}",
@@ -221,6 +329,7 @@ class CexBroker(Broker):
         )
         if status == "filled":
             order.set_filled()
+            order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步（OrderStatus.FILLED="fill"）
             self._tracked[oid] = {
                 "symbol": symbol, "pair": pair, "side": side,
                 "quantity": quantity, "filled": filled,
@@ -337,6 +446,7 @@ class CexBroker(Broker):
         )
         if status == "filled":
             order.set_filled()
+            order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步
         elif status == "cancelled":
             order.set_canceled()
         return order
