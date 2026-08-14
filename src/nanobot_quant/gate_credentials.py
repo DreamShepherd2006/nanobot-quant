@@ -116,7 +116,12 @@ def load_tokens_json() -> list[dict]:
 
 
 def gate_pair(symbol: str, tokens_json: Optional[list[dict]] = None) -> str:
-    """Gate spot pair for a symbol: CRCLX -> CRCLXUSDT (tokens.json gate_symbol wins)."""
+    """Gate spot pair for a symbol: CRCLX -> CRCLX_USDT (tokens.json gate_symbol wins).
+
+    Gate API uses ``BASE_QUOTE`` with an underscore (``BTC_USDT``), unlike
+    OKX (``BTC-USDT``) or Binance (``BTCUSDT``). Any input separator is
+    normalised away before rebuilding the underscore form.
+    """
     sym = str(symbol).upper().strip()
     tokens_json = tokens_json if tokens_json is not None else load_tokens_json()
     for e in tokens_json:
@@ -125,8 +130,10 @@ def gate_pair(symbol: str, tokens_json: Optional[list[dict]] = None) -> str:
             if gs:
                 sym = gs
             break
-    sym = sym.replace("-", "")
-    return sym if sym.endswith("USDT") else f"{sym}USDT"
+    base = sym.replace("-", "").replace("_", "")
+    if base.endswith("USDT"):
+        base = base[:-4]
+    return f"{base}_USDT"
 
 
 def okx_ticker(symbol: str, tokens_json: Optional[list[dict]] = None) -> str:

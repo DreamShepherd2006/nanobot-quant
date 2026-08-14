@@ -37,16 +37,19 @@ CREDS = {
 
 class TestGatePair:
     def test_default_pair(self):
-        assert gate_pair("CRCLX", []) == "CRCLXUSDT"
+        assert gate_pair("CRCLX", []) == "CRCLX_USDT"
 
     def test_tokens_mapping(self):
-        assert gate_pair("CRCLX", TOKENS) == "CRCLXUSDT"
+        assert gate_pair("CRCLX", TOKENS) == "CRCLX_USDT"
 
     def test_dash_normalized(self):
-        assert gate_pair("CRCLX-USDT", []) == "CRCLXUSDT"
+        assert gate_pair("CRCLX-USDT", []) == "CRCLX_USDT"
 
     def test_already_usdt(self):
-        assert gate_pair("CRCLXUSDT", []) == "CRCLXUSDT"
+        assert gate_pair("CRCLXUSDT", []) == "CRCLX_USDT"
+
+    def test_underscore_passthrough(self):
+        assert gate_pair("CRCLX_USDT", []) == "CRCLX_USDT"
 
 
 class TestOkxTicker:

@@ -93,10 +93,10 @@ class TestSubmitOrder:
         out = b._submit_order(order)
         assert out.filled is True
         assert out.identifier == "123"
-        assert out.custom_params["cex"]["pair"] == "CRCLXUSDT"
+        assert out.custom_params["cex"]["pair"] == "CRCLX_USDT"
         method, path, query, body = state["calls"][0]
         assert method == "POST" and path == "/api/v4/spot/orders"
-        assert "CRCLXUSDT" in body and '"side":"buy"' in body
+        assert "CRCLX_USDT" in body and '"side":"buy"' in body
 
     def test_create_error(self, monkeypatch):
         _fake_request(monkeypatch, (400, {"label": "INVALID_REQUEST_PARAMETER"}))
@@ -178,11 +178,11 @@ class TestCancelOrder:
     def test_cancel(self, monkeypatch):
         state = _fake_request(monkeypatch, (200, {"id": "123", "status": "cancelled"}))
         b = _broker()
-        b._tracked["123"] = {"pair": "CRCLXUSDT", "symbol": "CRCLX"}
+        b._tracked["123"] = {"pair": "CRCLX_USDT", "symbol": "CRCLX"}
         order = SimpleNamespace(identifier="123")
         b.cancel_order(order)
         method, path, query, body = state["calls"][0]
-        assert method == "DELETE" and "123" in path and "CRCLXUSDT" in query
+        assert method == "DELETE" and "123" in path and "CRCLX_USDT" in query
 
     def test_cancel_unknown_order(self, monkeypatch):
         state = _fake_request(monkeypatch, [])
