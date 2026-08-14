@@ -183,16 +183,27 @@ class CexBroker(Broker):
             if code == 200 and isinstance(data, list) and data:
                 last = float(data[0].get("last") or 0)
                 if last > 0:
+                    print(f"[DIAG] CEX price {symbol}: gate ticker {pair} last={last} (http {code})",
+                          file=sys.stderr, flush=True)
                     return last
+                print(f"[DIAG] CEX price {symbol}: gate ticker {pair} empty last "
+                      f"(http {code}, data={str(data)[:80]})", file=sys.stderr, flush=True)
+            else:
+                print(f"[DIAG] CEX price {symbol}: gate ticker {pair} failed "
+                      f"(http {code}, data={str(data)[:80]})", file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"[DIAG] CEX price gate ticker error {pair}: {e}", file=sys.stderr, flush=True)
+            print(f"[DIAG] CEX price {symbol}: gate ticker {pair} error: {e}", file=sys.stderr, flush=True)
         try:
             t = fetch_ticker(okx_ticker(symbol, self._tokens_json))
             px = float(t.get("last") or 0)
             if px > 0:
+                print(f"[DIAG] CEX price {symbol}: okx ticker last={px}", file=sys.stderr, flush=True)
                 return px
+            print(f"[DIAG] CEX price {symbol}: okx ticker empty (t={str(t)[:80]})", file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"[DIAG] CEX price okx ticker error {symbol}: {e}", file=sys.stderr, flush=True)
+            print(f"[DIAG] CEX price {symbol}: okx ticker error: {e}", file=sys.stderr, flush=True)
+        print(f"[DIAG] CEX price {symbol}: NO PRICE (gate+okx both failed) → fail-closed",
+              file=sys.stderr, flush=True)
         return 0.0
 
     def _balances(self) -> dict[str, dict]:
