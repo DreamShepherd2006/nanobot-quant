@@ -174,12 +174,25 @@ class CexBroker(Broker):
         return "submitted", filled, left, avg
 
     def _price_of(self, symbol: str) -> float:
-        """Current price from OKX CEX (data side), 0 on failure."""
+        """Current price for order sizing. Gate ticker first (same-exchange,
+        closest to fill), OKX CEX as fallback; 0.0 when both fail."""
+        pair = gate_pair(symbol, self._tokens_json)
+        try:
+            code, data = self._request("GET", f"/api/v4/spot/tickers/{pair}")
+            if code == 200 and isinstance(data, dict):
+                last = float(data.get("last") or 0)
+                if last > 0:
+                    return last
+        except Exception as e:
+            print(f"[DIAG] CEX price gate ticker error {pair}: {e}", file=sys.stderr, flush=True)
         try:
             t = fetch_ticker(okx_ticker(symbol, self._tokens_json))
-            return float(t.get("last") or 0)
-        except Exception:
-            return 0.0
+            px = float(t.get("last") or 0)
+            if px > 0:
+                return px
+        except Exception as e:
+            print(f"[DIAG] CEX price okx ticker error {symbol}: {e}", file=sys.stderr, flush=True)
+        return 0.0
 
     def _balances(self) -> dict[str, dict]:
         """Available+locked balances keyed by currency (this broker's account)."""

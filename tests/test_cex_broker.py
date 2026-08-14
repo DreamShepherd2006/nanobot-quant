@@ -183,6 +183,25 @@ class TestSubmitOrder:
         assert "no price for CRCLX" in out.error
         assert out.filled is False
 
+    def test_price_of_gate_ticker_fallback(self, monkeypatch):
+        # OKX ticker unavailable → fall back to Gate /spot/tickers/{pair}
+        def boom(ticker, **kw):
+            raise RuntimeError("okx unavailable")
+
+        monkeypatch.setattr(mod, "fetch_ticker", boom)  # module namespace, not okx_cex_data
+        state = _fake_request(monkeypatch, [(200, {"last": "67.2"})])
+        b = _broker()
+        assert b._price_of("CRCLX") == 67.2
+        method, path, query, body = state["calls"][0]
+        assert method == "GET" and "tickers/CRCLX_USDT" in path
+
+    def test_price_of_okx_ticker_first(self, monkeypatch):
+        # Gate ticker returns 0 → OKX CEX fallback
+        monkeypatch.setattr(mod, "fetch_ticker", lambda ticker, **kw: {"last": "68.5"})
+        b = _broker()
+        monkeypatch.setattr(b, "_request", lambda *a, **k: (200, {"last": "0"}))
+        assert b._price_of("CRCLX") == 68.5
+
     def test_meta_unavailable_fail_closed(self, monkeypatch):
         # pair meta fetch fails → fail-closed: refuse to place blind order
         CexBroker._pair_meta_cache.clear()  # isolate from earlier tests
