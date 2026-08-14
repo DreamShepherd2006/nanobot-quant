@@ -82,8 +82,15 @@ def _fake_request(monkeypatch, responses):
 
 
 class TestSubmitOrder:
+    # CRCLX_USDT on Gate: amount_precision=3, min_quote_amount=3 (2026-08-14 实测)
+    _PAIR_META = {
+        "id": "CRCLX_USDT", "base": "CRCLX", "quote": "USDT",
+        "trade_status": "tradable", "amount_precision": 3, "min_quote_amount": 3,
+    }
+
     def test_filled(self, monkeypatch):
         state = _fake_request(monkeypatch, [
+            (200, self._PAIR_META),  # GET pair meta
             (200, {"id": "123", "status": "open", "left": "0.05"}),  # POST create
             (200, {"id": "123", "status": "closed", "left": "0",
                    "filled_amount": "0.05", "avg_deal_price": "74.9"}),  # GET query
@@ -95,8 +102,12 @@ class TestSubmitOrder:
         assert out.identifier == "123"
         assert out.custom_params["cex"]["pair"] == "CRCLX_USDT"
         method, path, query, body = state["calls"][0]
+        assert method == "GET" and "currency_pairs" in path
+        method, path, query, body = state["calls"][1]
         assert method == "POST" and path == "/api/v4/spot/orders"
         assert "CRCLX_USDT" in body and '"side":"buy"' in body
+        # amount_precision=3 → quantity formatted to 3 decimals
+        assert '"amount":"0.050"' in body
 
     def test_create_error(self, monkeypatch):
         _fake_request(monkeypatch, (400, {"label": "INVALID_REQUEST_PARAMETER"}))
@@ -109,6 +120,7 @@ class TestSubmitOrder:
 
     def test_pending(self, monkeypatch):
         _fake_request(monkeypatch, [
+            (200, self._PAIR_META),  # GET pair meta
             (200, {"id": "9", "status": "open", "left": "0.05"}),  # POST create
             (200, {"id": "9", "status": "open", "left": "0.05"}),  # GET query
         ])
@@ -117,6 +129,34 @@ class TestSubmitOrder:
         out = b._submit_order(order)
         assert out.filled is False
         assert out.error is None
+
+    def test_min_quote_reject(self, monkeypatch):
+        _fake_request(monkeypatch, [(200, self._PAIR_META)])
+        b = _broker()
+        # price 67.0 × qty 0.02 = $1.34 < min_quote 3 → fail-closed reject
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
+        order = _mk_order(quantity=0.02)
+        out = b._submit_order(order)
+        assert out.error is not None
+        assert "below min order amount 3 USDT" in out.error
+        assert "1.34" in out.error
+        assert out.filled is False
+
+    def test_meta_unavailable_skips_preflight(self, monkeypatch):
+        # pair meta fetch fails → no preflight, order proceeds to Gate
+        CexBroker._pair_meta_cache.clear()  # isolate from earlier tests
+        state = _fake_request(monkeypatch, [
+            (500, {"label": "SERVER_ERROR"}),  # GET pair meta fails
+            (200, {"id": "7", "status": "open", "left": "0.02"}),  # POST create
+            (200, {"id": "7", "status": "closed", "left": "0",
+                   "filled_amount": "0.02", "avg_deal_price": "67.0"}),  # GET query
+        ])
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 0.0)  # price unknown
+        order = _mk_order(quantity=0.02)
+        out = b._submit_order(order)
+        assert out.filled is True
+        assert out.custom_params["cex"]["pair"] == "CRCLX_USDT"
 
     def test_invalid_quantity(self, monkeypatch):
         state = _fake_request(monkeypatch, [])

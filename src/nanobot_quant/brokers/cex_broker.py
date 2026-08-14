@@ -104,6 +104,32 @@ class CexBroker(Broker):
     #  Helpers
     # ═══════════════════════════════════════════════════════════
 
+    # Gate pair metadata cache (amount_precision / min_quote_amount / trade_status)
+    _pair_meta_cache: dict[str, tuple[float, dict]] = {}
+    _PAIR_META_TTL = 300.0
+
+    def _pair_meta(self, pair: str) -> dict:
+        """Gate spot pair metadata; {} on any failure (validation then skipped)."""
+        now = time.time()
+        cached = self._pair_meta_cache.get(pair)
+        if cached and now - cached[0] < self._PAIR_META_TTL:
+            return cached[1]
+        meta: dict = {}
+        try:
+            code, data = self._request(
+                "GET", f"/api/v4/spot/currency_pairs/{pair}",
+            )
+            if code == 200 and isinstance(data, dict):
+                meta = {
+                    "amount_precision": int(data.get("amount_precision") or 0),
+                    "min_quote_amount": float(data.get("min_quote_amount") or 0),
+                    "trade_status": str(data.get("trade_status") or ""),
+                }
+        except Exception as e:
+            print(f"[DIAG] CEX pair meta error {pair}: {e}", file=sys.stderr, flush=True)
+        self._pair_meta_cache[pair] = (now, meta)
+        return meta
+
     @staticmethod
     def _format_err(prefix: str, payload: Any = None) -> str:
         """Build a readable error string, keeping platform error codes intact."""
@@ -185,12 +211,34 @@ class CexBroker(Broker):
             return order
 
         pair = gate_pair(symbol, self._tokens_json)
+
+        # ── Pair-level pre-flight (fail-closed, explicit errors) ─────
+        meta = self._pair_meta(pair)
+        status = meta.get("trade_status", "")
+        if status and status != "tradable":
+            order.set_error(f"Gate pair {pair} not tradable (trade_status={status})")
+            return order
+        ap = int(meta.get("amount_precision") or 0)
+        min_quote = float(meta.get("min_quote_amount") or 0)
+        if min_quote > 0:
+            px = self._price_of(symbol)
+            if px > 0 and quantity * px < min_quote:
+                msg = (
+                    f"Gate {pair} below min order amount {min_quote:g} USDT "
+                    f"(qty {quantity} x {px:.2f} = ${quantity * px:.2f})"
+                )
+                order.set_error(msg)
+                print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                      file=sys.stderr, flush=True)
+                return order
+        amount_str = f"{quantity:.{ap}f}" if ap > 0 else f"{quantity:.8f}"
+
         client_oid = f"nq{int(time.time())}{os.urandom(3).hex()}"
         body = json.dumps({
             "currency_pair": pair,
             "side": side,
             "type": "market",
-            "amount": f"{quantity:.8f}",
+            "amount": amount_str,
             "time_in_force": "ioc",
             "text": f"t-{client_oid}",
         }, separators=(",", ":"))
