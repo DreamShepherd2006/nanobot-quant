@@ -314,7 +314,14 @@ class CexBroker(Broker):
         }
 
         # ── status confirmation ──────────────────────────────────
-        status, filled, left, avg = self._query_order(oid, pair)
+        # Gate 市价单结算异步：下单后立即查询可能仍 open（实测 SELL 查询时
+        # 未 closed → broker_status=unprocessed），轮询等待 closed（上限 ~5s）。
+        status, filled, left, avg = "submitted", 0.0, 0.0, 0.0
+        for _ in range(10):
+            status, filled, left, avg = self._query_order(oid, pair)
+            if status != "submitted":
+                break
+            time.sleep(0.5)
         print(
             f"CEX BROKER DIAG | submit {side} {quantity} {symbol}@{pair} "
             f"oid={oid[:12]} status={status} filled={filled} left={left} avg={avg}",

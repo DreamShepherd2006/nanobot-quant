@@ -151,12 +151,36 @@ class TestSubmitOrder:
         assert "INVALID_REQUEST_PARAMETER" in out.error
         assert out.filled is False
 
+    def test_query_retry_until_closed(self, monkeypatch):
+        # Gate 市价单结算异步：下单后立即查询仍 open（SELL 实测），轮询后 closed
+        state = _fake_request(monkeypatch, [
+            (200, self._PAIR_META),  # GET pair meta
+            (201, {"id": "124", "status": "open", "left": "0.05",
+                   "filled_amount": "0", "avg_deal_price": "0"}),  # POST create
+            (200, {"id": "124", "status": "open", "left": "0.05",
+                   "filled_amount": "0", "avg_deal_price": "0"}),  # query #1: open
+            (200, {"id": "124", "status": "closed", "left": "0",
+                   "filled_amount": "0.05", "avg_deal_price": "74.9"}),  # query #2: closed
+        ])
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
+        order = _mk_order()
+        out = b._submit_order(order)
+        assert out.filled is True
+        assert b._tracked["124"]["filled"] == 0.05
+        assert b._tracked["124"]["avg_price"] == 74.9
+        # POST → query#1(open) → query#2(closed)：共 3 次请求在 create 之后
+        assert len(state["calls"]) == 4
+
     def test_pending(self, monkeypatch):
+        # POST create + 10 次轮询均 open → 最终仍 pending（不误报 error）
         _fake_request(monkeypatch, [
             (200, self._PAIR_META),  # GET pair meta
             (200, {"id": "9", "status": "open", "left": "0.05"}),  # POST create
-            (200, {"id": "9", "status": "open", "left": "0.05"}),  # GET query
+            *[(200, {"id": "9", "status": "open", "left": "0.05"}) for _ in range(10)],
         ])
+        monkeypatch.setattr("time.sleep", lambda _: None)
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order()
@@ -289,3 +313,4 @@ class TestCancelOrder:
         b = _broker()
         b.cancel_order(SimpleNamespace(identifier="nope"))
         assert state["calls"] == []
+
