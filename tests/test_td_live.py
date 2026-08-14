@@ -181,3 +181,110 @@ def test_start_waits_when_thread_tearing_down(monkeypatch):
     assert st["running"] is True
     time.sleep(0.1)
     assert fake2.running is True
+
+class TestBuildExecutorChannel:
+    """P2: execution_channel 分叉 — dex=OnchainOS，cex=CexBroker + CexDataSource。
+
+    通过 sys.modules 注入 fake 模块拦截 _build_executor 函数内延迟 import
+    （测试容器无真实 lumibot），只验证 broker/data_source 选型，不验证
+    StrategyExecutor 真实构造。
+    """
+
+    def _fake_modules(self, monkeypatch):
+        import sys
+        import types
+
+        fakes = {}
+
+        class FakeCexBroker:
+            def __init__(self, **kw):
+                self.data_source = kw["data_source"]
+                fakes["cex_broker_kw"] = kw
+
+        class FakeCexDataSource:
+            def __init__(self, **kw):
+                fakes["cex_ds_kw"] = kw
+
+        class FakeOnchainBroker:
+            def __init__(self, **kw):
+                self.data_source = kw["data_source"]
+                fakes["dex_broker_kw"] = kw
+
+        class FakeOnchainDataSource:
+            def __init__(self, **kw):
+                fakes["dex_ds_kw"] = kw
+
+        class FakeTdStrategy:
+            parameters = {}
+
+            def __init__(self, **kw):
+                self.broker = kw.get("broker")
+                self.data_source = kw.get("data_source")
+
+        class FakeExecutor:
+            daemon = False
+
+            def __init__(self, strategy):
+                self.strategy = strategy
+
+        def _mod(name, attrs):
+            m = types.ModuleType(name)
+            for k, v in attrs.items():
+                setattr(m, k, v)
+            monkeypatch.setitem(sys.modules, name, m)
+            return m
+
+        _mod("nanobot_quant.brokers.cex_broker", {"CexBroker": FakeCexBroker})
+        _mod("nanobot_quant.data.cex_data_source", {"CexDataSource": FakeCexDataSource})
+        _mod(
+            "nanobot_quant.brokers.onchainos_broker",
+            {"OnchainOSBroker": FakeOnchainBroker},
+        )
+        _mod(
+            "nanobot_quant.data.onchainos_data_source",
+            {"OnchainOSDataSource": FakeOnchainDataSource},
+        )
+        _mod(
+            "nanobot_quant.strategies.registry",
+            {"load_selected": lambda: "td_sequential"},
+        )
+        _mod(
+            "nanobot_quant.strategies.td_sequential_strategy",
+            {"TdSequentialStrategy": FakeTdStrategy},
+        )
+        _mod("nanobot_quant.td_params", {"load_td_params": lambda n: {}})
+        _mod("nanobot_quant.tokens_store", {"load_tokens_json": lambda: []})
+        _mod(
+            "lumibot.strategies.strategy_executor",
+            {"StrategyExecutor": FakeExecutor},
+        )
+        return fakes, FakeCexBroker, FakeCexDataSource, FakeOnchainBroker, FakeOnchainDataSource
+
+    def test_cex_channel(self, monkeypatch):
+        fakes, CexB, CexDS, _OnB, _OnDS = self._fake_modules(monkeypatch)
+        runner = td_live._TdLiveRunner()
+        ex = runner._build_executor(
+            _params(td_enabled=True, execution_channel="cex")
+        )
+        assert isinstance(ex.strategy.broker, CexB)
+        assert isinstance(ex.strategy.broker.data_source, CexDS)
+        assert fakes["cex_broker_kw"]["slippage"] == "0.01"
+        assert "sol_buffer_pct" not in fakes["cex_broker_kw"]
+
+    def test_dex_channel_default(self, monkeypatch):
+        fakes, _CexB, _CexDS, OnB, OnDS = self._fake_modules(monkeypatch)
+        runner = td_live._TdLiveRunner()
+        ex = runner._build_executor(
+            _params(td_enabled=True, execution_channel="dex")
+        )
+        assert isinstance(ex.strategy.broker, OnB)
+        assert isinstance(ex.strategy.broker.data_source, OnDS)
+        assert fakes["dex_broker_kw"]["slippage"] == "0.01"
+
+    def test_unknown_channel_falls_back_to_dex(self, monkeypatch):
+        _, _CexB, _CexDS, OnB, _OnDS = self._fake_modules(monkeypatch)
+        runner = td_live._TdLiveRunner()
+        ex = runner._build_executor(
+            _params(td_enabled=True, execution_channel="coinbase")
+        )
+        assert isinstance(ex.strategy.broker, OnB)

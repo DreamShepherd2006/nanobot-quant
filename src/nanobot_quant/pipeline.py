@@ -614,21 +614,33 @@ def run_from_signals(
 
                     from lumibot.entities import Asset, Order as LumibotOrder
                     from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
+                    from nanobot_quant.brokers.cex_broker import CexBroker
 
                     sys.stdout = _saved_stdout
 
-                    broker = OnchainOSBroker(
-                        tokens_json=tokens_json or [],
-                        slippage=str(slippage),
-                        sol_buffer_pct=float(sol_buffer_pct),
-                    )
+                    # 执行通道（2026-08-14，P2）：dex=链上 DEX（默认）；cex=Gate.io
+                    # 交易所（子账号）。只影响之后的新下单，不迁移持仓。
+                    _channel = str(_exec.get("execution_channel", "dex"))
+                    if _channel == "cex":
+                        broker = CexBroker(
+                            tokens_json=tokens_json or [],
+                            slippage=str(slippage),
+                        )
+                        quote_symbol = "USDT"
+                    else:
+                        broker = OnchainOSBroker(
+                            tokens_json=tokens_json or [],
+                            slippage=str(slippage),
+                            sol_buffer_pct=float(sol_buffer_pct),
+                        )
+                        quote_symbol = "USDC"
 
                     asset = Asset(
                         symbol=req.asset,
                         asset_type="crypto",
                     )
                     quote = Asset(
-                        symbol="USDC",
+                        symbol=quote_symbol,
                         asset_type="crypto",
                     )
                     lumibot_order = LumibotOrder(

@@ -84,14 +84,17 @@ class TdSequentialStrategy(Strategy):
         """Called once before the backtest/live loop starts (lumibot lifecycle)."""
         # 链上 broker（OnchainOSBroker）：交易对必须是 X/USDC，lumibot
         # 默认 quote_asset 是 USD(forex) → resolve_token_address("USD")
-        # 失败导致 "Cannot resolve addresses: X→USD"。此处显式设 USDC。
+        # 失败导致 "Cannot resolve addresses: X→USD"。此处按执行通道显式设
+        # 计价币：DEX=USDC（链上），CEX=USDT（Gate 交易对计价）。
         broker = getattr(self, "broker", None)
-        self._is_live_broker = (
-            broker is not None and broker.__class__.__name__ == "OnchainOSBroker"
-        )
+        broker_cls = broker.__class__.__name__ if broker is not None else ""
+        self._is_live_broker = broker_cls in ("OnchainOSBroker", "CexBroker")
         if self._is_live_broker:
             from lumibot.entities import Asset
-            self.quote_asset = Asset("USDC", asset_type="crypto")
+            self.quote_asset = Asset(
+                "USDT" if broker_cls == "CexBroker" else "USDC",
+                asset_type="crypto",
+            )
         self.symbol = symbol or self.parameters.get("symbol", "AAPL")
         # 标的池（多标的扫描，2026-08-10）：每轮遍历 symbols 算信号，
         # 谁 Setup 9 谁执行；self.symbol 在每标的评估时切换。
