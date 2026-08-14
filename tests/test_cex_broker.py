@@ -99,7 +99,9 @@ class TestSubmitOrder:
     def test_filled(self, monkeypatch):
         state = _fake_request(monkeypatch, [
             (200, self._PAIR_META),  # GET pair meta
-            (200, {"id": "123", "status": "open", "left": "0"}),  # POST create
+            (201, {"id": "123", "status": "closed", "left": "0",
+                   "filled_amount": "0.05", "avg_deal_price": "74.9",
+                   "finish_as": "filled"}),  # POST create (Gate returns 201)
             (200, {"id": "123", "status": "closed", "left": "0",
                    "filled_amount": "0.05", "avg_deal_price": "74.9"}),  # GET query
         ])
@@ -122,7 +124,8 @@ class TestSubmitOrder:
         # market SELL: amount = base 数量 (CRCLX), amount_precision=3
         state = _fake_request(monkeypatch, [
             (200, self._PAIR_META),  # GET pair meta
-            (200, {"id": "55", "status": "open", "left": "0.05"}),  # POST create
+            (201, {"id": "55", "status": "closed", "left": "0",
+                   "filled_amount": "0.05", "avg_deal_price": "67.1"}),  # POST create
             (200, {"id": "55", "status": "closed", "left": "0",
                    "filled_amount": "0.05", "avg_deal_price": "67.1"}),  # GET query
         ])

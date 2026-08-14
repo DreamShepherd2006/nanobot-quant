@@ -156,7 +156,7 @@ class CexBroker(Broker):
             "GET", f"{_SPOT_ORDERS_PATH}/{order_id}",
             query=f"currency_pair={pair}",
         )
-        if code != 200:
+        if code < 200 or code >= 300:
             return "submitted", 0.0, 0.0, 0.0
         status = str(data.get("status") or "").lower()
         filled = float(data.get("filled_amount") or 0)
@@ -297,7 +297,7 @@ class CexBroker(Broker):
         }, separators=(",", ":"))
 
         code, data = self._request("POST", _SPOT_ORDERS_PATH, body=body)
-        if code != 200:
+        if code < 200 or code >= 300:  # Gate returns 201 Created on success
             msg = self._format_err(f"Gate create_order failed: {pair} {side} {quantity}", data)
             order.set_error(msg)
             print(f"CEX BROKER DIAG | submit FAIL {side} {quantity} {symbol}@{pair}: {msg}",
