@@ -122,6 +122,7 @@ class CexBroker(Broker):
             if code == 200 and isinstance(data, dict):
                 meta = {
                     "amount_precision": int(data.get("amount_precision") or 0),
+                    "quote_precision": int(data.get("precision") or 0),
                     "min_quote_amount": float(data.get("min_quote_amount") or 0),
                     "trade_status": str(data.get("trade_status") or ""),
                 }
@@ -214,15 +215,31 @@ class CexBroker(Broker):
 
         # ── Pair-level pre-flight (fail-closed, explicit errors) ─────
         meta = self._pair_meta(pair)
+        if not meta:
+            msg = f"Gate {pair} pair metadata unavailable — refusing to place order"
+            order.set_error(msg)
+            print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                  file=sys.stderr, flush=True)
+            return order
         status = meta.get("trade_status", "")
         if status and status != "tradable":
             order.set_error(f"Gate pair {pair} not tradable (trade_status={status})")
             return order
-        ap = int(meta.get("amount_precision") or 0)
+        ap = int(meta.get("amount_precision") or 0)  # base 数量精度（market SELL）
+        qp = int(meta.get("quote_precision") or 0)   # quote 金额精度（market BUY）
         min_quote = float(meta.get("min_quote_amount") or 0)
-        if min_quote > 0:
-            px = self._price_of(symbol)
-            if px > 0 and quantity * px < min_quote:
+
+        # Gate market order semantics (官方 spec): buy → amount = quote 金额 (USDT),
+        # sell → amount = base 数量 (CRCLX).
+        px = self._price_of(symbol)
+        if side == "buy":
+            if px <= 0:
+                msg = f"Gate {pair} cannot place market buy: no price for {symbol}"
+                order.set_error(msg)
+                print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                      file=sys.stderr, flush=True)
+                return order
+            if min_quote > 0 and quantity * px < min_quote:
                 msg = (
                     f"Gate {pair} below min order amount {min_quote:g} USDT "
                     f"(qty {quantity} x {px:.2f} = ${quantity * px:.2f})"
@@ -231,7 +248,18 @@ class CexBroker(Broker):
                 print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
                       file=sys.stderr, flush=True)
                 return order
-        amount_str = f"{quantity:.{ap}f}" if ap > 0 else f"{quantity:.8f}"
+            amount_str = f"{quantity * px:.{qp}f}" if qp > 0 else f"{quantity * px:.8f}"
+        else:
+            if min_quote > 0 and px > 0 and quantity * px < min_quote:
+                msg = (
+                    f"Gate {pair} below min order amount {min_quote:g} USDT "
+                    f"(qty {quantity} x {px:.2f} = ${quantity * px:.2f})"
+                )
+                order.set_error(msg)
+                print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                      file=sys.stderr, flush=True)
+                return order
+            amount_str = f"{quantity:.{ap}f}" if ap > 0 else f"{quantity:.8f}"
 
         client_oid = f"nq{int(time.time())}{os.urandom(3).hex()}"
         body = json.dumps({

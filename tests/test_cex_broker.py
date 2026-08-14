@@ -82,20 +82,29 @@ def _fake_request(monkeypatch, responses):
 
 
 class TestSubmitOrder:
-    # CRCLX_USDT on Gate: amount_precision=3, min_quote_amount=3 (2026-08-14 实测)
+    # CRCLX_USDT on Gate: amount_precision=3, precision=2, min_quote_amount=3 (2026-08-14 实测)
     _PAIR_META = {
         "id": "CRCLX_USDT", "base": "CRCLX", "quote": "USDT",
-        "trade_status": "tradable", "amount_precision": 3, "min_quote_amount": 3,
+        "trade_status": "tradable", "amount_precision": 3,
+        "precision": 2, "min_quote_amount": 3,
     }
+
+    @pytest.fixture(autouse=True)
+    def _clear_pair_meta_cache(self):
+        # class-level cache leaks across tests (500s TTL) — isolate per test
+        CexBroker._pair_meta_cache.clear()
+        yield
+        CexBroker._pair_meta_cache.clear()
 
     def test_filled(self, monkeypatch):
         state = _fake_request(monkeypatch, [
             (200, self._PAIR_META),  # GET pair meta
-            (200, {"id": "123", "status": "open", "left": "0.05"}),  # POST create
+            (200, {"id": "123", "status": "open", "left": "0"}),  # POST create
             (200, {"id": "123", "status": "closed", "left": "0",
                    "filled_amount": "0.05", "avg_deal_price": "74.9"}),  # GET query
         ])
         b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order()
         out = b._submit_order(order)
         assert out.filled is True
@@ -106,12 +115,33 @@ class TestSubmitOrder:
         method, path, query, body = state["calls"][1]
         assert method == "POST" and path == "/api/v4/spot/orders"
         assert "CRCLX_USDT" in body and '"side":"buy"' in body
-        # amount_precision=3 → quantity formatted to 3 decimals
+        # market BUY: amount = quote 金额 (USDT), 0.05 x 67.0 = 3.35, precision=2
+        assert '"amount":"3.35"' in body
+
+    def test_sell_amount_is_base_quantity(self, monkeypatch):
+        # market SELL: amount = base 数量 (CRCLX), amount_precision=3
+        state = _fake_request(monkeypatch, [
+            (200, self._PAIR_META),  # GET pair meta
+            (200, {"id": "55", "status": "open", "left": "0.05"}),  # POST create
+            (200, {"id": "55", "status": "closed", "left": "0",
+                   "filled_amount": "0.05", "avg_deal_price": "67.1"}),  # GET query
+        ])
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
+        order = _mk_order(side="sell")
+        out = b._submit_order(order)
+        assert out.filled is True
+        method, path, query, body = state["calls"][1]
+        assert method == "POST" and '"side":"sell"' in body
         assert '"amount":"0.050"' in body
 
     def test_create_error(self, monkeypatch):
-        _fake_request(monkeypatch, (400, {"label": "INVALID_REQUEST_PARAMETER"}))
+        _fake_request(monkeypatch, [
+            (200, self._PAIR_META),  # GET pair meta
+            (400, {"label": "INVALID_REQUEST_PARAMETER"}),  # POST create
+        ])
         b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order()
         out = b._submit_order(order)
         assert out.error is not None
@@ -125,6 +155,7 @@ class TestSubmitOrder:
             (200, {"id": "9", "status": "open", "left": "0.05"}),  # GET query
         ])
         b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order()
         out = b._submit_order(order)
         assert out.filled is False
@@ -142,21 +173,27 @@ class TestSubmitOrder:
         assert "1.34" in out.error
         assert out.filled is False
 
-    def test_meta_unavailable_skips_preflight(self, monkeypatch):
-        # pair meta fetch fails → no preflight, order proceeds to Gate
-        CexBroker._pair_meta_cache.clear()  # isolate from earlier tests
-        state = _fake_request(monkeypatch, [
-            (500, {"label": "SERVER_ERROR"}),  # GET pair meta fails
-            (200, {"id": "7", "status": "open", "left": "0.02"}),  # POST create
-            (200, {"id": "7", "status": "closed", "left": "0",
-                   "filled_amount": "0.02", "avg_deal_price": "67.0"}),  # GET query
-        ])
+    def test_buy_no_price_rejects(self, monkeypatch):
+        _fake_request(monkeypatch, [(200, self._PAIR_META)])
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 0.0)  # price unknown
+        order = _mk_order()
+        out = b._submit_order(order)
+        assert out.error is not None
+        assert "no price for CRCLX" in out.error
+        assert out.filled is False
+
+    def test_meta_unavailable_fail_closed(self, monkeypatch):
+        # pair meta fetch fails → fail-closed: refuse to place blind order
+        CexBroker._pair_meta_cache.clear()  # isolate from earlier tests
+        _fake_request(monkeypatch, [(500, {"label": "SERVER_ERROR"})])
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order(quantity=0.02)
         out = b._submit_order(order)
-        assert out.filled is True
-        assert out.custom_params["cex"]["pair"] == "CRCLX_USDT"
+        assert out.error is not None
+        assert "pair metadata unavailable" in out.error
+        assert out.filled is False
 
     def test_invalid_quantity(self, monkeypatch):
         state = _fake_request(monkeypatch, [])
