@@ -34,7 +34,7 @@ os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
 # "Getting historical prices …") that otherwise flood the channel with
 # parse-error noise.
 os.environ.setdefault("BACKTESTING_SHOW_PROGRESS_BAR", "0")
-os.environ.setdefault("BACKTESTING_QUIET_LOGS", "1")
+os.environ.setdefault("BACKTESTING_QUIET_LOGS", "true")
 
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
 # Clear handlers on the ENTIRE lumibot logger tree (sub-loggers like

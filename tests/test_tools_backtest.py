@@ -41,7 +41,7 @@ def test_run_backtest_sets_lumibot_env_before_import(monkeypatch, capsys):
     run_backtest("SOL/USDC", "2026-07-01", "2026-07-05")
 
     assert os.environ.get("BACKTESTING_SHOW_PROGRESS_BAR") == "0"
-    assert os.environ.get("BACKTESTING_QUIET_LOGS") == "1"
+    assert os.environ.get("BACKTESTING_QUIET_LOGS") == "true"
     assert os.environ.get("LUMIBOT_TELEMETRY") == "0"
 
 

@@ -40,7 +40,7 @@ def run_backtest(
     try:
         os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
         os.environ.setdefault("BACKTESTING_SHOW_PROGRESS_BAR", "0")
-        os.environ.setdefault("BACKTESTING_QUIET_LOGS", "1")
+        os.environ.setdefault("BACKTESTING_QUIET_LOGS", "true")
 
         from nanobot_quant.backtest_runner import run as _backtest_run
         from nanobot_quant.tools.tools_execute import _silence_lumibot_loggers
