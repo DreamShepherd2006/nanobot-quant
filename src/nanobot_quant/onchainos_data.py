@@ -78,7 +78,7 @@ TOKENS: dict[str, dict[str, str]] = {
     "WSOL": {
         "solana": "So11111111111111111111111111111111111111112",
     },
-    "CRCLx": {
+    "CRCLX": {
         "solana": "XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
     },
 }
@@ -175,11 +175,17 @@ def fetch_kline_range(
     if span_s is None:
         raise ValueError(f"不支持的周期 {bar!r}（支持 1m/5m/15m/1H/4H/1D/1W）")
 
-    needed = int((end.timestamp() - start.timestamp()) / span_s) + 2  # +slack
+    # CLI ``market kline --limit N`` 返回的是**最近 N 根**（从当前时间往前
+    # 数；v4.3.1 无 --before，无法指定起点）。因此 N 必须覆盖 [start, now]，
+    # 不能只覆盖 [start, end]——否则 end 是过去日期（如回测历史区间
+    # SOL/USDC 2026-07-01→07-05）时，拉到的全是区间之后的 K 线，本地裁剪
+    # 后为空（曾回归：needed 以 end 为基准，历史区间回测恒空）。
+    now = datetime.now(timezone.utc)
+    needed = int((now.timestamp() - start.timestamp()) / span_s) + 2  # +slack
     if needed > MAX_LIMIT:
         raise ValueError(
             f"链上 DEX 源单次最多返回 {MAX_LIMIT} 根 {bar} K 线，"
-            f"当前区间需要 {needed} 根（{start:%Y-%m-%d} ~ {end:%Y-%m-%d}）。"
+            f"当前区间需要 {needed} 根（{start:%Y-%m-%d} ~ 现在）。"
             f"请缩短时间范围（≤{MAX_LIMIT} 根，约 {MAX_LIMIT * span_s / 86400:.1f} 天）"
             f"或改用股票源。"
         )

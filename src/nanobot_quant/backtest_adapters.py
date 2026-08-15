@@ -33,7 +33,7 @@ CRYPTO_PAIRS: dict[str, tuple[str, str, str]] = {
     "WBTC/USDT": ("ethereum", "WBTC", "USDT"),
     # Solana SPL pairs
     "SOL/USDC": ("solana", "SOL", "USDC"),
-    "CRCLx/USDC": ("solana", "CRCLx", "USDC"),
+    "CRCLX/USDC": ("solana", "CRCLX", "USDC"),
 }
 
 

@@ -27,27 +27,27 @@ def run_backtest(
     Returns backtest metrics: total_return_pct, cagr_pct, sharpe_ratio,
     total_trades, win_count, loss_count, etc.
     """
-    # ── Guard MCP stdio from library import-time logging ─────────
+    # ── Guard MCP stdio from library import-time logging AND the
+    #    backtest runner's own print() progress lines (CLI-facing).
+    #    Everything must go to stderr while inside an MCP tool call;
+    #    the result is returned as a value, never via stdout.
     _saved_stdout = sys.stdout
-    sys.stdout = sys.stderr
     try:
         from nanobot_quant.backtest_runner import run as _backtest_run
+
+        sys.stdout = sys.stderr
+        try:
+            result = _backtest_run(
+                symbol=symbol,
+                start=start,
+                end=end,
+                quantity=quantity,
+                source=source,
+            )
+            return result
+        except Exception as exc:
+            return {"error": f"Backtest failed: {exc}"}
+        finally:
+            sys.stdout = _saved_stdout
     finally:
         sys.stdout = _saved_stdout
-
-    print(
-        f"[DIAG] run_backtest: {symbol} {start} → {end} source={source} quantity={quantity}",
-        file=sys.stderr, flush=True,
-    )
-
-    try:
-        result = _backtest_run(
-            symbol=symbol,
-            start=start,
-            end=end,
-            quantity=quantity,
-            source=source,
-        )
-        return result
-    except Exception as exc:
-        return {"error": f"Backtest failed: {exc}"}
