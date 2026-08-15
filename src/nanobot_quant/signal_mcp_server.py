@@ -25,6 +25,17 @@ import sys
 # order-dependent because lumibot imports lazily inside tool calls).
 os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
 
+# Backtest progress bar writes "\rProgress |…" to stdout WITHOUT a trailing
+# newline: it shares the MCP stdio buffer with the JSON-RPC response and the
+# merged line fails client-side JSON parsing → the response is lost → the
+# 30s MCP tool timeout fires even though the backtest finished in 9s.
+# Constants are read at lumibot import time, so set these at process level.
+# BACKTESTING_QUIET_LOGS silences INFO logs ("LumiBot v4.5.78 starting",
+# "Getting historical prices …") that otherwise flood the channel with
+# parse-error noise.
+os.environ.setdefault("BACKTESTING_SHOW_PROGRESS_BAR", "0")
+os.environ.setdefault("BACKTESTING_QUIET_LOGS", "1")
+
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
 # Clear handlers on the ENTIRE lumibot logger tree (sub-loggers like
 # lumibot.brokers.broker register their own stdout handlers, polluting
