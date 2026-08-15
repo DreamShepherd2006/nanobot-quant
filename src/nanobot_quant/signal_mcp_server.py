@@ -116,10 +116,18 @@ _TOOL_DESCRIPTIONS = {
         "enabled; otherwise the order stays paper-only."
     ),
     "run_backtest": (
-        "Run a full backtest on a token symbol. "
+        "Start a full backtest on a token symbol in the BACKGROUND. "
         "Resolves ticker → fetches historical K-lines → runs TD Sequential "
-        "strategy → Lumibot backtest engine → returns performance metrics. "
-        "One-shot: all steps run in a single call, no LLM orchestration needed."
+        "strategy → Lumibot backtest engine. Returns status=started + run_id "
+        "immediately (a non-trivial range exceeds the 30s MCP tool timeout); "
+        "poll get_backtest_result(run_id) for the performance metrics."
+    ),
+    "get_backtest_result": (
+        "Return the persisted outcome of a background backtest started by "
+        "run_backtest: reads <data_root>/legion/backtests/<run_id>.json. "
+        "Returns status=done + result (total_return_pct, sharpe_ratio, "
+        "total_trades, win_rate_pct, …), status=error, or a hint when the "
+        "run is still in progress."
     ),
     "wallet_login_init": (
         "Initiate onchainos social (Google/Apple/email) wallet login. "
@@ -206,6 +214,7 @@ _TOOL_DISPATCH = {
     "get_chain_result": get_chain_result,
     "get_execution_outcome": get_execution_outcome,
     "run_backtest": run_backtest,
+    "get_backtest_result": get_backtest_result,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,

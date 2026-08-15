@@ -93,6 +93,11 @@ def run(
             "max_position_pct": max_position_pct,
             "max_drawdown_pct": max_drawdown_pct,
         },
+        # 指标（total_return/sharpe 等）来自返回的 stats dict，tearsheet/
+        # analyze 图表我们不读——关掉避免 matplotlib 渲染（容器无 Arial
+        # 字体 → findfont 警告刷屏 ×N）+ 减少回测耗时。
+        save_tearsheet=False,
+        analyze_backtest=False,
     )
 
     if isinstance(out, tuple):
