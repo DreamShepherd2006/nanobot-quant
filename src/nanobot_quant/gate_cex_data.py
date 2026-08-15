@@ -116,3 +116,40 @@ def fetch_gate_ticker(pair: str) -> Optional[dict]:
     if isinstance(data, dict) and data:
         return data
     return None
+
+
+def fetch_gate_order_book(pair: str, depth: int = 5) -> Optional[dict]:
+    """GET /spot/order_book?currency_pair=&limit= -> depth summary (public).
+
+    Returns ``{"best_bid", "best_ask", "spread_pct", "bids", "asks"}``
+    (same shape as the OKX CEX order book used for VT grounding) or
+    ``None`` on failure.  ``bids``/``asks`` are ``[price, amount]`` lists.
+    """
+    url = ("https://api.gateio.ws/api/v4/spot/order_book?"
+           + urllib.parse.urlencode({
+               "currency_pair": pair,
+               "limit": max(1, min(int(depth), 100)),
+           }))
+    req = urllib.request.Request(url, headers={"User-Agent": "nanobot-quant/0.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode() or "{}")
+    except (urllib.error.HTTPError, OSError, ValueError):
+        return None
+    bids = data.get("bids") or []
+    asks = data.get("asks") or []
+    try:
+        best_bid = float(bids[0][0]) if bids else None
+        best_ask = float(asks[0][0]) if asks else None
+    except (TypeError, ValueError, IndexError):
+        best_bid = best_ask = None
+    spread_pct = None
+    if best_bid and best_ask:
+        spread_pct = (best_ask - best_bid) / best_bid * 100.0
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread_pct": spread_pct,
+        "bids": [[float(x), float(y)] for x, y in bids],
+        "asks": [[float(x), float(y)] for x, y in asks],
+    }

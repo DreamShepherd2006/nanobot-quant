@@ -12,13 +12,14 @@ import pytest
 
 from nanobot_quant.td_table_handlers import (
     _fetch_stock_kline,
-    _fetch_stock_kline_yahoo,
     _render_history,
     _render_snapshot,
-    _stock_secid,
-    _yf_symbol,
     td_table_page,
 )
+from nanobot_quant.data_sources.eastmoney import stock_secid
+from nanobot_quant.data_sources.yfinance import yf_symbol
+from nanobot_quant.data_sources import eastmoney as em_src
+from nanobot_quant.data_sources import yfinance as _yf_src
 
 
 class FakeRequest:
@@ -64,17 +65,17 @@ _EM_JSON = '{"data":{"klines":[' \
 
 def test_stock_secid_mapping():
     """6 位数字=A股（沪 1./深 0.），字母=美股 105.；yfinance 后缀映射。"""
-    assert _stock_secid("601127") == "1.601127"
-    assert _stock_secid("000001") == "0.000001"
-    assert _stock_secid("300750") == "0.300750"
-    assert _stock_secid("510050") == "1.510050"  # 沪市 ETF（上证50）
-    assert _stock_secid("159915") == "0.159915"  # 深市 ETF（创业板）
-    assert _stock_secid("NVDA") == "105.NVDA"
-    assert _yf_symbol("601127") == "601127.SS"
-    assert _yf_symbol("000001") == "000001.SZ"
-    assert _yf_symbol("510050") == "510050.SS"
-    assert _yf_symbol("159915") == "159915.SZ"
-    assert _yf_symbol("NVDA") == "NVDA"
+    assert stock_secid("601127") == "1.601127"
+    assert stock_secid("000001") == "0.000001"
+    assert stock_secid("300750") == "0.300750"
+    assert stock_secid("510050") == "1.510050"  # 沪市 ETF（上证50）
+    assert stock_secid("159915") == "0.159915"  # 深市 ETF（创业板）
+    assert stock_secid("NVDA") == "105.NVDA"
+    assert yf_symbol("601127") == "601127.SS"
+    assert yf_symbol("000001") == "000001.SZ"
+    assert yf_symbol("510050") == "510050.SS"
+    assert yf_symbol("159915") == "159915.SZ"
+    assert yf_symbol("NVDA") == "NVDA"
 
 
 def test_trade_signal_row_thresholds():
@@ -124,7 +125,7 @@ def test_fetch_stock_kline_eastmoney_parse(monkeypatch):
         calls["url"] = req.full_url
         return FakeResp(_EM_JSON)
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(em_src.urllib.request, "urlopen", fake_urlopen)
     df = _fetch_stock_kline("601127", bar="1D", limit=60)
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
     assert str(df.index.tz) == "Asia/Shanghai"
@@ -144,7 +145,7 @@ def test_fetch_stock_kline_us_secid(monkeypatch):
         calls["url"] = req.full_url
         return FakeResp(_EM_JSON)
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(em_src.urllib.request, "urlopen", fake_urlopen)
     _fetch_stock_kline("NVDA", bar="1D", limit=60)
     assert "secid=105.NVDA" in calls["url"]
 
@@ -156,7 +157,7 @@ def test_fetch_stock_kline_yahoo_fallback(monkeypatch):
     def fake_urlopen(req, timeout=20):
         raise ConnectionError("eastmoney down")
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(em_src.urllib.request, "urlopen", fake_urlopen)
     calls = {}
 
     def fake_download(ticker, **kw):
@@ -164,7 +165,7 @@ def test_fetch_stock_kline_yahoo_fallback(monkeypatch):
         calls["interval"] = kw.get("interval")
         return _stock_df(n=70, tz=True)
 
-    monkeypatch.setattr(m.yf, "download", fake_download)
+    monkeypatch.setattr(_yf_src.yf, "download", fake_download)
     df = _fetch_stock_kline("601127", bar="1D", limit=60)
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
     assert str(df.index.tz) == "America/New_York"  # yfinance exchange tz kept
@@ -182,10 +183,10 @@ def test_fetch_stock_kline_yahoo_minute_end_extends(monkeypatch):
         calls.update(kw)
         return _stock_df(n=10, tz=True)
 
-    monkeypatch.setattr(m.yf, "download", fake_download)
+    monkeypatch.setattr(_yf_src.yf, "download", fake_download)
     start = pd.Timestamp("2026-08-11 11:59")
     end = pd.Timestamp("2026-08-11 21:59")
-    df = _fetch_stock_kline_yahoo("AAPL", bar="5m", limit=60, start=start, end=end)
+    df = _yf_src.fetch_kline("AAPL", bar="5m", limit=60, start=start, end=end)
     assert calls["start"] == "2026-08-11"
     assert calls["end"] == "2026-08-12"  # +1 天确保区间非空
     assert calls["interval"] == "5m"
@@ -197,8 +198,8 @@ def test_fetch_stock_kline_both_fail(monkeypatch):
     def fake_urlopen(req, timeout=20):
         raise ConnectionError("eastmoney down")
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(m.yf, "download", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(em_src.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_yf_src.yf, "download", lambda *a, **k: pd.DataFrame())
     with pytest.raises(RuntimeError) as ei:
         _fetch_stock_kline("NVDA", bar="1D", limit=60)
     msg = str(ei.value)
@@ -209,7 +210,7 @@ def test_fetch_stock_kline_4h_unsupported(monkeypatch):
     """4H 两个源都不支持 → 明确报错（不发起网络请求）。"""
     import nanobot_quant.td_table_handlers as m
 
-    monkeypatch.setattr(m.urllib.request, "urlopen",
+    monkeypatch.setattr(em_src.urllib.request, "urlopen",
                         lambda req, timeout=20: (_ for _ in ()).throw(AssertionError("should not hit network")))
     with pytest.raises(RuntimeError, match="暂不支持 4H"):
         _fetch_stock_kline("NVDA", bar="4H", limit=60)
@@ -268,7 +269,7 @@ def test_fetch_stock_kline_us_daily_ny_tz(monkeypatch):
         calls["url"] = req.full_url
         return FakeResp(_EM_JSON)
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(em_src.urllib.request, "urlopen", fake_urlopen)
     df = _fetch_stock_kline("NVDA", bar="1D", limit=60)
     assert "secid=105.NVDA" in calls["url"]
     assert str(df.index.tz) == "America/New_York"
@@ -288,7 +289,7 @@ def test_fetch_stock_kline_us_intraday_shanghai_tz(monkeypatch):
         calls["url"] = req.full_url
         return FakeResp(_EM_JSON_1H)
 
-    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(em_src.urllib.request, "urlopen", fake_urlopen)
     df = _fetch_stock_kline("NVDA", bar="1H", limit=60)
     assert "klt=60" in calls["url"]
     assert str(df.index.tz) == "Asia/Shanghai"
@@ -308,27 +309,22 @@ def test_display_utc_column_for_onchainos():
     headers = m._build_headers(True, True, True)
     assert "UTC 时间" in headers
 def test_fetch_cex_kline_mapping(monkeypatch):
-    """CEX 源：pair 经 gate_pair 映射（CRCLX→CRCLX_USDT，tokens.json gate_symbol 优先）。"""
+    """CEX 源：td_table 经注册表调 gate_cex（pair 映射在源内，gate_symbol 优先）。"""
     import nanobot_quant.td_table_handlers as m
 
     calls = []
-    monkeypatch.setattr(m, "load_tokens_json", lambda: [
-        {"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT", "confirmed": True},
-    ])
 
-    def fake_fetch(pair, bar="1D", limit=120):
-        calls.append((pair, bar, limit))
-        return _stock_df(n=30, tz=False)
+    class _FakeGate:
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            calls.append((ticker, bar, limit))
+            return _stock_df(n=30, tz=False)
 
-    monkeypatch.setattr(m, "fetch_gate_kline", fake_fetch)
+    monkeypatch.setattr(m, "get_data_source",
+                        lambda name: _FakeGate() if name == "gate_cex"
+                        else m.get_data_source(name))
     df = m._fetch_cex_kline("CRCLX", bar="1D", limit=60)
-    assert calls == [("CRCLX_USDT", "1D", 60)]  # gate_symbol 归一化
+    assert calls == [("CRCLX", "1D", 60)]  # ticker 原样传入，源内部 gate_pair 归一化
     assert len(df) == 30
-
-    # 未登记：默认规则 CRCLX→CRCLX_USDT
-    monkeypatch.setattr(m, "load_tokens_json", lambda: [])
-    m._fetch_cex_kline("AAPL", bar="1D", limit=60)
-    assert calls[-1] == ("AAPL_USDT", "1D", 60)
 
 
 def test_render_snapshot_cex_source(monkeypatch):

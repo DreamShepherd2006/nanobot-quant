@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from nanobot_quant import td_live
 
 
@@ -281,10 +283,11 @@ class TestBuildExecutorChannel:
         assert isinstance(ex.strategy.broker.data_source, OnDS)
         assert fakes["dex_broker_kw"]["slippage"] == "0.01"
 
-    def test_unknown_channel_falls_back_to_dex(self, monkeypatch):
-        _, _CexB, _CexDS, OnB, _OnDS = self._fake_modules(monkeypatch)
+    def test_unknown_channel_fails_closed(self, monkeypatch):
+        """未知执行通道 fail-closed（KeyError），绝不静默回退到别所的行情。"""
+        self._fake_modules(monkeypatch)
         runner = td_live._TdLiveRunner()
-        ex = runner._build_executor(
-            _params(td_enabled=True, execution_channel="coinbase")
-        )
-        assert isinstance(ex.strategy.broker, OnB)
+        with pytest.raises(KeyError):
+            runner._build_executor(
+                _params(td_enabled=True, execution_channel="coinbase")
+            )
