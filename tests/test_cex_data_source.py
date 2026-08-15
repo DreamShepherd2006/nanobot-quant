@@ -1,10 +1,10 @@
-"""P1: CexDataSource unit tests (mock OKX CEX fetchers — no network).
+"""CEX DataSource unit tests (mock Gate fetchers — no network).
 
 Covered:
 - get_historical_prices signature contract (exchange / return_polars kwargs
   required by lumibot v4.5.78 Strategy.get_historical_prices)
-- okx_symbol mapping applied to fetch_kline
-- Bars carries source + asset; get_last_price from OKX ticker
+- gate_pair mapping applied to fetch_gate_kline
+- Bars carries source + asset; get_last_price from Gate ticker (public)
 """
 
 import inspect
@@ -19,8 +19,7 @@ TOKENS = [
         "symbol": "CRCLX",
         "chain": "solana",
         "address": "XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
-        "gate_symbol": "CRCLX",
-        "okx_symbol": "XCRCL",
+        "gate_symbol": "CRCLXUSDT",
     }
 ]
 
@@ -62,68 +61,71 @@ class TestLiveLoopSignature:
 
 
 class TestGetHistoricalPrices:
-    def test_maps_okx_symbol(self, ds, monkeypatch):
+    def test_maps_gate_pair(self, ds, monkeypatch):
         calls = {}
 
-        def fake_fetch_kline(ticker, bar, limit):
-            calls.update(ticker=ticker, bar=bar, limit=limit)
+        def fake_fetch_gate_kline(pair, bar, limit):
+            calls.update(pair=pair, bar=bar, limit=limit)
             return _df()
 
         monkeypatch.setattr(
-            "nanobot_quant.data.cex_data_source.fetch_kline", fake_fetch_kline
+            "nanobot_quant.data.cex_data_source.fetch_gate_kline",
+            fake_fetch_gate_kline,
         )
         bars = ds.get_historical_prices(_asset("CRCLX"), length=2, timestep="day")
-        assert calls["ticker"] == "XCRCL"
+        assert calls["pair"] == "CRCLX_USDT"
         assert calls["bar"] == "1D"
         assert calls["limit"] == 2
-        assert bars.source == "OKX_CEX"
+        assert bars.source == "GATE_CEX"
         assert bars.asset.symbol == "CRCLX"
 
     def test_timestep_mapping(self, ds, monkeypatch):
         calls = {}
 
-        def fake_fetch_kline(ticker, bar, limit):
+        def fake_fetch_gate_kline(pair, bar, limit):
             calls["bar"] = bar
             return _df()
 
         monkeypatch.setattr(
-            "nanobot_quant.data.cex_data_source.fetch_kline", fake_fetch_kline
+            "nanobot_quant.data.cex_data_source.fetch_gate_kline",
+            fake_fetch_gate_kline,
         )
         ds.get_historical_prices(_asset(), length=5, timestep="5min")
         assert calls["bar"] == "5m"
 
-    def test_length_clamped_to_300(self, ds, monkeypatch):
+    def test_length_clamped_to_1000(self, ds, monkeypatch):
         calls = {}
 
-        def fake_fetch_kline(ticker, bar, limit):
+        def fake_fetch_gate_kline(pair, bar, limit):
             calls["limit"] = limit
             return _df()
 
         monkeypatch.setattr(
-            "nanobot_quant.data.cex_data_source.fetch_kline", fake_fetch_kline
+            "nanobot_quant.data.cex_data_source.fetch_gate_kline",
+            fake_fetch_gate_kline,
         )
-        ds.get_historical_prices(_asset(), length=500, timestep="day")
-        assert calls["limit"] == 300
+        ds.get_historical_prices(_asset(), length=5000, timestep="day")
+        assert calls["limit"] == 1000
 
     def test_empty_kline_raises(self, ds, monkeypatch):
         monkeypatch.setattr(
-            "nanobot_quant.data.cex_data_source.fetch_kline",
+            "nanobot_quant.data.cex_data_source.fetch_gate_kline",
             lambda *a, **k: None,
         )
-        with pytest.raises(RuntimeError, match="No OKX CEX kline"):
+        with pytest.raises(RuntimeError, match="No Gate CEX kline"):
             ds.get_historical_prices(_asset(), length=2, timestep="day")
 
 
 class TestGetLastPrice:
     def test_ok(self, ds, monkeypatch):
         monkeypatch.setattr(
-            "nanobot_quant.data.cex_data_source.fetch_ticker",
-            lambda ticker: {"last": "74.94"},
+            "nanobot_quant.data.cex_data_source.fetch_gate_ticker",
+            lambda pair: {"last": "74.94"},
         )
         assert ds.get_last_price(_asset("CRCLX")) == pytest.approx(74.94)
 
     def test_empty_ticker(self, ds, monkeypatch):
         monkeypatch.setattr(
-            "nanobot_quant.data.cex_data_source.fetch_ticker", lambda ticker: {}
+            "nanobot_quant.data.cex_data_source.fetch_gate_ticker", lambda pair: None
         )
         assert ds.get_last_price(_asset()) is None

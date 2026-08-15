@@ -32,6 +32,8 @@ import yfinance as yf
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
+from nanobot_quant.gate_cex_data import fetch_gate_kline, fetch_gate_kline_range
+from nanobot_quant.gate_credentials import gate_pair, load_tokens_json
 from nanobot_quant.onchainos_cli import resolve_token, token_json_path
 from nanobot_quant.onchainos_data import fetch_kline, fetch_kline_range
 from nanobot_quant.strategies.registry import get_strategy, load_selected, resolve_engine_cls
@@ -49,7 +51,7 @@ _EM_KLTS = {"1m": "1", "5m": "5", "15m": "15", "1H": "60", "1D": "101", "1W": "1
 # yfinance (fallback) interval map — no 4h in either source.
 _YF_INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "60m", "1D": "1d", "1W": "1wk"}
 _SPAN = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "1D": 86400, "1W": 604800}
-_SOURCES = ("onchainos", "stock")
+_SOURCES = ("onchainos", "stock", "cex")
 
 
 # ── 数据获取 ──────────────────────────────────────────────────────────
@@ -508,10 +510,17 @@ def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, sou
     source_opts = (
         '<label>数据源</label><select name="source">'
         '<option value="onchainos"%s>链上 DEX (OnchainOS)</option>'
-        '<option value="stock"%s>股票 (东财/yfinance)</option></select>'
-        % (" selected" if source == "onchainos" else "", " selected" if source == "stock" else "")
+        '<option value="stock"%s>股票 (东财/yfinance)</option>'
+        '<option value="cex"%s>Gate CEX (执行同源)</option></select>'
+        % (" selected" if source == "onchainos" else "",
+           " selected" if source == "stock" else "",
+           " selected" if source == "cex" else "")
     )
-    placeholder = "NVDA / 601127" if source == "stock" else "SOL / BTC"
+    placeholder = {
+        "stock": "NVDA / 601127",
+        "cex": "CRCLX / SOL / AAPL",
+        "onchainos": "SOL / BTC",
+    }.get(source, "SOL / BTC")
     if tab == "live":
         return ""  # 实时监控无表单，自动轮询
     if tab == "history":
@@ -973,6 +982,19 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     return html
 
 
+def _fetch_cex_kline(ticker, bar="1D", limit=120, start=None, end=None):
+    """Gate CEX K 线（执行通道同源）。
+
+    pair 经 gate_pair 映射：CRCLX→CRCLX_USDT（tokens.json gate_symbol 优先）。
+    返回 OnchainOS 同形 DataFrame（UTC，仅已收盘 bar）。
+    """
+    pair = gate_pair(ticker, load_tokens_json())
+    if start and end:
+        return fetch_gate_kline_range(pair, int(start.timestamp()),
+                                      int(end.timestamp()), bar=bar)
+    return fetch_gate_kline(pair, bar=bar, limit=limit)
+
+
 def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
                      entry_setup=None, exit_setup=None, exit_cd=None,
                      source="onchainos"):
@@ -985,6 +1007,15 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
             return ('<div class="banner err">%s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(bar))), None
         src_label = "股票（%s）" % _esc(ticker)
+    elif source == "cex":
+        try:
+            df = _fetch_cex_kline(ticker, bar=bar, limit=limit)
+        except Exception as exc:
+            return ('<div class="banner err">Gate CEX 数据获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 无 %s Gate CEX K 线数据（可能是未登记代币或交易对不存在）。</div>'
+                    % (_esc(ticker), _esc(bar))), None
+        src_label = "Gate CEX（%s）" % _esc(gate_pair(ticker, load_tokens_json()))
     else:
         resolved = _resolve_for_table(ticker)
         if not resolved.get("ok"):
@@ -1037,6 +1068,15 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
             return ('<div class="banner err">%s 在 %s ~ %s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
         src_label = "股票（%s）" % _esc(ticker)
+    elif source == "cex":
+        try:
+            df = _fetch_cex_kline(ticker, bar=bar, start=start_dt, end=end_dt)
+        except Exception as exc:
+            return ('<div class="banner err">Gate CEX 数据获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 在 %s ~ %s 无 %s Gate CEX K 线数据。</div>'
+                    % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
+        src_label = "Gate CEX（%s）" % _esc(gate_pair(ticker, load_tokens_json()))
     else:
         resolved = _resolve_for_table(ticker)
         if not resolved.get("ok"):

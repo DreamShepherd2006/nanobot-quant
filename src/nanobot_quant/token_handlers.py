@@ -185,6 +185,10 @@ async def token_add(request: Request) -> JSONResponse:
     entry = {"symbol": symbol, "address": address, "chain": chain,
              "confirmed": symbol in _BUILTIN_TOKENS}
     _apply_meta_fields(entry, data)  # min_hold / cost_price（标的池编辑）
+    for k in ("okx_symbol", "gate_symbol"):
+        v = str(data.get(k) or "").upper().strip()
+        if v:
+            entry[k] = v
     check = _validate_token_entry(entry, chain=chain)
     entries.append(entry)
     _write_tokens(entries)
@@ -248,6 +252,31 @@ async def token_edit(request: Request) -> JSONResponse:
     return JSONResponse({"ok": False, "error": f"{symbol} 不存在"}, status_code=404)
 
 
+async def token_meta(request: Request) -> JSONResponse:
+    """POST /config/tokens/meta — edit OKX CEX / Gate 交易对映射（可选，空=自动映射）。"""
+    data = await _body(request)
+    if not data:
+        return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
+    symbol = normalize_symbol(data.get("symbol", ""))
+    if not symbol:
+        return JSONResponse({"ok": False, "error": "symbol 不能为空"}, status_code=400)
+
+    entries = _read_tokens()
+    entry = next((e for e in entries if str(e.get("symbol", "")).upper() == symbol), None)
+    if entry is None:
+        return JSONResponse({"ok": False, "error": f"{symbol} 不存在"}, status_code=404)
+
+    for k in ("okx_symbol", "gate_symbol"):
+        v = str(data.get(k) or "").upper().strip()
+        if v:
+            entry[k] = v
+        else:
+            entry.pop(k, None)  # 留空 = 恢复自动映射
+    _write_tokens(entries)
+    return JSONResponse({"ok": True,
+                         "message": f"{symbol} 映射已更新（OKX: {entry.get('okx_symbol') or '自动'} / Gate: {entry.get('gate_symbol') or '自动'}）"})
+
+
 async def token_delete(request: Request) -> JSONResponse:
     """POST /config/tokens/delete — remove a tokens.json entry."""
     data = await _body(request)
@@ -302,4 +331,5 @@ def register_token_routes(app, gatekeeper) -> None:
     app.post("/config/tokens/add")(token_add)
     app.post("/config/tokens/confirm")(token_confirm)
     app.post("/config/tokens/edit")(token_edit)
+    app.post("/config/tokens/meta")(token_meta)
     app.post("/config/tokens/delete")(token_delete)

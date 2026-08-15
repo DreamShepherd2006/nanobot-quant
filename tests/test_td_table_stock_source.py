@@ -307,3 +307,78 @@ def test_display_utc_column_for_onchainos():
     assert out["_time_utc"].iloc[0] == "2026-08-05 05:15"  # 原生 UTC
     headers = m._build_headers(True, True, True)
     assert "UTC 时间" in headers
+def test_fetch_cex_kline_mapping(monkeypatch):
+    """CEX 源：pair 经 gate_pair 映射（CRCLX→CRCLX_USDT，tokens.json gate_symbol 优先）。"""
+    import nanobot_quant.td_table_handlers as m
+
+    calls = []
+    monkeypatch.setattr(m, "load_tokens_json", lambda: [
+        {"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT", "confirmed": True},
+    ])
+
+    def fake_fetch(pair, bar="1D", limit=120):
+        calls.append((pair, bar, limit))
+        return _stock_df(n=30, tz=False)
+
+    monkeypatch.setattr(m, "fetch_gate_kline", fake_fetch)
+    df = m._fetch_cex_kline("CRCLX", bar="1D", limit=60)
+    assert calls == [("CRCLX_USDT", "1D", 60)]  # gate_symbol 归一化
+    assert len(df) == 30
+
+    # 未登记：默认规则 CRCLX→CRCLX_USDT
+    monkeypatch.setattr(m, "load_tokens_json", lambda: [])
+    m._fetch_cex_kline("AAPL", bar="1D", limit=60)
+    assert calls[-1] == ("AAPL_USDT", "1D", 60)
+
+
+def test_render_snapshot_cex_source(monkeypatch):
+    """CEX 源快照：标注 Gate CEX 来源、渲染表格。"""
+    import nanobot_quant.td_table_handlers as m
+
+    monkeypatch.setattr(m, "_fetch_cex_kline", lambda ticker, **kw: _stock_df(n=40, tz=False))
+    monkeypatch.setattr(m, "load_tokens_json", lambda: [{"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT"}])
+    result = _render_snapshot(
+        "CRCLX", "1D", 60, "td_sequential_futu", {"setup_period": 9}, 9, source="cex"
+    )
+    html = result[0] if isinstance(result, tuple) else result
+    assert "Gate CEX（CRCLX_USDT）" in html
+    assert "<table>" in html
+
+
+def test_render_history_cex_source(monkeypatch):
+    """CEX 源历史：区间 K 线 + 信号统计。"""
+    import nanobot_quant.td_table_handlers as m
+
+    monkeypatch.setattr(m, "_fetch_cex_kline", lambda ticker, **kw: _stock_df(n=50, tz=False))
+    monkeypatch.setattr(m, "load_tokens_json", lambda: [{"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT"}])
+    result = _render_history(
+        "CRCLX", "1D", "2026-03-01", "2026-08-05",
+        "td_sequential_futu", {"setup_period": 9}, 9, source="cex"
+    )
+    html = result[0] if isinstance(result, tuple) else result
+    assert "Gate CEX（CRCLX_USDT）" in html
+    assert "9 信号" in html
+
+
+def test_page_cex_source_param_persisted(monkeypatch):
+    """URL ?source=cex：表单保留选中态、placeholder 变化。"""
+    import nanobot_quant.td_table_handlers as m
+
+    monkeypatch.setattr(m, "_fetch_cex_kline", lambda ticker, **kw: _stock_df(n=40, tz=False))
+    resp = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "CRCLX", "source": "cex"}))
+    body = resp.body.decode("utf-8")
+    assert 'value="cex" selected' in body
+    assert 'placeholder="CRCLX / SOL / AAPL"' in body
+
+
+def test_cex_source_empty_kline(monkeypatch):
+    """CEX 源无数据：明确报错而非静默。"""
+    import nanobot_quant.td_table_handlers as m
+
+    monkeypatch.setattr(m, "_fetch_cex_kline", lambda ticker, **kw: _stock_df(n=0, tz=False))
+    result = _render_snapshot(
+        "NOPE", "1D", 60, "td_sequential_futu", {"setup_period": 9}, 9, source="cex"
+    )
+    html = result[0] if isinstance(result, tuple) else result
+    assert "无" in html and "Gate CEX" in html
+

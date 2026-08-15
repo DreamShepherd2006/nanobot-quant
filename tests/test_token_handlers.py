@@ -81,7 +81,7 @@ def _call(handler, body=None):
 
 
 class TestRouteRegistration:
-    def test_five_endpoints(self):
+    def test_six_endpoints(self):
         app = _FakeApp()
         register_token_routes(app, None)
         paths = sorted((m, p) for m, p, _ in app.routes)
@@ -91,6 +91,7 @@ class TestRouteRegistration:
                 ("POST", "/config/tokens/add"),
                 ("POST", "/config/tokens/confirm"),
                 ("POST", "/config/tokens/edit"),
+                ("POST", "/config/tokens/meta"),
                 ("POST", "/config/tokens/delete"),
             ]
         )
