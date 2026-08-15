@@ -65,10 +65,21 @@ from nanobot_quant.tools.tools_wallet import (
     wallet_login_status,
 )
 from nanobot_quant.tools.tools_analysis import run_td_sequential
-from nanobot_quant.tools.tools_backtest import run_backtest
+from nanobot_quant.tools.tools_backtest import get_backtest_result, run_backtest
 from nanobot_quant.tools.tools_structurize import structurize_signal
-from nanobot_quant.tools.tools_execute import execute_signal, get_execution_outcome
+from nanobot_quant.tools.tools_execute import (
+    _redirect_lumibot_console_to_stderr,
+    execute_signal,
+    get_execution_outcome,
+)
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
+
+# ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
+# import time through a stdout-bound StreamHandler, BEFORE any handler
+# cleanup can run. Reuse the pre-existing-console-handler path: register a
+# stderr handler now so the banner (and the console handler it installs)
+# stays off the MCP stdio channel for every tool in this process.
+_redirect_lumibot_console_to_stderr()
 
 from mcp.server.fastmcp import FastMCP
 

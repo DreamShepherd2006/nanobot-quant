@@ -600,6 +600,26 @@ def chain_results_dir(roots: tuple = ("/data", "/mnt/workspace")) -> Path:
     return d
 
 
+def backtests_dir(roots: tuple = ("/data", "/mnt/workspace")) -> Path:
+    """Persistent directory for async backtest results.
+
+    ``{data_root}/legion/backtests/`` (survives Factory Rebuild; mirrors
+    ``chain_results_dir``). Falls back to ``~/.backtests`` when neither HF
+    nor MS root exists. ``roots`` is test-only.
+    """
+    for root in roots:
+        d = Path(root) / "legion" / "backtests"
+        try:
+            if d.parent.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+        except OSError:
+            continue
+    d = Path.home() / ".backtests"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_token_price(symbol: str, tokens_json: list[dict] | None = None,
                     chain: str = "solana") -> Optional[float]:
     """Get real-time token price as float (USD).

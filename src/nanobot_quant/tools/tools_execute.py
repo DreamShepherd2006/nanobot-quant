@@ -234,6 +234,27 @@ def _load_tokens(live: bool) -> list[dict] | None:
     return None
 
 
+def _redirect_lumibot_console_to_stderr() -> None:
+    """Pre-register a stderr console handler on the 'lumibot' logger.
+
+    ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting"
+    at import time through ``StreamHandler(sys.stdout)`` — but it reuses any
+    pre-existing console handler on the logger. Registering a stderr handler
+    BEFORE the first lumibot import keeps the startup banner (and everything
+    else routed to that console handler) off the MCP stdio JSON-RPC channel.
+    """
+    import logging
+
+    _lb = logging.getLogger("lumibot")
+    if not any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in _lb.handlers
+    ):
+        _h = logging.StreamHandler(sys.stderr)
+        _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        _lb.addHandler(_h)
+
+
 def _silence_lumibot_loggers() -> None:
     """Clear stdout-bound handlers on the whole lumibot logger tree.
 
