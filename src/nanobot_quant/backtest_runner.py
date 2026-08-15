@@ -40,13 +40,19 @@ _IMPLEMENTED_BACKTEST_SOURCES = ("onchainos", "okx_cex", "yfinance")
 
 
 def normalize_source(source: str) -> str:
-    """统一回测入口：接受注册表名 + 旧别名（yahoo→yfinance）。"""
+    """统一回测入口：接受注册表名 + 旧别名（yahoo→yfinance）。
+
+    未知/未实现源抛 ValueError（业务错误——MCP 工具路径可被 except
+    Exception 捕获并包装为 error 响应）；CLI 入口负责把 ValueError
+    转成干净的 SystemExit。注意不可用 SystemExit：MCP 工具调用路径
+    无法捕获 BaseException，会直接终止 MCP server 进程。
+    """
     s = _SOURCE_ALIASES.get(source, source)
     if s not in list_data_sources():
-        raise SystemExit("未知数据源 %r（可选：%s，别名 yahoo）"
+        raise ValueError("未知数据源 %r（可选：%s，别名 yahoo）"
                          % (source, ", ".join(list_data_sources())))
     if s not in _IMPLEMENTED_BACKTEST_SOURCES:
-        raise SystemExit("%s 回测适配未实现（当前支持：onchainos / okx_cex / yfinance）" % s)
+        raise ValueError("%s 回测适配未实现（当前支持：onchainos / okx_cex / yfinance）" % s)
     return s
 
 
@@ -256,7 +262,11 @@ def main():
     # Parse --source flag
     if "--source" in args:
         idx = args.index("--source")
-        source = normalize_source(args[idx + 1])
+        try:
+            source = normalize_source(args[idx + 1])
+        except ValueError as exc:
+            print(f"错误: {exc}")
+            sys.exit(1)
         args = args[:idx] + args[idx + 2:]
 
     if len(args) < 3:
