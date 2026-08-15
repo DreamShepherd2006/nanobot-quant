@@ -11,8 +11,7 @@ from typing import Optional
 
 from lumibot.data_sources import DataSource
 
-from nanobot_quant.gate_cex_data import fetch_gate_kline, fetch_gate_ticker
-from nanobot_quant.gate_credentials import gate_pair
+from nanobot_quant.data_sources import get_data_source
 
 logger = logging.getLogger("nanobot_quant.data.cex")
 
@@ -53,26 +52,23 @@ class CexDataSource(DataSource):
         quote=None,
         return_polars: bool = False,
     ):
-        """Return lumibot Bars for the asset from Gate spot candles."""
+        """Return lumibot Bars for the asset from Gate spot candles.
+
+        K 线统一经数据源注册表（gate_cex = CEX 执行通道同所）获取。
+        """
         symbol = asset.symbol
-        pair = gate_pair(symbol, self._tokens_json)
         bar = _BAR_MAP.get(str(timestep or "").lower(), _DEFAULT_BAR)
         limit = max(1, min(int(length), 1000))
-        df = fetch_gate_kline(pair, bar=bar, limit=limit)
+        df = get_data_source("gate_cex").fetch_kline(symbol, bar=bar, limit=limit)
         if df is None or df.empty:
-            raise RuntimeError(f"No Gate CEX kline for {symbol} (pair={pair}, bar={bar})")
+            raise RuntimeError(f"No Gate CEX kline for {symbol} (bar={bar})")
         from lumibot.entities import Bars
         return Bars(df, self.SOURCE, asset)
 
     def get_last_price(self, asset, quote=None, exchange=None):
         """Last price for the asset from Gate spot ticker (public)."""
-        symbol = asset.symbol
-        pair = gate_pair(symbol, self._tokens_json)
-        t = fetch_gate_ticker(pair)
-        if not t:
-            return None
-        last = t.get("last")
-        return float(last) if last else None
+        p = get_data_source("gate_cex").get_price(asset.symbol)
+        return p if p else None
 
     def get_timestamp(self):
         import time

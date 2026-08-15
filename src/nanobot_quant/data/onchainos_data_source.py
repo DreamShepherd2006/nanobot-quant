@@ -12,13 +12,7 @@ from typing import Optional
 
 from lumibot.data_sources import DataSource
 
-from nanobot_quant.onchainos_cli import (
-    resolve_token_address,
-    get_kline,
-    get_token_price,
-)
-from nanobot_quant.onchainos_data import parse_kline_response
-from nanobot_quant.tokens_store import token_chain
+from nanobot_quant.data_sources import get_data_source
 
 logger = logging.getLogger("nanobot_quant.data.onchainos")
 
@@ -61,27 +55,17 @@ class OnchainOSDataSource(DataSource):
         output is not supported — we always return pandas Bars.
         """
         symbol = asset.symbol
-        addr = resolve_token_address(symbol, self._tokens_json)
-        if not addr:
-            raise ValueError(f"Cannot resolve token address for '{symbol}'")
 
-        # Per-target chain from the managed gate (tokens.json entry wins,
-        # default solana) — a BNB target e.g. SPCXB fetches on chain 56.
-        chain = token_chain(symbol, self._tokens_json)
-
+        # Per-target chain resolution happens inside the onchainos source
+        # (resolve_token: tokens.json entry wins, default solana).
         resolution = self._map_timestep(timestep or "day")
-        candles = get_kline(addr, bar=resolution, limit=min(length, 299),
-                            chain=chain)
-
-        if not candles:
-            raise RuntimeError(f"No kline data returned for {symbol} ({addr})")
-
-        # Shared parser — single source of truth for the official CLI
-        # contract (string OHLCV + epoch-millisecond ts). Backtest and
-        # live loops therefore see byte-identical DataFrames.
-        df = parse_kline_response(candles)
-        if df.empty:
-            raise RuntimeError(f"No kline data returned for {symbol} ({addr})")
+        try:
+            df = get_data_source("onchainos").fetch_kline(
+                symbol, bar=resolution, limit=min(length, 299))
+        except Exception as exc:
+            raise RuntimeError(f"No kline data returned for {symbol}: {exc}")
+        if df is None or df.empty:
+            raise RuntimeError(f"No kline data returned for {symbol}")
 
         from lumibot.entities import Bars
         return Bars(df, self.SOURCE, asset)
@@ -89,13 +73,9 @@ class OnchainOSDataSource(DataSource):
     def get_last_price(
         self, asset, quote=None, exchange=None
     ) -> Optional[float]:
-        """Get real-time price for *asset* from onchainos."""
-        symbol = asset.symbol
-        addr = resolve_token_address(symbol, self._tokens_json)
-        if not addr:
-            return None
-        chain = token_chain(symbol, self._tokens_json)
-        return get_token_price(addr, chain=chain)
+        """Get real-time price for *asset* from onchainos (official path)."""
+        p = get_data_source("onchainos").get_price(asset.symbol)
+        return p if p else None
 
     # ── helpers ───────────────────────────────────────────────────
 

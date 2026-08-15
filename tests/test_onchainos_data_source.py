@@ -1,9 +1,8 @@
-"""B1: OnchainOSDataSource live-loop compatibility tests.
+"""OnchainOSDataSource tests — mock the data-source registry (gate_cex style).
 
-Verifies the DataSource signature contract that lumibot v4.5.78's
-``Strategy.get_historical_prices`` requires (exchange / return_polars /
-quote kwargs) and that returned Bars objects carry the asset — both were
-broken in the initial P2 smoke test (TypeError in the live main loop).
+2026-08-15: the Lumibot DataSource now consumes the data-source registry
+(onchainos source) instead of calling onchainos_cli / onchainos_data
+directly; per-target chain resolution moved inside the source.
 """
 
 import inspect
@@ -20,12 +19,53 @@ def _asset(symbol="SOL"):
     return Asset(symbol=symbol, asset_type="crypto")
 
 
+def _df(n=5, tz="UTC"):
+    idx = pd.to_datetime([1700000000000 + i * 86400000 for i in range(n)],
+                         unit="ms")
+    if tz:
+        idx = idx.tz_localize(tz)
+    return pd.DataFrame({
+        "open": [10.0] * n, "high": [11.0] * n, "low": [9.0] * n,
+        "close": [10.5] * n, "volume": [100.0] * n,
+    }, index=idx)
+
+
+class _FakeOnchain:
+    """Registry data source stub — per-test behaviour via attributes."""
+
+    def __init__(self, kline=None, price=137.08, resolve_error=None):
+        self.kline = kline
+        self.price = price
+        self.resolve_error = resolve_error
+        self.kline_calls = []
+        self.price_calls = []
+
+    def fetch_kline(self, symbol, bar="1D", limit=120, start=None, end=None):
+        self.kline_calls.append({"symbol": symbol, "bar": bar, "limit": limit,
+                                 "start": start, "end": end})
+        if self.resolve_error:
+            raise RuntimeError(self.resolve_error)
+        if self.kline is None:
+            raise RuntimeError("no kline data")
+        return self.kline
+
+    def get_price(self, symbol):
+        self.price_calls.append(symbol)
+        return self.price
+
+
 @pytest.fixture
-def ds(monkeypatch):
+def fake(monkeypatch):
+    fake = _FakeOnchain(kline=_df())
     monkeypatch.setattr(
-        "nanobot_quant.data.onchainos_data_source.resolve_token_address",
-        lambda symbol, tokens_json: "So11111111111111111111111111111111111111112",
+        "nanobot_quant.data.onchainos_data_source.get_data_source",
+        lambda name: fake,
     )
+    return fake
+
+
+@pytest.fixture
+def ds(fake):
     return OnchainOSDataSource(tokens_json=[])
 
 
@@ -47,10 +87,7 @@ class TestLiveLoopSignature:
 
 
 class TestMapTimestep:
-    """B3: timestep → OKX bar format must use 1m/5m/15m (not 1Min/5Min).
-
-    "1Min" triggered 51000 Parameter bar error in the live 5m loop.
-    """
+    """B3: timestep → OKX bar format must use 1m/5m/15m (not 1Min/5Min)."""
 
     @pytest.mark.parametrize(
         "timestep,bar",
@@ -72,15 +109,8 @@ class TestMapTimestep:
 
 
 class TestGetHistoricalPrices:
-    def test_returns_bars_with_asset(self, ds, monkeypatch):
-        candles = [
-            {"ts": 1700000000000 + i * 86400000, "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "vol": 100.0}
-            for i in range(5)
-        ]
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.get_kline",
-            lambda addr, bar, limit, chain="solana": candles,
-        )
+    def test_returns_bars_with_asset(self, ds, fake):
+        fake.kline = _df(tz="UTC")
         asset = _asset()
         bars = ds.get_historical_prices(
             asset, length=5, timestep="day", exchange=None, return_polars=False
@@ -91,15 +121,15 @@ class TestGetHistoricalPrices:
         assert set(bars.df.columns) >= {"open", "high", "low", "close", "volume"}
         assert bars.df.index.tz is not None  # shared parser keeps UTC tz
 
-    def test_accepts_string_ohlcv_values(self, ds, monkeypatch):
+    def test_accepts_string_ohlcv_values(self, ds, fake):
+        from nanobot_quant.onchainos_data import parse_kline_response
+
         candles = [
-            {"ts": 1700000000000 + i * 86400000, "o": "10.0", "h": "11.0", "l": "9.0", "c": "10.5", "vol": "100.0"}
+            {"ts": 1700000000000 + i * 86400000, "o": "10.0", "h": "11.0",
+             "l": "9.0", "c": "10.5", "vol": "100.0"}
             for i in range(5)
         ]
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.get_kline",
-            lambda addr, bar, limit, chain="solana": candles,
-        )
+        fake.kline = parse_kline_response(candles)
         bars = ds.get_historical_prices(
             _asset(), length=5, timestep="day", exchange=None, return_polars=False
         )
@@ -107,64 +137,30 @@ class TestGetHistoricalPrices:
         assert len(bars.df) == 5
         assert bars.df["close"].dtype.kind in "fiu"  # numeric, not object
 
-    def test_unresolvable_token_raises(self, ds, monkeypatch):
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.resolve_token_address",
-            lambda symbol, tokens_json: "",
-        )
-        with pytest.raises(ValueError, match="Cannot resolve token address"):
+    def test_unresolvable_token_raises(self, ds, fake):
+        fake.resolve_error = "Cannot resolve token address"
+        with pytest.raises(RuntimeError, match="Cannot resolve token address"):
             ds.get_historical_prices(_asset(), length=5, timestep="day")
 
-    def test_empty_kline_raises(self, ds, monkeypatch):
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.get_kline",
-            lambda addr, bar, limit, chain="solana": [],
-        )
+    def test_empty_kline_raises(self, ds, fake):
+        fake.kline = pd.DataFrame()
         with pytest.raises(RuntimeError, match="No kline data returned"):
             ds.get_historical_prices(_asset(), length=5, timestep="day")
 
-    def test_forwards_entry_chain_to_kline(self, monkeypatch):
-        """Per-target chain (tokens.json entry) is forwarded to get_kline —
-        a BNB target fetches on chain 56, not solana."""
-        captured = {}
+    def test_forwards_symbol_to_registry(self, ds, fake):
+        """Chain resolution moved inside the registry source — the DataSource
+        forwards the raw symbol + bar + limit."""
+        fake.kline = _df()
+        ds.get_historical_prices(_asset("SPCXB"), length=5, timestep="day")
+        call = fake.kline_calls[-1]
+        assert call["symbol"] == "SPCXB"
+        assert call["bar"] == "1D"
+        assert call["limit"] == 5
 
-        def fake_kline(addr, bar, limit, chain="solana"):
-            captured["chain"] = chain
-            return []
+    def test_get_last_price_via_registry(self, ds, fake):
+        assert ds.get_last_price(_asset("SOL")) == 137.08
+        assert fake.price_calls == ["SOL"]
 
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.get_kline",
-            fake_kline,
-        )
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.token_chain",
-            lambda symbol, tokens_json: "bnb",
-        )
-        ds = OnchainOSDataSource(
-            tokens_json=[{"symbol": "SPCXB", "chain": "bnb",
-                          "address": "0xbe000000000000000000000000000000000003e1"}]
-        )
-        with pytest.raises(RuntimeError):
-            ds.get_historical_prices(_asset("SPCXB"), length=5, timestep="day")
-        assert captured["chain"] == "bnb"
-
-    def test_get_last_price_forwards_chain(self, monkeypatch):
-        captured = {}
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.resolve_token_address",
-            lambda symbol, tokens_json: "0xbe000000000000000000000000000000000003e1",
-        )
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.token_chain",
-            lambda symbol, tokens_json: "bnb",
-        )
-        monkeypatch.setattr(
-            "nanobot_quant.data.onchainos_data_source.get_token_price",
-            lambda addr, chain="solana": (
-                captured.update(chain=chain) or 137.08
-            ),
-        )
-        ds = OnchainOSDataSource(tokens_json=[])
-        price = ds.get_last_price(_asset("SPCXB"))
-        assert price == 137.08
-        assert captured["chain"] == "bnb"
+    def test_get_last_price_none_when_zero(self, ds, fake):
+        fake.price = None
+        assert ds.get_last_price(_asset("SOL")) is None

@@ -23,19 +23,17 @@ from __future__ import annotations
 
 import html as _html
 import json
-import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-import yfinance as yf
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-from nanobot_quant.gate_cex_data import fetch_gate_kline, fetch_gate_kline_range
+from nanobot_quant.data_sources import data_source_for_channel, get_data_source
+from nanobot_quant.exec_params import load_exec_params
 from nanobot_quant.gate_credentials import gate_pair, load_tokens_json
 from nanobot_quant.onchainos_cli import resolve_token, token_json_path
-from nanobot_quant.onchainos_data import fetch_kline, fetch_kline_range
 from nanobot_quant.strategies.registry import get_strategy, load_selected, resolve_engine_cls
 from nanobot_quant.td_params import load_td_params
 
@@ -46,12 +44,27 @@ _DEFAULT_TICKER = "SOL"
 _DEFAULT_LIMIT = 60
 _DEFAULT_HISTORY_DAYS = 90
 
-# EastMoney (primary stock source) klt codes + window spans.
-_EM_KLTS = {"1m": "1", "5m": "5", "15m": "15", "1H": "60", "1D": "101", "1W": "102"}
-# yfinance (fallback) interval map — no 4h in either source.
-_YF_INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "60m", "1D": "1d", "1W": "1wk"}
-_SPAN = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "1D": 86400, "1W": 604800}
 _SOURCES = ("onchainos", "stock", "cex")
+
+# 页面 source 值 → 注册表源名（页面保留三视图，取数统一走注册表）。
+_PAGE_SOURCE_TO_SOURCE = {"onchainos": "onchainos", "stock": "eastmoney", "cex": "gate_cex"}
+
+
+def _default_source() -> str:
+    """分析页默认源 = 当前执行通道对应源（结构性同源）。
+
+    execution_channel=cex → Gate CEX；dex → OnchainOS。exec_params 读取
+    失败时保守回退 onchainos（与旧行为一致）。
+    """
+    try:
+        channel = str(load_exec_params().get("execution_channel", "dex"))
+        ds = data_source_for_channel(channel).name
+        for page_val, ds_name in _PAGE_SOURCE_TO_SOURCE.items():
+            if ds_name == ds:
+                return page_val
+    except (KeyError, OSError, ValueError):
+        pass
+    return "onchainos"
 
 
 # ── 数据获取 ──────────────────────────────────────────────────────────
@@ -81,149 +94,25 @@ def _fetch_stock_kline(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch real-stock candles, normalised to the OnchainOS DataFrame shape
-    (lowercase ohlcv columns, naive DatetimeIndex).
-
-    ``ticker`` is the US stock symbol itself (方案 A — no token→stock map).
+    """Real-stock candles via the data-source registry.
 
     Primary source is EastMoney (push2his.eastmoney.com, no API key, works
     from datacenter IPs); Yahoo Finance (yfinance) is the fallback because
     Yahoo rate-limits datacenter IPs (429). 4H is unsupported for stocks.
+    Both feeds are registered research sources (不参与执行).
     """
     errors: list[str] = []
     try:
-        return _fetch_stock_kline_eastmoney(ticker, bar=bar, limit=limit, start=start, end=end)
+        return get_data_source("eastmoney").fetch_kline(
+            ticker, bar=bar, limit=limit, start=start, end=end)
     except Exception as exc:
         errors.append("东财: %s" % exc)
     try:
-        return _fetch_stock_kline_yahoo(ticker, bar=bar, limit=limit, start=start, end=end)
+        return get_data_source("yfinance").fetch_kline(
+            ticker, bar=bar, limit=limit, start=start, end=end)
     except Exception as exc:
         errors.append("yfinance: %s" % exc)
     raise RuntimeError("；".join(errors) or "股票数据获取失败")
-
-
-def _stock_secid(ticker: str) -> str:
-    """Map a symbol to an EastMoney secid.
-
-    6-digit numeric codes are treated as A-shares (SSE ``1.`` / SZSE
-    ``0.``); anything else is treated as a US symbol (``105.`` NYSE).
-    5-prefix codes are SSE ETF (510/511/560/561/588 etc.); SZSE ETF use
-    1/2/3-prefix (e.g. 159xxx) so they keep the ``0.`` branch.
-    """
-    if ticker.isdigit() and len(ticker) == 6:
-        return f"1.{ticker}" if ticker.startswith(("6", "9", "5")) else f"0.{ticker}"
-    return f"105.{ticker}"
-
-
-def _yf_symbol(ticker: str) -> str:
-    """Map a symbol to yfinance format: 6-digit codes get .SS/.SZ suffix."""
-    if ticker.isdigit() and len(ticker) == 6:
-        return f"{ticker}.SS" if ticker.startswith(("6", "9", "5")) else f"{ticker}.SZ"
-    return ticker
-
-
-def _fetch_stock_kline_eastmoney(
-    ticker: str,
-    bar: str = "1D",
-    limit: int = 60,
-    start: datetime | None = None,
-    end: datetime | None = None,
-) -> pd.DataFrame:
-    """EastMoney kline API → normalised DataFrame.
-
-    Response klines: "date,open,close,high,low,volume" (fields2
-    f51..f56). US symbols use secid=105.<SYMBOL>; 6-digit codes are
-    A-shares (secid 1./0.). 4H has no klt code.
-    """
-    klt = _EM_KLTS.get(bar)
-    if klt is None:
-        raise ValueError(f"股票数据源暂不支持 {bar} 周期（支持 1m/5m/15m/1H/1D/1W）")
-    if start is None:
-        now = end or datetime.now()
-        span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
-        start = now - timedelta(seconds=span)
-        end = now
-    url = (
-        "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
-        f"secid={_stock_secid(ticker)}&fields1=f1,f2,f3,f4,f5&"
-        "fields2=f51,f52,f53,f54,f55,f56&"
-        f"klt={klt}&fqt=1&beg={start.strftime('%Y%m%d')}&end={end.strftime('%Y%m%d')}"
-    )
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        payload = json.loads(r.read().decode("utf-8"))
-    klines = (payload.get("data") or {}).get("klines") or []
-    if not klines:
-        raise RuntimeError(f"东财无数据: {ticker}")
-    rows = []
-    for line in klines:
-        p = line.split(",")
-        rows.append({"time": p[0], "open": float(p[1]), "close": float(p[2]),
-                     "high": float(p[3]), "low": float(p[4]), "volume": float(p[5])})
-    df = pd.DataFrame(rows).set_index("time")
-    df.index = pd.to_datetime(df.index)
-    # EastMoney timestamp semantics (verified 2026-08-05 against live API):
-    #   A-share (secid 1./0.)      → Asia/Shanghai
-    #   US daily   (klt=101)       → America/New_York (dates are US trading days)
-    #   US intraday (klt=5/15/60)  → Asia/Shanghai (US 16:00 close = 04:00 Beijing)
-    if ticker.isdigit() and len(ticker) == 6:
-        em_tz = "Asia/Shanghai"
-    else:
-        # _EM_KLTS values are strings ("101", "60", ...)
-        em_tz = "America/New_York" if klt == "101" else "Asia/Shanghai"
-    df.index = df.index.tz_localize(em_tz)
-    df.index.name = "time"
-    df = df[["open", "high", "low", "close", "volume"]]
-    if limit and len(df) > limit:
-        df = df.tail(limit)
-    return df
-
-
-def _fetch_stock_kline_yahoo(
-    ticker: str,
-    bar: str = "1D",
-    limit: int = 60,
-    start: datetime | None = None,
-    end: datetime | None = None,
-) -> pd.DataFrame:
-    """yfinance fallback — Yahoo rate-limits datacenter IPs (429)."""
-    interval = _YF_INTERVALS.get(bar)
-    if interval is None:
-        raise ValueError(f"股票数据源暂不支持 {bar} 周期（支持 1m/5m/15m/1H/1D/1W）")
-    if start is None:
-        now = end or datetime.now()
-        span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
-        start = now - timedelta(seconds=span)
-        end = now
-    # yfinance `end` is exclusive; extend by one day so the requested end
-    # date is included. 2026-08-11 修复：start/end 以日期字符串（%Y-%m-%d）
-    # 传给 yfinance（时分丢失），分钟周期（1m/5m/15m/1H）在 start/end 落
-    # 同一天时区间为空（如 21:59 查 AAPL 5m 60 根 → start=end=今天 →
-    # "yfinance 无数据"）。统一 +1 天，多余行由 tail(limit) 截断。
-    end = end + timedelta(days=1)
-    df = yf.download(
-        _yf_symbol(ticker),
-        start=start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else start,
-        end=end.strftime("%Y-%m-%d") if hasattr(end, "strftime") else end,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-    )
-    if df is None or df.empty:
-        raise RuntimeError(f"yfinance 无数据: {ticker}")
-    if isinstance(df.columns, pd.MultiIndex):
-        # yfinance ≥1.x wraps columns as (Close, NVDA), (High, NVDA) …
-        df.columns = df.columns.get_level_values(0)
-    df = df.rename(columns={c: str(c).lower() for c in df.columns})
-    cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
-    df = df[cols].dropna(subset=["close"])
-    # Keep the exchange tz (e.g. America/New_York, Asia/Shanghai for
-    # .SS/.SZ) — the display layer tz_convert()s to local/UTC.
-    df.index.name = "time"
-    if limit and len(df) > limit:
-        df = df.tail(limit)
-    return df
 
 
 def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFrame:
@@ -559,9 +448,9 @@ def td_table_page(request: Request) -> HTMLResponse:
     if bar not in _BARS:
         bar = "1D"
     limit = _query_int(q, "limit", _DEFAULT_LIMIT, 20, 300)
-    source = q.get("source") or "onchainos"
+    source = q.get("source") or _default_source()
     if source not in _SOURCES:
-        source = "onchainos"
+        source = _default_source()
     today = datetime.now()
     end = (q.get("end") or today.strftime("%Y-%m-%d")).strip()
     start = (q.get("start") or (today - timedelta(days=_DEFAULT_HISTORY_DAYS)).strftime("%Y-%m-%d")).strip()
@@ -983,16 +872,13 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
 
 
 def _fetch_cex_kline(ticker, bar="1D", limit=120, start=None, end=None):
-    """Gate CEX K 线（执行通道同源）。
+    """Gate CEX K 线——经数据源注册表（gate_cex，执行通道同源）。
 
-    pair 经 gate_pair 映射：CRCLX→CRCLX_USDT（tokens.json gate_symbol 优先）。
-    返回 OnchainOS 同形 DataFrame（UTC，仅已收盘 bar）。
+    pair 映射（CRCLX→CRCLX_USDT，tokens.json gate_symbol 优先）在源内
+    完成。返回 OnchainOS 同形 DataFrame（UTC，仅已收盘 bar）。
     """
-    pair = gate_pair(ticker, load_tokens_json())
-    if start and end:
-        return fetch_gate_kline_range(pair, int(start.timestamp()),
-                                      int(end.timestamp()), bar=bar)
-    return fetch_gate_kline(pair, bar=bar, limit=limit)
+    return get_data_source("gate_cex").fetch_kline(
+        ticker, bar=bar, limit=limit, start=start, end=end)
 
 
 def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
@@ -1022,7 +908,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
             return ('<div class="banner err">标的解析失败：%s（%s）——可在「📊 业务管理」→ 代币管理添加或确认。</div>'
                     % (_esc(resolved.get("issue") or "unknown"), _esc(resolved.get("category") or ""))), None
         try:
-            df = fetch_kline(resolved["chain"], resolved["address"], bar=bar, limit=limit)
+            df = get_data_source("onchainos").fetch_kline(ticker, bar=bar, limit=limit)
         except Exception as exc:  # CLI failure (e.g. missing credentials)
             return ('<div class="banner err">K 线获取失败：%s</div>' % _esc(exc)), None
         if df.empty:
@@ -1083,8 +969,8 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
             return ('<div class="banner err">标的解析失败：%s（%s）</div>'
                     % (_esc(resolved.get("issue") or "unknown"), _esc(resolved.get("category") or ""))), None
         try:
-            df = fetch_kline_range(resolved["chain"], resolved["address"],
-                                   start=start_dt, end=end_dt, bar=bar)
+            df = get_data_source("onchainos").fetch_kline(
+                ticker, bar=bar, start=start_dt, end=end_dt)
         except Exception as exc:
             return ('<div class="banner err">K 线获取失败：%s</div>' % _esc(exc)), None
         if df.empty:

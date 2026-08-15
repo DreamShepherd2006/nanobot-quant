@@ -78,3 +78,31 @@ def test_fetch_kline_range_default_end_now(monkeypatch):
     out = mod.fetch_kline_range("solana", "Xaddr", start=start, bar="1D")
     assert not out.empty
     assert len(out) <= 10  # 本地裁剪到 [start, now]
+
+
+def test_fetch_kline_range_past_range_not_empty(monkeypatch):
+    """end 是过去日期（回测历史区间）时不得返回空。
+
+    回归：needed 曾以 end 为基准计算，而 CLI --limit 返回的是最近 N 根
+    （从当前时间往前数），导致历史区间拉到的全是区间之后的 K 线，本地
+    裁剪后恒为空（SOL/USDC 2026-07-01→07-05 回测 No kline data）。
+    修复后 needed 覆盖 [start, now]，CLI 返回包含 start 的最近数据，
+    裁剪到 [start, end] 应有数据。
+    """
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 5, tzinfo=timezone.utc)
+    # mock CLI 返回覆盖 start→now 的最近 60 根 1D（修复前 needed 只拉
+    # 7 根，mock 返回的是区间之后的数据，裁剪后为空）。
+    df = _mock_kline_df(n=60, start_ts=int(start.timestamp() * 1000))
+    calls = []
+    monkeypatch.setattr(mod, "_run_cli", lambda args: calls.append(args) or {})
+    monkeypatch.setattr(mod, "parse_kline_response", lambda data: df)
+
+    out = mod.fetch_kline_range("solana", "Xaddr", start=start, end=end, bar="1D")
+
+    assert not out.empty
+    assert out.index.min() >= start
+    assert out.index.max() <= end
+    # 单次调用、不传 --before
+    assert len(calls) == 1
+    assert "--before" not in calls[0]

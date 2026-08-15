@@ -28,9 +28,32 @@ from pathlib import Path
 
 from lumibot.backtesting import YahooDataBacktesting
 from nanobot_quant.backtest_adapters import create_onchainos_backtesting, create_okx_cex_backtesting
+from nanobot_quant.data_sources import list_data_sources
 from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 
 RESULTS_DIR = Path("/tmp/nanobot_quant_backtests")
+
+# --source 兼容别名（旧 CLI 值 → 注册表名）。
+_SOURCE_ALIASES = {"yahoo": "yfinance"}
+# 已实现 Lumibot 回测适配的注册表源。
+_IMPLEMENTED_BACKTEST_SOURCES = ("onchainos", "okx_cex", "yfinance")
+
+
+def normalize_source(source: str) -> str:
+    """统一回测入口：接受注册表名 + 旧别名（yahoo→yfinance）。
+
+    未知/未实现源抛 ValueError（业务错误——MCP 工具路径可被 except
+    Exception 捕获并包装为 error 响应）；CLI 入口负责把 ValueError
+    转成干净的 SystemExit。注意不可用 SystemExit：MCP 工具调用路径
+    无法捕获 BaseException，会直接终止 MCP server 进程。
+    """
+    s = _SOURCE_ALIASES.get(source, source)
+    if s not in list_data_sources():
+        raise ValueError("未知数据源 %r（可选：%s，别名 yahoo）"
+                         % (source, ", ".join(list_data_sources())))
+    if s not in _IMPLEMENTED_BACKTEST_SOURCES:
+        raise ValueError("%s 回测适配未实现（当前支持：onchainos / okx_cex / yfinance）" % s)
+    return s
 
 
 def run(
@@ -51,6 +74,7 @@ def run(
     print(f"{'='*60}")
     sys.stdout.flush()
 
+    source = normalize_source(source)
     if source == "onchainos":
         data_source = create_onchainos_backtesting(symbol, start, end)
         # Strategy needs base token (e.g. "WETH"), not pair ("WETH/USDC")
@@ -58,7 +82,7 @@ def run(
     elif source == "okx_cex":
         data_source = create_okx_cex_backtesting(symbol, start, end)
         strategy_symbol = symbol
-    else:
+    else:  # yfinance
         data_source = YahooDataBacktesting
         strategy_symbol = symbol
 
@@ -69,6 +93,11 @@ def run(
             "max_position_pct": max_position_pct,
             "max_drawdown_pct": max_drawdown_pct,
         },
+        # 指标（total_return/sharpe 等）来自返回的 stats dict，tearsheet/
+        # analyze 图表我们不读——关掉避免 matplotlib 渲染（容器无 Arial
+        # 字体 → findfont 警告刷屏 ×N）+ 减少回测耗时。
+        save_tearsheet=False,
+        analyze_backtest=False,
     )
 
     if isinstance(out, tuple):
@@ -238,16 +267,21 @@ def main():
     # Parse --source flag
     if "--source" in args:
         idx = args.index("--source")
-        source = args[idx + 1]
+        try:
+            source = normalize_source(args[idx + 1])
+        except ValueError as exc:
+            print(f"错误: {exc}")
+            sys.exit(1)
         args = args[:idx] + args[idx + 2:]
 
     if len(args) < 3:
-        print("Usage: python -m nanobot_quant.backtest_runner [--source yahoo|onchainos|okx_cex] SYMBOL START END [QUANTITY]")
-        print("       python -m nanobot_quant.backtest_runner [--source yahoo|onchainos|okx_cex] --batch SYM1,SYM2,... START END")
+        print("Usage: python -m nanobot_quant.backtest_runner [--source yfinance|onchainos|okx_cex] SYMBOL START END [QUANTITY]")
+        print("       python -m nanobot_quant.backtest_runner [--source yfinance|onchainos|okx_cex] --batch SYM1,SYM2,... START END")
         sys.exit(1)
 
     if args[0] == "--batch":
-        symbols = [s.strip().upper() if source == "yahoo" else s.strip() for s in args[1].split(",")]
+        symbols = [s.strip().upper() if source in ("yahoo", "yfinance") else s.strip()
+                   for s in args[1].split(",")]
         start, end = args[2], args[3]
         results = batch_run(symbols, start, end, source=source)
         print(f"\n{format_report(results)}")
@@ -259,7 +293,7 @@ def main():
             json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"\nSaved: {batch_path}")
     else:
-        symbol = args[0].upper() if source == "yahoo" else args[0]
+        symbol = args[0].upper() if source in ("yahoo", "yfinance") else args[0]
         start, end = args[1], args[2]
         quantity = int(args[3]) if len(args) > 3 else 10
         result = run(symbol, start, end, quantity, source=source)

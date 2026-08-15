@@ -59,6 +59,22 @@ def _mk_order(side="buy", quantity=0.05, symbol="CRCLX"):
     )
 
 
+class _FakePriceSource:
+    """数据源注册表 stub：按注册表名返回可配置价格（0.0=fail-closed）。"""
+
+    def __init__(self, name, price, calls, error=False):
+        self.name = name
+        self.price = price
+        self.calls = calls
+        self.error = error
+
+    def get_price(self, symbol):
+        self.calls.append(self.name)
+        if self.error:
+            raise RuntimeError("ticker down")
+        return self.price or 0.0
+
+
 def _broker(**kwargs):
     return CexBroker(credentials=CREDS, tokens_json=TOKENS, **kwargs)
 
@@ -210,25 +226,33 @@ class TestSubmitOrder:
         assert "no price for CRCLX" in out.error
         assert out.filled is False
 
-    def test_price_of_gate_ticker_fallback(self, monkeypatch):
-        # OKX ticker unavailable → fall back to Gate /spot/tickers/{pair}
-        def boom(ticker, **kw):
-            raise RuntimeError("okx unavailable")
-
-        monkeypatch.setattr(mod, "fetch_ticker", boom)  # module namespace, not okx_cex_data
-        state = _fake_request(monkeypatch, [(200, [{"last": "67.2"}])])
+    def test_price_of_gate_ticker_first(self, monkeypatch):
+        """同所取价：gate_cex 源有价 → 直接用，不调 OKX。"""
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, 67.2 if name == "gate_cex" else None, calls))
         b = _broker()
         assert b._price_of("CRCLX") == 67.2
-        method, path, query, body = state["calls"][0]
-        assert method == "GET" and path == "/api/v4/spot/tickers"
-        assert "currency_pair=CRCLX_USDT" in query
+        assert calls == ["gate_cex"]
 
-    def test_price_of_okx_ticker_first(self, monkeypatch):
-        # Gate ticker returns 0 → OKX CEX fallback
-        monkeypatch.setattr(mod, "fetch_ticker", lambda ticker, **kw: {"last": "68.5"})
+    def test_price_of_okx_fallback(self, monkeypatch):
+        """Gate 取价失败 → OKX CEX 兜底（注册表 okx_cex 源）。"""
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, None if name == "gate_cex" else 68.5, calls))
         b = _broker()
-        monkeypatch.setattr(b, "_request", lambda *a, **k: (200, {"last": "0"}))
         assert b._price_of("CRCLX") == 68.5
+        assert calls == ["gate_cex", "okx_cex"]
+
+    def test_price_of_gate_error_falls_to_okx(self, monkeypatch):
+        """Gate ticker 抛异常 → OKX 兜底。"""
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, None if name == "gate_cex" else 68.5, calls,
+            error=(name == "gate_cex")))
+        b = _broker()
+        assert b._price_of("CRCLX") == 68.5
+        assert calls == ["gate_cex", "okx_cex"]
 
     def test_meta_unavailable_fail_closed(self, monkeypatch):
         # pair meta fetch fails → fail-closed: refuse to place blind order

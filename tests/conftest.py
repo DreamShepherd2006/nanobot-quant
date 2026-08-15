@@ -87,6 +87,16 @@ except ImportError:
     _lumibot.brokers = _brokers
     _lumibot.entities = _entities
     _lumibot.data_sources = _data_sources
+
+    # backtest_runner imports lumibot.backtesting.YahooDataBacktesting
+    # at module level — provide a stub so tests can import the module.
+    _backtesting = types.ModuleType("lumibot.backtesting")
+
+    class _YahooBacktesting:
+        pass
+
+    _backtesting.YahooDataBacktesting = _YahooBacktesting
+    _lumibot.backtesting = _backtesting
     _lumibot.__path__ = []  # mark as package so submodules can import
 
     sys.modules.setdefault("lumibot", _lumibot)
@@ -95,6 +105,7 @@ except ImportError:
     sys.modules.setdefault("lumibot.brokers", _brokers)
     sys.modules.setdefault("lumibot.entities", _entities)
     sys.modules.setdefault("lumibot.data_sources", _data_sources)
+    sys.modules.setdefault("lumibot.backtesting", _backtesting)
 
 try:
     import yfinance  # noqa: F401

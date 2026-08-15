@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
     "get_chain_result",
     "get_execution_outcome",
     "run_backtest",
+    "get_backtest_result",
     "wallet_login_init",
     "wallet_login_poll",
     "wallet_payment_set",

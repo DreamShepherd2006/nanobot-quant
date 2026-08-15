@@ -29,14 +29,13 @@ from typing import Any, Optional
 
 from lumibot.brokers import Broker
 
+from nanobot_quant.data_sources import get_data_source
 from nanobot_quant.gate_credentials import (
     fetch_spot_balances,
     gate_pair,
     get_api_credentials,
-    okx_ticker,
     signed_request,
 )
-from nanobot_quant.okx_cex_data import fetch_ticker
 
 logger = logging.getLogger("nanobot_quant.brokers.cex")
 
@@ -174,34 +173,34 @@ class CexBroker(Broker):
         return "submitted", filled, left, avg
 
     def _price_of(self, symbol: str) -> float:
-        """Current price for order sizing. Gate ticker first (same-exchange,
-        closest to fill), OKX CEX as fallback; 0.0 when both fail."""
-        pair = gate_pair(symbol, self._tokens_json)
+        """Current price for order sizing.
+
+        Gate ticker first (same-exchange, closest to fill), OKX CEX as
+        fallback — both via the data-source registry (gate_cex / okx_cex);
+        0.0 when both fail (fail-closed, consumers refuse to trade on 0).
+        """
         try:
-            # Gate tickers endpoint is list-based: GET /spot/tickers?currency_pair=PAIR
-            code, data = self._request("GET", "/api/v4/spot/tickers", query=f"currency_pair={pair}")
-            if code == 200 and isinstance(data, list) and data:
-                last = float(data[0].get("last") or 0)
-                if last > 0:
-                    print(f"[DIAG] CEX price {symbol}: gate ticker {pair} last={last} (http {code})",
-                          file=sys.stderr, flush=True)
-                    return last
-                print(f"[DIAG] CEX price {symbol}: gate ticker {pair} empty last "
-                      f"(http {code}, data={str(data)[:80]})", file=sys.stderr, flush=True)
-            else:
-                print(f"[DIAG] CEX price {symbol}: gate ticker {pair} failed "
-                      f"(http {code}, data={str(data)[:80]})", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"[DIAG] CEX price {symbol}: gate ticker {pair} error: {e}", file=sys.stderr, flush=True)
-        try:
-            t = fetch_ticker(okx_ticker(symbol, self._tokens_json))
-            px = float(t.get("last") or 0)
+            px = get_data_source("gate_cex").get_price(symbol)
             if px > 0:
-                print(f"[DIAG] CEX price {symbol}: okx ticker last={px}", file=sys.stderr, flush=True)
+                print(f"[DIAG] CEX price {symbol}: gate ticker last={px}",
+                      file=sys.stderr, flush=True)
                 return px
-            print(f"[DIAG] CEX price {symbol}: okx ticker empty (t={str(t)[:80]})", file=sys.stderr, flush=True)
+            print(f"[DIAG] CEX price {symbol}: gate ticker empty → okx fallback",
+                  file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"[DIAG] CEX price {symbol}: okx ticker error: {e}", file=sys.stderr, flush=True)
+            print(f"[DIAG] CEX price {symbol}: gate ticker error: {e}",
+                  file=sys.stderr, flush=True)
+        try:
+            px = get_data_source("okx_cex").get_price(symbol)
+            if px > 0:
+                print(f"[DIAG] CEX price {symbol}: okx ticker last={px}",
+                      file=sys.stderr, flush=True)
+                return px
+            print(f"[DIAG] CEX price {symbol}: okx ticker empty",
+                  file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[DIAG] CEX price {symbol}: okx ticker error: {e}",
+                  file=sys.stderr, flush=True)
         print(f"[DIAG] CEX price {symbol}: NO PRICE (gate+okx both failed) → fail-closed",
               file=sys.stderr, flush=True)
         return 0.0

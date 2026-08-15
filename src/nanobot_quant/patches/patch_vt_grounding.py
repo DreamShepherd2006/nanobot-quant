@@ -192,15 +192,27 @@ def _format_onchainos_block(onchainos_data):
 
 import logging as _cex_log
 
-_cex_logger = _cex_log.getLogger("vt.enrich.okx_cex")
+_cex_logger = _cex_log.getLogger("vt.enrich.cex")
 
 
 def _fetch_okx_cex_data(user_vars):
-    """Enrich swarm run with OKX CEX market data."""
+    """Enrich swarm run with the execution channel's CEX market data.
+
+    同源约束（docs/quant-system.md §6.1）：CEX 富集数据来自当前执行通道
+    对应的注册表数据源——execution_channel=cex → gate_cex（Gate 订单簿
+    +ticker，与 CexBroker 同所）；dex 通道无 CEX 层（跳过）。函数名保留
+    （patch 注入点不变），内部实现跟随通道。
+    """
     try:
-        from nanobot_quant.okx_cex_data import fetch_order_book as _fetch_ob, fetch_ticker as _fetch_t
-    except ImportError:
-        _cex_logger.warning("OKX CEX enrich: nanobot_quant.okx_cex_data not available")
+        from nanobot_quant.data_sources import data_source_for_channel
+        from nanobot_quant.exec_params import load_exec_params
+        channel = str(load_exec_params().get("execution_channel", "dex"))
+        ds = data_source_for_channel(channel)
+    except Exception as exc:
+        _cex_logger.warning("CEX enrich: channel→data-source resolve failed: %s", exc)
+        return {}
+    if ds.name != "gate_cex":
+        _cex_logger.info("CEX enrich: channel=%s has no CEX layer, skip", channel)
         return {}
 
     sym = user_vars.get("symbol", "").upper()
@@ -209,39 +221,33 @@ def _fetch_okx_cex_data(user_vars):
 
     result = {}
     try:
-        ticker = _fetch_t(sym, timeout=10)
-        if ticker:
-            result["ticker"] = {
-                "last": ticker.get("last"),
-                "bid": ticker.get("bid"),
-                "ask": ticker.get("ask"),
-                "high24h": ticker.get("high24h"),
-                "low24h": ticker.get("low24h"),
-                "vol24h": ticker.get("vol24h"),
-            }
-            _cex_logger.info("OKX CEX enrich: %s ticker ok", sym)
+        t = ds.ticker(sym)
+        if t and t.get("last"):
+            result["ticker"] = t
+            _cex_logger.info("CEX enrich: %s ticker ok (last=%s)", sym, t.get("last"))
     except Exception as exc:
-        _cex_logger.warning("OKX CEX enrich: %s ticker failed — %s", sym, exc)
+        _cex_logger.warning("CEX enrich: %s ticker failed — %s", sym, exc)
 
     try:
-        ob = _fetch_ob(sym, depth=5)
+        ob = ds.order_book(sym, depth=5)
         if ob:
             result["order_book"] = {
                 "best_bid": ob["best_bid"],
                 "best_ask": ob["best_ask"],
                 "spread_pct": ob["spread_pct"],
-                "bid_depth": ob["bid_depth"],
-                "ask_depth": ob["ask_depth"],
+                "bid_depth": round(sum(q for _, q in ob.get("bids") or []), 2),
+                "ask_depth": round(sum(q for _, q in ob.get("asks") or []), 2),
             }
-            _cex_logger.info("OKX CEX enrich: %s order book ok spread=%.4f%%", sym, ob["spread_pct"])
+            _cex_logger.info("CEX enrich: %s order book ok spread=%.4f%%",
+                             sym, ob["spread_pct"])
     except Exception as exc:
-        _cex_logger.warning("OKX CEX enrich: %s order book failed — %s", sym, exc)
+        _cex_logger.warning("CEX enrich: %s order book failed — %s", sym, exc)
 
     return {sym: {"ok": bool(result), "data": result}} if result else {}
 
 
 def _format_okx_cex_block(cex_data):
-    """Format OKX CEX data as a Markdown block for the grounding prompt."""
+    """Format CEX enrichment data as a Markdown block for the grounding prompt."""
     if not cex_data:
         return ""
 
@@ -249,8 +255,9 @@ def _format_okx_cex_block(cex_data):
     sections = []
 
     header = (
-        "## OKX CEX Market Data\\n\\n"
-        "**Live order book & ticker data from OKX CEX (USDT pair).** "
+        "## CEX Market Data\\n\\n"
+        "**Live order book & ticker data from the execution channel's CEX "
+        "exchange (same-source as the broker).** "
         "Reflects real traded prices with unified order book depth. "
         "Use this to assess liquidity, spread, and intraday range "
         "alongside the OHLCV table above."
@@ -296,7 +303,7 @@ def _format_okx_cex_block(cex_data):
 
     if all_failed:
         sections.append(
-            "\\n\\u26a0\\ufe0f **OKX CEX data temporarily unavailable.** "
+            "\\n\\u26a0\\ufe0f **CEX market data temporarily unavailable.** "
             "Analysis based on OHLCV only."
         )
 

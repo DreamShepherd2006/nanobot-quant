@@ -79,6 +79,10 @@ class _TdLiveRunner:
         # 公共端点）；dex=链上 DEX（默认，OnchainOS 子钱包）。只影响之后
         # 的新下单，不迁移持仓。
         channel = str(params.get("execution_channel", "dex"))
+        # 结构性同源：通道 → 数据源唯一映射（data_sources 注册表），未知
+        # 通道 fail-closed（KeyError），绝不静默回退到别所的行情。
+        from nanobot_quant.data_sources import data_source_for_channel
+        data_source_for_channel(channel)
         if channel == "cex":
             from nanobot_quant.brokers.cex_broker import CexBroker
             from nanobot_quant.data.cex_data_source import CexDataSource

@@ -25,6 +25,17 @@ import sys
 # order-dependent because lumibot imports lazily inside tool calls).
 os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
 
+# Backtest progress bar writes "\rProgress |…" to stdout WITHOUT a trailing
+# newline: it shares the MCP stdio buffer with the JSON-RPC response and the
+# merged line fails client-side JSON parsing → the response is lost → the
+# 30s MCP tool timeout fires even though the backtest finished in 9s.
+# Constants are read at lumibot import time, so set these at process level.
+# BACKTESTING_QUIET_LOGS silences INFO logs ("LumiBot v4.5.78 starting",
+# "Getting historical prices …") that otherwise flood the channel with
+# parse-error noise.
+os.environ.setdefault("BACKTESTING_SHOW_PROGRESS_BAR", "0")
+os.environ.setdefault("BACKTESTING_QUIET_LOGS", "true")
+
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING, force=True)
 # Clear handlers on the ENTIRE lumibot logger tree (sub-loggers like
 # lumibot.brokers.broker register their own stdout handlers, polluting
@@ -54,10 +65,21 @@ from nanobot_quant.tools.tools_wallet import (
     wallet_login_status,
 )
 from nanobot_quant.tools.tools_analysis import run_td_sequential
-from nanobot_quant.tools.tools_backtest import run_backtest
+from nanobot_quant.tools.tools_backtest import get_backtest_result, run_backtest
 from nanobot_quant.tools.tools_structurize import structurize_signal
-from nanobot_quant.tools.tools_execute import execute_signal, get_execution_outcome
+from nanobot_quant.tools.tools_execute import (
+    _redirect_lumibot_console_to_stderr,
+    execute_signal,
+    get_execution_outcome,
+)
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
+
+# ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
+# import time through a stdout-bound StreamHandler, BEFORE any handler
+# cleanup can run. Reuse the pre-existing-console-handler path: register a
+# stderr handler now so the banner (and the console handler it installs)
+# stays off the MCP stdio channel for every tool in this process.
+_redirect_lumibot_console_to_stderr()
 
 from mcp.server.fastmcp import FastMCP
 
@@ -94,10 +116,18 @@ _TOOL_DESCRIPTIONS = {
         "enabled; otherwise the order stays paper-only."
     ),
     "run_backtest": (
-        "Run a full backtest on a token symbol. "
+        "Start a full backtest on a token symbol in the BACKGROUND. "
         "Resolves ticker → fetches historical K-lines → runs TD Sequential "
-        "strategy → Lumibot backtest engine → returns performance metrics. "
-        "One-shot: all steps run in a single call, no LLM orchestration needed."
+        "strategy → Lumibot backtest engine. Returns status=started + run_id "
+        "immediately (a non-trivial range exceeds the 30s MCP tool timeout); "
+        "poll get_backtest_result(run_id) for the performance metrics."
+    ),
+    "get_backtest_result": (
+        "Return the persisted outcome of a background backtest started by "
+        "run_backtest: reads <data_root>/legion/backtests/<run_id>.json. "
+        "Returns status=done + result (total_return_pct, sharpe_ratio, "
+        "total_trades, win_rate_pct, …), status=error, or a hint when the "
+        "run is still in progress."
     ),
     "wallet_login_init": (
         "Initiate onchainos social (Google/Apple/email) wallet login. "
@@ -184,6 +214,7 @@ _TOOL_DISPATCH = {
     "get_chain_result": get_chain_result,
     "get_execution_outcome": get_execution_outcome,
     "run_backtest": run_backtest,
+    "get_backtest_result": get_backtest_result,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,

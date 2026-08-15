@@ -156,7 +156,17 @@ def test_page_renders_with_mocked_data(monkeypatch):
     monkeypatch.setattr(mod, "_resolve_for_table",
                         lambda ticker: {"ok": True, "chain": "solana",
                                        "address": "So11111111111111111111111111111111111111112"})
-    monkeypatch.setattr(mod, "fetch_kline", lambda chain, addr, bar="1D", limit=60: df)
+
+    class _FakeOnchain:
+        def __init__(self, frame):
+            self._df = frame
+
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            return self._df
+
+    monkeypatch.setattr(mod, "get_data_source",
+                        lambda name: _FakeOnchain(df) if name == "onchainos"
+                        else mod.get_data_source(name))
     monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
     monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
     monkeypatch.setattr(mod, "get_strategy",
@@ -182,8 +192,17 @@ def test_page_renders_history_with_mocked_data(monkeypatch):
     monkeypatch.setattr(mod, "_resolve_for_table",
                         lambda ticker: {"ok": True, "chain": "solana",
                                        "address": "So11111111111111111111111111111111111111112"})
-    monkeypatch.setattr(mod, "fetch_kline_range",
-                        lambda chain, addr, start, end, bar="1D": df)
+
+    class _FakeOnchain:
+        def __init__(self, frame):
+            self._df = frame
+
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            return self._df
+
+    monkeypatch.setattr(mod, "get_data_source",
+                        lambda name: _FakeOnchain(df) if name == "onchainos"
+                        else mod.get_data_source(name))
     monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
     monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
     monkeypatch.setattr(mod, "get_strategy",
