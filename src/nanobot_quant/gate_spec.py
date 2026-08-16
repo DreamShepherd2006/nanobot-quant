@@ -96,36 +96,21 @@ GATE_SPEC = CredentialSpec(
     ),
     icon="🏛️",
     fields=[
-        FieldSpec("api_key", "主账号 API Key", placeholder="Gate.io → API 管理（需交易权限）", required=False),
-        FieldSpec("api_secret", "主账号 API Secret", required=False),
-        FieldSpec("uid", "主账号 UID", type="text", placeholder="Gate.io 个人中心显示（如 15119093）"),
+        FieldSpec("api_key", "API Key", group="🏛️ 主账号", placeholder="Gate.io → API 管理（需交易权限）", required=False),
+        FieldSpec("api_secret", "API Secret", group="🏛️ 主账号", required=False),
+        FieldSpec("uid", "UID", type="text", group="🏛️ 主账号", placeholder="Gate.io 个人中心显示（如 15119093）"),
     ]
+    # 每个子账号一组（UID / API Key / API Secret 连续排列，按账号分组展示）
     + [
-        FieldSpec(
-            f"sub_{name}_uid",
-            f"子账号 {name} · UID",
-            type="text",
-            placeholder=f"子账号 {name} 的 UID（账户管理页查看）",
-            required=False,
-        )
+        f
         for name in _SUB_NAMES
-    ]
-    + [
-        FieldSpec(
-            f"sub_{name}_api_key",
-            f"子账号 {name} · API Key",
-            placeholder=f"子账号 {name} 的 API Key（P3 分批下单签名用，可留空）",
-            required=False,
+        for f in (
+            FieldSpec(f"sub_{name}_uid", "UID", type="text", group=f"🤖 {name}",
+                      placeholder=f"子账号 {name} 的 UID（账户管理页查看）", required=False),
+            FieldSpec(f"sub_{name}_api_key", "API Key", group=f"🤖 {name}",
+                      placeholder=f"子账号 {name} 的 API Key（P3 分批下单签名用，可留空）", required=False),
+            FieldSpec(f"sub_{name}_api_secret", "API Secret", group=f"🤖 {name}", required=False),
         )
-        for name in _SUB_NAMES
-    ]
-    + [
-        FieldSpec(
-            f"sub_{name}_api_secret",
-            f"子账号 {name} · API Secret",
-            required=False,
-        )
-        for name in _SUB_NAMES
     ],
     docs_url="https://www.gate.io/myaccount/api_keys",
     normalize=_normalize_gate_form,
