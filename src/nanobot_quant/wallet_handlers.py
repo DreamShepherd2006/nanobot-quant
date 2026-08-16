@@ -49,6 +49,7 @@ def _load_template(filename: str) -> str:
 
 
 _WALLET_PAGE = _load_template("wallet_page.html")
+_WALLETS_OVERVIEW = _load_template("wallets_page.html")
 
 
 # ── CLI call helpers (concurrent, timeout-guarded) ────────────────
@@ -464,6 +465,18 @@ def register_wallet_routes(app, gatekeeper) -> None:
             )
         return HTMLResponse(_WALLET_PAGE)
 
+    async def _wallets_overview(request: Request):
+        """GET /config/wallets — wallet-management category page (DEX / CEX)."""
+        _u = request.session.get("user")
+        if not _u:
+            return RedirectResponse("/")
+        if not gatekeeper._platform.is_commander(_u):
+            return HTMLResponse(
+                "<h3 style='text-align:center;margin-top:60px;color:#e74c3c;'>🔒 仅 Commander 可访问</h3>",
+                status_code=403,
+            )
+        return HTMLResponse(_WALLETS_OVERVIEW)
+
     async def _wallet_data(request: Request) -> JSONResponse:
         """GET /config/wallet/data — aggregate wallet state for the page.
 
@@ -793,6 +806,7 @@ def register_wallet_routes(app, gatekeeper) -> None:
         _save_address_book(book)
         return JSONResponse({"ok": True, "address_book": book})
 
+    app.add_route("/config/wallets", _wallets_overview, methods=["GET"])
     app.add_route("/config/wallet", _wallet_page, methods=["GET"])
     app.add_route("/config/wallet/data", _wallet_data, methods=["GET"])
     app.add_route("/config/wallet/login", _wallet_login, methods=["POST"])

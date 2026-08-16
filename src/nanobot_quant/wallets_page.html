@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>👛 钱包管理 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:#f5f5f5; color:#333; padding:20px; max-width:760px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:20px; }
+  .card { background:#fff; border-radius:10px; padding:18px; margin-bottom:14px;
+          border:1px solid #e0e0e0; box-shadow:0 1px 2px rgba(0,0,0,.04);
+          display:flex; align-items:center; gap:14px; text-decoration:none; color:inherit;
+          transition:box-shadow .15s; }
+  .card:hover { box-shadow:0 3px 8px rgba(0,0,0,.12); }
+  .card .icon { font-size:2em; }
+  .card .title { font-weight:600; font-size:1.05em; }
+  .card .desc { color:#888; font-size:.85em; margin-top:4px; }
+  .card .arrow { margin-left:auto; color:#bbb; font-size:1.3em; }
+</style>
+</head>
+<body>
+<h1>👛 钱包管理</h1>
+<div class="subtitle">账户体系分两大类：链上钱包（DEX）与交易所账户（CEX），两者账户模型与资金操作不同，独立管理。</div>
+
+<a class="card" href="/config/wallet">
+  <span class="icon">🔗</span>
+  <div>
+    <div class="title">DEX 钱包</div>
+    <div class="desc">OKX Agentic Wallet — 链上地址、TEE 签名、子钱包账户、各链余额、转账（地址簿白名单 + 两步确认）</div>
+  </div>
+  <span class="arrow">›</span>
+</a>
+
+<a class="card" href="/config/gate">
+  <span class="icon">🏛️</span>
+  <div>
+    <div class="title">CEX 账户</div>
+    <div class="desc">Gate.io — 主账号 + 子账号（gate_bot1-5）、slot 分批映射、spot 余额、主→子划转（两步确认）</div>
+  </div>
+  <span class="arrow">›</span>
+</a>
+</body>
+</html>

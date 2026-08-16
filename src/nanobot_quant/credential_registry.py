@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 # ── Storage path ────────────────────────────────────────────────
 # Set via init_storage() at startup (called by gatekeeper with platform data_root).
@@ -81,6 +81,11 @@ class CredentialSpec:
     icon: str = "🔑"
     fields: list[FieldSpec] = field(default_factory=list)
     docs_url: Optional[str] = None
+    # Optional flat-form → stored-shape normalizer (e.g. gate: flat WebUI form
+    # with sub-account keys → nested {main, sub_accounts, slot_map}). Called by
+    # credential_save before write. Inverse is denormalize (stored → form).
+    normalize: Optional[Callable[[dict], dict]] = field(default=None, repr=False)
+    denormalize: Optional[Callable[[dict], dict]] = field(default=None, repr=False)
 
 
 # ── Registry ─────────────────────────────────────────────────────

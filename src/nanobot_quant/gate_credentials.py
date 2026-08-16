@@ -217,3 +217,109 @@ def fetch_spot_balances(api_key: str, api_secret: str) -> dict[str, dict]:
             "locked": float(d.get("locked") or 0),
         }
     return out
+
+
+def load_slot_map(credentials: Optional[dict] = None) -> dict[str, str]:
+    """Return slot → sub-account-name mapping (persisted in gate.json slot_map).
+
+    Defaults to 1..5 → gate_bot1..5 when the field is absent, so existing
+    deployments without slot_map keep working. Values are validated against
+    the configured sub-accounts; unknown names are dropped.
+    """
+    creds = credentials if credentials is not None else (load_gate_credentials() or {})
+    if not creds:
+        return {}
+    slot_map = creds.get("slot_map") or {}
+    subs = set((creds.get("sub_accounts") or {}).keys())
+    out: dict[str, str] = {}
+    for i in range(1, 6):
+        configured = slot_map.get(str(i))
+        if configured and subs and configured not in subs:
+            configured = None  # slot references an unconfigured sub → fall back to default
+        out[str(i)] = configured or f"gate_bot{i}"
+    return out
+
+
+def sub_account_transfer(
+    amount: str,
+    target_sub: str,
+    currency: str = "USDT",
+    credentials: Optional[dict] = None,
+    timeout: int = 15,
+) -> dict:
+    """Transfer funds from the main account to a sub-account (in-house, instant).
+
+    POST /api/v4/wallet/sub_account_transfers, signed with the main key.
+    ``target_sub`` accepts a sub-account name ("gate_bot1") or uid; it is
+    resolved to the sub-account uid for the API call.
+    """
+    creds = credentials or load_gate_credentials()
+    if not creds:
+        raise FileNotFoundError("gate.json not found")
+    main = creds.get("main") or {}
+    if not main.get("api_key") or not main.get("api_secret"):
+        raise RuntimeError("主账号 Key 未配置（/config/credentials/gate 录入）")
+    sa = get_api_credentials(creds, target_sub)
+    uid = str(sa.get("uid") or "").strip()
+    if not uid:
+        raise RuntimeError(f"子账号 {target_sub} 未配置 UID（/config/credentials/gate 录入）")
+    # Official SDK path (gate-api): transfer with the main key; direction
+    # deposit = main → sub. Signed REST was dropped — SDK covers this API.
+    from .gate_sdk import transfer_to_sub  # avoid import cycle
+
+    return transfer_to_sub(
+        api_key=main["api_key"],
+        api_secret=main["api_secret"],
+        currency=currency,
+        sub_uid=uid,
+        amount=str(amount),
+        direction="to",
+    )
+
+
+def fetch_all_balances(credentials: Optional[dict] = None) -> dict:
+    """Balances for the main account and every sub-account.
+
+    The **main key** (with the '子账号' permission) queries all sub-account
+    balances via ``GET /wallet/sub_account_balances`` — no sub-account keys
+    are required for the account page (only UIDs for name matching).
+
+    Returns ``{"main": {CURRENCY: {available, locked}},
+               "sub_accounts": [{"uid", "balances": {CURRENCY: {available, locked}}}, ...]}``.
+    A failed query surfaces as ``{"__error": "..."}`` instead of aborting the
+    whole page (fail-open for display, fail-closed never guessed).
+    """
+    from .gate_sdk import sub_account_balances as _list_sub_accounts  # avoid import cycle
+
+    creds = credentials or load_gate_credentials()
+    if not creds:
+        return {"__error": "gate.json not found"}
+    main = creds.get("main") or {}
+    out: dict = {"main": {}, "sub_accounts": []}
+
+    if not main.get("api_key") or not main.get("api_secret"):
+        return {
+            "main": {"__error": "主账号 Key 未配置（/config/credentials/gate 录入）"},
+            "sub_accounts": {"__error": "主账号 Key 未配置"},
+        }
+
+    try:
+        out["main"] = fetch_spot_balances(main["api_key"], main["api_secret"])
+    except RuntimeError as exc:
+        out["main"] = {"__error": str(exc)}
+
+    try:
+        rows = _list_sub_accounts(main["api_key"], main["api_secret"])
+        subs: list[dict] = []
+        for r in rows or []:
+            bal: dict[str, dict] = {}
+            for cur, amt in (r.get("available") or {}).items():
+                bal[cur] = {"available": float(amt or 0), "locked": 0.0}
+            for cur, amt in (r.get("locking") or r.get("locked") or {}).items():
+                entry = bal.setdefault(cur, {"available": 0.0, "locked": 0.0})
+                entry["locked"] = float(amt or 0)
+            subs.append({"uid": str(r.get("uid") or ""), "balances": bal})
+        out["sub_accounts"] = subs
+    except RuntimeError as exc:
+        out["sub_accounts"] = {"__error": str(exc)}
+    return out
