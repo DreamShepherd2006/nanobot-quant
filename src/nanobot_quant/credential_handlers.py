@@ -151,6 +151,7 @@ async def credential_save(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
     if not isinstance(data, dict):
         return JSONResponse({"ok": False, "error": "请求体必须是 JSON 对象"}, status_code=400)
+    spec = specs[name]
     # Specs with a normalizer convert the flat WebUI form into the stored
     # shape (e.g. gate: flat form → nested {main, sub_accounts, slot_map}).
     if spec.normalize is not None:
