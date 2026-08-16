@@ -81,6 +81,7 @@ GATE_SPEC = CredentialSpec(
             f"子账号 {name} · UID",
             type="text",
             placeholder=f"子账号 {name} 的 UID（账户管理页查看）",
+            required=False,  # 只填 UID 即可保存（余额/划转走主 key，UID 仅用于名字↔余额匹配）
         )
         for name in _SUB_NAMES
     ]
@@ -89,6 +90,7 @@ GATE_SPEC = CredentialSpec(
             f"sub_{name}_api_key",
             f"子账号 {name} · API Key",
             placeholder=f"子账号 {name} 的 Key（spot 交易权限）",
+            required=False,  # 仅 P3 TD 分批子账号下单需要；留空不阻塞保存
         )
         for name in _SUB_NAMES
     ]
@@ -97,6 +99,7 @@ GATE_SPEC = CredentialSpec(
             f"sub_{name}_api_secret",
             f"子账号 {name} · API Secret",
             placeholder=f"子账号 {name} 的 Secret",
+            required=False,
         )
         for name in _SUB_NAMES
     ],
