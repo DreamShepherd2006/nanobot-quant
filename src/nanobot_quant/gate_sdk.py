@@ -91,11 +91,14 @@ def create_order(
     order_type: str = "market",
     price: Optional[str] = None,
     text: Optional[str] = None,
+    time_in_force: Optional[str] = None,
 ) -> dict:
     """Place a spot order (market by default, mirroring signed-REST semantics).
 
     Market: ``amount`` is the quote-currency amount for buy, base-currency
     amount for sell. Limit: ``price`` is required, ``amount`` is base units.
+    ``time_in_force``: market rejects ``gtc`` — pass ``"ioc"`` (as the legacy
+    signed-REST path did) or leave None (API default).
     Returns the created order as a dict (``id``, ``status``, ...).
     """
     if not currency_pair or not side or not amount:
@@ -109,8 +112,7 @@ def create_order(
         type=order_type,
         price=price if order_type == "limit" else None,
         text=text,
-        # time_in_force left None: market rejects gtc; limit falls back to API
-        # default (gtc). Same behaviour as the previous signed-REST calls.
+        time_in_force=time_in_force,
     )
     api = make_spot_api(api_key, api_secret)
     return _call("create_order", lambda: api.create_order(order)).to_dict()
