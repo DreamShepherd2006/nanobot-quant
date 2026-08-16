@@ -121,37 +121,35 @@ class TestSlotMap:
 
 
 class TestSubAccountTransfer:
-    def test_calls_signed_request(self, monkeypatch):
+    def test_calls_sdk_transfer(self, monkeypatch):
         captured = {}
 
-        def fake_signed(method, path, body=None, **kw):
-            captured["method"] = method
-            captured["path"] = path
-            captured["body"] = body
-            return 200, {"currency": "USDT", "sub_account": "59175220", "amount": "1.5"}
+        def fake_transfer(**kw):
+            captured.update(kw)
+            return {"currency": "USDT", "sub_account": "59175220", "amount": "1.5"}
 
-        monkeypatch.setattr("nanobot_quant.gate_credentials.signed_request", fake_signed)
+        monkeypatch.setattr("nanobot_quant.gate_sdk.transfer_to_sub", fake_transfer)
         monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials", lambda: CREDS)
 
         out = sub_account_transfer("1.5", "gate_bot1")
-        assert captured["method"] == "POST"
-        assert captured["path"] == "/api/v4/wallet/sub_account_transfers"
-        assert '"sub_account": "59175220"' in captured["body"]
-        assert '"amount": "1.5"' in captured["body"]
-        assert '"currency": "USDT"' in captured["body"]
+        assert captured["currency"] == "USDT"
+        assert captured["sub_uid"] == "59175220"
+        assert captured["amount"] == "1.5"
+        assert captured["direction"] == "deposit"  # main → sub
+        assert captured["api_key"] == "k"
         assert out["sub_account"] == "59175220"
 
     def test_by_uid(self, monkeypatch):
         captured = {}
 
-        def fake_signed(method, path, body=None, **kw):
-            captured["body"] = body
-            return 200, {}
+        def fake_transfer(**kw):
+            captured.update(kw)
+            return {}
 
-        monkeypatch.setattr("nanobot_quant.gate_credentials.signed_request", fake_signed)
+        monkeypatch.setattr("nanobot_quant.gate_sdk.transfer_to_sub", fake_transfer)
         monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials", lambda: CREDS)
         sub_account_transfer("0.5", "59175220")
-        assert '"sub_account": "59175220"' in captured["body"]
+        assert captured["sub_uid"] == "59175220"
 
     def test_missing_main_key(self, monkeypatch):
         creds = {"main": {"api_key": "", "api_secret": ""}, "sub_accounts": {}}
@@ -167,10 +165,10 @@ class TestSubAccountTransfer:
             sub_account_transfer("1", "gate_bot1")
 
     def test_api_error_raises(self, monkeypatch):
-        def fake_signed(method, path, body=None, **kw):
-            return 400, {"label": "INVALID_CURRENCY_PAIR"}
+        def fake_transfer(**kw):
+            raise RuntimeError("transfer_to_sub failed: HTTP 400")
 
-        monkeypatch.setattr("nanobot_quant.gate_credentials.signed_request", fake_signed)
+        monkeypatch.setattr("nanobot_quant.gate_sdk.transfer_to_sub", fake_transfer)
         monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials", lambda: CREDS)
         with pytest.raises(RuntimeError, match="400"):
             sub_account_transfer("1", "gate_bot1")

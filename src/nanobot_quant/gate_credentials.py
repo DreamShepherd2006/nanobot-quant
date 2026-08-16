@@ -263,18 +263,18 @@ def sub_account_transfer(
     uid = str(sa.get("uid") or "").strip()
     if not uid:
         raise RuntimeError(f"子账号 {target_sub} 未配置 UID（/config/credentials/gate 录入）")
-    body = json.dumps({"currency": currency, "sub_account": uid, "amount": str(amount)})
-    code, data = signed_request(
-        "POST",
-        "/api/v4/wallet/sub_account_transfers",
-        body=body,
+    # Official SDK path (gate-api): transfer with the main key; direction
+    # deposit = main → sub. Signed REST was dropped — SDK covers this API.
+    from .gate_sdk import transfer_to_sub  # avoid import cycle
+
+    return transfer_to_sub(
         api_key=main["api_key"],
         api_secret=main["api_secret"],
-        timeout=timeout,
+        currency=currency,
+        sub_uid=uid,
+        amount=str(amount),
+        direction="deposit",
     )
-    if code != 200:
-        raise RuntimeError(f"主→子划转失败: HTTP {code} {data}")
-    return data
 
 
 def fetch_all_balances(credentials: Optional[dict] = None) -> dict:
