@@ -137,12 +137,12 @@ class TestTransfer:
         assert t.currency == "USDT"
         assert t.sub_account == "59175220"
         assert t.amount == "5"
-        assert t.direction == "deposit"
+        assert t.direction == "to"
         assert out["sub_account"] == "59175220"
 
     def test_transfer_direction_withdraw(self, fake_wallet):
-        gate_sdk.transfer_to_sub("k", "s", "USDT", "59175220", "5", direction="withdraw")
-        assert fake_wallet.calls[0][1].direction == "withdraw"
+        gate_sdk.transfer_to_sub("k", "s", "USDT", "59175220", "5", direction="from")
+        assert fake_wallet.calls[0][1].direction == "from"
 
     def test_transfer_missing_params(self, fake_wallet):
         with pytest.raises(RuntimeError, match="缺少必要参数"):
