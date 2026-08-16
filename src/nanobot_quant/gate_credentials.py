@@ -277,30 +277,49 @@ def sub_account_transfer(
     return data
 
 
-def fetch_all_balances(credentials: Optional[dict] = None) -> dict[str, dict]:
-    """Balances for the main account and every configured sub-account.
+def fetch_all_balances(credentials: Optional[dict] = None) -> dict:
+    """Balances for the main account and every sub-account.
 
-    Returns {"main": {CURRENCY: {available, locked}}, "gate_bot1": {...}, ...}.
-    A failed sub-account query surfaces as {"__error": "..."} instead of
-    aborting the whole page (fail-open for display, fail-closed never guessed).
+    The **main key** (with the '子账号' permission) queries all sub-account
+    balances via ``GET /wallet/sub_account_balances`` — no sub-account keys
+    are required for the account page (only UIDs for name matching).
+
+    Returns ``{"main": {CURRENCY: {available, locked}},
+               "sub_accounts": [{"uid", "balances": {CURRENCY: {available, locked}}}, ...]}``.
+    A failed query surfaces as ``{"__error": "..."}`` instead of aborting the
+    whole page (fail-open for display, fail-closed never guessed).
     """
+    from .gate_sdk import sub_account_balances as _list_sub_accounts  # avoid import cycle
+
     creds = credentials or load_gate_credentials()
     if not creds:
         return {"__error": "gate.json not found"}
     main = creds.get("main") or {}
-    subs = creds.get("sub_accounts") or {}
-    out: dict[str, dict] = {}
+    out: dict = {"main": {}, "sub_accounts": []}
 
-    def _fetch(api_key: str, api_secret: str) -> dict:
-        if not api_key or not api_secret:
-            return {"__error": "未配置 Key"}
-        try:
-            return fetch_spot_balances(api_key, api_secret)
-        except RuntimeError as exc:
-            return {"__error": str(exc)}
+    if not main.get("api_key") or not main.get("api_secret"):
+        return {
+            "main": {"__error": "主账号 Key 未配置（/config/credentials/gate 录入）"},
+            "sub_accounts": {"__error": "主账号 Key 未配置"},
+        }
 
-    out["main"] = _fetch(main.get("api_key", ""), main.get("api_secret", ""))
-    for name in sorted(subs):
-        sa = subs[name]
-        out[name] = _fetch(sa.get("api_key", ""), sa.get("api_secret", ""))
+    try:
+        out["main"] = fetch_spot_balances(main["api_key"], main["api_secret"])
+    except RuntimeError as exc:
+        out["main"] = {"__error": str(exc)}
+
+    try:
+        rows = _list_sub_accounts(main["api_key"], main["api_secret"])
+        subs: list[dict] = []
+        for r in rows or []:
+            bal: dict[str, dict] = {}
+            for cur, amt in (r.get("available") or {}).items():
+                bal[cur] = {"available": float(amt or 0), "locked": 0.0}
+            for cur, amt in (r.get("locking") or r.get("locked") or {}).items():
+                entry = bal.setdefault(cur, {"available": 0.0, "locked": 0.0})
+                entry["locked"] = float(amt or 0)
+            subs.append({"uid": str(r.get("uid") or ""), "balances": bal})
+        out["sub_accounts"] = subs
+    except RuntimeError as exc:
+        out["sub_accounts"] = {"__error": str(exc)}
     return out

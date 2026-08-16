@@ -72,21 +72,40 @@ async def gate_data(request: Request) -> JSONResponse:
     slot_map = load_slot_map(creds)
 
     balances = fetch_all_balances(creds)
+    main_bal = balances.get("main", {"__error": "无数据"}) if isinstance(balances, dict) else {"__error": "无数据"}
+    sub_rows = balances.get("sub_accounts", []) if isinstance(balances, dict) else []
+    if isinstance(sub_rows, dict):  # whole-list failure → {"__error": ...}
+        sub_by_uid: dict = {}
+        sub_err = sub_rows.get("__error", "查询失败")
+    else:
+        sub_by_uid = {str(r.get("uid")): r.get("balances") or {} for r in sub_rows if r.get("uid")}
+        sub_err = None
 
-    def _account_card(name: str, sa: dict, slot: str | None) -> dict:
-        bal = _format_balances(balances.get(name, {"__error": "无数据"}))
+    def _account_card(name: str, sa: dict, slot: str | None, bal: dict) -> dict:
         return {
             "name": name,
             "uid": sa.get("uid", ""),
             "slot": slot,
-            "configured": bool(sa.get("api_key") and sa.get("api_secret")),
-            "balances": bal,
+            # Balance + transfer both run on the main key — sub cards only need
+            # a UID for name↔balance matching, not a sub-account key.
+            "configured": bool(sa.get("uid")),
+            "balances": _format_balances(bal),
         }
 
-    cards = [_account_card("main", main, None)]
+    cards = [_account_card("main", main, None, main_bal)]
     for slot in sorted(slot_map, key=int):
         name = slot_map[slot]
-        cards.append(_account_card(name, subs.get(name, {}), slot))
+        sa = subs.get(name, {})
+        uid = str(sa.get("uid") or "")
+        if uid and uid in sub_by_uid:
+            bal = sub_by_uid[uid]
+        elif sub_err:
+            bal = {"__error": sub_err}
+        elif not uid:
+            bal = {"__error": "UID 未配置（/config/credentials/gate 录入）"}
+        else:
+            bal = {"__error": f"未匹配到 UID {uid} 的余额"}
+        cards.append(_account_card(name, sa, slot, bal))
 
     return JSONResponse(
         {
@@ -94,8 +113,8 @@ async def gate_data(request: Request) -> JSONResponse:
             "main_uid": main.get("uid", ""),
             "slot_map": slot_map,
             "accounts": cards,
-            "subs_configured": sum(1 for n in subs if subs[n].get("api_key")),
-            "subs_total": len(subs),
+            "subs_configured": sum(1 for n in subs if subs[n].get("uid")),
+            "subs_total": len(slot_map),
         }
     )
 

@@ -166,32 +166,44 @@ class TestSubAccountTransfer:
 class TestFetchAllBalances:
     def test_aggregates_main_and_subs(self, monkeypatch):
         def fake_spot(key, secret):
-            return {"USDT": {"available": "10" if key == "k" else "5", "locked": "0"}}
+            return {"USDT": {"available": 10.0, "locked": 0.0}}
+
+        def fake_list_sub(key, secret):
+            return [
+                {"uid": "59175220", "available": {"USDT": "5"}, "locking": {}},
+                {"uid": "59175258", "available": {"USDT": "3"}, "locking": {"USDT": "1"}},
+            ]
 
         monkeypatch.setattr("nanobot_quant.gate_credentials.fetch_spot_balances", fake_spot)
+        monkeypatch.setattr("nanobot_quant.gate_sdk.sub_account_balances", fake_list_sub)
         monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials", lambda: CREDS)
         out = fetch_all_balances()
-        assert out["main"]["USDT"]["available"] == "10"
-        assert out["gate_bot1"]["USDT"]["available"] == "5"
-        assert len(out) == 6
+        assert out["main"]["USDT"]["available"] == 10.0
+        assert out["sub_accounts"][0]["uid"] == "59175220"
+        assert out["sub_accounts"][0]["balances"]["USDT"]["available"] == 5.0
+        assert out["sub_accounts"][1]["balances"]["USDT"]["locked"] == 1.0
+        assert len(out["sub_accounts"]) == 2
 
-    def test_sub_error_surfaces(self, monkeypatch):
+    def test_sub_list_error_surfaces(self, monkeypatch):
         def fake_spot(key, secret):
-            if key == "k1":
-                raise RuntimeError("HTTP 401")
-            return {"USDT": {"available": "1", "locked": "0"}}
+            return {"USDT": {"available": 1.0, "locked": 0.0}}
+
+        def fake_list_sub(key, secret):
+            raise RuntimeError("HTTP 401")
 
         monkeypatch.setattr("nanobot_quant.gate_credentials.fetch_spot_balances", fake_spot)
+        monkeypatch.setattr("nanobot_quant.gate_sdk.sub_account_balances", fake_list_sub)
         monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials", lambda: CREDS)
         out = fetch_all_balances()
-        assert out["gate_bot1"]["__error"] == "HTTP 401"
+        assert out["main"]["USDT"]["available"] == 1.0
+        assert out["sub_accounts"]["__error"] == "HTTP 401"
 
-    def test_unconfigured_sub(self, monkeypatch):
+    def test_no_main_key(self, monkeypatch):
         creds = dict(CREDS)
-        creds["sub_accounts"] = {"gate_bot1": {"uid": "59175220"}}
+        creds["main"] = {}
         monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials", lambda: creds)
         out = fetch_all_balances()
-        assert "未配置 Key" in out["gate_bot1"]["__error"]
+        assert "主账号 Key 未配置" in out["main"]["__error"]
 
 
 class _FakeGatekeeper:

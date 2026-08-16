@@ -56,7 +56,9 @@ class _FakeWalletApi:
         self.calls.append(("balances", sub_account_id))
         return [
             gate_api.SubAccountBalance(
-                currency="USDT", available="10.0", locked="0", sub_account_id=sub_account_id
+                uid=sub_account_id or "59175220",
+                available={"USDT": "10.0"},
+                locking={},
             )
         ]
 
@@ -149,8 +151,15 @@ class TestTransfer:
     def test_sub_account_balances(self, fake_wallet):
         out = gate_sdk.sub_account_balances("k", "s", "59175220")
         assert fake_wallet.calls[0] == ("balances", "59175220")
-        assert out[0]["currency"] == "USDT"
-        assert out[0]["sub_account_id"] == "59175220"
+        assert out[0]["uid"] == "59175220"
+        assert out[0]["available"]["USDT"] == "10.0"
+
+    def test_sub_account_balances_all(self, fake_wallet):
+        """No sub_uid → list-form call (sub_account_id=None) returns every sub."""
+        out = gate_sdk.sub_account_balances("k", "s")
+        assert fake_wallet.calls[0] == ("balances", None)
+        assert len(out) == 1
+        assert out[0]["uid"] == "59175220"
 
 
 class TestErrors:

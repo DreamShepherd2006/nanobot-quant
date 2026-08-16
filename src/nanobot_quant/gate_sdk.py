@@ -164,10 +164,17 @@ def transfer_to_sub(
     ).to_dict()
 
 
-def sub_account_balances(api_key: str, api_secret: str, sub_uid: str) -> list[dict]:
-    """Balances of a sub-account (queried with the *main* key)."""
-    if not sub_uid:
-        raise RuntimeError("sub_account_balances 缺少 sub_uid")
+def sub_account_balances(
+    api_key: str, api_secret: str, sub_uid: Optional[str] = None
+) -> list[dict]:
+    """Balances of sub-account(s), queried with the *main* key.
+
+    Without ``sub_uid`` returns **every** sub-account (list form of
+    ``GET /wallet/sub_account_balances``) — the account page uses this so no
+    sub-account keys are required (main key with the '子账号' permission is
+    enough). With ``sub_uid`` filters to that sub-account.
+    Each row is ``{"uid": ..., "available": {...}, "locked": {...}}``.
+    """
     api = make_wallet_api(api_key, api_secret)
     rows = _call(
         "sub_account_balances",

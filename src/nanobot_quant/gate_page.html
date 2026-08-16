@@ -94,8 +94,8 @@ async function loadData() {
 
 function badgeFor(acc) {
   if (acc.balances.error) return '<span class="badge err">查询失败</span>';
-  if (!acc.configured) return '<span class="badge miss">Key 未配置</span>';
-  return '<span class="badge ok">Key 就绪</span>';
+  if (!acc.configured) return '<span class="badge miss">UID 未配置</span>';
+  return '<span class="badge ok">余额正常</span>';
 }
 
 function holdingsHtml(acc) {
@@ -131,10 +131,10 @@ function render(d) {
     holdingsHtml(acc) + '</div>'
   ).join('');
 
-  // transfer select
+  // transfer select — main key handles the transfer; only UID is needed
   const sel = document.getElementById('subSelect');
   const prev = sel.value;
-  sel.innerHTML = subs.filter(a => a.configured && a.uid).map(a =>
+  sel.innerHTML = subs.filter(a => a.uid).map(a =>
     '<option value="' + a.name + '">' + a.name + '（slot ' + a.slot + '）</option>'
   ).join('');
   if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
