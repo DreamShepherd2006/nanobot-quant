@@ -38,11 +38,11 @@ CREDS = {
 
 FLAT_FORM = {
     "api_key": "k", "api_secret": "s", "uid": "15119093",
-    "sub_gate_bot1_uid": "59175220", "sub_gate_bot1_api_key": "k1", "sub_gate_bot1_api_secret": "s1",
-    "sub_gate_bot2_uid": "59175258", "sub_gate_bot2_api_key": "k2", "sub_gate_bot2_api_secret": "s2",
-    "sub_gate_bot3_uid": "59175298", "sub_gate_bot3_api_key": "k3", "sub_gate_bot3_api_secret": "s3",
-    "sub_gate_bot4_uid": "59175332", "sub_gate_bot4_api_key": "k4", "sub_gate_bot4_api_secret": "s4",
-    "sub_gate_bot5_uid": "59175360", "sub_gate_bot5_api_key": "k5", "sub_gate_bot5_api_secret": "s5",
+    "sub_gate_bot1_uid": "59175220",
+    "sub_gate_bot2_uid": "59175258",
+    "sub_gate_bot3_uid": "59175298",
+    "sub_gate_bot4_uid": "59175332",
+    "sub_gate_bot5_uid": "59175360",
 }
 
 
@@ -63,8 +63,6 @@ class TestGateSpec:
     def test_normalize_drops_empty_subs(self):
         form = dict(FLAT_FORM)
         form["sub_gate_bot1_uid"] = ""
-        form["sub_gate_bot1_api_key"] = ""
-        form["sub_gate_bot1_api_secret"] = ""
         out = GATE_SPEC.normalize(form)
         assert "gate_bot1" not in out["sub_accounts"]
         assert len(out["sub_accounts"]) == 4
@@ -82,7 +80,22 @@ class TestGateSpec:
 
     def test_denormalize_empty(self):
         assert GATE_SPEC.denormalize(None)["api_key"] == ""
-        assert GATE_SPEC.denormalize({})["sub_gate_bot1_api_key"] == ""
+        assert GATE_SPEC.denormalize({})["sub_gate_bot1_uid"] == ""
+
+    def test_normalize_keeps_stored_main_keys(self, monkeypatch):
+        # Form only edits UIDs after initial setup — main key/secret must survive.
+        monkeypatch.setattr(
+            "nanobot_quant.gate_spec.read_credential",
+            lambda name: {"main": {"api_key": "stored-k", "api_secret": "stored-s"}},
+        )
+        form = dict(FLAT_FORM)
+        form["api_key"] = ""
+        form["api_secret"] = ""
+        out = GATE_SPEC.normalize(form)
+        assert out["main"]["api_key"] == "stored-k"
+        assert out["main"]["api_secret"] == "stored-s"
+        assert out["main"]["uid"] == "15119093"
+        assert "api_key" not in out["sub_accounts"]["gate_bot1"]
 
 
 class TestSlotMap:
