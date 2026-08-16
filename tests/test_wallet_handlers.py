@@ -79,6 +79,7 @@ class TestRegister:
     def test_routes_registered(self):
         app, handlers = _make_handlers()
         assert set(handlers) == {
+            "/config/wallets",
             "/config/wallet",
             "/config/wallet/data",
             "/config/wallet/login",

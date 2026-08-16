@@ -217,3 +217,90 @@ def fetch_spot_balances(api_key: str, api_secret: str) -> dict[str, dict]:
             "locked": float(d.get("locked") or 0),
         }
     return out
+
+
+def load_slot_map(credentials: Optional[dict] = None) -> dict[str, str]:
+    """Return slot → sub-account-name mapping (persisted in gate.json slot_map).
+
+    Defaults to 1..5 → gate_bot1..5 when the field is absent, so existing
+    deployments without slot_map keep working. Values are validated against
+    the configured sub-accounts; unknown names are dropped.
+    """
+    creds = credentials if credentials is not None else (load_gate_credentials() or {})
+    if not creds:
+        return {}
+    slot_map = creds.get("slot_map") or {}
+    subs = set((creds.get("sub_accounts") or {}).keys())
+    out: dict[str, str] = {}
+    for i in range(1, 6):
+        configured = slot_map.get(str(i))
+        if configured and subs and configured not in subs:
+            configured = None  # slot references an unconfigured sub → fall back to default
+        out[str(i)] = configured or f"gate_bot{i}"
+    return out
+
+
+def sub_account_transfer(
+    amount: str,
+    target_sub: str,
+    currency: str = "USDT",
+    credentials: Optional[dict] = None,
+    timeout: int = 15,
+) -> dict:
+    """Transfer funds from the main account to a sub-account (in-house, instant).
+
+    POST /api/v4/wallet/sub_account_transfers, signed with the main key.
+    ``target_sub`` accepts a sub-account name ("gate_bot1") or uid; it is
+    resolved to the sub-account uid for the API call.
+    """
+    creds = credentials or load_gate_credentials()
+    if not creds:
+        raise FileNotFoundError("gate.json not found")
+    main = creds.get("main") or {}
+    if not main.get("api_key") or not main.get("api_secret"):
+        raise RuntimeError("主账号 Key 未配置（/config/credentials/gate 录入）")
+    sa = get_api_credentials(creds, target_sub)
+    uid = str(sa.get("uid") or "").strip()
+    if not uid:
+        raise RuntimeError(f"子账号 {target_sub} 未配置 UID（/config/credentials/gate 录入）")
+    body = json.dumps({"currency": currency, "sub_account": uid, "amount": str(amount)})
+    code, data = signed_request(
+        "POST",
+        "/api/v4/wallet/sub_account_transfers",
+        body=body,
+        api_key=main["api_key"],
+        api_secret=main["api_secret"],
+        timeout=timeout,
+    )
+    if code != 200:
+        raise RuntimeError(f"主→子划转失败: HTTP {code} {data}")
+    return data
+
+
+def fetch_all_balances(credentials: Optional[dict] = None) -> dict[str, dict]:
+    """Balances for the main account and every configured sub-account.
+
+    Returns {"main": {CURRENCY: {available, locked}}, "gate_bot1": {...}, ...}.
+    A failed sub-account query surfaces as {"__error": "..."} instead of
+    aborting the whole page (fail-open for display, fail-closed never guessed).
+    """
+    creds = credentials or load_gate_credentials()
+    if not creds:
+        return {"__error": "gate.json not found"}
+    main = creds.get("main") or {}
+    subs = creds.get("sub_accounts") or {}
+    out: dict[str, dict] = {}
+
+    def _fetch(api_key: str, api_secret: str) -> dict:
+        if not api_key or not api_secret:
+            return {"__error": "未配置 Key"}
+        try:
+            return fetch_spot_balances(api_key, api_secret)
+        except RuntimeError as exc:
+            return {"__error": str(exc)}
+
+    out["main"] = _fetch(main.get("api_key", ""), main.get("api_secret", ""))
+    for name in sorted(subs):
+        sa = subs[name]
+        out[name] = _fetch(sa.get("api_key", ""), sa.get("api_secret", ""))
+    return out

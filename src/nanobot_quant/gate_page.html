@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🏛️ Gate 账户管理 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:#f5f5f5; color:#333; padding:20px; max-width:760px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:20px; }
+  .card { background:#fff; border-radius:10px; padding:16px; margin-bottom:12px;
+          border:1px solid #e0e0e0; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  .card-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .card-header .icon { font-size:1.3em; }
+  .card-header .name { font-weight:600; font-size:1.05em; }
+  .card-header .badge { margin-left:auto; font-size:.78em; padding:3px 10px; border-radius:20px; }
+  .badge.main { background:#e3f2fd; color:#1565c0; }
+  .badge.slot { background:#f3e5f5; color:#6a1b9a; }
+  .badge.ok { background:#e8f5e9; color:#2e7d32; }
+  .badge.miss { background:#fff3e0; color:#e65100; }
+  .badge.err { background:#fdecea; color:#c62828; }
+  .kv { display:flex; justify-content:space-between; padding:5px 0; font-size:.9em;
+        border-bottom:1px dashed #f0f0f0; }
+  .kv:last-child { border-bottom:none; }
+  .kv .k { color:#888; }
+  .kv .v { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86em;
+           word-break:break-all; text-align:right; max-width:70%; }
+  .holdings { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { background:#f0f0f0; border-radius:6px; padding:3px 9px; font-size:.78em;
+          font-family:ui-monospace,Menlo,monospace; color:#555; }
+  .err-text { color:#c62828; font-size:.85em; margin-top:4px; }
+  .btn { border:none; border-radius:6px; cursor:pointer; font-size:.85em; padding:7px 14px; }
+  .btn.primary { background:#1565c0; color:#fff; }
+  .btn.primary:hover { background:#0d47a1; }
+  .btn.danger { background:#c62828; color:#fff; }
+  .btn.ghost { background:#eee; color:#444; }
+  .btn:disabled { background:#ccc; cursor:not-allowed; }
+  .form-row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
+  .form-row label { font-size:.8em; color:#888; display:block; margin-bottom:4px; }
+  .form-row select, .form-row input {
+    border:1px solid #ccc; border-radius:6px; padding:7px 10px; font-size:.9em; }
+  #confirmBox { margin-top:12px; padding:12px; border-radius:8px; background:#fff8e1;
+                border:1px solid #ffe082; font-size:.9em; }
+  #confirmBox .summary { font-weight:600; margin-bottom:8px; }
+  #confirmBox .timer { color:#e65100; font-size:.8em; margin-top:6px; }
+  a.back { display:inline-block; margin-bottom:14px; color:#1565c0; text-decoration:none;
+           font-size:.88em; }
+  a.back:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<h1>🏛️ Gate 账户管理</h1>
+<div class="subtitle">Gate.io CEX — 执行通道 cex 的账户与分批载体（slot 1-5 ↔ gate_bot1-5）</div>
+<a class="back" href="/config/wallets">← 返回钱包管理</a>
+
+<div id="mainCard" class="card"><div style="color:#888;font-size:.9em">加载中…</div></div>
+<div id="subCards"></div>
+
+<div class="card">
+  <div class="card-header"><span class="icon">💸</span><span class="name">主 → 子划转</span></div>
+  <div class="form-row">
+    <div><label>目标子账号</label><select id="subSelect"></select></div>
+    <div><label>金额（USDT）</label><input id="amountInput" type="number" min="0" step="0.000001" placeholder="0.00"></div>
+    <button id="transferBtn" class="btn primary">发起划转</button>
+  </div>
+  <div id="confirmBox" style="display:none">
+    <div class="summary" id="confirmSummary"></div>
+    <button id="confirmBtn" class="btn danger">✅ 确认划转</button>
+    <button id="cancelBtn" class="btn ghost" style="margin-left:8px">取消</button>
+    <div class="timer" id="confirmTimer"></div>
+  </div>
+  <div id="transferMsg" style="margin-top:10px;font-size:.85em"></div>
+</div>
+
+<script>
+let accounts = [];
+let txId = null;
+let ttlEnds = 0;
+let timerHandle = null;
+
+async function loadData() {
+  try {
+    const resp = await fetch('/config/gate/data');
+    const d = await resp.json();
+    if (!d.ok) { showMsg(d.error || '加载失败', true); return; }
+    accounts = d.accounts;
+    render(d);
+  } catch (e) {
+    showMsg('加载失败: ' + e, true);
+  }
+}
+
+function badgeFor(acc) {
+  if (acc.balances.error) return '<span class="badge err">查询失败</span>';
+  if (!acc.configured) return '<span class="badge miss">Key 未配置</span>';
+  return '<span class="badge ok">Key 就绪</span>';
+}
+
+function holdingsHtml(acc) {
+  if (acc.balances.error) return '<div class="err-text">' + acc.balances.error + '</div>';
+  let usdt = acc.balances.usdt === null ? '—' : acc.balances.usdt;
+  let h = '<div class="kv"><span class="k">USDT 可用</span><span class="v">' + usdt + '</span></div>';
+  const hs = acc.balances.holdings;
+  if (hs.length) {
+    h += '<div class="kv"><span class="k">持仓</span><span class="v">' +
+         hs.map(x => x.currency + ' ' + x.available).join(' · ') + '</span></div>';
+  } else {
+    h += '<div class="kv"><span class="k">持仓</span><span class="v">—</span></div>';
+  }
+  return h;
+}
+
+function render(d) {
+  // main card
+  const main = accounts.find(a => a.name === 'main');
+  document.getElementById('mainCard').innerHTML =
+    '<div class="card-header"><span class="icon">🏛️</span><span class="name">主账号</span>' +
+    '<span class="badge main">主 Key</span>' + badgeFor(main) + '</div>' +
+    '<div class="kv"><span class="k">UID</span><span class="v">' + (main.uid || '—') + '</span></div>' +
+    holdingsHtml(main);
+
+  // sub cards + slot map
+  const subs = accounts.filter(a => a.name !== 'main');
+  document.getElementById('subCards').innerHTML = subs.map(acc =>
+    '<div class="card"><div class="card-header"><span class="icon">🤖</span>' +
+    '<span class="name">' + acc.name + '</span>' +
+    '<span class="badge slot">slot ' + acc.slot + '</span>' + badgeFor(acc) + '</div>' +
+    '<div class="kv"><span class="k">UID</span><span class="v">' + (acc.uid || '—') + '</span></div>' +
+    holdingsHtml(acc) + '</div>'
+  ).join('');
+
+  // transfer select
+  const sel = document.getElementById('subSelect');
+  const prev = sel.value;
+  sel.innerHTML = subs.filter(a => a.configured && a.uid).map(a =>
+    '<option value="' + a.name + '">' + a.name + '（slot ' + a.slot + '）</option>'
+  ).join('');
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function showMsg(text, isErr) {
+  const el = document.getElementById('transferMsg');
+  el.style.color = isErr ? '#c62828' : '#2e7d32';
+  el.textContent = text;
+}
+
+async function startTransfer() {
+  showMsg('');
+  const sub = document.getElementById('subSelect').value;
+  const amount = document.getElementById('amountInput').value;
+  if (!sub || !amount) { showMsg('请选择目标子账号并输入金额', true); return; }
+  const resp = await fetch('/config/gate/transfer', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sub, amount})
+  });
+  const d = await resp.json();
+  if (!d.ok) { showMsg(d.error || '发起失败', true); return; }
+  txId = d.tx_id;
+  ttlEnds = Date.now() + d.ttl * 1000;
+  document.getElementById('confirmSummary').textContent = '确认划转：' + d.summary;
+  document.getElementById('confirmBox').style.display = 'block';
+  document.getElementById('transferBtn').disabled = true;
+  startTimer(d.ttl);
+}
+
+function startTimer(ttl) {
+  clearInterval(timerHandle);
+  const tick = () => {
+    const left = Math.max(0, Math.round((ttlEnds - Date.now()) / 1000));
+    document.getElementById('confirmTimer').textContent = '⏳ ' + left + ' 秒后确认失效';
+    if (left <= 0) { clearInterval(timerHandle); cancelTransfer(); }
+  };
+  tick();
+  timerHandle = setInterval(tick, 1000);
+}
+
+function cancelTransfer() {
+  txId = null;
+  document.getElementById('confirmBox').style.display = 'none';
+  document.getElementById('transferBtn').disabled = false;
+}
+
+async function confirmTransfer() {
+  if (!txId) return;
+  const resp = await fetch('/config/gate/transfer/confirm', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tx_id: txId})
+  });
+  const d = await resp.json();
+  txId = null;
+  cancelTransfer();
+  if (!d.ok) { showMsg(d.error || '确认失败', true); return; }
+  showMsg('✅ 划转完成：' + d.summary);
+  setTimeout(loadData, 800);
+}
+
+document.getElementById('transferBtn').addEventListener('click', startTransfer);
+document.getElementById('confirmBtn').addEventListener('click', confirmTransfer);
+document.getElementById('cancelBtn').addEventListener('click', cancelTransfer);
+loadData();
+setInterval(loadData, 15000);
+</script>
+</body>
+</html>

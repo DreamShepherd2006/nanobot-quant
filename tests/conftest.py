@@ -133,3 +133,107 @@ except ImportError:
     _pd.DataFrame = object
     _pd.MultiIndex = _MultiIndex
     sys.modules.setdefault("pandas", _pd)
+try:
+    import pandas  # noqa: F401
+except ImportError:
+    # pipeline.py imports pandas at module level but only uses it for
+    # type annotations (pd.DataFrame) and an isinstance check
+    # (pd.MultiIndex); a minimal stub keeps pipeline tests runnable
+    # without the heavy pandas/numpy stack.
+    _pd = types.ModuleType("pandas")
+
+    class _MultiIndex:
+        pass
+
+    _pd.DataFrame = object
+    _pd.MultiIndex = _MultiIndex
+    sys.modules.setdefault("pandas", _pd)
+
+try:
+    import gate_api  # noqa: F401
+except ImportError:
+    # nanobot_quant.gate_sdk imports gate_api at module level (direct
+    # import, no fallback — same policy as lumibot). The test container
+    # does not install the gate-api SDK, so inject a minimal stub before
+    # collection: model objects support kwargs + to_dict() (None values
+    # dropped, mirroring real SDK serialization) and API classes record
+    # calls for gate_sdk tests.
+    _gate = types.ModuleType("gate_api")
+
+    class _Configuration:
+        def __init__(self, key="", secret="", **kwargs):
+            self.key = key
+            self.secret = secret
+
+    class _ApiClient:
+        def __init__(self, configuration=None, **kwargs):
+            self.configuration = configuration
+
+    class _ApiException(Exception):
+        def __init__(self, status=None, reason=None, http_resp=None):
+            super().__init__(status, reason)
+            self.status = status
+            self.reason = reason
+            self.http_resp = http_resp
+
+    class _Model:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def to_dict(self):
+            return {k: v for k, v in self.__dict__.items() if v is not None}
+
+    class _Order(_Model):
+        pass
+
+    class _CurrencyPair(_Model):
+        pass
+
+    class _SubAccountTransfer(_Model):
+        pass
+
+    class _SubAccountBalance(_Model):
+        pass
+
+    class _SpotApi:
+        def __init__(self, api_client=None, **kwargs):
+            self.api_client = api_client
+
+        def create_order(self, order, **kwargs):
+            return order
+
+        def get_order(self, order_id, currency_pair, **kwargs):
+            return _Order(id=order_id, currency_pair=currency_pair, status="closed")
+
+        def cancel_order(self, order_id, currency_pair, **kwargs):
+            return _Order(id=order_id, currency_pair=currency_pair, status="cancelled")
+
+        def get_currency_pair(self, currency_pair, **kwargs):
+            return _CurrencyPair(currency_pair=currency_pair, trade_status="tradable")
+
+        def list_tickers(self, **kwargs):
+            return []
+
+    class _WalletApi:
+        def __init__(self, api_client=None, **kwargs):
+            self.api_client = api_client
+
+        def transfer_with_sub_account(self, sub_account_transfer, **kwargs):
+            return sub_account_transfer
+
+        def list_sub_account_balances(self, sub_account_id=None, currency=None, **kwargs):
+            return []
+
+    for _name, _obj in {
+        "Configuration": _Configuration,
+        "ApiClient": _ApiClient,
+        "ApiException": _ApiException,
+        "Order": _Order,
+        "CurrencyPair": _CurrencyPair,
+        "SubAccountTransfer": _SubAccountTransfer,
+        "SubAccountBalance": _SubAccountBalance,
+        "SpotApi": _SpotApi,
+        "WalletApi": _WalletApi,
+    }.items():
+        setattr(_gate, _name, _obj)
+    sys.modules.setdefault("gate_api", _gate)

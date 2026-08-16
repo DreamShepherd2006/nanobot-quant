@@ -67,6 +67,10 @@ def _render_cards(specs: dict[str, CredentialSpec]) -> str:
 def _render_detail_form(spec: CredentialSpec) -> str:
     """Render credential edit form with current values pre-filled."""
     current = read_credential(spec.name)
+    # Specs with a denormalizer store data in a nested shape; flatten it back
+    # to the flat form field names for pre-filling.
+    if spec.denormalize is not None:
+        current = spec.denormalize(current)
 
     fields_html_parts: list[str] = []
     for f in spec.fields:
@@ -147,6 +151,13 @@ async def credential_save(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
     if not isinstance(data, dict):
         return JSONResponse({"ok": False, "error": "请求体必须是 JSON 对象"}, status_code=400)
+    # Specs with a normalizer convert the flat WebUI form into the stored
+    # shape (e.g. gate: flat form → nested {main, sub_accounts, slot_map}).
+    if spec.normalize is not None:
+        try:
+            data = spec.normalize(data)
+        except Exception as exc:  # noqa: BLE001 — surface normalization errors
+            return JSONResponse({"ok": False, "error": f"表单归一化失败: {exc}"}, status_code=400)
     write_credential(name, data)
     return JSONResponse({"ok": True})
 
