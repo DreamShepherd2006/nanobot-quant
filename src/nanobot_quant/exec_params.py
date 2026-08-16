@@ -14,8 +14,8 @@ Control-plane design (2026-08-08):
 - ``max_position_pct`` is enforced live by RiskEngine on every order.
 - ``slippage`` / ``sol_buffer_pct`` are passed to OnchainOSBroker for
   actual swap execution.
-- ``max_drawdown_pct`` / ``stop_loss_pct`` are effective in backtest and
-  paper trading today; on the execute_signal path they are formal checks
+- ``max_drawdown_pct`` / ``stop_loss_pct`` are effective in backtest
+  today; on the execute_signal path they are formal checks
   (no position context yet) — the parameters are configured here so a
   future position-context integration picks them up automatically.
 - ``td_*`` / ``quantity_mode`` drive the TD autonomous StrategyExecutor

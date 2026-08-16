@@ -106,7 +106,7 @@ class OrderSubmittedEvent:
 class ExecutionReportEvent:
     """Emitted when a broker/backtest reports order fill status.
 
-    Used by: Lumibot paper broker, OnchainOS tx confirmation (future).
+    Used by: OnchainOS tx confirmation (future).
     """
 
     type: str = field(default="execution.report", init=False)

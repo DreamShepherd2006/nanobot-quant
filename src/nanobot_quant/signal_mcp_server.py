@@ -113,7 +113,7 @@ _TOOL_DESCRIPTIONS = {
         "or list), returns risk checks and suggested orders. "
         "Pass live=true to attempt on-chain execution — this only "
         "works if the WebUI live trading toggle (/config/live) is "
-        "enabled; otherwise the order stays paper-only."
+        "enabled; otherwise the order is not executed (dry-run)."
     ),
     "run_backtest": (
         "Start a full backtest on a token symbol in the BACKGROUND. "

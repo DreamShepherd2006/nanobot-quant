@@ -25,7 +25,7 @@ def _live_path(gatekeeper) -> str:
 
 
 def _read_live(gatekeeper) -> bool:
-    """Read current live toggle, default False (paper-only)."""
+    """Read current live toggle, default False (dry-run, no execution)."""
     path = _live_path(gatekeeper)
     try:
         with open(path) as f:
@@ -101,13 +101,13 @@ _LIVE_PAGE = """\
 </head>
 <body>
 <h1>⚡ 实盘交易开关</h1>
-<p class="sub">主开关：开启后 agent 传入 <code>live=true</code> 才可触发链上交易；关闭时强制纸面交易。</p>
+<p class="sub">主开关：开启后 agent 传入 <code>live=true</code> 才可触发真实交易；关闭时订单不实际执行（dry-run：仅风控校验 + 生成订单建议）。</p>
 
 <div class="card">
   <div class="switch-row">
     <div class="switch-label">
       <h2>允许实盘交易 (Live)</h2>
-      <p>开启后 execute_signal 可走 OnchainOSBroker 链上 swap</p>
+      <p>开启后 execute_signal 按当前执行通道真实下单（DEX=链上 swap / CEX=Gate spot）</p>
     </div>
     <span id="status" class="status {status_cls}">{status_text}</span>
     <label class="switch">
@@ -116,11 +116,11 @@ _LIVE_PAGE = """\
     </label>
   </div>
 
-  <div id="warn" class="warn">⚠️ <strong>实盘交易已开启</strong> — execute_signal 收到的信号将通过 OnchainOSBroker 真实上链。请确保钱包地址与凭证正确，且仓位受风控约束。</div>
+  <div id="warn" class="warn">⚠️ <strong>实盘交易已开启</strong> — execute_signal 收到的信号将按当前执行通道（DEX 链上 swap / CEX Gate spot）真实下单。请确保钱包地址与凭证正确，且仓位受风控约束。</div>
 </div>
 
 <div class="info">
-  <p><strong>安全模型</strong>：此开关是实盘交易的<b>总闸门</b>。即使 agent 在调用中传 <code>live=true</code>，只要此开关为关，订单仍然只会走纸面（paper）路径。</p>
+  <p><strong>安全模型</strong>：此开关是实盘交易的<b>总闸门</b>。即使 agent 在调用中传 <code>live=true</code>，只要此开关为关，订单仍然不会实际执行（dry-run：仅风控校验 + 生成订单建议，不成交、不记账）。</p>
   <p><strong>配置存储</strong>：<code>{live_path}</code>（与 API 凭证同目录，重启保留）。</p>
 </div>
 
@@ -137,7 +137,7 @@ const statusEl = document.getElementById('status');
 function refreshUI() {
   const on = toggle.checked;
   warn.classList.toggle('show', on);
-  statusEl.textContent = on ? '● 实盘已开启' : '○ 纸面交易';
+  statusEl.textContent = on ? '● 实盘已开启' : '○ 实盘关闭（不成交）';
   statusEl.className = 'status ' + (on ? 'on' : 'off');
 }
 toggle.addEventListener('change', refreshUI);
@@ -152,7 +152,7 @@ document.getElementById('save-btn').addEventListener('click', async () => {
   });
   const data = await resp.json();
   if (data.ok) {
-    toast('✅ 已保存：' + (live ? '实盘开启' : '纸面交易'), true);
+    toast('✅ 已保存：' + (live ? '实盘开启' : '实盘关闭（dry-run）'), true);
   } else {
     toast('❌ ' + (data.error || '保存失败'), false);
   }
@@ -186,7 +186,7 @@ def register_live_routes(app, gatekeeper):
             _LIVE_PAGE
             .replace("{checked}", " checked" if live else "")
             .replace("{status_cls}", "on" if live else "off")
-            .replace("{status_text}", "● 实盘已开启" if live else "○ 纸面交易")
+            .replace("{status_text}", "● 实盘已开启" if live else "○ 实盘关闭（不成交）")
             .replace("{live_path}", _live_path(gatekeeper))
         )
         return HTMLResponse(html)
