@@ -95,7 +95,34 @@ class TestGateSpec:
         assert out["main"]["api_key"] == "stored-k"
         assert out["main"]["api_secret"] == "stored-s"
         assert out["main"]["uid"] == "15119093"
-        assert "api_key" not in out["sub_accounts"]["gate_bot1"]
+        # 子账号行保留 uid；key/secret 空表单不覆盖旧值（增量保存）
+        assert out["sub_accounts"]["gate_bot1"]["uid"] == "59175220"
+        assert out["sub_accounts"]["gate_bot1"]["api_key"] == ""
+        assert out["sub_accounts"]["gate_bot1"]["api_secret"] == ""
+
+    def test_normalize_keeps_stored_sub_keys(self, monkeypatch):
+        # 子账号 key/secret 表单留空 → 保留已存值（增量保存）
+        monkeypatch.setattr(
+            "nanobot_quant.gate_spec.read_credential",
+            lambda name: {"sub_accounts": {
+                "gate_bot1": {"uid": "59175220", "api_key": "k1", "api_secret": "s1"}}},
+        )
+        form = dict(FLAT_FORM)
+        form["sub_gate_bot1_api_key"] = ""
+        form["sub_gate_bot1_api_secret"] = ""
+        out = GATE_SPEC.normalize(form)
+        assert out["sub_accounts"]["gate_bot1"]["api_key"] == "k1"
+        assert out["sub_accounts"]["gate_bot1"]["api_secret"] == "s1"
+
+    def test_normalize_drops_all_empty_sub_row(self, monkeypatch):
+        # uid/key/secret 全空 → 该子账号行删除
+        monkeypatch.setattr("nanobot_quant.gate_spec.read_credential", lambda name: None)
+        form = dict(FLAT_FORM)
+        form["sub_gate_bot3_uid"] = ""
+        form["sub_gate_bot3_api_key"] = ""
+        form["sub_gate_bot3_api_secret"] = ""
+        out = GATE_SPEC.normalize(form)
+        assert "gate_bot3" not in out["sub_accounts"]
 
 
 class TestSlotMap:

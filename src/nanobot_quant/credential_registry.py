@@ -55,6 +55,7 @@ class FieldSpec:
     required: bool = True
     readonly: bool = False  # render as disabled input (display-only, not editable)
     options: list[str] = field(default_factory=list)  # non-empty → render as <select>
+    group: str = ""        # non-empty → rendered as a titled card section (e.g. "🤖 gate_bot1")
 
 
 @dataclass

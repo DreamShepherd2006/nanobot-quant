@@ -1,9 +1,10 @@
-"""P1: CexBroker unit tests (mock signed REST — no network).
+"""P1: CexBroker unit tests (mock gate-api SDK — no network).
 
 Covered:
 - _submit_order: filled / pending / create-error paths
 - _get_balances_at_broker / _pull_positions (cash vs position separation)
 - cancel_order, sub-account credential selection
+- SDK parameter contract (currency_pair / side / amount / order_type / tif)
 """
 
 from types import SimpleNamespace
@@ -79,21 +80,30 @@ def _broker(**kwargs):
     return CexBroker(credentials=CREDS, tokens_json=TOKENS, **kwargs)
 
 
-def _fake_request(monkeypatch, responses):
-    """Patch signed_request inside cex_broker module namespace.
+def _fake_sdk(monkeypatch, responses):
+    """Patch gate_sdk functions inside cex_broker module namespace.
 
-    ``from ... import signed_request`` binds the name at import time, so we
-    must patch the module attribute (not gate_credentials.signed_request).
+    The broker binds ``from nanobot_quant.gate_sdk import ...`` at import
+    time, so we must patch the module attributes (not gate_sdk itself).
+    ``responses`` is a list consumed per call (or a single value returned
+    for every call); entries may be dicts (success) or exceptions (API
+    failure — gate_sdk._call wraps ApiException into RuntimeError).
     """
     state = {"calls": []}
 
-    def fake(method, path, query="", body="", api_key="", api_secret="", timeout=15):
-        state["calls"].append((method, path, query, body))
-        if isinstance(responses, list):
-            return responses.pop(0)
-        return responses
+    def make(label):
+        def fake(*args, **kwargs):
+            state["calls"].append((label, args, kwargs))
+            if isinstance(responses, list):
+                return responses.pop(0)
+            return responses
 
-    monkeypatch.setattr(mod, "signed_request", fake)
+        return fake
+
+    monkeypatch.setattr(mod, "sdk_get_currency_pair", make("pair_meta"))
+    monkeypatch.setattr(mod, "sdk_create_order", make("create"))
+    monkeypatch.setattr(mod, "sdk_get_order", make("query"))
+    monkeypatch.setattr(mod, "sdk_cancel_order", make("cancel"))
     return state
 
 
@@ -113,13 +123,13 @@ class TestSubmitOrder:
         CexBroker._pair_meta_cache.clear()
 
     def test_filled(self, monkeypatch):
-        state = _fake_request(monkeypatch, [
-            (200, self._PAIR_META),  # GET pair meta
-            (201, {"id": "123", "status": "closed", "left": "0",
-                   "filled_amount": "0.05", "avg_deal_price": "74.9",
-                   "finish_as": "filled"}),  # POST create (Gate returns 201)
-            (200, {"id": "123", "status": "closed", "left": "0",
-                   "filled_amount": "0.05", "avg_deal_price": "74.9"}),  # GET query
+        state = _fake_sdk(monkeypatch, [
+            self._PAIR_META,  # get_currency_pair
+            {"id": "123", "status": "closed", "left": "0",
+             "filled_amount": "0.05", "avg_deal_price": "74.9",
+             "finish_as": "filled"},  # create_order
+            {"id": "123", "status": "closed", "left": "0",
+             "filled_amount": "0.05", "avg_deal_price": "74.9"},  # get_order
         ])
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
@@ -128,36 +138,41 @@ class TestSubmitOrder:
         assert out.filled is True
         assert out.identifier == "123"
         assert out.custom_params["cex"]["pair"] == "CRCLX_USDT"
-        method, path, query, body = state["calls"][0]
-        assert method == "GET" and "currency_pairs" in path
-        method, path, query, body = state["calls"][1]
-        assert method == "POST" and path == "/api/v4/spot/orders"
-        assert "CRCLX_USDT" in body and '"side":"buy"' in body
+        # SDK contract: get_currency_pair(key, secret, pair)
+        label, args, kwargs = state["calls"][0]
+        assert label == "pair_meta" and args[2] == "CRCLX_USDT"
+        # SDK contract: create_order(key, secret, pair, side, amount, ...)
+        label, args, kwargs = state["calls"][1]
+        assert label == "create"
+        assert args[2] == "CRCLX_USDT" and args[3] == "buy"
         # market BUY: amount = quote 金额 (USDT), 0.05 x 67.0 = 3.35, precision=2
-        assert '"amount":"3.35"' in body
+        assert args[4] == "3.35"
+        assert kwargs["order_type"] == "market"
+        assert kwargs["time_in_force"] == "ioc"
+        assert kwargs["text"].startswith("t-nq")
 
     def test_sell_amount_is_base_quantity(self, monkeypatch):
         # market SELL: amount = base 数量 (CRCLX), amount_precision=3
-        state = _fake_request(monkeypatch, [
-            (200, self._PAIR_META),  # GET pair meta
-            (201, {"id": "55", "status": "closed", "left": "0",
-                   "filled_amount": "0.05", "avg_deal_price": "67.1"}),  # POST create
-            (200, {"id": "55", "status": "closed", "left": "0",
-                   "filled_amount": "0.05", "avg_deal_price": "67.1"}),  # GET query
+        state = _fake_sdk(monkeypatch, [
+            self._PAIR_META,  # get_currency_pair
+            {"id": "55", "status": "closed", "left": "0",
+             "filled_amount": "0.05", "avg_deal_price": "67.1"},  # create_order
+            {"id": "55", "status": "closed", "left": "0",
+             "filled_amount": "0.05", "avg_deal_price": "67.1"},  # get_order
         ])
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order(side="sell")
         out = b._submit_order(order)
         assert out.filled is True
-        method, path, query, body = state["calls"][1]
-        assert method == "POST" and '"side":"sell"' in body
-        assert '"amount":"0.050"' in body
+        label, args, kwargs = state["calls"][1]
+        assert label == "create" and args[3] == "sell"
+        assert args[4] == "0.050"
 
     def test_create_error(self, monkeypatch):
-        _fake_request(monkeypatch, [
-            (200, self._PAIR_META),  # GET pair meta
-            (400, {"label": "INVALID_REQUEST_PARAMETER"}),  # POST create
+        _fake_sdk(monkeypatch, [
+            self._PAIR_META,  # get_currency_pair
+            RuntimeError("create_order failed: HTTP 400 INVALID_REQUEST_PARAMETER"),
         ])
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
@@ -169,14 +184,14 @@ class TestSubmitOrder:
 
     def test_query_retry_until_closed(self, monkeypatch):
         # Gate 市价单结算异步：下单后立即查询仍 open（SELL 实测），轮询后 closed
-        state = _fake_request(monkeypatch, [
-            (200, self._PAIR_META),  # GET pair meta
-            (201, {"id": "124", "status": "open", "left": "0.05",
-                   "filled_amount": "0", "avg_deal_price": "0"}),  # POST create
-            (200, {"id": "124", "status": "open", "left": "0.05",
-                   "filled_amount": "0", "avg_deal_price": "0"}),  # query #1: open
-            (200, {"id": "124", "status": "closed", "left": "0",
-                   "filled_amount": "0.05", "avg_deal_price": "74.9"}),  # query #2: closed
+        state = _fake_sdk(monkeypatch, [
+            self._PAIR_META,  # get_currency_pair
+            {"id": "124", "status": "open", "left": "0.05",
+             "filled_amount": "0", "avg_deal_price": "0"},  # create_order
+            {"id": "124", "status": "open", "left": "0.05",
+             "filled_amount": "0", "avg_deal_price": "0"},  # get_order #1: open
+            {"id": "124", "status": "closed", "left": "0",
+             "filled_amount": "0.05", "avg_deal_price": "74.9"},  # get_order #2: closed
         ])
         monkeypatch.setattr("time.sleep", lambda _: None)
         b = _broker()
@@ -186,15 +201,16 @@ class TestSubmitOrder:
         assert out.filled is True
         assert b._tracked["124"]["filled"] == 0.05
         assert b._tracked["124"]["avg_price"] == 74.9
-        # POST → query#1(open) → query#2(closed)：共 3 次请求在 create 之后
+        # pair_meta → create → get_order#1(open) → get_order#2(closed)：共 4 次 SDK 调用
         assert len(state["calls"]) == 4
+        assert [c[0] for c in state["calls"]] == ["pair_meta", "create", "query", "query"]
 
     def test_pending(self, monkeypatch):
-        # POST create + 10 次轮询均 open → 最终仍 pending（不误报 error）
-        _fake_request(monkeypatch, [
-            (200, self._PAIR_META),  # GET pair meta
-            (200, {"id": "9", "status": "open", "left": "0.05"}),  # POST create
-            *[(200, {"id": "9", "status": "open", "left": "0.05"}) for _ in range(10)],
+        # create + 10 次轮询均 open → 最终仍 pending（不误报 error）
+        _fake_sdk(monkeypatch, [
+            self._PAIR_META,  # get_currency_pair
+            {"id": "9", "status": "open", "left": "0.05"},  # create_order
+            *[{"id": "9", "status": "open", "left": "0.05"} for _ in range(10)],
         ])
         monkeypatch.setattr("time.sleep", lambda _: None)
         b = _broker()
@@ -205,7 +221,7 @@ class TestSubmitOrder:
         assert out.error is None
 
     def test_min_quote_reject(self, monkeypatch):
-        _fake_request(monkeypatch, [(200, self._PAIR_META)])
+        _fake_sdk(monkeypatch, [self._PAIR_META])
         b = _broker()
         # price 67.0 × qty 0.02 = $1.34 < min_quote 3 → fail-closed reject
         monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
@@ -217,7 +233,7 @@ class TestSubmitOrder:
         assert out.filled is False
 
     def test_buy_no_price_rejects(self, monkeypatch):
-        _fake_request(monkeypatch, [(200, self._PAIR_META)])
+        _fake_sdk(monkeypatch, [self._PAIR_META])
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 0.0)  # price unknown
         order = _mk_order()
@@ -257,7 +273,9 @@ class TestSubmitOrder:
     def test_meta_unavailable_fail_closed(self, monkeypatch):
         # pair meta fetch fails → fail-closed: refuse to place blind order
         CexBroker._pair_meta_cache.clear()  # isolate from earlier tests
-        _fake_request(monkeypatch, [(500, {"label": "SERVER_ERROR"})])
+        _fake_sdk(monkeypatch, [
+            RuntimeError("get_currency_pair failed: HTTP 500 SERVER_ERROR"),
+        ])
         b = _broker()
         monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
         order = _mk_order(quantity=0.02)
@@ -267,7 +285,7 @@ class TestSubmitOrder:
         assert out.filled is False
 
     def test_invalid_quantity(self, monkeypatch):
-        state = _fake_request(monkeypatch, [])
+        state = _fake_sdk(monkeypatch, [])
         b = _broker()
         order = _mk_order(quantity=0)
         out = b._submit_order(order)
@@ -275,7 +293,7 @@ class TestSubmitOrder:
         assert state["calls"] == []  # no request sent
 
     def test_unsupported_side(self, monkeypatch):
-        _fake_request(monkeypatch, [])
+        _fake_sdk(monkeypatch, [])
         b = _broker()
         order = _mk_order(side="short")
         out = b._submit_order(order)
@@ -324,17 +342,17 @@ class TestBalances:
 
 class TestCancelOrder:
     def test_cancel(self, monkeypatch):
-        state = _fake_request(monkeypatch, (200, {"id": "123", "status": "cancelled"}))
+        state = _fake_sdk(monkeypatch, {"id": "123", "status": "cancelled"})
         b = _broker()
         b._tracked["123"] = {"pair": "CRCLX_USDT", "symbol": "CRCLX"}
         order = SimpleNamespace(identifier="123")
         b.cancel_order(order)
-        method, path, query, body = state["calls"][0]
-        assert method == "DELETE" and "123" in path and "CRCLX_USDT" in query
+        label, args, kwargs = state["calls"][0]
+        assert label == "cancel"
+        assert args[2] == "123" and args[3] == "CRCLX_USDT"
 
     def test_cancel_unknown_order(self, monkeypatch):
-        state = _fake_request(monkeypatch, [])
+        state = _fake_sdk(monkeypatch, [])
         b = _broker()
         b.cancel_order(SimpleNamespace(identifier="nope"))
         assert state["calls"] == []
-

@@ -66,14 +66,26 @@ def _render_cards(specs: dict[str, CredentialSpec]) -> str:
 
 def _render_detail_form(spec: CredentialSpec) -> str:
     """Render credential edit form with current values pre-filled."""
-    current = read_credential(spec.name)
+    current = read_credential(spec.name) or {}
     # Specs with a denormalizer store data in a nested shape; flatten it back
     # to the flat form field names for pre-filling.
     if spec.denormalize is not None:
         current = spec.denormalize(current)
 
-    fields_html_parts: list[str] = []
+    parts: list[str] = []
+    cur_group: str | None = None
     for f in spec.fields:
+        # Group changes open/close card sections. Fields without a group are
+        # rendered flat (backwards compatible with simple specs like OKX).
+        if f.group != cur_group:
+            if cur_group is not None:
+                parts.append("</div></div>")
+            cur_group = f.group
+            if cur_group:
+                parts.append(
+                    f'<div class="cred-group"><div class="cred-group-title">{html_escape(cur_group)}</div>'
+                    '<div class="cred-group-body">'
+                )
         val = html_escape(current.get(f.name, ""))
         required_attr = 'required' if f.required else ''
         placeholder = html_escape(f.placeholder)
@@ -82,7 +94,7 @@ def _render_detail_form(spec: CredentialSpec) -> str:
                 f'<option value="{html_escape(o)}"{" selected" if o == val else ""}>{html_escape(o)}</option>'
                 for o in f.options
             )
-            fields_html_parts.append(f"""\
+            parts.append(f"""\
   <div class="form-group">
     <label for="{html_escape(f.name)}">{html_escape(f.label)}</label>
     <select id="{html_escape(f.name)}" name="{html_escape(f.name)}" {required_attr}>
@@ -90,19 +102,21 @@ def _render_detail_form(spec: CredentialSpec) -> str:
     </select>
   </div>""")
         elif f.readonly:
-            fields_html_parts.append(f"""\
+            parts.append(f"""\
   <div class="form-group">
     <label for="{html_escape(f.name)}">{html_escape(f.label)}</label>
     <input id="{html_escape(f.name)}" name="{html_escape(f.name)}" type="text"
            value="{val}" placeholder="{placeholder}" readonly disabled>
   </div>""")
         else:
-            fields_html_parts.append(f"""\
+            parts.append(f"""\
   <div class="form-group">
     <label for="{html_escape(f.name)}">{html_escape(f.label)}</label>
     <input id="{html_escape(f.name)}" name="{html_escape(f.name)}" type="{html_escape(f.type)}"
            value="{val}" placeholder="{placeholder}" {required_attr}>
   </div>""")
+    if cur_group is not None:
+        parts.append("</div></div>")
 
     docs_block = ""
     if spec.docs_url:
@@ -112,7 +126,7 @@ def _render_detail_form(spec: CredentialSpec) -> str:
     html = html.replace("{display}", html_escape(spec.display))
     html = html.replace("{description}", html_escape(spec.description))
     html = html.replace("{docs_block}", docs_block)
-    html = html.replace("{fields_html}", "\n".join(fields_html_parts))
+    html = html.replace("{fields_html}", "\n".join(parts))
     html = html.replace("CRED_NAME_PLACEHOLDER", json.dumps(spec.name))
     return html
 

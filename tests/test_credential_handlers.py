@@ -82,3 +82,37 @@ class TestCredentialSave:
         assert saved["main"]["api_key"] == "stored-k"
         assert saved["main"]["api_secret"] == "stored-s"
         assert saved["main"]["uid"] == "15119093"
+
+
+class TestRenderGroups:
+    """FieldSpec.group — gate form renders per-account card sections."""
+
+    def test_gate_renders_six_groups(self, monkeypatch):
+        import nanobot_quant.credential_handlers as ch
+        from nanobot_quant.credential_registry import discover
+
+        monkeypatch.setattr(ch, "read_credential", lambda name: None)
+        spec = discover()["gate"]
+        html = ch._render_detail_form(spec)
+        # 主账号 + gate_bot1..5 = 6 张分组卡片
+        assert html.count('<div class="cred-group">') == 6
+        assert '🤖 gate_bot1' in html and '🤖 gate_bot5' in html
+        assert '🏛️ 主账号' in html
+        # 每个子账号组包含 uid/api_key/api_secret 三个字段
+        for name in ("gate_bot1", "gate_bot5"):
+            assert f'id="sub_{name}_uid"' in html
+            assert f'id="sub_{name}_api_key"' in html
+            assert f'id="sub_{name}_api_secret"' in html
+        # 主账号字段也在
+        assert 'id="api_key"' in html and 'id="uid"' in html
+
+    def test_ungrouped_spec_renders_flat(self, monkeypatch):
+        """无 group 的 spec（如 OKX）保持平铺，不出现分组卡片。"""
+        import nanobot_quant.credential_handlers as ch
+        from nanobot_quant.credential_registry import discover
+
+        monkeypatch.setattr(ch, "read_credential", lambda name: None)
+        spec = discover()["okx"]
+        assert all(not f.group for f in spec.fields)
+        html = ch._render_detail_form(spec)
+        assert '<div class="cred-group">' not in html

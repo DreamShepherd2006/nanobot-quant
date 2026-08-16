@@ -8,12 +8,15 @@ The same underlying tokenized asset may use different tickers per exchange
 (CRCLX on Gate ↔ XCRCL on OKX); the mapping lives in tokens.json
 (``gate_symbol`` / ``okx_symbol`` fields, see gate_credentials).
 
-Implementation notes (2026-08-14):
-- Trading endpoints (create/query/cancel order, balances) use signed Gate REST
-  requests (gate_credentials.signed_request) — the official gate-api SDK's
-  ``CreateOrder`` model does not match POST /spot/orders fields
-  (no currency_pair/side/amount), so the SDK is used only for the endpoints
-  it wraps correctly (sub-account management / transfers via WalletApi).
+Implementation notes (2026-08-14 → 2026-08-17):
+- Trading endpoints (create/query/cancel order) use the official gate-api SDK
+  (gate_sdk.create_order / get_order / cancel_order / get_currency_pair),
+  bound to this broker's credentials (own key, or a sub-account key via
+  ``sub_account``). Balances use fetch_spot_balances (SDK has no
+  /spot/accounts method — genuine SDK blind spot, kept on the minimal
+  signed call via gate_sdk.spot_accounts).
+- Market orders: ``amount`` is the quote-currency amount for buy and the
+  base-currency amount for sell; ``time_in_force="ioc"`` (market rejects gtc).
 - Gate signature requires the full ``/api/v4`` path prefix; signing
   ``/spot/accounts`` yields HTTP 401.
 """
@@ -34,16 +37,18 @@ from nanobot_quant.gate_credentials import (
     fetch_spot_balances,
     gate_pair,
     get_api_credentials,
-    signed_request,
+)
+from nanobot_quant.gate_sdk import (
+    cancel_order as sdk_cancel_order,
+    create_order as sdk_create_order,
+    get_currency_pair as sdk_get_currency_pair,
+    get_order as sdk_get_order,
 )
 
 logger = logging.getLogger("nanobot_quant.brokers.cex")
 
 # Currencies treated as cash — everything else counts as a position.
 _CASH_CURRENCIES = frozenset({"USDT", "USDC", "USDG", "USD", "TUSD"})
-
-_SPOT_ORDERS_PATH = "/api/v4/spot/orders"
-_SPOT_ACCOUNTS_PATH = "/api/v4/spot/accounts"
 
 
 class _DummyDataSource:
@@ -115,10 +120,8 @@ class CexBroker(Broker):
             return cached[1]
         meta: dict = {}
         try:
-            code, data = self._request(
-                "GET", f"/api/v4/spot/currency_pairs/{pair}",
-            )
-            if code == 200 and isinstance(data, dict):
+            data = sdk_get_currency_pair(self._api_key, self._api_secret, pair)
+            if isinstance(data, dict):
                 meta = {
                     "amount_precision": int(data.get("amount_precision") or 0),
                     "quote_precision": int(data.get("precision") or 0),
@@ -141,21 +144,14 @@ class CexBroker(Broker):
                 return f"{prefix}: {label}"
         return f"{prefix}: {payload}"
 
-    def _request(self, method: str, path: str, query: str = "", body: str = ""):
-        """Signed Gate request bound to this broker's credentials."""
-        code, payload = signed_request(
-            method, path, query=query, body=body,
-            api_key=self._api_key, api_secret=self._api_secret,
-        )
-        return code, payload
-
     def _query_order(self, order_id: str, pair: str) -> tuple[str, float, float, float]:
         """Query order status → (lumibot_status, filled, left, avg_price)."""
-        code, data = self._request(
-            "GET", f"{_SPOT_ORDERS_PATH}/{order_id}",
-            query=f"currency_pair={pair}",
-        )
-        if code < 200 or code >= 300:
+        try:
+            data = sdk_get_order(self._api_key, self._api_secret, order_id, pair)
+        except Exception as e:
+            print(f"[DIAG] CEX query order error {order_id}: {e}", file=sys.stderr, flush=True)
+            return "submitted", 0.0, 0.0, 0.0
+        if not isinstance(data, dict):
             return "submitted", 0.0, 0.0, 0.0
         status = str(data.get("status") or "").lower()
         filled = float(data.get("filled_amount") or 0)
@@ -286,18 +282,20 @@ class CexBroker(Broker):
             amount_str = f"{quantity:.{ap}f}" if ap > 0 else f"{quantity:.8f}"
 
         client_oid = f"nq{int(time.time())}{os.urandom(3).hex()}"
-        body = json.dumps({
-            "currency_pair": pair,
-            "side": side,
-            "type": "market",
-            "amount": amount_str,
-            "time_in_force": "ioc",
-            "text": f"t-{client_oid}",
-        }, separators=(",", ":"))
-
-        code, data = self._request("POST", _SPOT_ORDERS_PATH, body=body)
-        if code < 200 or code >= 300:  # Gate returns 201 Created on success
-            msg = self._format_err(f"Gate create_order failed: {pair} {side} {quantity}", data)
+        try:
+            data = sdk_create_order(
+                self._api_key, self._api_secret, pair, side, amount_str,
+                order_type="market", text=f"t-{client_oid}",
+                time_in_force="ioc",  # market rejects gtc; ioc mirrors legacy REST
+            )
+        except Exception as e:
+            msg = self._format_err(f"Gate create_order failed: {pair} {side} {quantity}", str(e))
+            order.set_error(msg)
+            print(f"CEX BROKER DIAG | submit FAIL {side} {quantity} {symbol}@{pair}: {msg}",
+                  file=sys.stderr, flush=True)
+            return order
+        if not isinstance(data, dict) or not data.get("id"):
+            msg = f"Gate create_order unexpected response: {data!r}"
             order.set_error(msg)
             print(f"CEX BROKER DIAG | submit FAIL {side} {quantity} {symbol}@{pair}: {msg}",
                   file=sys.stderr, flush=True)
@@ -347,11 +345,7 @@ class CexBroker(Broker):
         if not oid or not pair:
             return
         try:
-            code, data = self._request(
-                "DELETE", f"{_SPOT_ORDERS_PATH}/{oid}", query=f"currency_pair={pair}"
-            )
-            if code != 200:
-                logger.debug("cancel_order %s failed: %s %s", oid, code, data)
+            sdk_cancel_order(self._api_key, self._api_secret, oid, pair)
         except Exception as e:
             logger.debug("cancel_order %s error: %s", oid, e)
 
