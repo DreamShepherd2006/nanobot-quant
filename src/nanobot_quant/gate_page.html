@@ -62,7 +62,8 @@
   <div class="card-header"><span class="icon">💸</span><span class="name">主 → 子划转</span></div>
   <div class="form-row">
     <div><label>目标子账号</label><select id="subSelect"></select></div>
-    <div><label>金额（USDT）</label><input id="amountInput" type="number" min="0" step="0.000001" placeholder="0.00"></div>
+    <div><label>币种</label><select id="currencySelect"></select></div>
+    <div><label>金额</label><input id="amountInput" type="number" min="0" step="0.000001" placeholder="0.00"></div>
     <button id="transferBtn" class="btn primary">发起划转</button>
   </div>
   <div id="confirmBox" style="display:none">
@@ -138,6 +139,16 @@ function render(d) {
     '<option value="' + a.name + '">' + a.name + '（slot ' + a.slot + '）</option>'
   ).join('');
   if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+
+  // currency select — from main-account balances (USDT default + holdings)
+  const curSel = document.getElementById('currencySelect');
+  const prevCur = curSel.value;
+  const currs = ['USDT'];
+  ((main.balances || {}).holdings || []).forEach(h => {
+    if (!currs.includes(h.currency)) currs.push(h.currency);
+  });
+  curSel.innerHTML = currs.map(c => '<option value="' + c + '">' + c + '</option>').join('');
+  if (prevCur && currs.includes(prevCur)) curSel.value = prevCur;
 }
 
 function showMsg(text, isErr) {
@@ -149,11 +160,12 @@ function showMsg(text, isErr) {
 async function startTransfer() {
   showMsg('');
   const sub = document.getElementById('subSelect').value;
+  const currency = document.getElementById('currencySelect').value || 'USDT';
   const amount = document.getElementById('amountInput').value;
   if (!sub || !amount) { showMsg('请选择目标子账号并输入金额', true); return; }
   const resp = await fetch('/config/gate/transfer', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sub, amount})
+    body: JSON.stringify({sub, amount, currency})
   });
   const d = await resp.json();
   if (!d.ok) { showMsg(d.error || '发起失败', true); return; }

@@ -339,7 +339,8 @@ class TestGateHandlers:
         def fake_transfer(amount, target_sub, currency):
             called["amount"] = amount
             called["sub"] = target_sub
-            return {"currency": "USDT", "sub_account": "59175220", "amount": amount}
+            called["currency"] = currency
+            return {"currency": currency, "sub_account": "59175220", "amount": amount}
 
         monkeypatch.setattr("nanobot_quant.gate_handlers.sub_account_transfer", fake_transfer)
         _TRANSFER_PENDING.clear()
@@ -351,6 +352,21 @@ class TestGateHandlers:
         assert data["ok"] is True
         assert called["sub"] == "gate_bot1"
         assert called["amount"] == "2.25"
+        assert called["currency"] == "USDT"  # default when omitted
+        assert "USDT" in data["summary"]
+
+    def test_transfer_custom_currency(self, monkeypatch):
+        monkeypatch.setattr("nanobot_quant.gate_handlers.load_gate_credentials", lambda: CREDS)
+        handler = _guarded(_register(monkeypatch), "/config/gate/transfer")
+        _TRANSFER_PENDING.clear()
+        resp = asyncio.run(handler(_FakeRequest(user=_commander(), body={"sub": "gate_bot1", "amount": "0.01", "currency": "btc"})))
+        assert resp.status_code == 200
+        data = json.loads(resp.body.decode())
+        assert data["ok"] is True
+        assert data["summary"] == "主账号 → gate_bot1 0.01 BTC"
+        tx = _TRANSFER_PENDING[data["tx_id"]]
+        assert tx["currency"] == "BTC"  # normalized to upper case
+        assert tx["amount"] == "0.01"
 
     def test_confirm_failure_returns_502(self, monkeypatch):
         monkeypatch.setattr("nanobot_quant.gate_handlers.load_gate_credentials", lambda: CREDS)

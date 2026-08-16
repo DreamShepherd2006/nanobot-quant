@@ -127,6 +127,7 @@ async def gate_transfer(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "无效的 JSON"}, status_code=400)
     sub = str(body.get("sub") or "").strip()
     amount = str(body.get("amount") or "").strip()
+    currency = str(body.get("currency") or "USDT").strip().upper() or "USDT"
     if not sub or not amount:
         return JSONResponse({"ok": False, "error": "缺少目标子账号或金额"}, status_code=400)
     try:
@@ -155,7 +156,7 @@ async def gate_transfer(request: Request) -> JSONResponse:
         _TRANSFER_PENDING[tx_id] = {
             "sub": sub,
             "amount": f"{amt:.8f}".rstrip("0").rstrip("."),
-            "currency": "USDT",
+            "currency": currency,
             "expires_at": time.time() + _TRANSFER_TTL,
         }
     return JSONResponse(
@@ -163,7 +164,7 @@ async def gate_transfer(request: Request) -> JSONResponse:
             "ok": True,
             "tx_id": tx_id,
             "ttl": _TRANSFER_TTL,
-            "summary": f"主账号 → {sub} {amt} USDT",
+            "summary": f"主账号 → {sub} {amt} {currency}",
         }
     )
 
@@ -197,7 +198,7 @@ async def gate_transfer_confirm(request: Request) -> JSONResponse:
         {
             "ok": True,
             "result": result,
-            "summary": f"主账号 → {pending['sub']} {pending['amount']} USDT",
+            "summary": f"主账号 → {pending['sub']} {pending['amount']} {pending['currency']}",
         }
     )
 
