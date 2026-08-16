@@ -178,6 +178,6 @@ def sub_account_balances(
     api = make_wallet_api(api_key, api_secret)
     rows = _call(
         "sub_account_balances",
-        lambda: api.list_sub_account_balances(sub_account_id=sub_uid),
+        lambda: api.list_sub_account_balances(sub_uid=sub_uid),
     )
     return [r.to_dict() for r in (rows or []) if isinstance(r, SubAccountBalance)]

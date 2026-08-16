@@ -52,11 +52,11 @@ class _FakeWalletApi:
         self.calls.append(("transfer", sub_account_transfer))
         return sub_account_transfer
 
-    def list_sub_account_balances(self, sub_account_id=None, currency=None, **kwargs):
-        self.calls.append(("balances", sub_account_id))
+    def list_sub_account_balances(self, sub_uid=None, page=None, limit=None, **kwargs):
+        self.calls.append(("balances", sub_uid))
         return [
             gate_api.SubAccountBalance(
-                uid=sub_account_id or "59175220",
+                uid=sub_uid or "59175220",
                 available={"USDT": "10.0"},
                 locking={},
             )

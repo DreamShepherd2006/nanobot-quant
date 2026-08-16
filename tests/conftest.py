@@ -221,7 +221,7 @@ except ImportError:
         def transfer_with_sub_account(self, sub_account_transfer, **kwargs):
             return sub_account_transfer
 
-        def list_sub_account_balances(self, sub_account_id=None, currency=None, **kwargs):
+        def list_sub_account_balances(self, sub_uid=None, page=None, limit=None, **kwargs):
             return []
 
     for _name, _obj in {
