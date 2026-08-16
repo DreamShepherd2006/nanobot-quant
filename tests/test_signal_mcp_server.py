@@ -43,6 +43,7 @@ EXPECTED_TOOLS = {
     "wallet_history",
     "wallet_add",
     "wallet_switch",
+    "cex_sub_order",
 }
 
 
@@ -50,7 +51,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_initialize_and_list_19_tools():
+def test_initialize_and_list_20_tools():
     async def scenario():
         async with stdio_client(SERVER_PARAMS) as (read, write):
             async with ClientSession(read, write) as session:

@@ -66,6 +66,7 @@ from nanobot_quant.tools.tools_wallet import (
 )
 from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import get_backtest_result, run_backtest
+from nanobot_quant.tools.tools_cex import cex_sub_order
 from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import (
     _redirect_lumibot_console_to_stderr,
@@ -204,6 +205,12 @@ _TOOL_DESCRIPTIONS = {
         "[退役] Loop 模式已由 P2 B3 移除 — execute_signal 现在总是同步直调，"
         "结果直接包含在 execute_signal 的响应中。此工具仅返回 retired 说明。"
     ),
+    "cex_sub_order": (
+        "在指定子账号（gate_bot1..5）用其自身 API Key 下 Gate 市价单（官方 gate-api SDK）。"
+        "用于验证子账号交易链路（P3 TD 分批下单前置）及手动子账号下单/对账。"
+        "side=buy → amount 为 USDT 金额；side=sell → amount 为基础币数量。"
+        "返回 status=filled（成交明细）/ pending（已提交未 closed）/ error（明确原因）。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -215,6 +222,7 @@ _TOOL_DISPATCH = {
     "get_execution_outcome": get_execution_outcome,
     "run_backtest": run_backtest,
     "get_backtest_result": get_backtest_result,
+    "cex_sub_order": cex_sub_order,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,
