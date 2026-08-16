@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse
 
 from nanobot_quant.data_sources import data_source_for_channel, get_data_source
 from nanobot_quant.exec_params import load_exec_params
-from nanobot_quant.gate_credentials import gate_pair, load_tokens_json
+from nanobot_quant.gate_credentials import gate_pair, load_tokens_json, okx_ticker
 from nanobot_quant.onchainos_cli import resolve_token, token_json_path
 from nanobot_quant.strategies.registry import get_strategy, load_selected, resolve_engine_cls
 from nanobot_quant.td_params import load_td_params
@@ -44,10 +44,15 @@ _DEFAULT_TICKER = "SOL"
 _DEFAULT_LIMIT = 60
 _DEFAULT_HISTORY_DAYS = 90
 
-_SOURCES = ("onchainos", "stock", "cex")
+_SOURCES = ("onchainos", "cex", "okx_cex", "stock")
 
-# 页面 source 值 → 注册表源名（页面保留三视图，取数统一走注册表）。
-_PAGE_SOURCE_TO_SOURCE = {"onchainos": "onchainos", "stock": "eastmoney", "cex": "gate_cex"}
+# 页面 source 值 → 注册表源名（页面保留四视图，取数统一走注册表）。
+_PAGE_SOURCE_TO_SOURCE = {
+    "onchainos": "onchainos",
+    "cex": "gate_cex",
+    "okx_cex": "okx_cex",
+    "stock": "eastmoney",
+}
 
 
 def _default_source() -> str:
@@ -399,15 +404,18 @@ def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, sou
     source_opts = (
         '<label>数据源</label><select name="source">'
         '<option value="onchainos"%s>链上 DEX (OnchainOS)</option>'
-        '<option value="stock"%s>股票 (东财/yfinance)</option>'
-        '<option value="cex"%s>Gate CEX (执行同源)</option></select>'
+        '<option value="cex"%s>Gate CEX (执行同源)</option>'
+        '<option value="okx_cex"%s>OKX CEX (回测/展示)</option>'
+        '<option value="stock"%s>股票 (东财/yfinance)</option></select>'
         % (" selected" if source == "onchainos" else "",
-           " selected" if source == "stock" else "",
-           " selected" if source == "cex" else "")
+           " selected" if source == "cex" else "",
+           " selected" if source == "okx_cex" else "",
+           " selected" if source == "stock" else "")
     )
     placeholder = {
         "stock": "NVDA / 601127",
         "cex": "CRCLX / SOL / AAPL",
+        "okx_cex": "SOL / XSPCX",
         "onchainos": "SOL / BTC",
     }.get(source, "SOL / BTC")
     if tab == "live":
@@ -881,6 +889,12 @@ def _fetch_cex_kline(ticker, bar="1D", limit=120, start=None, end=None):
         ticker, bar=bar, limit=limit, start=start, end=end)
 
 
+def _fetch_okx_cex_kline(ticker, bar="1D", limit=120, start=None, end=None):
+    """OKX CEX K 线——经数据源注册表（okx_cex，research 源，仅回测/展示）。"""
+    return get_data_source("okx_cex").fetch_kline(
+        ticker, bar=bar, limit=limit, start=start, end=end)
+
+
 def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
                      entry_setup=None, exit_setup=None, exit_cd=None,
                      source="onchainos"):
@@ -902,6 +916,15 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
             return ('<div class="banner err">%s 无 %s Gate CEX K 线数据（可能是未登记代币或交易对不存在）。</div>'
                     % (_esc(ticker), _esc(bar))), None
         src_label = "Gate CEX（%s）" % _esc(gate_pair(ticker, load_tokens_json()))
+    elif source == "okx_cex":
+        try:
+            df = _fetch_okx_cex_kline(ticker, bar=bar, limit=limit)
+        except Exception as exc:
+            return ('<div class="banner err">OKX CEX 数据获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 无 %s OKX CEX K 线数据（可能是未登记 okx_symbol 或交易对不存在）。</div>'
+                    % (_esc(ticker), _esc(bar))), None
+        src_label = "OKX CEX（%s）· 回测/展示，不参与执行" % _esc(okx_ticker(ticker, load_tokens_json()))
     else:
         resolved = _resolve_for_table(ticker)
         if not resolved.get("ok"):
@@ -954,6 +977,15 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
             return ('<div class="banner err">%s 在 %s ~ %s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
         src_label = "股票（%s）" % _esc(ticker)
+    elif source == "okx_cex":
+        try:
+            df = _fetch_okx_cex_kline(ticker, bar=bar, start=start_dt, end=end_dt)
+        except Exception as exc:
+            return ('<div class="banner err">OKX CEX 数据获取失败：%s</div>' % _esc(exc)), None
+        if df.empty:
+            return ('<div class="banner err">%s 在 %s ~ %s 无 %s OKX CEX K 线数据。</div>'
+                    % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
+        src_label = "OKX CEX（%s）· 回测/展示，不参与执行" % _esc(okx_ticker(ticker, load_tokens_json()))
     elif source == "cex":
         try:
             df = _fetch_cex_kline(ticker, bar=bar, start=start_dt, end=end_dt)
