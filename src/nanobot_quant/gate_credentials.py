@@ -273,7 +273,7 @@ def sub_account_transfer(
         currency=currency,
         sub_uid=uid,
         amount=str(amount),
-        direction="deposit",
+        direction="to",
     )
 
 

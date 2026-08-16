@@ -135,7 +135,7 @@ class TestSubAccountTransfer:
         assert captured["currency"] == "USDT"
         assert captured["sub_uid"] == "59175220"
         assert captured["amount"] == "1.5"
-        assert captured["direction"] == "deposit"  # main → sub
+        assert captured["direction"] == "to"  # main → sub
         assert captured["api_key"] == "k"
         assert out["sub_account"] == "59175220"
 

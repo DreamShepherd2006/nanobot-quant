@@ -66,7 +66,19 @@ def _call(label: str, fn) -> Any:
     try:
         return fn()
     except ApiException as exc:
-        msg = f"{label} failed: HTTP {exc.status} {exc.reason or ''}".strip()
+        body = getattr(exc, "body", None)
+        detail = ""
+        if body:
+            if isinstance(body, dict):
+                detail = f" {body.get('label', '')} {body.get('message', '')}".rstrip()
+            elif isinstance(body, (bytes, bytearray)):
+                try:
+                    detail = f" {body.decode('utf-8', 'replace')}"
+                except Exception:
+                    detail = ""
+            else:
+                detail = f" {body}"
+        msg = f"{label} failed: HTTP {exc.status} {exc.reason or ''}{detail}".strip()
         raise RuntimeError(msg) from exc
 
 
@@ -143,12 +155,14 @@ def transfer_to_sub(
     currency: str,
     sub_uid: str,
     amount: str,
-    direction: str = "deposit",
+    direction: str = "to",
 ) -> dict:
     """Transfer between main and sub accounts (in-house, instant).
 
-    ``direction``: ``deposit`` = main → sub (default), ``withdraw`` = sub → main.
-    ``sub_uid`` is the numeric sub-account UID. Returns the transfer as a dict.
+    ``direction``: ``to`` = main → sub (default), ``from`` = sub → main
+    (Gate v4 enum — NOT deposit/withdraw, which the API rejects with
+    INVALID_PARAM_VALUE). ``sub_uid`` is the numeric sub-account UID.
+    Returns the transfer as a dict.
     """
     if not currency or not sub_uid or not amount:
         raise RuntimeError("transfer_to_sub 缺少必要参数（currency/sub_uid/amount）")
