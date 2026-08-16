@@ -24,8 +24,8 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
 
     Args:
         ticker_signal_json: JSON string of signal(s).
-        live: If True, submit orders to OnchainOSBroker for on-chain
-              execution.  Default False (paper-only).
+        live: If True, submit orders to the active broker (DEX=OnchainOSBroker / CEX=CexBroker) for real execution.
+              Default False (dry-run: risk checks + suggested order, no execution).
         confirm: Explicit user confirmation for a questionable tokens.json
                  entry (default False).  When a token needs confirmation
                  this returns error=needs_confirmation without executing;
@@ -64,7 +64,7 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
     effective_live = bool(live) and webui_live
     if live and not webui_live:
         print(
-            "[DIAG] execute_signal: live requested but WebUI toggle is OFF — forcing paper",
+            "[DIAG] execute_signal: live requested but WebUI toggle is OFF — forcing dry-run (no execution)",
             file=sys.stderr, flush=True,
         )
 
@@ -168,7 +168,7 @@ def execute_signal(ticker_signal_json: str, *, live: bool = False, confirm: bool
 
         if live and not webui_live:
             summary["live_blocked"] = (
-                "live 已请求但 WebUI 实盘开关未开启（/config/live），订单已强制走纸面路径"
+                "live 已请求但 WebUI 实盘开关未开启（/config/live），订单未实际执行（dry-run：仅风控校验 + 订单建议）"
             )
 
         if effective_live:
