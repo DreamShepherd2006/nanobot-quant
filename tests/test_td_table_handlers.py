@@ -179,9 +179,41 @@ def test_page_renders_with_mocked_data(monkeypatch):
     assert "当前策略" in body
 
 
-def test_page_renders_history_with_mocked_data(monkeypatch):
+def test_page_renders_okx_cex_source(monkeypatch):
+    """OKX CEX 四平选项 + research 徽标（来源行，不参与执行）。"""
     import nanobot_quant.td_table_handlers as mod
 
+    closes = list(range(100, 105)) + list(range(100, 91, -1))
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+
+    class _FakeOkx:
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            return df
+
+    monkeypatch.setattr(mod, "get_data_source",
+                        lambda name: _FakeOkx() if name == "okx_cex"
+                        else mod.get_data_source(name))
+    monkeypatch.setattr(mod, "okx_ticker", lambda t, tokens: "XSOL-USDT")
+    monkeypatch.setattr(mod, "load_tokens_json", lambda: {})
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    body = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "SOL", "bar": "1D",
+                                      "limit": "60", "source": "okx_cex"})).body.decode()
+    assert "OKX CEX (回测/展示)" in body  # 四平选项
+    assert "OKX CEX（XSOL-USDT）· 回测/展示，不参与执行" in body  # 来源行 research 徽标
+    assert "Gate CEX (执行同源)" in body  # 其余选项仍在
+
+
+def test_page_renders_history_with_mocked_data(monkeypatch):
+    import nanobot_quant.td_table_handlers as mod
     closes = list(range(100, 105)) + list(range(100, 91, -1))
     df = pd.DataFrame(
         {"open": closes, "high": [c + 1 for c in closes],
