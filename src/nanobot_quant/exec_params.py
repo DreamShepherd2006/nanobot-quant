@@ -102,7 +102,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "execution_channel": {
         "group": "exec", "type": "enum", "enum": list(EXECUTION_CHANNELS), "std": "dex",
-        "label": "执行通道", "hint": "dex=链上 DEX（OnchainOS 子钱包，默认）；cex=Gate.io 交易所（子账号，需在凭证管理配置 Gate API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到 cex 时 TD 循环 K 线数据源联动切换为 OKX CEX 公共端点",
+        "enum_labels": {
+            "dex": "dex（OKX DEX · 链上子钱包）",
+            "cex": "cex（Gate.io · 交易所子账号）",
+        },
+        "label": "执行通道", "hint": "按大类二选一（未来多所经注册表扩展）：dex=链上 DEX（OnchainOS 子钱包，默认）；cex=Gate.io 交易所（子账号，需在凭证管理配置 Gate API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到 cex 时 TD 循环 K 线数据源联动切换为 Gate CEX 公共端点（与执行同所）",
     },
     "td_enabled": {
         "group": "td", "type": "bool", "std": False,

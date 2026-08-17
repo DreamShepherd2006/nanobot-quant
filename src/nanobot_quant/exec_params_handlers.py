@@ -68,8 +68,10 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
         )
     if vtype == "enum":
         choices = meta["enum"]
+        labels = meta.get("enum_labels") or {}
         opts = "".join(
-            f'<option value="{c}" {"selected" if str(value) == c else ""}>{c}</option>'
+            f'<option value="{c}" {"selected" if str(value) == c else ""}>'
+            f'{labels.get(c, c)}</option>'
             for c in choices
         )
         return (
