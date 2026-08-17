@@ -309,11 +309,12 @@ class TdSequentialStrategy(Strategy):
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。"""
         # ── 1. Fetch historical data ──
         # 数据源契约：Gate CEX（drops_in_progress_bars=True）在 rows_to_df 已过滤
-        # 进行中 bar；OnchainOS（DEX）返回含进行中 bar——只有后者需多拉 1 根并
-        # 丢弃（2026-08-17 A 修复第二部分：gate_cex 曾 121→源过滤→120→策略再丢
-        # →119 < min_history 永久 SKIP，双重丢弃）。
-        _src = getattr(self, "data_source", None)
-        _drops_in_progress = bool(getattr(_src, "drops_in_progress_bars", False))
+        # 进行中 bar；OnchainOS（DEX，无该参数默认 False）返回含进行中 bar——
+        # 只有后者需多拉 1 根并丢弃（2026-08-17 A 修复第二部分：gate_cex 曾
+        # 121→源过滤→120→策略再丢→119 < min_history 永久 SKIP，双重丢弃）。
+        # 契约由 td_live 从 broker.data_source 读取并注入 parameters（lumibot
+        # Strategy 基类不保存 data_source，策略无法自取）。
+        _drops_in_progress = bool(self.parameters.get("drops_in_progress_bars", False))
         drop_in_progress = self._is_live_broker and not _drops_in_progress
 
         fetch_len = self._min_history

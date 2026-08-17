@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import types
 
 import pandas as pd
 
@@ -193,12 +192,12 @@ def test_on_trading_iteration_uses_fixed_window(monkeypatch):
 
 
 def test_live_gate_source_no_double_drop(monkeypatch):
-    """A 修复第二部分回归：数据源已过滤进行中 bar（gate_cex drops=True）时，
-    live 不多拉 1 根、不再丢——双重丢弃会得到 119 < min_history 永久 SKIP。
-    """
+    """A 修复第二部分回归：数据源已过滤进行中 bar（gate_cex drops=True，td_live
+    注入 parameters）时，live 不多拉 1 根、不再丢——双重丢弃会得到
+    119 < min_history 永久 SKIP。"""
     s = _make_strategy(min_history=50)
     s._is_live_broker = True
-    s.data_source = types.SimpleNamespace(drops_in_progress_bars=True)
+    s.parameters["drops_in_progress_bars"] = True  # td_live 从 broker.data_source 注入
     calls: list[int] = []
 
     def _record(symbol, length, timestep):
@@ -212,11 +211,11 @@ def test_live_gate_source_no_double_drop(monkeypatch):
 
 
 def test_live_onchainos_source_drops_one(monkeypatch):
-    """OnchainOS（DEX）数据源无 drops 属性（含进行中 bar）：live 保持原行为
+    """OnchainOS（DEX）数据源无 drops 契约（含进行中 bar）：live 保持原行为
     多拉 1 根供丢弃（方案 C，2026-08-11）。"""
     s = _make_strategy(min_history=50)
     s._is_live_broker = True
-    s.data_source = types.SimpleNamespace()  # 无 drops_in_progress_bars
+    s.parameters["drops_in_progress_bars"] = False  # 默认（未注入）
     calls: list[int] = []
 
     def _record(symbol, length, timestep):
