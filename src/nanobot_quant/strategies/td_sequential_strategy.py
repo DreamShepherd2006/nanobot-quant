@@ -16,6 +16,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import sys
 
 from lumibot.strategies.strategy import Strategy
@@ -113,6 +114,21 @@ class TdSequentialStrategy(Strategy):
             self.parameters.get("min_history", 120) or 120
         )
         self._peak_portfolio = None  # track peak for drawdown calc
+
+        # TD 循环日志可见性（2026-08-17）：gatekeeper 进程无 logging handler，
+        # logger.info 被 Python lastResort 静默丢弃（仅 WARNING+ 到 stderr）——
+        # BUY/SELL 分支（TD BATCH LONG / TD BATCH EXIT / TD SLOT SKIP 等）全是
+        # logger.info，实盘静默不可见。策略 logger 显式挂 stderr handler，
+        # 使 INFO 级直达 gatekeeper 日志（与 HOLD/BLOCK 的 print(stderr) 同可见）。
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False  # 阻断 root/lastResort 重复输出
+        if not any(
+            isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
+            for h in self.logger.handlers
+        ):
+            _h = logging.StreamHandler(sys.stderr)
+            _h.setFormatter(logging.Formatter("%(message)s"))
+            self.logger.addHandler(_h)
 
         # Build RiskEngine from parameters
         self._risk = RiskEngine(
