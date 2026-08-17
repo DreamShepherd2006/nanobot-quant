@@ -75,22 +75,14 @@ class _TdLiveRunner:
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
-        # 执行通道（2026-08-14，P2；方案 C 后为实例名）：gate=Gate.io 交易所；
-        # okx_dex=链上 DEX（默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
-        channel = str(params.get("execution_channel", "okx_dex"))
+        # 执行通道（2026-08-14，P2）：cex=Gate.io 交易所；dex=链上 DEX
+        # （默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
+        channel = str(params.get("execution_channel", "dex"))
         # 统一 broker 构造：broker 注册表（第十九章，2026-08-17）——
-        # 通道值=spec 实例名（gate/okx_dex），旧值 dex/cex 自动归一化，未知通道
+        # CHANNEL_BROKER 唯一映射（dex→okx_dex、cex→gate），未知通道
         # fail-closed（KeyError），绝不静默回退到别所下单。
-        from nanobot_quant.brokers.registry import (
-            broker_for_channel,
-            spec_for_channel,
-        )
+        from nanobot_quant.brokers.registry import broker_for_channel
 
-        # 通道大类（family）：从 broker spec 解析（gate→cex、okx_dex→dex），
-        # 不可直接用 execution_channel 实例名判断——方案 C 值域已从大类改为
-        # 实例名（2026-08-17 修复：曾注入实例名导致 gate 通道下
-        # channel_family="gate"≠"cex"，CEX 对账跳过判断失效、DEX 对账误跑）。
-        family = spec_for_channel(channel).family
         broker = broker_for_channel(
             channel,
             tokens_json=tokens,
@@ -130,10 +122,8 @@ class _TdLiveRunner:
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
                 "strategy_variant": strategy_name,
-                # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据；
-                # 2026-08-17 修复：取 broker spec.family（gate→cex、okx_dex→dex），
-                # 不可用 execution_channel 实例名（"gate"≠"cex" 会误判）。
-                "channel_family": family,
+                # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据
+                "channel_family": channel,
             },
             **td_params,
         )
@@ -153,7 +143,7 @@ class _TdLiveRunner:
         # 标的池（多标的扫描）：每标的独立台账（batches.{symbol}.json）。
         td_batches = int(params.get("td_batches", 1) or 1)
         symbols = params["td_symbols"]
-        channel = str(params.get("execution_channel", "okx_dex"))
+        channel = str(params.get("execution_channel", "dex"))
         if td_batches > 1:
             strategy.batch_managers = self._prepare_all_batches(
                 td_batches, symbols, channel

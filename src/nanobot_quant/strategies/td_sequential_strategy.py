@@ -165,6 +165,8 @@ class TdSequentialStrategy(Strategy):
         # 未成交”的账实脱管（RENDER 3.06 实证）。
         self._pending_sells: dict[int, dict] = {}
         self._pending_buys: dict[int, dict] = {}
+        # ── CEX 通道（Step 1，2026-08-17）：slot → 子账号 CexBroker 缓存 ──
+        self._cex_brokers: dict[int, Any] = {}
 
         # TD algorithm params (subset of the strategy parameters dict)
         self._td_params = {
@@ -478,23 +480,29 @@ class TdSequentialStrategy(Strategy):
                         break
                     # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
                     # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
-                    pend = (order.custom_params or {}).get("onchain_pending") or {}
+                    if self._is_cex():
+                        # CEX：无链上 hash——order_id 来自 CexBroker 设置的 identifier
+                        pend, order_id, chain = {}, order.identifier, ""
+                    else:
+                        pend = (order.custom_params or {}).get("onchain_pending") or {}
+                        order_id, chain = pend.get("order_id", ""), pend.get("chain", "")
                     # DIAG（2026-08-12）：打印提交后 pending 记录——确认 tx_hash/order_id
                     self.logger.info(
                         "TD BUY SUBMIT | slot=%s symbol=%s tx_hash=%s order_id=%s chain=%s",
                         slot["slot"], self.symbol,
                         (pend.get("tx_hash") or "-")[:20],
-                        (pend.get("order_id") or "-")[:20],
-                        pend.get("chain", ""),
+                        (order_id or "-")[:20],
+                        chain,
                     )
                     self._pending_buys[slot["slot"]] = {
                         "slot": slot["slot"],
                         "tx_hash": pend.get("tx_hash", ""),
-                        "order_id": pend.get("order_id", ""),
-                        "chain": pend.get("chain", ""),
+                        "order_id": order_id,
+                        "chain": chain,
                         "qty": qty, "price": price, "reason": reason,
                         "account_id": slot.get("account_id", ""),
                         "symbol": self.symbol,
+                        "cex": self._is_cex(),
                     }
                     self.logger.info(
                         f"TD BATCH LONG PENDING | symbol={self.symbol} slot={slot['slot']} "
@@ -645,6 +653,9 @@ class TdSequentialStrategy(Strategy):
         对账导入时已扣减（导入量 = 余额 − min_hold），SELL 缩量卖出时
         同样保留 min_hold，防止卖出 gas 后子钱包无法交易。
         """
+        if self._is_cex():
+            # CEX 通道无 gas 保留概念（交易所内资金/持仓，无链上手续费）
+            return 0.0
         try:
             from nanobot_quant.tokens_store import token_meta
             tokens = self.parameters.get("tokens_json") or []
@@ -672,6 +683,8 @@ class TdSequentialStrategy(Strategy):
         保持 open，下轮可重试）。彻底消除“提交成功但链上未成交”导致
         的账实脱管（RENDER 3.06 实证）。
         """
+        if self._is_cex():
+            return self._sell_lot_cex(slot, price, signal, exit_reason)
         if slot["slot"] in self._pending_sells:
             return  # 该 slot 已有卖出待确认，防重复卖
         lot = self.batch_manager.get_lot(slot["slot"])
@@ -826,6 +839,8 @@ class TdSequentialStrategy(Strategy):
         home = self._home_account_id()
         for slot_id in list(self._pending_sells):
             info = self._pending_sells[slot_id]
+            if info.get("cex"):
+                continue  # CEX pending 确认在 Step 2（2026-08-17）——台账保持 open
             aid = info.get("account_id", "")
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
@@ -926,6 +941,8 @@ class TdSequentialStrategy(Strategy):
                         self.logger.warning(f"TD RESTORE ERR | {exc}")
         for slot_id in list(self._pending_buys):
             info = self._pending_buys[slot_id]
+            if info.get("cex"):
+                continue  # CEX pending 确认在 Step 2（2026-08-17）——不 open_lot（fail-safe）
             aid = info.get("account_id", "")
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
@@ -1153,6 +1170,8 @@ class TdSequentialStrategy(Strategy):
         返回 (order, qty) 或 None（switch 失败/余额查询失败/低于资金门槛/
         风控拒绝/USDC 不足 → 调用方跳下一 slot）。
         """
+        if self._is_cex():
+            return self._buy_on_slot_cex(slot, price, reason)
         aid = slot.get("account_id")
         home = self._home_account_id()
         if aid and not self._wallet_switch(aid):
@@ -1231,6 +1250,277 @@ class TdSequentialStrategy(Strategy):
                     self._wallet_switch(home)
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning(f"TD RESTORE ERR | symbol={self.symbol} {exc}")
+
+    # ── CEX 通道（Step 1，2026-08-17）──────────────────────────────
+    # 与 DEX 真分账对称：批次状态机不变（slot 可用性/台账/平仓顺序），只换
+    # 「钱在哪、怎么下单」——子账号独立 key，无 wallet_switch；pv_slot = 子
+    # 账号总资产（USDT + 持仓×Gate 价）；quote = USDT。
+
+    def _is_cex(self) -> bool:
+        """执行通道大类：cex=Gate 交易所子账号；dex=链上子钱包（默认）。"""
+        return self.parameters.get("channel_family") == "cex"
+
+    def _cex_slot_broker(self, slot: dict) -> Any:
+        """slot → 子账号 CexBroker（子账号 key 签名；缓存，避免每轮重建）。"""
+        slot_no = int(slot["slot"])
+        broker = self._cex_brokers.get(slot_no)
+        if broker is None:
+            from nanobot_quant.brokers.cex_broker import CexBroker
+            from nanobot_quant.gate_credentials import load_slot_map
+            name = load_slot_map().get(str(slot_no)) or f"gate_bot{slot_no}"
+            broker = CexBroker(
+                tokens_json=self.parameters.get("tokens_json") or [],
+                slippage=str(self.parameters.get("slippage", "0.01")),
+                sub_account=name,
+            )
+            self._cex_brokers[slot_no] = broker
+        return broker
+
+    def _cex_slot_balances(self, slot: dict) -> dict:
+        """子账号 spot 余额 {CURRENCY: {available, locked}}；失败返回 {}。"""
+        try:
+            return self._cex_slot_broker(slot)._balances()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD CEX BAL ERR | symbol={self.symbol} slot={slot['slot']} {exc}"
+            )
+            return {}
+
+    def _cex_slot_quote_balance(self, slot: dict, quote: str = "USDT") -> float:
+        """子账号 quote 币种可用+锁定余额。"""
+        bal = self._cex_slot_balances(slot).get(quote) or {}
+        return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
+
+    def _cex_slot_token_balance(self, slot: dict, symbol: str) -> float:
+        """子账号该标的持仓量（tokens.json gate_symbol 优先，回退 symbol）。"""
+        token = next(
+            (
+                t
+                for t in (self.parameters.get("tokens_json") or [])
+                if str(t.get("symbol") or "").upper() == str(symbol).upper()
+            ),
+            None,
+        )
+        key = str((token or {}).get("gate_symbol") or symbol).upper()
+        bal = self._cex_slot_balances(slot).get(key) or {}
+        return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
+
+    def _cex_slot_portfolio_value(self, slot: dict) -> float:
+        """子账号总资产 USD：USDT + Σ(持仓 × Gate 价)；失败返回 0（fail-closed）。"""
+        try:
+            balances = self._cex_slot_balances(slot)
+            total = 0.0
+            for cur, b in balances.items():
+                avail = float(b.get("available") or 0) + float(b.get("locked") or 0)
+                if avail <= 0:
+                    continue
+                if cur == "USDT":
+                    total += avail
+                else:
+                    try:
+                        px = self._cex_price_of(cur)
+                    except Exception:  # noqa: BLE001
+                        px = 0.0
+                    total += avail * px
+            return total
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD CEX PV ERR | symbol={self.symbol} slot={slot['slot']} {exc}"
+            )
+            return 0.0
+
+    def _cex_price_of(self, currency: str) -> float:
+        """Gate 计价（子账号持仓估值用）：gate_cex 优先，okx_cex 兜底。"""
+        try:
+            from nanobot_quant.data_sources import get_data_source
+            px = get_data_source("gate_cex").get_price(currency)
+            if px and px > 0:
+                return float(px)
+            px = get_data_source("okx_cex").get_price(currency)
+            return float(px) if px and px > 0 else 0.0
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _cex_submit(self, slot: dict, req) -> Any:
+        """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。"""
+        return self._cex_slot_broker(slot).submit_order(
+            self.create_order(req.asset, req.quantity, req.action)
+        )
+
+    def _buy_on_slot_cex(self, slot: dict, price: float, reason: str):
+        """CEX 通道 BUY（Step 1）：子账号独立 key，无 wallet_switch；
+
+        pv_slot = 子账号总资产（USDT + 持仓×Gate 价）→ min_account_value
+        → qty（fixed/value）→ position_limit（pv_slot 基准）→ USDT 资金
+        检查 → 子账号 broker 下单。返回 (order, qty) 或 None（跳下一 slot）。
+        """
+        try:
+            pv_slot = self._cex_slot_portfolio_value(slot)
+            if pv_slot <= 0:
+                self.logger.warning(
+                    f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 余额查询失败/为零"
+                )
+                return None
+            min_v = float(self.parameters.get("min_account_value", 0) or 0)
+            if min_v > 0 and pv_slot < min_v:
+                self.logger.warning(
+                    f"TD SLOT SKIP (min_account_value) | symbol={self.symbol} slot={slot['slot']} "
+                    f"pv=${pv_slot:.2f} < ${min_v:.2f}"
+                )
+                return None
+            if self.quantity_mode == "value":
+                qty = pv_slot * self._risk.max_position_pct / price if price > 0 else 0.0
+            else:
+                qty = float(self.quantity or 0)
+            if qty <= 0:
+                return None
+            result = self._risk.can_enter(
+                position_value=qty * price,
+                portfolio_value=pv_slot,
+                peak_portfolio=pv_slot,
+            )
+            if not result.approved:
+                print(
+                    f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} slot={slot['slot']} "
+                    f"pos=${qty * price:.2f} > "
+                    f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
+                    file=sys.stderr, flush=True,
+                )
+                return None
+            bal = self._cex_slot_quote_balance(slot, "USDT")
+            needed = qty * price
+            if bal < needed:
+                self.logger.warning(
+                    f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 资金不足 "
+                    f"({bal:.4f} < {needed:.4f} USDT)"
+                )
+                return None
+            req = self._portfolio.build_buy_order(
+                self.symbol, price, reason, quantity=qty,
+            )
+            order = self._cex_submit(slot, req)
+            if order is None or _order_error(order):
+                err = _order_error(order) or "order is None"
+                self.logger.info(
+                    f"TD BATCH BUY FAIL | symbol={self.symbol} slot={slot['slot']} "
+                    f"price={price:.2f} qty={qty} {err}"
+                )
+                self._record(
+                    "BUY_FAIL", f"slot={slot['slot']} {err}",
+                    slot=slot["slot"], qty=qty, price=price,
+                    direction="buy", status="fail",
+                )
+                return None
+            return (order, qty)
+        finally:
+            pass  # CEX 无 switch/还原
+
+    def _sell_lot_cex(self, slot: dict, price: float, signal: dict, exit_reason: str) -> None:
+        """CEX 通道 SELL（Step 1）：子账号 key 查余额/下单；min_hold=0；
+
+        filled → close_lot；pending（5s 未 closed）→ _pending_sells（台账
+        保持 open，Step 2 补确认）；error → EXIT_FAIL（台账 open 可重试）。
+        余额为 0 → 幽灵批次释放台账（与 DEX 对称）。
+        """
+        if slot["slot"] in self._pending_sells:
+            return
+        lot = self.batch_manager.get_lot(slot["slot"])
+        if lot is None:
+            return
+        qty = float(lot["qty"])
+        try:
+            bal = self._cex_slot_token_balance(slot, self.symbol)
+            if bal <= 0:
+                # 子账号无持仓 → 幽灵批次，释放台账
+                self.batch_manager.close_lot(slot["slot"])
+                self.batch_manager.save()
+                self.logger.warning(
+                    f"TD BATCH EXIT SKIP | symbol={self.symbol} slot={slot['slot']} "
+                    f"子账号无持仓（台账 {qty} 已释放）"
+                )
+                self._record("EXIT_SKIP", f"slot={slot['slot']} 子账号无持仓")
+                return
+            if bal < qty:
+                qty = bal
+                self.logger.warning(
+                    f"TD BATCH EXIT SHRINK | symbol={self.symbol} slot={slot['slot']} "
+                    f"台账 {lot['qty']} 子账号 {bal:.6f} → 缩量卖出 {qty:.6f}"
+                )
+                self._record(
+                    "EXIT_SHRINK",
+                    f"slot={slot['slot']} 台账 {lot['qty']:.6g} 子账号 {bal:.6f} → 缩量",
+                )
+            req = self._portfolio.build_sell_order(
+                self.symbol, price, exit_reason,
+                quantity=qty,
+            )
+            order = self._cex_submit(slot, req)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD BATCH EXIT FAIL | symbol={self.symbol} slot={slot['slot']} {exc}"
+            )
+            self._record(
+                "EXIT_FAIL", f"slot={slot['slot']} {exc}",
+                slot=slot["slot"], qty=qty, price=price,
+                direction="sell", status="fail",
+            )
+            return
+        if order is not None and not _order_error(order):
+            if order.is_filled():
+                self.batch_manager.close_lot(slot["slot"])
+                self.batch_manager.save()
+                self.tracker.track(
+                    order_id=order.identifier,
+                    symbol=self.symbol,
+                    action="sell",
+                    quantity=qty,
+                    tag=f"signal:td-sell:{exit_reason}",
+                    signal=signal,
+                    reason=exit_reason,
+                )
+                self.logger.info(
+                    f"TD BATCH EXIT | symbol={self.symbol} slot={slot['slot']} price={price:.2f} "
+                    f"qty={qty} {exit_reason}"
+                )
+                self._record(
+                    "EXIT",
+                    f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                    slot=slot["slot"], qty=qty, price=price,
+                    direction="sell", status="ok",
+                )
+                return
+            # pending（5s 未 closed）→ 台账保持 open + pending 记录（Step 2 补确认）
+            self._pending_sells[slot["slot"]] = {
+                "slot": slot["slot"],
+                "order_id": order.identifier,
+                "qty": qty,
+                "price": price,
+                "exit_reason": exit_reason,
+                "account_id": slot.get("account_id", ""),
+                "symbol": self.symbol,
+                "cex": True,
+            }
+            self.logger.info(
+                f"TD BATCH EXIT PENDING | symbol={self.symbol} slot={slot['slot']} price={price:.2f} "
+                f"qty={qty} {exit_reason}"
+            )
+            self._record(
+                "EXIT_PENDING",
+                f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                slot=slot["slot"], qty=qty, price=price,
+                direction="sell", status="pending",
+            )
+            return
+        err = _order_error(order) or "order is None"
+        self.logger.warning(
+            f"TD BATCH EXIT FAIL | symbol={self.symbol} slot={slot['slot']} price={price:.2f} "
+            f"qty={qty} {exit_reason} error={err}"
+        )
+        self._record(
+            "EXIT_FAIL", f"slot={slot['slot']} {exit_reason} {err}",
+            slot=slot["slot"], qty=qty, price=price,
+            direction="sell", status="fail",
+        )
 
     def _slot_portfolio_value(self) -> float:
         """当前活跃（=目标 slot）子钱包总资产 USD；失败返回 0（fail-closed 跳过）。
