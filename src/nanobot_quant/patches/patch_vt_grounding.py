@@ -199,14 +199,14 @@ def _fetch_okx_cex_data(user_vars):
     """Enrich swarm run with the execution channel's CEX market data.
 
     同源约束（docs/quant-system.md §6.1）：CEX 富集数据来自当前执行通道
-    对应的注册表数据源——execution_channel=cex → gate_cex（Gate 订单簿
-    +ticker，与 CexBroker 同所）；dex 通道无 CEX 层（跳过）。函数名保留
+    对应的注册表数据源——execution_channel=gate → gate_cex（Gate 订单簿
+    +ticker，与 CexBroker 同所）；dex 家族无 CEX 层（跳过）。函数名保留
     （patch 注入点不变），内部实现跟随通道。
     """
     try:
         from nanobot_quant.data_sources import data_source_for_channel
         from nanobot_quant.exec_params import load_exec_params
-        channel = str(load_exec_params().get("execution_channel", "dex"))
+        channel = str(load_exec_params().get("execution_channel", "okx_dex"))
         ds = data_source_for_channel(channel)
     except Exception as exc:
         _cex_logger.warning("CEX enrich: channel→data-source resolve failed: %s", exc)

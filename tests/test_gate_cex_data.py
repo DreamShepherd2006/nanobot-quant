@@ -64,7 +64,9 @@ def test_fetch_gate_kline_live(monkeypatch):
     import nanobot_quant.gate_cex_data as m
     monkeypatch.setattr(m, "_request", fake_request)
     df = fetch_gate_kline("CRCLX_USDT", bar="1D", limit=60)
-    assert calls == {"pair": "CRCLX_USDT", "interval": "1d", "limit": 60,
+    # Gate limit 语义=返回 limit 根含进行中最后一根；fetch_gate_kline 请求
+    # limit+1，过滤 closed=false 后正好返回 limit 根已收盘（A 修复第三部分）。
+    assert calls == {"pair": "CRCLX_USDT", "interval": "1d", "limit": 61,
                      "from_ts": None, "to_ts": None}
     assert len(df) == 4
 

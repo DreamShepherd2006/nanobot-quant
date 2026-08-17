@@ -5,10 +5,11 @@
 - 执行通道按**大类**分层：``dex``（链上地址 + TEE 签名）与 ``cex``
   （交易所 UID + API key）。当前实例：``okx_dex``（OnchainOSBroker，
   OKX DEX/onchainos）与 ``gate``（CexBroker，Gate.io）。
-- 与数据源注册表（``data_sources``）对称：``CHANNEL_BROKER`` 把
-  execution_channel 结构性绑定到 broker spec——td_live、pipeline live
-  分支等全部从这条映射取，加新执行所 = 注册一个 spec + 通道映射加一行，
-  上层（TD 信号、执行链）零分叉。
+- 通道值即 broker spec 实例名（方案 C，2026-08-17）：``spec_for_channel``
+  直接按名解析，family 由 spec 表达；旧值 dex/cex 经
+  ``normalize_execution_channel`` 自动迁移。td_live、pipeline live 分支
+  等全部从这条路径取，加新执行所 = 注册一个 spec + EXECUTION_CHANNELS/
+  enum_groups 加一项，上层（TD 信号、执行链）零分叉。
 - 未知通道 fail-closed（KeyError），绝不静默回退到别所下单。
 - ``family`` 注入策略层 ``parameters.channel_family``——批次逻辑按大类
   分叉（dex：wallet_switch 子钱包；cex：子账号 key），不用 isinstance。
@@ -17,6 +18,8 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
+
+from nanobot_quant.exec_params import normalize_execution_channel
 
 
 class BrokerSpec:
@@ -128,28 +131,23 @@ register(BrokerSpec(
 ))
 
 
-# execution_channel → broker（结构性绑定）。
-# 未来 OKX CEX 业务量化接入：加一行 "okx_cex": "okx_cex" + spec 即可。
-CHANNEL_BROKER = {
-    "dex": "okx_dex",
-    "cex": "gate",
-}
+# execution_channel（实例名）→ broker spec：直接按名解析，结构绑定退化（方案 C，2026-08-17）。
+# 未来新增执行所（如 OKX CEX）：注册一个 BrokerSpec + EXECUTION_CHANNELS/enum_groups 加一项即可，
+# 上层（td_live / pipeline / 策略层）零改动。旧值 dex/cex 经 normalize_execution_channel 自动迁移。
 
 
 def spec_for_channel(channel: str) -> BrokerSpec:
-    """Resolve the broker spec bound to an execution channel.
+    """Resolve the broker spec bound to an execution channel (instance name).
 
-    Raises KeyError for unknown channels — fail-closed, never falls back
-    to another exchange's broker.
+    Legacy ``dex``/``cex`` values are normalized first. Raises KeyError for
+    unknown channels — fail-closed, never falls back to another exchange's
+    broker.
     """
-    if channel not in CHANNEL_BROKER:
+    name = normalize_execution_channel(channel)
+    if name not in REGISTRY:
         raise KeyError("执行通道 %r 未绑定 broker（可选：%s）"
-                       % (channel, ", ".join(CHANNEL_BROKER)))
-    spec = get_broker(CHANNEL_BROKER[channel])
-    if spec.family != channel:
-        raise KeyError("通道 %r 与 spec %r family(%r) 不一致"
-                       % (channel, spec.name, spec.family))
-    return spec
+                       % (channel, ", ".join(REGISTRY)))
+    return get_broker(name)
 
 
 def broker_for_channel(channel: str, **kw: Any) -> Any:

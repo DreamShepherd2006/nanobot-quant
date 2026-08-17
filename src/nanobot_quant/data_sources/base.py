@@ -4,10 +4,12 @@
 
 - 所有数据源实现统一契约 ``DataSourceSpec``：``fetch_kline`` /
   ``get_price`` / 可选 ``order_book``（CEX 类源，VT grounding 用）。
-- ``CHANNEL_DATA_SOURCE`` 把 execution_channel（dex/cex）结构性绑定到
-  数据源——TD live、取价、分析页默认源、grounding 全部从这条映射取，
-  同源约束从「约定」变「结构」。加新交易所 = 注册表加条目 + 通道映射
-  加一行 + broker，上层（TD 信号、执行链）零改动。
+- 通道→数据源经 broker spec 的 ``data_source`` 字段单一事实源（方案 C，
+  2026-08-17）：``data_source_for_channel`` = ``spec_for_channel`` 的
+  data_source 解析，同源约束从「约定」变「结构」，且杜绝通道→broker 与
+  通道→数据源两表漂移。TD live、取价、分析页默认源、grounding 全部从
+  这条路径取。加新交易所 = 注册 BrokerSpec（含 data_source 字段）+
+  EXECUTION_CHANNELS/enum_groups 加一项，上层零改动。
 - ``kind`` 区分可执行源（executable，关联执行通道）与纯研究源
   （research，仅展示/回测，如东财/yfinance/okx_cex 现阶段）。
 """
@@ -128,21 +130,18 @@ def research_sources() -> list[str]:
     return [n for n, s in REGISTRY.items() if s.kind == "research"]
 
 
-# execution_channel → data source（结构性同源）。
-# 未来 OKX CEX 业务量化接入：加一行 "okx_cex": "okx_cex" + broker 即可。
-CHANNEL_DATA_SOURCE = {
-    "dex": "onchainos",
-    "cex": "gate_cex",
-}
+# execution_channel（实例名）→ data source：从绑定 broker spec 的 data_source 字段取
+# （单一事实源，杜绝通道→broker 与通道→数据源两表漂移；方案 C，2026-08-17）。
+# 未来新增执行所：注册 BrokerSpec（含 data_source 字段）即可，此处零改动。
 
 
 def data_source_for_channel(channel: str) -> DataSourceSpec:
-    """Resolve the data source bound to an execution channel.
+    """Resolve the data source bound to an execution channel (via broker spec).
 
+    Same-exchange data is guaranteed structurally: the broker spec carries
+    its own data_source name. Legacy ``dex``/``cex`` values are normalized.
     Raises KeyError for unknown channels — fail-closed, never falls back
     to a different exchange's data.
     """
-    if channel not in CHANNEL_DATA_SOURCE:
-        raise KeyError("执行通道 %r 未绑定数据源（可选：%s）"
-                       % (channel, ", ".join(CHANNEL_DATA_SOURCE)))
-    return get_data_source(CHANNEL_DATA_SOURCE[channel])
+    from nanobot_quant.brokers.registry import spec_for_channel
+    return get_data_source(spec_for_channel(channel).data_source)

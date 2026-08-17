@@ -21,10 +21,13 @@ from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 def _bars_with(closes: list[float]):
     from lumibot.entities import Bars
 
+    # 小写列 = lumibot v4.5.78 Bars 契约（Bars.__init__ 访问 df["close"] 派生
+    # return 列）；CexDataSource 修复后输出小写列，测试 mock 须同契约
+    # （2026-08-17 A 修复）。
     df = pd.DataFrame(
-        {"Open": closes, "High": [c + 1 for c in closes],
-         "Low": [c - 1 for c in closes], "Close": closes,
-         "Volume": [1_000_000] * len(closes)},
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
         index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
     )
     return Bars(df, "ONCHAIN", None)

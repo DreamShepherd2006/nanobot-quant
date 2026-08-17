@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import pandas as pd
 
@@ -41,9 +42,9 @@ def _make_strategy(**params) -> TdSequentialStrategy:
 
     closes = _buy_signal_closes()
     df = pd.DataFrame(
-        {"Open": closes, "High": [c + 1 for c in closes],
-         "Low": [c - 1 for c in closes], "Close": closes,
-         "Volume": [1_000_000] * len(closes)},
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
         index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
     )
     s._bars = Bars(df, "ONCHAIN", None)
@@ -191,6 +192,43 @@ def test_on_trading_iteration_uses_fixed_window(monkeypatch):
     assert calls == [50, 50]
 
 
+def test_live_gate_source_no_double_drop(monkeypatch):
+    """A 修复第二部分回归：数据源已过滤进行中 bar（gate_cex drops=True，td_live
+    注入 parameters）时，live 不多拉 1 根、不再丢——双重丢弃会得到
+    119 < min_history 永久 SKIP。"""
+    s = _make_strategy(min_history=50)
+    s._is_live_broker = True
+    s.parameters["drops_in_progress_bars"] = True  # td_live 从 broker.data_source 注入
+    calls: list[int] = []
+
+    def _record(symbol, length, timestep):
+        calls.append(length)
+        return s._bars
+
+    s.get_historical_prices = _record
+    monkeypatch.setattr(s, "_calc", lambda df: {"setup_buy": 0, "setup_sell": 0, "cd_buy": 0, "cd_sell": 0, "score": 0, "price": 0})  # 短路信号计算
+    s.on_trading_iteration()
+    assert calls == [50]  # 不 +1
+
+
+def test_live_onchainos_source_drops_one(monkeypatch):
+    """OnchainOS（DEX）数据源无 drops 契约（含进行中 bar）：live 保持原行为
+    多拉 1 根供丢弃（方案 C，2026-08-11）。"""
+    s = _make_strategy(min_history=50)
+    s._is_live_broker = True
+    s.parameters["drops_in_progress_bars"] = False  # 默认（未注入）
+    calls: list[int] = []
+
+    def _record(symbol, length, timestep):
+        calls.append(length)
+        return s._bars
+
+    s.get_historical_prices = _record
+    monkeypatch.setattr(s, "_calc", lambda df: {"setup_buy": 0, "setup_sell": 0, "cd_buy": 0, "cd_sell": 0, "score": 0, "price": 0})
+    s.on_trading_iteration()
+    assert calls == [51]  # +1
+
+
 
 
 # ── 2026-08-11 事件展示修复：symbol 显式传 + tx_hash detail 提取 ──
@@ -263,3 +301,48 @@ def test_is_placeholder_tx_hash():
     assert is_placeholder_tx_hash(
         "5xNq3aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef") is False
     assert is_placeholder_tx_hash("") is False
+
+def test_logger_proxy_penetration():
+    """日志可见性：LazyStrategyLogger → StrategyLoggerAdapter → Logger 三层穿透。
+    模拟 lumibot v4.5.78 的 logger 链（无 .handlers 的 proxy，仅 .logger 属性委托），
+    策略 __init__ 的穿透循环必须拿到底层 logging.Logger（回归：直接访问
+    .handlers 曾抛 AttributeError 'StrategyLoggerAdapter' object has no attribute 'handlers'）。"""
+
+    class _FakeProxy:
+        def __init__(self, inner):
+            self.logger = inner
+
+    base = logging.getLogger("td_test_logger_penetration")
+    proxy = _FakeProxy(_FakeProxy(base))  # 两层代理（LazyStrategyLogger → Adapter）
+    _lg = proxy
+    for _ in range(3):
+        if isinstance(_lg, logging.Logger):
+            break
+        _lg = getattr(_lg, "logger", _lg)
+    assert _lg is base
+
+    # 兜底：穿透失败时退化为按类名取 logger（不崩溃）
+    _lg2 = object()
+    if not isinstance(_lg2, logging.Logger):
+        _lg2 = logging.getLogger("TdSequentialStrategy")
+    assert isinstance(_lg2, logging.Logger)
+
+
+def test_strategy_logger_binds_stderr():
+    """策略 initialize 后底层 logger 挂 stderr handler（TD 循环日志 gatekeeper 可见）。
+    回归：initialize 直接访问 self.logger.handlers 曾抛 AttributeError——
+    lumibot 的 logger 是 LazyStrategyLogger proxy（无 .handlers），须穿透
+    .logger 链拿底层 Logger 再配置。"""
+    s = _make_strategy()
+    s.initialize()  # 日志配置在 lumibot lifecycle initialize 里执行
+    _lg = logging.getLogger("td-test")  # _make_strategy 手动设置的策略 logger
+    assert isinstance(_lg, logging.Logger)
+    assert _lg.propagate is False
+    assert any(
+        isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
+        for h in _lg.handlers
+    )
+    # 幂等：重复 initialize 不重复加 handler
+    n = len(_lg.handlers)
+    s.initialize()
+    assert len(_lg.handlers) == n

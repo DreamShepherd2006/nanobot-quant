@@ -111,6 +111,8 @@ def test_meta_covers_all_defaults_and_three_groups():
         ("max_position_pct", True),
         ("execution_channel", "coinbase"),
         ("execution_channel", "dex_onchain"),
+        ("execution_channel", "dex"),   # 旧大类值已迁移为实例名（方案 C）
+        ("execution_channel", "cex"),   # 旧大类值已迁移为实例名（方案 C）
     ],
 )
 def test_validation_rejects_out_of_range(key, bad):
@@ -133,8 +135,8 @@ def test_validation_rejects_out_of_range(key, bad):
         ("td_quantity", 100000),
         ("td_enabled", True),
         ("td_enabled", False),
-        ("execution_channel", "dex"),
-        ("execution_channel", "cex"),
+        ("execution_channel", "okx_dex"),
+        ("execution_channel", "gate"),
     ],
 )
 def test_validation_accepts_in_range(key, good):
@@ -239,6 +241,60 @@ def test_save_partial_update_keeps_rest(tmp_path):
 def test_corrupt_file_falls_back_to_defaults(tmp_path):
     exec_params_mod.exec_params_path().write_text("{not json", encoding="utf-8")
     assert load_exec_params() == DEFAULT_EXEC_PARAMS
+
+
+# ── 执行通道值域迁移（方案 C，2026-08-17）────────────────────────────────
+
+def test_normalize_execution_channel_idempotent():
+    from nanobot_quant.exec_params import normalize_execution_channel
+    assert normalize_execution_channel("dex") == "okx_dex"
+    assert normalize_execution_channel("cex") == "gate"
+    assert normalize_execution_channel("okx_dex") == "okx_dex"
+    assert normalize_execution_channel("gate") == "gate"
+    # 未知值原样透传（由调用方 fail-closed），绝不静默映射
+    assert normalize_execution_channel("binance") == "binance"
+    assert normalize_execution_channel(None) == ""
+
+
+def test_load_migrates_legacy_channel(tmp_path):
+    raw = dict(DEFAULT_EXEC_PARAMS)
+    raw["execution_channel"] = "cex"
+    exec_params_mod.exec_params_path().write_text(
+        json.dumps(raw), encoding="utf-8"
+    )
+    loaded = load_exec_params()
+    assert loaded["execution_channel"] == "gate"
+
+
+def test_load_migrates_legacy_dex(tmp_path):
+    raw = dict(DEFAULT_EXEC_PARAMS)
+    raw["execution_channel"] = "dex"
+    exec_params_mod.exec_params_path().write_text(
+        json.dumps(raw), encoding="utf-8"
+    )
+    loaded = load_exec_params()
+    assert loaded["execution_channel"] == "okx_dex"
+
+
+def test_save_migrates_legacy_channel(tmp_path):
+    params = dict(DEFAULT_EXEC_PARAMS)
+    params["execution_channel"] = "cex"
+    res = save_exec_params(params)
+    assert res["ok"] is True
+    assert exec_params_mod.exec_params_path().read_text(
+        encoding="utf-8"
+    ).__contains__('"execution_channel": "gate"')
+    loaded = load_exec_params()
+    assert loaded["execution_channel"] == "gate"
+
+
+def test_save_unknown_channel_fails_closed(tmp_path):
+    params = dict(DEFAULT_EXEC_PARAMS)
+    params["execution_channel"] = "coinbase"
+    res = save_exec_params(params)
+    assert res["ok"] is False
+    assert "error" in res
+    assert not exec_params_mod.exec_params_path().exists()
 
 
 def test_reset_removes_file(tmp_path):

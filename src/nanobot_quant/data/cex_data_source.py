@@ -34,6 +34,11 @@ class CexDataSource(DataSource):
 
     SOURCE = "gate_cex"
 
+    # 数据源契约：gate_cex_data.rows_to_df 已丢弃进行中 bar（closed=false，
+    # 仅返回已收盘 K 线）。策略层据此不再多拉 1 根/再丢弃，避免双重丢弃
+    # 导致 bars=119 < min_history 永久 SKIP（2026-08-17 A 修复第二部分）。
+    drops_in_progress_bars = True
+
     def __init__(self, tokens_json: Optional[list[dict]] = None, **kwargs):
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
@@ -62,6 +67,11 @@ class CexDataSource(DataSource):
         df = get_data_source("gate_cex").fetch_kline(symbol, bar=bar, limit=limit)
         if df is None or df.empty:
             raise RuntimeError(f"No Gate CEX kline for {symbol} (bar={bar})")
+        # lumibot v4.5.78 Bars.__init__ 构造时访问小写列 df["close"] 派生 return 列；
+        # 而 gate_cex 数据源（rows_to_df）输出大写列 Open/High/Low/Close/Volume（td-table
+        # 页面契约）——列名不一致会抛 KeyError: 'close'（2026-08-17 A 修复）。此处统一
+        # 小写化对齐 lumibot 契约；策略层 col_map 再映射回大写供 calculate() 使用。
+        df = df.rename(columns=str.lower)
         from lumibot.entities import Bars
         return Bars(df, self.SOURCE, asset)
 

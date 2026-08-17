@@ -8,7 +8,6 @@ grounding）统一从 ``get_data_source(name)`` 取。
 from __future__ import annotations
 
 from nanobot_quant.data_sources.base import (
-    CHANNEL_DATA_SOURCE,
     DataSourceSpec,
     REGISTRY,
     data_source_for_channel,
@@ -67,7 +66,6 @@ register(DataSourceSpec(
 ))
 
 __all__ = [
-    "CHANNEL_DATA_SOURCE",
     "DataSourceSpec",
     "REGISTRY",
     "data_source_for_channel",

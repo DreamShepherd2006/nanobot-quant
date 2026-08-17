@@ -1,8 +1,9 @@
 """Lumibot Broker that executes trades on Gate CEX spot market.
 
-Second execution channel (``execution_channel="cex"``), alongside
+Second execution channel instance (``execution_channel="gate"``), alongside
 OnchainOSBroker (DEX) — docs/quant-system.md §18. Data/execution separation:
-signal data comes from OKX CEX (okx_cex_data.py), orders execute on Gate.
+signal data comes from Gate CEX public candles (same-exchange, via
+``gate_cex`` data source), orders execute on Gate.
 
 The same underlying tokenized asset may use different tickers per exchange
 (CRCLX on Gate ↔ XCRCL on OKX); the mapping lives in tokens.json

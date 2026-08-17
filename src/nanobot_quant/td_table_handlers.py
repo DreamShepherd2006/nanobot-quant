@@ -62,7 +62,7 @@ def _default_source() -> str:
     失败时保守回退 onchainos（与旧行为一致）。
     """
     try:
-        channel = str(load_exec_params().get("execution_channel", "dex"))
+        channel = str(load_exec_params().get("execution_channel", "okx_dex"))
         ds = data_source_for_channel(channel).name
         for page_val, ds_name in _PAGE_SOURCE_TO_SOURCE.items():
             if ds_name == ds:

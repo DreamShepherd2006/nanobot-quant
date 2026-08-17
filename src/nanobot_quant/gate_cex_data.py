@@ -85,8 +85,13 @@ def rows_to_df(rows: list) -> pd.DataFrame:
 
 
 def fetch_gate_kline(pair: str, bar: str = "1D", limit: int = 120) -> pd.DataFrame:
-    """Latest ``limit`` closed candles for a Gate spot pair (e.g. CRCLX_USDT)."""
-    rows = _request(pair, _map_bar(bar), limit)
+    """Latest ``limit`` closed candles for a Gate spot pair (e.g. CRCLX_USDT).
+
+    Gate 的 limit 语义 = 返回 limit 根（含最后一根进行中 closed=false）——
+    请求 limit+1，rows_to_df 过滤进行中后正好返回 limit 根已收盘
+    （2026-08-17 A 修复第三部分：requested=120 got=119 差 1 根永久 SKIP）。
+    """
+    rows = _request(pair, _map_bar(bar), limit + 1)
     return rows_to_df(rows)
 
 

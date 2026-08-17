@@ -68,10 +68,26 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
         )
     if vtype == "enum":
         choices = meta["enum"]
-        opts = "".join(
-            f'<option value="{c}" {"selected" if str(value) == c else ""}>{c}</option>'
-            for c in choices
-        )
+        labels = meta.get("enum_labels") or {}
+        groups = meta.get("enum_groups")
+
+        def _opt(c: str) -> str:
+            sel = "selected" if str(value) == c else ""
+            return f'<option value="{c}" {sel}>{labels.get(c, c)}</option>'
+
+        if groups:
+            grouped = {c for g in groups.values() for c in g}
+            parts = []
+            for gname, gitems in groups.items():
+                parts.append(f'<optgroup label="{gname}">'
+                             + "".join(_opt(c) for c in gitems)
+                             + "</optgroup>")
+            rest = "".join(_opt(c) for c in choices if c not in grouped)
+            if rest:
+                parts.append(rest)
+            opts = "".join(parts)
+        else:
+            opts = "".join(_opt(c) for c in choices)
         return (
             f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
             f'<select id="{key}" name="{key}">{opts}</select>'

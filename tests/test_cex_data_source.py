@@ -101,6 +101,22 @@ class TestGetHistoricalPrices:
         assert bars.source == "GATE_CEX"
         assert bars.asset.symbol == "CRCLX"
 
+    def test_bars_columns_lowercased(self, ds, fake):
+        """A 修复回归：lumibot Bars 契约要求小写列（df['close'] 派生 return 列）。
+
+        gate_cex 数据源输出大写列（Open/High/...），CexDataSource 须在构造
+        Bars 前小写化，否则真实 v4.5.78 抛 KeyError: 'close'。
+        """
+        bars = ds.get_historical_prices(_asset("CRCLX"), length=2, timestep="day")
+        assert list(bars.df.columns) == ["open", "high", "low", "close", "volume"]
+
+    def test_drops_in_progress_bars_contract(self, ds, fake):
+        """A 修复第二部分契约：gate_cex 数据源已过滤进行中 bar（closed=false）。
+
+        策略层据此不再多拉 1 根/再丢弃（双重丢弃 → bars=119 永久 SKIP）。
+        """
+        assert ds.drops_in_progress_bars is True
+
     def test_timestep_mapping(self, ds, fake):
         ds.get_historical_prices(_asset(), length=5, timestep="5min")
         assert fake.kline_calls[-1]["bar"] == "5m"

@@ -63,6 +63,12 @@ except ImportError:
 
     class _Bars:
         def __init__(self, df, source, asset, quote=None, raw=None, return_polars=False, tzinfo=None):
+            # 镜像 lumibot v4.5.78 Bars.__init__：无 return 列时（needs_derived=True）
+            # 派生 return 列访问小写列 df["close"]——列名契约不一致（如 gate_cex
+            # 大写列）直接抛 KeyError，让单测能捕获真实实盘路径的崩溃
+            # （2026-08-17 A 修复的回归保护）。
+            if hasattr(df, "columns") and "return" not in df.columns and "close" not in df.columns:
+                raise KeyError("close")
             self.df = df
             self.source = str(source).upper()
             self.asset = asset
