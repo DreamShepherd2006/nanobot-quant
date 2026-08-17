@@ -288,7 +288,7 @@ def test_prepare_batches_cex_uses_slot_map(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda symbol=None: tmp_path / f"batches.{symbol}.json",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(2, "CRCLX", channel="cex")
     assert bm is not None
@@ -305,7 +305,7 @@ def test_prepare_batches_cex_fallback_slot_map(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda symbol=None: tmp_path / f"batches.{symbol}.json",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(3, "CRCLX", channel="cex")
     assert [s["account_id"] for s in bm.slots] == [
@@ -313,12 +313,12 @@ def test_prepare_batches_cex_fallback_slot_map(tmp_path, monkeypatch):
     ]
 
 
-def test_prepare_batches_cex_migrates_dex_ledger(tmp_path, monkeypatch):
-    """DEX 台账（钱包 UUID）→ 切 cex → .bak 快照 + 新建 gate_botN 台账。"""
+def test_prepare_batches_cex_keeps_dex_ledger(tmp_path, monkeypatch):
+    """DEX 台账（无通道旧格式）→ cex 通道：归 okx_dex 保留，gate 台账独立新建。"""
     from nanobot_quant import td_live as td_live_mod
 
     loader = td_live_mod._TdLiveRunner()
-    # 先造一个 DEX 台账
+    # 旧格式 DEX 台账（无通道前缀）
     dex_bm = BatchManager(
         symbol="CRCLX",
         account_ids=["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
@@ -332,32 +332,35 @@ def test_prepare_batches_cex_migrates_dex_ledger(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda symbol=None: tmp_path / f"batches.{symbol}.json",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(2, "CRCLX", channel="cex")
     assert [s["account_id"] for s in bm.slots] == ["gate_bot1", "gate_bot2"]
     assert bm.open_slots() == []  # 新台账不含 DEX 历史仓位
-    # 快照保留（.dex.bak.* 文件存在且含原台账）
-    baks = list(tmp_path.glob("batches.CRCLX.json.dex.bak.*"))
-    assert len(baks) == 1
-    data = json.loads(baks[0].read_text())
+    # DEX 台账原地保留（迁移到 okx_dex 命名空间，不被 cex 复用）
+    migrated = tmp_path / "batches.okx_dex.CRCLX.json"
+    assert migrated.exists()
+    data = json.loads(migrated.read_text())
     assert data["slots"][0]["account_id"].startswith("aaaaaaaa")
+    # gate 台账文件独立
+    assert (tmp_path / "batches.gate.CRCLX.json").exists()
 
 
-def test_prepare_batches_dex_migrates_cex_ledger(tmp_path, monkeypatch):
-    """CEX 台账 → 切回 dex → .cex.bak 快照 + 新建子钱包台账。"""
+def test_prepare_batches_dex_keeps_cex_ledger(tmp_path, monkeypatch):
+    """CEX 台账 → 切回 dex：gate 文件保留，dex 台账独立新建/复用。"""
     from nanobot_quant import td_live as td_live_mod
 
     loader = td_live_mod._TdLiveRunner()
     cex_bm = BatchManager(
         symbol="CRCLX",
         account_ids=["gate_bot1", "gate_bot2"],
-        path=tmp_path / "batches.CRCLX.json",
+        path=tmp_path / "batches.gate.CRCLX.json",
     )
+    cex_bm.open_lot(qty=0.05, entry_price=70.0, entry_time="t1")
     cex_bm.save()
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda symbol=None: tmp_path / f"batches.{symbol}.json",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     monkeypatch.setattr(
         "nanobot_quant.tools.tools_wallet.wallet_accounts",
@@ -367,5 +370,7 @@ def test_prepare_batches_dex_migrates_cex_ledger(tmp_path, monkeypatch):
     )
     bm = loader._prepare_batches(2, "CRCLX", channel="dex")
     assert [s["account_id"] for s in bm.slots] == ["uuid-1", "uuid-2"]
-    baks = list(tmp_path.glob("batches.CRCLX.json.cex.bak.*"))
-    assert len(baks) == 1
+    # gate 台账保留（未被 dex 通道快照/删除）
+    assert (tmp_path / "batches.gate.CRCLX.json").exists()
+    data = json.loads((tmp_path / "batches.gate.CRCLX.json").read_text())
+    assert data["slots"][0]["account_id"] == "gate_bot1"

@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import threading
 import time
@@ -159,7 +158,8 @@ class _TdLiveRunner:
         )
         # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
         # 策略进入分批模式（BUY 占 slot / SELL 按 exit_order 平批 / 逐批止损止盈）。
-        # 标的池（多标的扫描）：每标的独立台账（batches.{symbol}.json）。
+        # 标的池（多标的扫描）：每标的独立台账（batches.{channel}.{symbol}.json，
+        # 2026-08-17 通道隔离——DEX 与 CEX 台账互不复用）。
         td_batches = int(params.get("td_batches", 1) or 1)
         symbols = params["td_symbols"]
         channel = str(params.get("execution_channel", "okx_dex"))
@@ -324,56 +324,36 @@ class _TdLiveRunner:
         return managers
 
     def _prepare_batches(
-        self, td_batches: int, symbol: str, channel: str = "dex"
+        self, td_batches: int, symbol: str, channel: str = "okx_dex"
     ) -> Any:
-        """加载/创建批次台账（通道化，2026-08-17 Step 1）。
+        """加载/创建批次台账（通道隔离，2026-08-17 拍板）。
 
-        - dex：子钱包映射（wallet_accounts 前 N 个 account_id，现状）
-        - cex：子账号映射（load_slot_map：slot→gate_botN；不足按 1..N
-          兜底 fallback）——不创建子钱包（子账号已存在于交易所）
-        - 台账通道迁移：已有台账的 account_id 格式与当前通道不匹配 →
-          自动 rename 快照（batches.{symbol}.json.{old_channel}.bak.{ts}）
-          后新建本通道台账（拍板 2026-08-17：旧 DEX 台账保留可追溯，不删除）
+        - 文件按通道独立：``batches.{channel}.{symbol}.json``——DEX 与
+          CEX 台账互不复用（此前同路径切换双向覆盖/快照堆积，导致
+          DEX lot 被 CEX 通道误卖/误释放）。
+        - dex（okx_dex）：子钱包映射（wallet_accounts 前 N 个 account_id）
+        - cex（gate）：子账号映射（load_slot_map：slot→gate_botN；不足按
+          1..N 兜底 fallback）——不创建子钱包（子账号已存在于交易所）
+        - 旧格式（无通道前缀）台账由 _load_or_migrate 自动归 okx_dex 命名空间
         """
         import sys
 
-        from nanobot_quant.batches import BatchManager, _load_or_migrate, batches_path
+        from nanobot_quant.batches import BatchManager, _load_or_migrate
+        from nanobot_quant.exec_params import normalize_execution_channel
+        from nanobot_quant.brokers.registry import spec_for_channel
 
-        def _is_cex_account_id(acc: str) -> bool:
-            return bool(re.match(r"^gate_bot\d+$", acc))
+        channel = normalize_execution_channel(channel)
+        family = spec_for_channel(channel).family  # gate→cex、okx_dex→dex
 
-        bm = _load_or_migrate(symbol)
+        bm = _load_or_migrate(symbol, channel)
         if bm is not None and bm.symbol == symbol and bm.slots:
-            first_acc = str(bm.slots[0].get("account_id") or "")
-            # 通道切换检测：账号格式与当前通道不符 → 快照 + 重建
-            if (channel == "cex" and not _is_cex_account_id(first_acc)) or (
-                channel == "dex" and first_acc and _is_cex_account_id(first_acc)
-            ):
-                old_channel = "cex" if _is_cex_account_id(first_acc) else "dex"
-                ts = time.strftime("%Y%m%d%H%M%S")
-                try:
-                    src = batches_path(symbol)
-                    bak = src.with_name(f"{src.name}.{old_channel}.bak.{ts}")
-                    os.replace(src, bak)
-                    print(
-                        f"[DIAG] td_live: 通道切换 {old_channel}→{channel}，"
-                        f"台账快照 {bak.name}",
-                        file=sys.stderr, flush=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[DIAG] td_live: 台账快照失败 {exc}",
-                        file=sys.stderr, flush=True,
-                    )
-                bm = None
-            else:
-                print(
-                    f"[DIAG] td_live: batches restored ({symbol}, "
-                    f"{len(bm.slots)} slots, {channel})",
-                    file=sys.stderr, flush=True,
-                )
-                return bm
-        if channel == "cex":
+            print(
+                f"[DIAG] td_live: batches restored ({symbol}, "
+                f"{len(bm.slots)} slots, {channel})",
+                file=sys.stderr, flush=True,
+            )
+            return bm
+        if family == "cex":
             from nanobot_quant.gate_credentials import load_slot_map
 
             slot_map = load_slot_map() or {}
@@ -421,7 +401,7 @@ class _TdLiveRunner:
                     f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
                     file=sys.stderr, flush=True,
                 )
-        bm = BatchManager(symbol=symbol, account_ids=ids)
+        bm = BatchManager(symbol=symbol, account_ids=ids, channel=channel)
         bm.save()
         print(
             f"[DIAG] td_live: batches created ({symbol}, "

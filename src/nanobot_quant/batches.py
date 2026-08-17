@@ -28,14 +28,21 @@ OPEN = "open"
 EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
 
 
-def batches_path(symbol: Optional[str] = None) -> Path:
+def batches_path(symbol: Optional[str] = None, channel: Optional[str] = None) -> Path:
     """持久化路径（与 exec_params.json 同一 credentials 目录）。
 
-    symbol 提供时使用 per-symbol 文件 ``batches.{symbol}.json``
-    （标的池隔离，2026-08-10 定案：多标的各自台账，open 批次不因
-    切换标的丢失）；None 时返回旧式单文件路径（兼容/迁移用）。
+    channel + symbol → ``batches.{channel}.{symbol}.json``（通道隔离，
+    2026-08-17 拍板：DEX 与 CEX 台账独立，切通道不复用对方台账——
+    此前同路径切换导致双向覆盖/快照堆积）；symbol 无 channel 时
+    返回 ``batches.{symbol}.json``（旧格式，迁移用）；None 时返回旧式
+    单文件路径（兼容/迁移用）。
     """
-    fname = f"batches.{symbol}.json" if symbol else "batches.json"
+    if channel and symbol:
+        fname = f"batches.{channel}.{symbol}.json"
+    elif symbol:
+        fname = f"batches.{symbol}.json"
+    else:
+        fname = "batches.json"
     for root in ("/data", "/mnt/workspace"):
         d = Path(root) / "legion" / "credentials"
         try:
@@ -48,10 +55,14 @@ def batches_path(symbol: Optional[str] = None) -> Path:
     return Path.home() / ".batches.json"
 
 
-def migrate_legacy_batches() -> None:
-    """旧式单文件 batches.json → per-symbol 归档（保留历史台账）。
+#: 历史台账默认归属通道（2026-08-17 拍板：旧批次全是 DEX 时代创建的）
+_LEGACY_CHANNEL = "okx_dex"
 
-    读旧文件取出其 symbol，rename 到 ``batches.{symbol}.json``。
+
+def migrate_legacy_batches() -> None:
+    """旧式单文件 batches.json → per-symbol 归档（保留历史台账，归 okx_dex）。
+
+    读旧文件取出其 symbol，rename 到 ``batches.okx_dex.{symbol}.json``。
     目标已存在时不覆盖（新文件优先）。幂等：无旧文件时 no-op。
     """
     legacy = batches_path()  # 无 symbol → 旧式单文件路径
@@ -61,7 +72,7 @@ def migrate_legacy_batches() -> None:
         old = BatchManager.load(path=legacy)
         if old is None or not old.symbol or not old.slots:
             return
-        target = batches_path(old.symbol)
+        target = batches_path(old.symbol, _LEGACY_CHANNEL)
         if target.exists():
             return
         os.replace(legacy, target)
@@ -69,13 +80,42 @@ def migrate_legacy_batches() -> None:
         return
 
 
-def _load_or_migrate(symbol: str) -> Optional["BatchManager"]:
-    """per-symbol 加载；缺失时先迁移旧单文件再试一次。"""
-    bm = BatchManager.load(symbol=symbol)
+def _migrate_channel_legacy() -> None:
+    """无通道前缀的 ``batches.{symbol}.json`` → ``batches.okx_dex.{symbol}.json``。
+
+    通道隔离前的旧 per-symbol 台账没有通道维度，一律归历史默认通道
+    okx_dex（2026-08-17 拍板）；目标已存在不覆盖。幂等：源不存在时 no-op。
+    """
+    import glob
+    for p in glob.glob(str(batches_path("*"))):
+        src = Path(p)
+        if src.name.startswith("batches.") and src.suffix == ".json":
+            sym = src.name[len("batches."):-len(".json")]
+            if "." in sym:
+                continue  # 已带通道前缀（batches.gate.CRCLX.json）——跳过
+            tgt = batches_path(sym, _LEGACY_CHANNEL)
+            if tgt.exists():
+                continue
+            try:
+                os.replace(src, tgt)
+            except OSError:
+                continue
+
+
+def _load_or_migrate(
+    symbol: str, channel: Optional[str] = None
+) -> Optional["BatchManager"]:
+    """通道化 per-symbol 加载；缺失时先迁移旧格式再试一次。
+
+    旧格式（无通道前缀 / 单文件）一律归 okx_dex 命名空间，不污染
+    当前通道（gate 通道请求时 DEX 台账原地保留，不迁移到 gate）。
+    """
+    bm = BatchManager.load(symbol=symbol, channel=channel)
     if bm is not None and bm.slots:
         return bm
     migrate_legacy_batches()
-    return BatchManager.load(symbol=symbol)
+    _migrate_channel_legacy()
+    return BatchManager.load(symbol=symbol, channel=channel)
 
 
 class BatchManager:
@@ -86,9 +126,11 @@ class BatchManager:
         symbol: str,
         account_ids: list[str],
         path: Optional[Path | str] = None,
+        channel: Optional[str] = None,
     ) -> None:
         self.symbol = symbol
-        self.path = Path(path) if path else batches_path(self.symbol)
+        self.channel = channel
+        self.path = Path(path) if path else batches_path(self.symbol, channel)
         self.slots: list[dict[str, Any]] = []
         self._init_slots(account_ids)
 
@@ -124,14 +166,16 @@ class BatchManager:
         cls,
         path: Optional[Path | str] = None,
         symbol: Optional[str] = None,
+        channel: Optional[str] = None,
     ) -> Optional["BatchManager"]:
         """从磁盘加载；文件缺失/损坏 → None。
 
-        path 显式时用 path；否则 symbol 提供时读 ``batches.{symbol}.json``，
-        都不提供时读旧式 ``batches.json``。
+        path 显式时用 path；否则 symbol 提供时读 ``batches.{channel}.{symbol}.json``
+        （channel 缺省时读旧格式 ``batches.{symbol}.json``），都不提供时
+        读旧式 ``batches.json``。
         """
         if path is None:
-            path = batches_path(symbol) if symbol else batches_path()
+            path = batches_path(symbol, channel) if symbol else batches_path()
         p = Path(path)
         if not p.exists():
             return None
@@ -140,6 +184,7 @@ class BatchManager:
             bm = cls.__new__(cls)
             bm.symbol = raw.get("symbol", "")
             bm.path = p
+            bm.channel = channel
             bm.slots = raw.get("slots", [])
             return bm
         except (OSError, ValueError, KeyError):
@@ -298,17 +343,20 @@ class BatchManager:
         return out
 
 
-def ensure_batches(td_batches: int, symbol: str) -> tuple[Optional[BatchManager], str]:
-    """WebUI 保存 td_batches 时调用：确保子钱包数量 ≥ td_batches 并建/复用批次映射。
+def ensure_batches(
+    td_batches: int, symbol: str, channel: Optional[str] = None
+) -> tuple[Optional[BatchManager], str]:
+    """WebUI 保存 td_batches 时调用：确保子钱包/子账号数量 ≥ td_batches 并建/复用批次映射。
 
     - 子钱包不足 → ``wallet add`` 补足（add 会自动切换活跃账户，
       补足后 switch 回原活跃账户）。
-    - 已有 batches.json 且 symbol 一致 → 复用（保留 open 批次，不重建）。
+    - 已有本通道 batches.{channel}.{symbol}.json 且 symbol 一致 → 复用
+      （保留 open 批次，不重建）。
     - 返回 ``(BatchManager | None, 日志信息)``。
     """
     from .tools.tools_wallet import wallet_accounts, wallet_add, wallet_switch
 
-    bm = _load_or_migrate(symbol)
+    bm = _load_or_migrate(symbol, channel)
     if bm is not None and bm.symbol == symbol and bm.slots:
         return bm, f"复用已有批次台账（{symbol}，{len(bm.slots)} slots）"
 
@@ -341,6 +389,6 @@ def ensure_batches(td_batches: int, symbol: str) -> tuple[Optional[BatchManager]
             f"子钱包不足：现有 {len(ids)}，要求 {td_batches} "
             "（wallet add 失败或达到 50 上限）"
         )
-    bm = BatchManager(symbol=symbol, account_ids=ids[:td_batches])
+    bm = BatchManager(symbol=symbol, account_ids=ids[:td_batches], channel=channel)
     bm.save()
     return bm, f"批次初始化完成：{len(bm.slots)} slots（新建 {created}）"
