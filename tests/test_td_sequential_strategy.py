@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import types
 
 import pandas as pd
 
@@ -189,6 +190,43 @@ def test_on_trading_iteration_uses_fixed_window(monkeypatch):
     s.on_trading_iteration()
     # 两轮 length 恒定 = 50（旧行为是 50、51 递增）
     assert calls == [50, 50]
+
+
+def test_live_gate_source_no_double_drop(monkeypatch):
+    """A 修复第二部分回归：数据源已过滤进行中 bar（gate_cex drops=True）时，
+    live 不多拉 1 根、不再丢——双重丢弃会得到 119 < min_history 永久 SKIP。
+    """
+    s = _make_strategy(min_history=50)
+    s._is_live_broker = True
+    s.data_source = types.SimpleNamespace(drops_in_progress_bars=True)
+    calls: list[int] = []
+
+    def _record(symbol, length, timestep):
+        calls.append(length)
+        return s._bars
+
+    s.get_historical_prices = _record
+    monkeypatch.setattr(s, "_calc", lambda df: {"setup_buy": 0, "setup_sell": 0, "cd_buy": 0, "cd_sell": 0, "score": 0, "price": 0})  # 短路信号计算
+    s.on_trading_iteration()
+    assert calls == [50]  # 不 +1
+
+
+def test_live_onchainos_source_drops_one(monkeypatch):
+    """OnchainOS（DEX）数据源无 drops 属性（含进行中 bar）：live 保持原行为
+    多拉 1 根供丢弃（方案 C，2026-08-11）。"""
+    s = _make_strategy(min_history=50)
+    s._is_live_broker = True
+    s.data_source = types.SimpleNamespace()  # 无 drops_in_progress_bars
+    calls: list[int] = []
+
+    def _record(symbol, length, timestep):
+        calls.append(length)
+        return s._bars
+
+    s.get_historical_prices = _record
+    monkeypatch.setattr(s, "_calc", lambda df: {"setup_buy": 0, "setup_sell": 0, "cd_buy": 0, "cd_sell": 0, "score": 0, "price": 0})
+    s.on_trading_iteration()
+    assert calls == [51]  # +1
 
 
 

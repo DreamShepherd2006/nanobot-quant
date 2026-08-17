@@ -110,6 +110,13 @@ class TestGetHistoricalPrices:
         bars = ds.get_historical_prices(_asset("CRCLX"), length=2, timestep="day")
         assert list(bars.df.columns) == ["open", "high", "low", "close", "volume"]
 
+    def test_drops_in_progress_bars_contract(self, ds, fake):
+        """A 修复第二部分契约：gate_cex 数据源已过滤进行中 bar（closed=false）。
+
+        策略层据此不再多拉 1 根/再丢弃（双重丢弃 → bars=119 永久 SKIP）。
+        """
+        assert ds.drops_in_progress_bars is True
+
     def test_timestep_mapping(self, ds, fake):
         ds.get_historical_prices(_asset(), length=5, timestep="5min")
         assert fake.kline_calls[-1]["bar"] == "5m"

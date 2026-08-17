@@ -34,6 +34,11 @@ class CexDataSource(DataSource):
 
     SOURCE = "gate_cex"
 
+    # 数据源契约：gate_cex_data.rows_to_df 已丢弃进行中 bar（closed=false，
+    # 仅返回已收盘 K 线）。策略层据此不再多拉 1 根/再丢弃，避免双重丢弃
+    # 导致 bars=119 < min_history 永久 SKIP（2026-08-17 A 修复第二部分）。
+    drops_in_progress_bars = True
+
     def __init__(self, tokens_json: Optional[list[dict]] = None, **kwargs):
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
