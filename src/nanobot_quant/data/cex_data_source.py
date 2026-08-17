@@ -62,6 +62,11 @@ class CexDataSource(DataSource):
         df = get_data_source("gate_cex").fetch_kline(symbol, bar=bar, limit=limit)
         if df is None or df.empty:
             raise RuntimeError(f"No Gate CEX kline for {symbol} (bar={bar})")
+        # lumibot v4.5.78 Bars.__init__ 构造时访问小写列 df["close"] 派生 return 列；
+        # 而 gate_cex 数据源（rows_to_df）输出大写列 Open/High/Low/Close/Volume（td-table
+        # 页面契约）——列名不一致会抛 KeyError: 'close'（2026-08-17 A 修复）。此处统一
+        # 小写化对齐 lumibot 契约；策略层 col_map 再映射回大写供 calculate() 使用。
+        df = df.rename(columns=str.lower)
         from lumibot.entities import Bars
         return Bars(df, self.SOURCE, asset)
 

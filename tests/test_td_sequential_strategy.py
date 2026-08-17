@@ -41,9 +41,9 @@ def _make_strategy(**params) -> TdSequentialStrategy:
 
     closes = _buy_signal_closes()
     df = pd.DataFrame(
-        {"Open": closes, "High": [c + 1 for c in closes],
-         "Low": [c - 1 for c in closes], "Close": closes,
-         "Volume": [1_000_000] * len(closes)},
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
         index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
     )
     s._bars = Bars(df, "ONCHAIN", None)
