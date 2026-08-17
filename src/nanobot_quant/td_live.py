@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 import threading
 import time
@@ -73,14 +75,22 @@ class _TdLiveRunner:
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
-        # 执行通道（2026-08-14，P2）：cex=Gate.io 交易所；dex=链上 DEX
-        # （默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
-        channel = str(params.get("execution_channel", "dex"))
+        # 执行通道（2026-08-14，P2；方案 C 后为实例名）：gate=Gate.io 交易所；
+        # okx_dex=链上 DEX（默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
+        channel = str(params.get("execution_channel", "okx_dex"))
         # 统一 broker 构造：broker 注册表（第十九章，2026-08-17）——
-        # CHANNEL_BROKER 唯一映射（dex→okx_dex、cex→gate），未知通道
+        # 通道值=spec 实例名（gate/okx_dex），旧值 dex/cex 自动归一化，未知通道
         # fail-closed（KeyError），绝不静默回退到别所下单。
-        from nanobot_quant.brokers.registry import broker_for_channel
+        from nanobot_quant.brokers.registry import (
+            broker_for_channel,
+            spec_for_channel,
+        )
 
+        # 通道大类（family）：从 broker spec 解析（gate→cex、okx_dex→dex），
+        # 不可直接用 execution_channel 实例名判断——方案 C 值域已从大类改为
+        # 实例名（2026-08-17 修复：曾注入实例名导致 gate 通道下
+        # channel_family="gate"≠"cex"，CEX 对账跳过判断失效、DEX 对账误跑）。
+        family = spec_for_channel(channel).family
         broker = broker_for_channel(
             channel,
             tokens_json=tokens,
@@ -120,8 +130,10 @@ class _TdLiveRunner:
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
                 "strategy_variant": strategy_name,
-                # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据
-                "channel_family": channel,
+                # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据；
+                # 2026-08-17 修复：取 broker spec.family（gate→cex、okx_dex→dex），
+                # 不可用 execution_channel 实例名（"gate"≠"cex" 会误判）。
+                "channel_family": family,
             },
             **td_params,
         )
@@ -141,9 +153,10 @@ class _TdLiveRunner:
         # 标的池（多标的扫描）：每标的独立台账（batches.{symbol}.json）。
         td_batches = int(params.get("td_batches", 1) or 1)
         symbols = params["td_symbols"]
+        channel = str(params.get("execution_channel", "okx_dex"))
         if td_batches > 1:
             strategy.batch_managers = self._prepare_all_batches(
-                td_batches, symbols
+                td_batches, symbols, channel
             )
         # 启动对账（天然持仓导入）在 _run() 线程内执行，避免阻塞 HTTP 保存。
         self._strategy = strategy
@@ -287,7 +300,7 @@ class _TdLiveRunner:
             )
 
     def _prepare_all_batches(
-        self, td_batches: int, symbols: list[str]
+        self, td_batches: int, symbols: list[str], channel: str = "dex"
     ) -> dict[str, Any]:
         """为标的池中每个标的准备独立 BatchManager（per-symbol 台账）。
 
@@ -296,66 +309,114 @@ class _TdLiveRunner:
         """
         managers: dict[str, Any] = {}
         for sym in symbols:
-            bm = self._prepare_batches(td_batches, sym)
+            bm = self._prepare_batches(td_batches, sym, channel)
             if bm is not None:
                 managers[sym] = bm
         return managers
 
-    def _prepare_batches(self, td_batches: int, symbol: str) -> Any:
-        """加载/创建批次台账（子钱包映射）。
+    def _prepare_batches(
+        self, td_batches: int, symbol: str, channel: str = "dex"
+    ) -> Any:
+        """加载/创建批次台账（通道化，2026-08-17 Step 1）。
 
-        batches.json 存在且 symbol 一致 → 复用（重启恢复）；否则从
-        wallets.json 取前 N 个子钱包 account_id 新建。不足 N 时按实际
-        数量建（下一 BUY 时无可用 slot 即跳过，日志告警）。
+        - dex：子钱包映射（wallet_accounts 前 N 个 account_id，现状）
+        - cex：子账号映射（load_slot_map：slot→gate_botN；不足按 1..N
+          兜底 fallback）——不创建子钱包（子账号已存在于交易所）
+        - 台账通道迁移：已有台账的 account_id 格式与当前通道不匹配 →
+          自动 rename 快照（batches.{symbol}.json.{old_channel}.bak.{ts}）
+          后新建本通道台账（拍板 2026-08-17：旧 DEX 台账保留可追溯，不删除）
         """
         import sys
 
-        from nanobot_quant.batches import BatchManager, _load_or_migrate
-        from nanobot_quant.tools.tools_wallet import wallet_accounts
+        from nanobot_quant.batches import BatchManager, _load_or_migrate, batches_path
+
+        def _is_cex_account_id(acc: str) -> bool:
+            return bool(re.match(r"^gate_bot\d+$", acc))
 
         bm = _load_or_migrate(symbol)
         if bm is not None and bm.symbol == symbol and bm.slots:
-            print(
-                f"[DIAG] td_live: batches restored ({symbol}, "
-                f"{len(bm.slots)} slots)",
-                file=sys.stderr, flush=True,
-            )
-            return bm
-        try:
-            acc = wallet_accounts()
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[DIAG] td_live: wallet_accounts failed: {exc}",
-                file=sys.stderr, flush=True,
-            )
-            return None
-        if acc.get("status") != "ok":
-            print(
-                f"[DIAG] td_live: wallet_accounts error: "
-                f"{acc.get('error')}",
-                file=sys.stderr, flush=True,
-            )
-            return None
-        ids = [
-            a["account_id"]
-            for a in acc.get("data", {}).get("accounts", [])[:td_batches]
-        ]
-        if not ids:
-            print(
-                "[DIAG] td_live: no sub-accounts in wallets.json",
-                file=sys.stderr, flush=True,
-            )
-            return None
-        if len(ids) < td_batches:
-            print(
-                f"[DIAG] td_live: only {len(ids)} sub-accounts, "
-                f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
-                file=sys.stderr, flush=True,
-            )
+            first_acc = str(bm.slots[0].get("account_id") or "")
+            # 通道切换检测：账号格式与当前通道不符 → 快照 + 重建
+            if (channel == "cex" and not _is_cex_account_id(first_acc)) or (
+                channel == "dex" and first_acc and _is_cex_account_id(first_acc)
+            ):
+                old_channel = "cex" if _is_cex_account_id(first_acc) else "dex"
+                ts = time.strftime("%Y%m%d%H%M%S")
+                try:
+                    src = batches_path(symbol)
+                    bak = src.with_name(f"{src.name}.{old_channel}.bak.{ts}")
+                    os.replace(src, bak)
+                    print(
+                        f"[DIAG] td_live: 通道切换 {old_channel}→{channel}，"
+                        f"台账快照 {bak.name}",
+                        file=sys.stderr, flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[DIAG] td_live: 台账快照失败 {exc}",
+                        file=sys.stderr, flush=True,
+                    )
+                bm = None
+            else:
+                print(
+                    f"[DIAG] td_live: batches restored ({symbol}, "
+                    f"{len(bm.slots)} slots, {channel})",
+                    file=sys.stderr, flush=True,
+                )
+                return bm
+        if channel == "cex":
+            from nanobot_quant.gate_credentials import load_slot_map
+
+            slot_map = load_slot_map() or {}
+            ids = [
+                str(slot_map.get(str(i)) or f"gate_bot{i}")
+                for i in range(1, td_batches + 1)
+            ]
+            if not ids:
+                print(
+                    "[DIAG] td_live: slot_map 为空",
+                    file=sys.stderr, flush=True,
+                )
+                return None
+        else:
+            from nanobot_quant.tools.tools_wallet import wallet_accounts
+
+            try:
+                acc = wallet_accounts()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[DIAG] td_live: wallet_accounts failed: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                return None
+            if acc.get("status") != "ok":
+                print(
+                    f"[DIAG] td_live: wallet_accounts error: "
+                    f"{acc.get('error')}",
+                    file=sys.stderr, flush=True,
+                )
+                return None
+            ids = [
+                a["account_id"]
+                for a in acc.get("data", {}).get("accounts", [])[:td_batches]
+            ]
+            if not ids:
+                print(
+                    "[DIAG] td_live: no sub-accounts in wallets.json",
+                    file=sys.stderr, flush=True,
+                )
+                return None
+            if len(ids) < td_batches:
+                print(
+                    f"[DIAG] td_live: only {len(ids)} sub-accounts, "
+                    f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
+                    file=sys.stderr, flush=True,
+                )
         bm = BatchManager(symbol=symbol, account_ids=ids)
         bm.save()
         print(
-            f"[DIAG] td_live: batches created ({symbol}, {len(ids)} slots)",
+            f"[DIAG] td_live: batches created ({symbol}, "
+            f"{len(ids)} slots, {channel})",
             file=sys.stderr, flush=True,
         )
         return bm
@@ -441,10 +502,20 @@ class _TdLiveRunner:
                 pass
 
     def _reconcile_all(self) -> None:
-        """对全部注入 batch_manager 的标的做启动对账（天然持仓导入）。"""
+        """对全部注入 batch_manager 的标的做启动对账（天然持仓导入）。
+
+        Step 1（2026-08-17）：CEX 通道跳过——子账号持仓对账导入在
+        Step 2 实现（对标 DEX _reconcile_import，按子账号余额导入）。
+        """
         try:
             strategy = getattr(self, "_strategy", None)
             if strategy is None:
+                return
+            if (strategy.parameters or {}).get("channel_family") == "cex":
+                print(
+                    "[DIAG] td_live 对账: CEX 通道跳过（Step 2 实现）",
+                    file=sys.stderr, flush=True,
+                )
                 return
             managers = getattr(strategy, "batch_managers", None) or {}
             tokens_json = getattr(strategy, "tokens_json", None)

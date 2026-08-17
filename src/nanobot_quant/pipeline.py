@@ -621,7 +621,7 @@ def run_from_signals(
 
                     # 执行通道（2026-08-14，P2）：dex=链上 DEX（默认）；cex=Gate.io
                     # 交易所（子账号）。只影响之后的新下单，不迁移持仓。
-                    _channel = str(_exec.get("execution_channel", "dex"))
+                    _channel = str(_exec.get("execution_channel", "okx_dex"))
                     # 结构性绑定校验（与 td_live 一致）：未知通道值 fail-closed
                     # （KeyError），绝不静默回退到 DEX——直调路径是测试验证
                     # 通道，通道写错必须显式报错而非悄悄走错所下单。

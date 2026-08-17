@@ -55,6 +55,19 @@ def test_spec_for_channel():
     assert spec_for_channel("dex").name == "okx_dex"
 
 
+def test_spec_family_semantics():
+    """通道家族（family）语义：gate→cex、okx_dex→dex（2026-08-17 D 修复契约）。
+
+    策略/对账层用 family 分叉（_is_cex / _reconcile_all），不可用实例名——
+    gate≠cex 曾导致 CEX 对账跳过判断失效、DEX 对账在 cex 通道误跑。
+    """
+    assert spec_for_channel("gate").family == "cex"
+    assert spec_for_channel("okx_dex").family == "dex"
+    # 旧大类值归一化后 family 语义不变
+    assert spec_for_channel("cex").family == "cex"
+    assert spec_for_channel("dex").family == "dex"
+
+
 def test_broker_for_channel_gate():
     b = broker_for_channel("cex", tokens_json=[], slippage="0.01")
     assert b.__class__.__name__ == "CexBroker"
