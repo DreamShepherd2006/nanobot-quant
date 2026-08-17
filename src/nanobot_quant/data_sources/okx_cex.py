@@ -2,7 +2,8 @@
 
 现状（2026-08-15 拍板）：OKX CEX 后续会接入执行，但目前业务量化部分
 尚未完成，故 kind=research（仅回测/展示，不参与执行）。接入执行时：
-注册表条目改 kind=executable + CHANNEL_DATA_SOURCE 加一行 + broker。
+注册表条目改 kind=executable + 注册 BrokerSpec（含 data_source="okx_cex"）
++ EXECUTION_CHANNELS/enum_groups 加一项。
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
 """Broker registry tests (docs/quant-system.md §19, 2026-08-17).
 
-Step 0: 执行通道大类分层——CHANNEL_BROKER 唯一映射 + fail-closed。
+Step 0: 执行通道大类分层——通道值=broker spec 实例名 + fail-closed（方案 C，2026-08-17）。
 """
 
 import pytest
 
 from nanobot_quant.brokers.registry import (
-    CHANNEL_BROKER,
     REGISTRY,
     broker_for_channel,
     get_broker,
@@ -43,14 +42,21 @@ def test_registry_contains_executables():
     assert o.data_source == "onchainos"
 
 
-def test_channel_map():
-    assert CHANNEL_BROKER == {"dex": "okx_dex", "cex": "gate"}
-    # 与数据源注册表通道 key 一致（结构性同源约束）
-    from nanobot_quant.data_sources import CHANNEL_DATA_SOURCE
-    assert set(CHANNEL_BROKER) == set(CHANNEL_DATA_SOURCE)
+def test_channel_map_aligns_with_enum():
+    """方案 C：通道=broker 实例名，EXECUTION_CHANNELS 与注册表 spec 一一对应。"""
+    from nanobot_quant.exec_params import EXECUTION_CHANNELS
+    assert set(EXECUTION_CHANNELS) == set(REGISTRY)
+    assert "okx_dex" in EXECUTION_CHANNELS
+    assert "gate" in EXECUTION_CHANNELS
 
 
 def test_spec_for_channel():
+    assert spec_for_channel("gate").name == "gate"
+    assert spec_for_channel("okx_dex").name == "okx_dex"
+
+
+def test_spec_for_channel_legacy_values_normalized():
+    """旧大类值 cex/dex 迁移期兼容（normalize_execution_channel）。"""
     assert spec_for_channel("cex").name == "gate"
     assert spec_for_channel("dex").name == "okx_dex"
 
@@ -69,14 +75,14 @@ def test_spec_family_semantics():
 
 
 def test_broker_for_channel_gate():
-    b = broker_for_channel("cex", tokens_json=[], slippage="0.01")
+    b = broker_for_channel("gate", tokens_json=[], slippage="0.01")
     assert b.__class__.__name__ == "CexBroker"
     assert b._uid == "1"
 
 
 def test_broker_for_channel_okx_dex():
     b = broker_for_channel(
-        "dex", tokens_json=[], slippage="0.01", sol_buffer_pct=0.0
+        "okx_dex", tokens_json=[], slippage="0.01", sol_buffer_pct=0.0
     )
     assert b.__class__.__name__ == "OnchainOSBroker"
 
@@ -84,7 +90,7 @@ def test_broker_for_channel_okx_dex():
 def test_broker_for_channel_gate_ignores_dex_only_kw():
     # gate spec 不消费 sol_buffer_pct（**kw 吸收），不应报错
     b = broker_for_channel(
-        "cex", tokens_json=[], slippage="0.01", sol_buffer_pct=0.05
+        "gate", tokens_json=[], slippage="0.01", sol_buffer_pct=0.05
     )
     assert b.__class__.__name__ == "CexBroker"
 
@@ -101,8 +107,9 @@ def test_unknown_broker_fail_closed():
         get_broker("nope")
 
 
-def test_registry_matches_channel_binding():
-    # 通道映射的每个 broker 都存在且 family 与通道一致
-    for channel, name in CHANNEL_BROKER.items():
-        spec = REGISTRY[name]
-        assert spec.family == channel
+def test_registry_matches_execution_channels():
+    # 执行通道（实例名）与注册表一一对应，且 family 与分组语义一致
+    from nanobot_quant.exec_params import EXECUTION_CHANNELS
+    assert set(EXECUTION_CHANNELS) == set(REGISTRY)
+    assert REGISTRY["gate"].family == "cex"
+    assert REGISTRY["okx_dex"].family == "dex"

@@ -75,11 +75,11 @@ class _TdLiveRunner:
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
-        # 执行通道（2026-08-14，P2）：cex=Gate.io 交易所；dex=链上 DEX
-        # （默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
-        channel = str(params.get("execution_channel", "dex"))
+        # 执行通道（2026-08-14，P2；方案 C 后为实例名）：gate=Gate.io 交易所；
+        # okx_dex=链上 DEX（默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
+        channel = str(params.get("execution_channel", "okx_dex"))
         # 统一 broker 构造：broker 注册表（第十九章，2026-08-17）——
-        # CHANNEL_BROKER 唯一映射（dex→okx_dex、cex→gate），未知通道
+        # 通道值=spec 实例名（gate/okx_dex），旧值 dex/cex 自动归一化，未知通道
         # fail-closed（KeyError），绝不静默回退到别所下单。
         from nanobot_quant.brokers.registry import broker_for_channel
 

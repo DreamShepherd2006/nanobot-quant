@@ -266,18 +266,28 @@ class TestBuildExecutorChannel:
         fakes, CexB, CexDS, _OnB, _OnDS = self._fake_modules(monkeypatch)
         runner = td_live._TdLiveRunner()
         ex = runner._build_executor(
-            _params(td_enabled=True, execution_channel="cex")
+            _params(td_enabled=True, execution_channel="gate")
         )
         assert isinstance(ex.strategy.broker, CexB)
         assert isinstance(ex.strategy.broker.data_source, CexDS)
         assert fakes["cex_broker_kw"]["slippage"] == "0.01"
         assert "sol_buffer_pct" not in fakes["cex_broker_kw"]
 
+    def test_legacy_cex_channel_normalized(self, monkeypatch):
+        """旧值 cex 经 normalize_execution_channel 迁移后仍构造 CexBroker（方案 C）。"""
+        fakes, CexB, CexDS, _OnB, _OnDS = self._fake_modules(monkeypatch)
+        runner = td_live._TdLiveRunner()
+        ex = runner._build_executor(
+            _params(td_enabled=True, execution_channel="cex")
+        )
+        assert isinstance(ex.strategy.broker, CexB)
+        assert isinstance(ex.strategy.broker.data_source, CexDS)
+
     def test_dex_channel_default(self, monkeypatch):
         fakes, _CexB, _CexDS, OnB, OnDS = self._fake_modules(monkeypatch)
         runner = td_live._TdLiveRunner()
         ex = runner._build_executor(
-            _params(td_enabled=True, execution_channel="dex")
+            _params(td_enabled=True, execution_channel="okx_dex")
         )
         assert isinstance(ex.strategy.broker, OnB)
         assert isinstance(ex.strategy.broker.data_source, OnDS)

@@ -46,7 +46,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ② Execution quality ──────────────────────────────────────────
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
-    "execution_channel": "dex", # enum — dex=链上 DEX(OnchainOS, 默认)；cex=Gate.io 交易所
+    "execution_channel": "okx_dex", # enum — 实例名（okx_dex=OKX DEX 链上 / gate=Gate.io 交易所）；旧值 dex/cex 自动迁移
     # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
     "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
     "td_symbols": ["SOL"],     # TD 标的池（多标的扫描，谁 Setup 9 谁执行；
@@ -75,8 +75,24 @@ QUANTITY_MODES: tuple[str, ...] = ("fixed", "value")
 #: Valid batch exit orders.
 EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
 
-#: Valid execution channels (DEX on-chain vs CEX exchange).
-EXECUTION_CHANNELS: tuple[str, ...] = ("dex", "cex")
+#: Valid execution channels — concrete broker instances (spec names).
+#: 大类（dex/cex）由 spec.family 表达，UI 按大类分组显示（方案 C，2026-08-17）：
+#:   链上 DEX 组：okx_dex；交易所（CEX）组：gate。
+#: 新增交易所 = 注册 BrokerSpec + 此处加一项 + enum_groups 加一项，上层零改动。
+EXECUTION_CHANNELS: tuple[str, ...] = ("okx_dex", "gate")
+
+#: Legacy channel values auto-migrated on load/save (2026-08-17 方案 C).
+LEGACY_CHANNEL_ALIASES: dict[str, str] = {"dex": "okx_dex", "cex": "gate"}
+
+
+def normalize_execution_channel(value: Any) -> str:
+    """Normalize an execution-channel value to the concrete instance name.
+
+    Idempotent: legacy ``dex``/``cex`` → ``okx_dex``/``gate``; unknown values
+    pass through unchanged (callers fail closed later, never silently map).
+    """
+    v = str(value) if value is not None else ""
+    return LEGACY_CHANNEL_ALIASES.get(v, v)
 
 #: Human-readable bounds used by the WebUI form validation + display.
 PARAM_META: dict[str, dict[str, Any]] = {
@@ -101,12 +117,16 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "SOL 缓冲", "hint": "BUY 时按比例预留 SOL 覆盖 gas 与报价-成交间价格波动（仅 DEX 通道）",
     },
     "execution_channel": {
-        "group": "exec", "type": "enum", "enum": list(EXECUTION_CHANNELS), "std": "dex",
+        "group": "exec", "type": "enum", "enum": list(EXECUTION_CHANNELS), "std": "okx_dex",
         "enum_labels": {
-            "dex": "dex（OKX DEX · 链上子钱包）",
-            "cex": "cex（Gate.io · 交易所子账号）",
+            "okx_dex": "OKX DEX（链上 · OnchainOS 子钱包）",
+            "gate": "Gate.io（交易所 · 子账号）",
         },
-        "label": "执行通道", "hint": "按大类二选一（未来多所经注册表扩展）：dex=链上 DEX（OnchainOS 子钱包，默认）；cex=Gate.io 交易所（子账号，需在凭证管理配置 Gate API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到 cex 时 TD 循环 K 线数据源联动切换为 Gate CEX 公共端点（与执行同所）",
+        "enum_groups": {
+            "链上 DEX（TEE 签名 · 子钱包）": ["okx_dex"],
+            "交易所 CEX（API Key · 子账号）": ["gate"],
+        },
+        "label": "执行通道", "hint": "两大执行家族是完全不同的概念：dex=链上 DEX（OKX OnchainOS 子钱包，TEE 签名，默认）；cex=交易所（当前实例 Gate.io，子账号 API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到交易所时 TD 循环 K 线数据源联动切换为同所 Gate CEX 公共端点。未来多家 CEX/DEX 在此下拉分组内扩展",
     },
     "td_enabled": {
         "group": "td", "type": "bool", "std": False,
@@ -230,6 +250,9 @@ def load_exec_params() -> dict[str, Any]:
     raw = _read_raw()
     if raw is None:
         return merged
+    # 迁移：旧版 execution_channel 大类值（dex/cex）→ 实例名（okx_dex/gate），2026-08-17 方案 C
+    if "execution_channel" in raw:
+        raw["execution_channel"] = normalize_execution_channel(raw["execution_channel"])
     for key in merged:
         if key in raw and validate_exec_param(key, raw[key]) is None:
             merged[key] = raw[key]
@@ -256,6 +279,9 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
         except OSError as exc:
             return {"ok": False, "error": f"重置失败: {exc}"}
         return {"ok": True, "message": "已恢复默认执行参数", "params": dict(DEFAULT_EXEC_PARAMS)}
+    # 迁移：保存时旧版大类值自动归一化为实例名（WebUI 保存即迁移，2026-08-17 方案 C）
+    if "execution_channel" in params:
+        params["execution_channel"] = normalize_execution_channel(params["execution_channel"])
     for key in merged:
         if key in params:
             err = validate_exec_param(key, params[key])

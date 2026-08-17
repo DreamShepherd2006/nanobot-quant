@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from nanobot_quant.data_sources import (
-    CHANNEL_DATA_SOURCE,
     data_source_for_channel,
     executable_sources,
     get_data_source,
@@ -38,7 +37,16 @@ def test_okx_cex_is_research_until_execution_integrated():
 
 
 def test_channel_binding_structural_same_source():
-    assert CHANNEL_DATA_SOURCE == {"dex": "onchainos", "cex": "gate_cex"}
+    """通道→数据源经 broker spec 单一事实源（方案 C）：gate→gate_cex、okx_dex→onchainos。"""
+    from nanobot_quant.brokers.registry import spec_for_channel
+    assert spec_for_channel("gate").data_source == "gate_cex"
+    assert spec_for_channel("okx_dex").data_source == "onchainos"
+    assert data_source_for_channel("gate").name == "gate_cex"
+    assert data_source_for_channel("okx_dex").name == "onchainos"
+
+
+def test_channel_binding_legacy_values_normalized():
+    """旧值 cex/dex 经归一化仍解析到同所数据源（迁移期兼容）。"""
     assert data_source_for_channel("cex").name == "gate_cex"
     assert data_source_for_channel("dex").name == "onchainos"
 
