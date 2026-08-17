@@ -120,15 +120,28 @@ class TdSequentialStrategy(Strategy):
         # BUY/SELL 分支（TD BATCH LONG / TD BATCH EXIT / TD SLOT SKIP 等）全是
         # logger.info，实盘静默不可见。策略 logger 显式挂 stderr handler，
         # 使 INFO 级直达 gatekeeper 日志（与 HOLD/BLOCK 的 print(stderr) 同可见）。
-        self.logger.setLevel(logging.INFO)
-        self.logger.propagate = False  # 阻断 root/lastResort 重复输出
+        #
+        # lumibot v4.5.78 self.logger 是 LazyStrategyLogger proxy（非标准
+        # Logger）：无 .handlers/.propagate/setLevel，且 __getattr__ 只转发
+        # .info/.warning 等日志方法——直接访问 .handlers 抛 AttributeError
+        # （StrategyLoggerAdapter 也没有该属性，LoggerAdapter 才经 .logger 委托）。
+        # 正确路径：LazyStrategyLogger.logger → StrategyLoggerAdapter.logger → Logger。
+        _lg = self.logger
+        for _ in range(3):
+            if isinstance(_lg, logging.Logger):
+                break
+            _lg = getattr(_lg, "logger", _lg)
+        if not isinstance(_lg, logging.Logger):
+            _lg = logging.getLogger(type(self).__name__)
+        _lg.setLevel(logging.INFO)
+        _lg.propagate = False  # 阻断 root/lastResort 重复输出
         if not any(
             isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
-            for h in self.logger.handlers
+            for h in _lg.handlers
         ):
             _h = logging.StreamHandler(sys.stderr)
             _h.setFormatter(logging.Formatter("%(message)s"))
-            self.logger.addHandler(_h)
+            _lg.addHandler(_h)
 
         # Build RiskEngine from parameters
         self._risk = RiskEngine(

@@ -300,3 +300,48 @@ def test_is_placeholder_tx_hash():
     assert is_placeholder_tx_hash(
         "5xNq3aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef") is False
     assert is_placeholder_tx_hash("") is False
+
+def test_logger_proxy_penetration():
+    """日志可见性：LazyStrategyLogger → StrategyLoggerAdapter → Logger 三层穿透。
+    模拟 lumibot v4.5.78 的 logger 链（无 .handlers 的 proxy，仅 .logger 属性委托），
+    策略 __init__ 的穿透循环必须拿到底层 logging.Logger（回归：直接访问
+    .handlers 曾抛 AttributeError 'StrategyLoggerAdapter' object has no attribute 'handlers'）。"""
+
+    class _FakeProxy:
+        def __init__(self, inner):
+            self.logger = inner
+
+    base = logging.getLogger("td_test_logger_penetration")
+    proxy = _FakeProxy(_FakeProxy(base))  # 两层代理（LazyStrategyLogger → Adapter）
+    _lg = proxy
+    for _ in range(3):
+        if isinstance(_lg, logging.Logger):
+            break
+        _lg = getattr(_lg, "logger", _lg)
+    assert _lg is base
+
+    # 兜底：穿透失败时退化为按类名取 logger（不崩溃）
+    _lg2 = object()
+    if not isinstance(_lg2, logging.Logger):
+        _lg2 = logging.getLogger("TdSequentialStrategy")
+    assert isinstance(_lg2, logging.Logger)
+
+
+def test_strategy_logger_binds_stderr():
+    """策略 initialize 后底层 logger 挂 stderr handler（TD 循环日志 gatekeeper 可见）。
+    回归：initialize 直接访问 self.logger.handlers 曾抛 AttributeError——
+    lumibot 的 logger 是 LazyStrategyLogger proxy（无 .handlers），须穿透
+    .logger 链拿底层 Logger 再配置。"""
+    s = _make_strategy()
+    s.initialize()  # 日志配置在 lumibot lifecycle initialize 里执行
+    _lg = logging.getLogger("td-test")  # _make_strategy 手动设置的策略 logger
+    assert isinstance(_lg, logging.Logger)
+    assert _lg.propagate is False
+    assert any(
+        isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
+        for h in _lg.handlers
+    )
+    # 幂等：重复 initialize 不重复加 handler
+    n = len(_lg.handlers)
+    s.initialize()
+    assert len(_lg.handlers) == n
