@@ -65,8 +65,6 @@ class _TdLiveRunner:
         """构造 StrategyExecutor（lumibot 真包延迟导入，测试容器无 lumibot）。"""
         from lumibot.strategies.strategy_executor import StrategyExecutor
 
-        from nanobot_quant.brokers.onchainos_broker import OnchainOSBroker
-        from nanobot_quant.data.onchainos_data_source import OnchainOSDataSource
         from nanobot_quant.strategies.registry import load_selected
         from nanobot_quant.strategies.td_sequential_strategy import (
             TdSequentialStrategy,
@@ -75,30 +73,20 @@ class _TdLiveRunner:
         from nanobot_quant.tokens_store import load_tokens_json
 
         tokens = load_tokens_json() or []
-        # 执行通道（2026-08-14，P2）：cex=Gate.io 交易所（K 线联动 OKX CEX
-        # 公共端点）；dex=链上 DEX（默认，OnchainOS 子钱包）。只影响之后
-        # 的新下单，不迁移持仓。
+        # 执行通道（2026-08-14，P2）：cex=Gate.io 交易所；dex=链上 DEX
+        # （默认，OnchainOS 子钱包）。只影响之后的新下单，不迁移持仓。
         channel = str(params.get("execution_channel", "dex"))
-        # 结构性同源：通道 → 数据源唯一映射（data_sources 注册表），未知
-        # 通道 fail-closed（KeyError），绝不静默回退到别所的行情。
-        from nanobot_quant.data_sources import data_source_for_channel
-        data_source_for_channel(channel)
-        if channel == "cex":
-            from nanobot_quant.brokers.cex_broker import CexBroker
-            from nanobot_quant.data.cex_data_source import CexDataSource
+        # 统一 broker 构造：broker 注册表（第十九章，2026-08-17）——
+        # CHANNEL_BROKER 唯一映射（dex→okx_dex、cex→gate），未知通道
+        # fail-closed（KeyError），绝不静默回退到别所下单。
+        from nanobot_quant.brokers.registry import broker_for_channel
 
-            broker = CexBroker(
-                tokens_json=tokens,
-                slippage=str(params["slippage"]),
-                data_source=CexDataSource(tokens_json=tokens),
-            )
-        else:
-            broker = OnchainOSBroker(
-                tokens_json=tokens,
-                slippage=str(params["slippage"]),
-                sol_buffer_pct=float(params["sol_buffer_pct"]),
-                data_source=OnchainOSDataSource(tokens_json=tokens),
-            )
+        broker = broker_for_channel(
+            channel,
+            tokens_json=tokens,
+            slippage=str(params["slippage"]),
+            sol_buffer_pct=float(params["sol_buffer_pct"]),
+        )
         # lumibot Strategy.__init__ 在 broker=None 时直接 raise
         # ("No broker is set")，必须构造时传入 broker + data_source。
         strategy = TdSequentialStrategy(
@@ -132,6 +120,8 @@ class _TdLiveRunner:
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
                 "strategy_variant": strategy_name,
+                # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据
+                "channel_family": channel,
             },
             **td_params,
         )
