@@ -345,9 +345,18 @@ class TdSequentialStrategy(Strategy):
             return
 
         df = bars.df.copy()
+        print(
+            f"[TD] BARS | symbol={self.symbol} requested={fetch_len} "
+            f"got={len(df)} drop_in_progress={drop_in_progress}",
+            file=sys.stderr, flush=True,
+        )
         if drop_in_progress and len(df) > 2:
             # 丢弃进行中的最后一根（live + 数据源未过滤；回测数据源全为已收盘 bar）
             df = df.iloc[:-1]
+        print(
+            f"[TD] BARS | symbol={self.symbol} final={len(df)} (min_history={self._min_history})",
+            file=sys.stderr, flush=True,
+        )
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {
