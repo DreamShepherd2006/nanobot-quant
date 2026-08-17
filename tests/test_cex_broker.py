@@ -270,6 +270,35 @@ class TestSubmitOrder:
         assert b._price_of("CRCLX") == 68.5
         assert calls == ["gate_cex", "okx_cex"]
 
+    def test_price_of_both_fail_blacklists(self, monkeypatch):
+        """gate+okx 均无价 → 进黑名单，后续调用不再查询（用户自行处理后重启循环恢复）。"""
+        from nanobot_quant.gate_cex_data import blacklist_reason, clear_blacklist
+        clear_blacklist()
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, None, calls))
+        b = _broker()
+        assert b._price_of("VSC") == 0.0
+        assert calls == ["gate_cex", "okx_cex"]
+        assert blacklist_reason("VSC") and "无行情" in blacklist_reason("VSC")
+        # 黑名单内：静默短路，不再发任何查询
+        assert b._price_of("VSC") == 0.0
+        assert calls == ["gate_cex", "okx_cex"]  # 未新增调用
+        clear_blacklist()
+
+    def test_price_of_blacklisted_short_circuits(self, monkeypatch):
+        """黑名单内的币直接 0.0，不调数据源（gate ticker 400 进黑名单场景）。"""
+        from nanobot_quant.gate_cex_data import clear_blacklist, mark_blacklisted
+        clear_blacklist()
+        mark_blacklisted("VSC", "Gate 已下架/无行情 (delisted)")
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, 99.0, calls))
+        b = _broker()
+        assert b._price_of("VSC") == 0.0
+        assert calls == []  # gate + okx 都不查
+        clear_blacklist()
+
     def test_meta_unavailable_fail_closed(self, monkeypatch):
         # pair meta fetch fails → fail-closed: refuse to place blind order
         CexBroker._pair_meta_cache.clear()  # isolate from earlier tests

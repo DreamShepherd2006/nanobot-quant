@@ -361,6 +361,14 @@ class TdSequentialStrategy(Strategy):
                 timestep=self._timestep,
             )
         except Exception as e:
+            # 黑名单标的（Gate 无交易对/已下架，如 MU/VSC）静默跳过——
+            # 首次失败已打印原因，不再每轮刷屏；重启 TD 循环重新探测
+            try:
+                from nanobot_quant.gate_cex_data import blacklist_reason
+                if blacklist_reason(self.symbol):
+                    return
+            except ImportError:  # pragma: no cover
+                pass
             print(
                 f"[TD] DATA ERROR | symbol={self.symbol} {type(e).__name__}: {e}",
                 file=sys.stderr, flush=True,
