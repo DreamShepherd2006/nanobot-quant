@@ -352,12 +352,14 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         try:
             from nanobot_quant.batches import ensure_batches
 
+            _channel = result["params"].get("execution_channel", "okx_dex")
             _symbols = result["params"].get("td_symbols") or ["SOL"]
             _msgs = []
             for _sym in _symbols:
                 _b, _msg = ensure_batches(
                     int(result["params"].get("td_batches", 1) or 1),
                     _sym,
+                    _channel,
                 )
                 _msgs.append(f"{_sym}: {_msg}")
             gatekeeper._log(f"🧩 批次同步: {'; '.join(_msgs)}")

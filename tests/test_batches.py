@@ -267,10 +267,17 @@ def test_load_per_symbol(monkeypatch, tmp_path):
     d.mkdir(parents=True)
     target = d / "batches.SPXCB.json"
     target.write_text(json.dumps({"symbol": "SPXCB", "slots": [{"slot": 1}]}))
-    monkeypatch.setattr("nanobot_quant.batches.batches_path", lambda s=None: d / f"batches.{s}.json" if s else d / "batches.json")
+    monkeypatch.setattr("nanobot_quant.batches.batches_path",
+                        lambda s=None, c=None: d / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"))
     bm = BatchManager.load(symbol="SPXCB")
     assert bm is not None and bm.symbol == "SPXCB"
     assert BatchManager.load(symbol="OTHER") is None
+    # 通道化加载：batches.gate.CRCLX.json 独立读
+    gate = d / "batches.gate.CRCLX.json"
+    gate.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 1}]}))
+    bg = BatchManager.load(symbol="CRCLX", channel="gate")
+    assert bg is not None and bg.channel == "gate"
+    assert bg.path == gate
 
 
 def test_migrate_legacy_batches(monkeypatch, tmp_path):
@@ -280,12 +287,12 @@ def test_migrate_legacy_batches(monkeypatch, tmp_path):
     legacy.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 1}]}))
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None: d / f"batches.{s}.json" if s else d / "batches.json",
+        lambda s=None, c=None: d / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
     )
     migrate_legacy_batches()
-    # 旧文件归档到 batches.CRCLX.json，原路径消失
+    # 旧文件归档到 batches.okx_dex.CRCLX.json（历史 DEX 台账），原路径消失
     assert not legacy.exists()
-    assert (d / "batches.CRCLX.json").exists()
+    assert (d / "batches.okx_dex.CRCLX.json").exists()
 
 
 def test_migrate_does_not_clobber_existing(monkeypatch, tmp_path):
@@ -293,11 +300,11 @@ def test_migrate_does_not_clobber_existing(monkeypatch, tmp_path):
     d.mkdir(parents=True)
     legacy = d / "batches.json"
     legacy.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 9}]}))
-    target = d / "batches.CRCLX.json"
+    target = d / "batches.okx_dex.CRCLX.json"
     target.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 1}]}))
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None: d / f"batches.{s}.json" if s else d / "batches.json",
+        lambda s=None, c=None: d / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
     )
     migrate_legacy_batches()
     # 目标已存在 → 不覆盖，旧文件保留（新文件优先）
