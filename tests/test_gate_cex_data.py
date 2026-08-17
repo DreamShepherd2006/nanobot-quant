@@ -1,5 +1,8 @@
 """Unit tests for gate_cex_data.py (Gate spot candlesticks → DataFrame)."""
 
+import json
+import urllib.error
+
 import pandas as pd
 import pytest
 
@@ -97,3 +100,101 @@ class _FakeResp:
 def urllib_request():
     import urllib.request
     return urllib.request
+
+
+# ── 黑名单：Gate 无交易对/已下架币停止查询 ──────────────────────────
+
+class _FakeHTTPError(urllib.error.HTTPError):
+    def __init__(self, label):
+        self.code = 400
+        self._label = label
+
+    def read(self):
+        return json.dumps({"label": self._label, "message": "x"}).encode()
+
+
+def _clean_blacklist():
+    import nanobot_quant.gate_cex_data as m
+    m.clear_blacklist()
+
+
+def test_kline_400_blacklists_symbol(monkeypatch):
+    import nanobot_quant.gate_cex_data as m
+    _clean_blacklist()
+
+    def boom(req, timeout=20):
+        raise _FakeHTTPError("INVALID_CURRENCY_PAIR")
+
+    monkeypatch.setattr(urllib_request(), "urlopen", boom)
+    import pytest
+    with pytest.raises(urllib.error.HTTPError):
+        fetch_gate_kline("MU_USDT", bar="1m", limit=120)
+    assert m.blacklist_reason("MU") and "INVALID_CURRENCY_PAIR" in m.blacklist_reason("MU")
+    _clean_blacklist()
+
+
+def test_kline_blacklisted_short_circuits(monkeypatch):
+    import nanobot_quant.gate_cex_data as m
+    _clean_blacklist()
+    m.mark_blacklisted("MU", "Gate 无此交易对/已下架 (INVALID_CURRENCY_PAIR)")
+    calls = []
+
+    def spy(req, timeout=20):
+        calls.append(1)
+        return _FakeResp("[]")
+
+    monkeypatch.setattr(urllib_request(), "urlopen", spy)
+    import pytest
+    with pytest.raises(RuntimeError, match="已停止查询"):
+        fetch_gate_kline("MU_USDT", bar="1m", limit=120)
+    assert calls == []  # 不再发请求
+    _clean_blacklist()
+
+
+def test_ticker_400_blacklists_symbol(monkeypatch):
+    import nanobot_quant.gate_cex_data as m
+    _clean_blacklist()
+
+    def boom(req, timeout=20):
+        raise _FakeHTTPError("currency VSC is delisted")
+
+    monkeypatch.setattr(urllib_request(), "urlopen", boom)
+    assert fetch_gate_ticker("VSC_USDT") is None
+    assert m.blacklist_reason("VSC") and "delisted" in m.blacklist_reason("VSC")
+    _clean_blacklist()
+
+
+def test_ticker_blacklisted_short_circuits(monkeypatch):
+    import nanobot_quant.gate_cex_data as m
+    _clean_blacklist()
+    m.mark_blacklisted("VSC", "Gate 已下架/无行情 (delisted)")
+    calls = []
+
+    def spy(req, timeout=20):
+        calls.append(1)
+        return _FakeResp("[]")
+
+    monkeypatch.setattr(urllib_request(), "urlopen", spy)
+    assert fetch_gate_ticker("VSC_USDT") is None
+    assert calls == []  # 不再发请求
+    _clean_blacklist()
+
+
+def test_clear_blacklist_reenables(monkeypatch):
+    import nanobot_quant.gate_cex_data as m
+    _clean_blacklist()
+    m.mark_blacklisted("MU", "test")
+    assert m.blacklist_reason("MU")
+    m.clear_blacklist()
+    assert m.blacklist_reason("MU") is None
+    # 清空后重新探测（真实 _request 正常发请求）
+    calls = []
+
+    def fake(req, timeout=20):
+        calls.append(1)
+        return _FakeResp(json.dumps(_rows(4)))
+
+    monkeypatch.setattr(urllib_request(), "urlopen", fake)
+    df = fetch_gate_kline("MU_USDT", bar="1m", limit=120)
+    assert calls == [1] and len(df) == 4
+    _clean_blacklist()

@@ -175,7 +175,14 @@ class CexBroker(Broker):
         Gate ticker first (same-exchange, closest to fill), OKX CEX as
         fallback — both via the data-source registry (gate_cex / okx_cex);
         0.0 when both fail (fail-closed, consumers refuse to trade on 0).
+        已确认无行情的币（黑名单，如 Gate 无交易对/已下架）直接短路返回 0，
+        不再每轮查询刷屏——用户自行处理后重启 TD 循环重新探测。
         """
+        from nanobot_quant.gate_cex_data import blacklist_reason, mark_blacklisted
+
+        reason = blacklist_reason(symbol)
+        if reason:
+            return 0.0  # 黑名单内——静默 fail-closed（首次原因已打印）
         try:
             px = get_data_source("gate_cex").get_price(symbol)
             if px > 0:
@@ -198,6 +205,8 @@ class CexBroker(Broker):
         except Exception as e:
             print(f"[DIAG] CEX price {symbol}: okx ticker error: {e}",
                   file=sys.stderr, flush=True)
+        # gate+okx 均无价——永久性失败进黑名单（下架/无交易对），停止后续查询
+        mark_blacklisted(symbol, "gate+okx 均无行情（Gate 无交易对/已下架）")
         print(f"[DIAG] CEX price {symbol}: NO PRICE (gate+okx both failed) → fail-closed",
               file=sys.stderr, flush=True)
         return 0.0

@@ -449,6 +449,13 @@ class _TdLiveRunner:
                     )
                     return self.status()
                 # 等待成功后继续向下启动新循环
+            # 新循环启动前清空 CEX 黑名单——用户处理完下架/无交易对币后
+            # 重启 TD 循环即重新探测（blacklist 见 gate_cex_data.py）
+            try:
+                from nanobot_quant.gate_cex_data import clear_blacklist
+                clear_blacklist()
+            except Exception:  # pragma: no cover
+                pass
             try:
                 executor = self._build_executor(params)
             except Exception as exc:  # pragma: no cover — lumibot 真包异常

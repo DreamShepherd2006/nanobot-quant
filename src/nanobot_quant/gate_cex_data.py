@@ -15,6 +15,7 @@ on-chain DEX live path, docs/quant-system.md 方案 C).
 from __future__ import annotations
 
 import json
+import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -23,6 +24,38 @@ from typing import Optional
 import pandas as pd
 
 _API = "https://api.gateio.ws/api/v4/spot/candlesticks"
+
+# 黑名单：symbol -> 原因。Gate 无此交易对/已下架的币（如 MU、VSC）首次查询失败后
+# 记录，后续查询直接短路（不再每轮发请求刷屏）。TD 循环重启时由 td_live 调用
+# clear_blacklist() 清除——用户自行处理后重启循环即重新探测。
+_BLACKLIST: dict[str, str] = {}
+
+
+def blacklist_reason(symbol: str) -> Optional[str]:
+    """黑名单原因；不在黑名单返回 None。"""
+    return _BLACKLIST.get(str(symbol).upper())
+
+
+def mark_blacklisted(symbol: str, reason: str) -> None:
+    """记录黑名单并打印一次原因（stderr，gatekeeper 可见）。"""
+    key = str(symbol).upper()
+    if key in _BLACKLIST:
+        return
+    _BLACKLIST[key] = reason
+    print(
+        f"[DIAG] CEX blacklist {key}: {reason} — 停止查询，重启 TD 循环后重新探测",
+        file=sys.stderr, flush=True,
+    )
+
+
+def clear_blacklist() -> None:
+    """清空黑名单（TD 循环重启时调用，重新探测所有标的）。"""
+    _BLACKLIST.clear()
+
+
+def _symbol_of(pair: str) -> str:
+    """Gate pair（如 CRCLX_USDT）→ base symbol（CRCLX）。"""
+    return str(pair).split("_")[0].upper()
 
 # td-table / lumibot bar names -> Gate interval
 _BAR_MAP = {
@@ -39,6 +72,10 @@ def _map_bar(bar) -> str:
 
 def _request(pair: str, interval: str, limit: int,
              from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> list:
+    sym = _symbol_of(pair)
+    reason = blacklist_reason(sym)
+    if reason:
+        raise RuntimeError(f"{sym} 已停止查询（{reason}）——重启 TD 循环后重新探测")
     params = {
         "currency_pair": pair,
         "interval": interval,
@@ -50,8 +87,20 @@ def _request(pair: str, interval: str, limit: int,
         params["to"] = int(to_ts)
     url = _API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "nanobot-quant/0.1"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read().decode() or "[]")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode() or "[]")
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            # Gate 无此交易对（如 MU_USDT）——永久性错误，进黑名单停止查询
+            label = "HTTP 400"
+            try:
+                body = json.loads(e.read().decode() or "{}")
+                label = body.get("label") or body.get("message") or label
+            except (ValueError, OSError):
+                pass
+            mark_blacklisted(sym, f"Gate 无此交易对/已下架 ({label})")
+        raise
 
 
 def rows_to_df(rows: list) -> pd.DataFrame:
@@ -108,13 +157,25 @@ def fetch_gate_ticker(pair: str) -> Optional[dict]:
     Falls back to the list endpoint shape used by the broker: returns the
     first entry, whose ``last`` field is the last traded price.
     """
+    sym = _symbol_of(pair)
+    if blacklist_reason(sym):
+        return None  # 黑名单内——不再查询
     url = ("https://api.gateio.ws/api/v4/spot/tickers?currency_pair="
            + urllib.parse.quote(pair))
     req = urllib.request.Request(url, headers={"User-Agent": "nanobot-quant/0.1"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             data = json.loads(r.read().decode() or "[]")
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            # 已下架币（如 VSC delisted）——永久性错误，进黑名单停止查询
+            label = "HTTP 400"
+            try:
+                body = json.loads(e.read().decode() or "{}")
+                label = body.get("label") or body.get("message") or label
+            except (ValueError, OSError):
+                pass
+            mark_blacklisted(sym, f"Gate 已下架/无行情 ({label})")
         return None
     if isinstance(data, list) and data:
         return data[0]
