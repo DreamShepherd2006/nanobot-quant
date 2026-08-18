@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -503,12 +504,44 @@ class _TdLiveRunner:
 
         bm = _load_or_migrate(symbol, channel)
         if bm is not None and bm.symbol == symbol and bm.slots:
-            print(
-                f"[DIAG] td_live: batches restored ({symbol}, "
-                f"{len(bm.slots)} slots, {channel})",
-                file=sys.stderr, flush=True,
-            )
-            return bm
+            if family == "cex" and not all(
+                re.match(r"^gate_bot\d+$", str(s.get("account_id") or ""))
+                for s in bm.slots
+            ):
+                # 自愈：CEX 通道台账混入 DEX 子钱包 UUID（历史迁移残留，
+                # 2026-08-18 实证 batches.gate.CRCLX.json 为 UUID）——
+                # account_id 匹配不上 gate.json sub_accounts，对账/下单
+                # 永远静默跳过。全部 available 时快照后重建 gate_botN；
+                # 有 open lot 时 fail-closed 等人工处理（不可丢台账）。
+                opens = [
+                    s["slot"]
+                    for s in bm.slots
+                    if s.get("status") != "available"
+                ]
+                if opens:
+                    print(
+                        f"[DIAG] td_live: {symbol} gate 台账含 DEX UUID 且 "
+                        f"slot {opens} 有 open lot——拒绝重建，请人工处理",
+                        file=sys.stderr, flush=True,
+                    )
+                    return bm
+                ts = time.strftime("%Y%m%d%H%M%S")
+                src = bm.path
+                bak = src.with_name(f"{src.name}.dex-uuid.bak.{ts}")
+                os.replace(src, bak)
+                print(
+                    f"[DIAG] td_live: {symbol} gate 台账为 DEX UUID 残留"
+                    f"（全部 available），快照 {bak.name} 后重建",
+                    file=sys.stderr, flush=True,
+                )
+                bm = None  # 走下方按通道创建流程
+            else:
+                print(
+                    f"[DIAG] td_live: batches restored ({symbol}, "
+                    f"{len(bm.slots)} slots, {channel})",
+                    file=sys.stderr, flush=True,
+                )
+                return bm
         if family == "cex":
             from nanobot_quant.gate_credentials import load_slot_map
 

@@ -215,3 +215,39 @@ def test_cex_reconcile_gate_symbol_full_pair(monkeypatch, capsys):
     assert abs(lot["entry_price"] - 74.14) < 1e-9
     err = capsys.readouterr().err
     assert "导入 slot 2" in err
+
+
+def test_prepare_batches_heals_dex_uuid_ledger(monkeypatch, tmp_path):
+    """CEX 通道台账为 DEX UUID 残留（历史迁移污染）时：
+    快照后重建 gate_botN 批次，杜绝对账/下单静默跳过。
+
+    回归：2026-08-18 实证 batches.gate.CRCLX.json 的 account_id 是
+    DEX 子钱包 UUID（cd649f4e-...），gate.json sub_accounts 匹配不上。
+    """
+    import os as _os
+    from nanobot_quant.batches import BatchManager
+
+    uuid_ledger = BatchManager(
+        symbol="CRCLX",
+        account_ids=[
+            "cd649f4e-1316-4e57-8c84-8d29f1b9a6e0",
+            "bf9cf7ff-63e6-438f-bd83-2d010ab9b076",
+        ],
+        path=tmp_path / "batches.gate.CRCLX.json",
+    )
+    monkeypatch.setattr("nanobot_quant.batches._load_or_migrate",
+                        lambda symbol, channel=None: uuid_ledger)
+    monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials",
+                        lambda: _creds())
+    monkeypatch.setattr("nanobot_quant.gate_credentials.load_slot_map",
+                        lambda creds=None: {"1": "gate_bot1", "2": "gate_bot2"})
+    moved = []
+    monkeypatch.setattr("os.replace",
+                        lambda src, dst: moved.append((str(src), str(dst))))
+    monkeypatch.setattr("nanobot_quant.batches.BatchManager.save",
+                        lambda self: None)
+
+    from nanobot_quant.td_live import _TdLiveRunner
+    bm = _TdLiveRunner()._prepare_batches(2, "CRCLX", channel="gate")
+    assert [s["account_id"] for s in bm.slots] == ["gate_bot1", "gate_bot2"]
+    assert len(moved) == 1 and ".dex-uuid.bak." in moved[0][1]
