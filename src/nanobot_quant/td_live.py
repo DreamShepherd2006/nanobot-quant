@@ -308,6 +308,150 @@ class _TdLiveRunner:
                 file=sys.stderr, flush=True,
             )
 
+    def _reconcile_import_cex(
+        self, bm: Any, symbol: str, tokens_json: list[dict] | None
+    ) -> None:
+        """启动对账：CEX 子账号天然持仓导入台账（Step 2，2026-08-18 拍板）。
+
+        - 数据源：主 key `/wallet/sub_account_balances` 一次拉全部子账号，
+          按 slot 的 account_id（gate_botN）→ UID 匹配（无状态、无需还原）；
+        - 无 gas/min_hold（CEX 无链上 gas），导入量 = 子账号可用余额；
+        - 阈值：价值 < Gate min_quote（交易对规则动态拉取，兜底 $3）不导入
+          ——CEX 卖出受 min_quote 硬限，导入死 lot 会卡 slot（P2-A）；
+        - entry_price = cost_price（WebUI 设置）→ gate ticker 对账时市价
+          兜底（P3-A）；
+        - 已 open 的 slot 跳过（幂等，重启不重复导入）；主账号不是 slot
+          载体，不导入。
+        """
+        import sys
+        import time as _t
+
+        from nanobot_quant.data_sources.base import get_data_source
+        from nanobot_quant.gate_credentials import (
+            gate_pair,
+            load_gate_credentials,
+            load_slot_map,
+        )
+        from nanobot_quant.gate_sdk import get_currency_pair, sub_account_balances
+        from nanobot_quant.tokens_store import token_meta
+
+        creds = load_gate_credentials()
+        if not creds:
+            print(
+                f"[DIAG] td_live 对账: {symbol} 无 gate 凭证，跳过",
+                file=sys.stderr, flush=True,
+            )
+            return
+        main = creds.get("main") or {}
+        api_key = str(main.get("api_key") or "")
+        api_secret = str(main.get("api_secret") or "")
+        if not api_key or not api_secret:
+            print(
+                f"[DIAG] td_live 对账: {symbol} 主 key 缺失，跳过",
+                file=sys.stderr, flush=True,
+            )
+            return
+        meta = token_meta(symbol, tokens_json)
+        cost = meta.get("cost_price")
+        slot_map = load_slot_map(creds) or {}
+        subs = creds.get("sub_accounts") or {}
+        # 子账号名称 → UID（slot.account_id 存的是名称，如 gate_bot1）
+        name_to_uid = {
+            str(name): str(v.get("uid") or "")
+            for name, v in subs.items()
+            if isinstance(v, dict) and v.get("uid")
+        }
+        # P2-A 阈值：交易对 min_quote 动态拉取（与买卖预检同源），失败兜底 $3
+        pair = gate_pair(symbol, tokens_json)
+        min_quote = 3.0
+        try:
+            pair_meta = get_currency_pair(api_key, api_secret, pair)
+            if isinstance(pair_meta, dict):
+                min_quote = float(pair_meta.get("min_quote_amount") or 3.0)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[DIAG] td_live 对账: {symbol} pair meta 失败 {exc}，"
+                f"用默认 min_quote=${min_quote:g}",
+                file=sys.stderr, flush=True,
+            )
+        try:
+            rows = sub_account_balances(api_key, api_secret) or []
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[DIAG] td_live 对账: {symbol} 子账号余额查询失败: {exc}",
+                file=sys.stderr, flush=True,
+            )
+            return
+        by_uid: dict[str, dict] = {}
+        for r in rows:
+            uid = str(r.get("uid") or "")
+            if uid:
+                by_uid[uid] = dict(r.get("available") or {})
+        # 币种匹配：tokens.json gate_symbol 优先，回退 symbol（Gate 币种大写）
+        bal_key = (
+            str(meta.get("gate_symbol") or "").upper()
+            or symbol.upper()
+        )
+        reports: list[str] = []
+        imported_any = False
+        px: float | None = None
+        for slot in bm.slots:
+            if slot.get("status") != "available":
+                continue  # 已 open：TD 自己开的仓，天然持仓不可重复导入
+            name = str(slot.get("account_id") or "")
+            uid = name_to_uid.get(name) or ""
+            if not uid or uid not in by_uid:
+                continue  # 未配置/无余额记录的子账号跳过
+            bal = float(by_uid[uid].get(bal_key) or 0.0)
+            if bal <= 0:
+                continue
+            # 阈值判断与定价：gate ticker（与 CexBroker._price_of 同源）
+            if px is None:
+                try:
+                    px = float(
+                        get_data_source("gate_cex").get_price(symbol) or 0.0
+                    )
+                except Exception:  # noqa: BLE001
+                    px = 0.0
+            if px <= 0:
+                reports.append(
+                    f"{symbol} 账户{name} 取价失败，跳过导入（无法判阈值/定价）"
+                )
+                continue
+            if bal * px < min_quote:
+                reports.append(
+                    f"{symbol} 账户{name} dust ${bal * px:.2f} < "
+                    f"${min_quote:g}（min_quote），跳过导入"
+                )
+                continue
+            if cost:
+                price = float(cost)
+                note = "cost_price"
+            else:
+                price = px
+                note = "gate ticker"
+            bm.open_lot(
+                qty=bal,
+                entry_price=price,
+                entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
+                slot=slot["slot"],
+            )
+            imported_any = True
+            reports.append(
+                f"{symbol} 账户{name}(uid {uid}) 子账号 {bal} → "
+                f"导入 slot {slot['slot']}（{note} {price:.4g}）"
+            )
+        if imported_any:
+            bm.save()
+        if reports:
+            for r in reports:
+                print(f"[DIAG] td_live 对账: {r}", file=sys.stderr, flush=True)
+        else:
+            print(
+                f"[DIAG] td_live 对账: {symbol} 无天然持仓（或全部低于阈值）",
+                file=sys.stderr, flush=True,
+            )
+
     def _prepare_all_batches(
         self, td_batches: int, symbols: list[str], channel: str = "dex"
     ) -> dict[str, Any]:
@@ -507,17 +651,15 @@ class _TdLiveRunner:
             strategy = getattr(self, "_strategy", None)
             if strategy is None:
                 return
-            if (strategy.parameters or {}).get("channel_family") == "cex":
-                print(
-                    "[DIAG] td_live 对账: CEX 通道跳过（Step 2 实现）",
-                    file=sys.stderr, flush=True,
-                )
-                return
             managers = getattr(strategy, "batch_managers", None) or {}
             tokens_json = getattr(strategy, "tokens_json", None)
+            if (strategy.parameters or {}).get("channel_family") == "cex":
+                importer = self._reconcile_import_cex
+            else:
+                importer = self._reconcile_import
             for sym, bm in managers.items():
                 try:
-                    self._reconcile_import(bm, sym, tokens_json)
+                    importer(bm, sym, tokens_json)
                 except Exception as exc:  # noqa: BLE001
                     print(
                         f"[DIAG] td_live 对账: {sym} 失败: {exc}",
