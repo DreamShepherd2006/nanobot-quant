@@ -361,6 +361,12 @@ class _TdLiveRunner:
             for name, v in subs.items()
             if isinstance(v, dict) and v.get("uid")
         }
+        if not name_to_uid:
+            print(
+                f"[DIAG] td_live 对账: {symbol} gate.json sub_accounts 无 UID 映射"
+                "（凭证页子账号 UID 未配置？）——跳过导入",
+                file=sys.stderr, flush=True,
+            )
         # P2-A 阈值：交易对 min_quote 动态拉取（与买卖预检同源），失败兜底 $3
         pair = gate_pair(symbol, tokens_json)
         min_quote = 3.0
@@ -387,6 +393,12 @@ class _TdLiveRunner:
             uid = str(r.get("uid") or "")
             if uid:
                 by_uid[uid] = dict(r.get("available") or {})
+        if not by_uid:
+            print(
+                f"[DIAG] td_live 对账: {symbol} 子账号余额为空"
+                "（主 key 是否开通「子账号」权限？）——跳过导入",
+                file=sys.stderr, flush=True,
+            )
         # 币种匹配：tokens.json gate_symbol 优先，回退 symbol（Gate 币种大写）
         bal_key = (
             str(meta.get("gate_symbol") or "").upper()
@@ -399,7 +411,8 @@ class _TdLiveRunner:
             if slot.get("status") != "available":
                 continue  # 已 open：TD 自己开的仓，天然持仓不可重复导入
             name = str(slot.get("account_id") or "")
-            uid = name_to_uid.get(name) or ""
+            # 名称 → UID；兜底：slot_map 若直接存 UID 也可用
+            uid = name_to_uid.get(name) or str(slot_map.get(str(slot["slot"])) or "")
             if not uid or uid not in by_uid:
                 continue  # 未配置/无余额记录的子账号跳过
             bal = float(by_uid[uid].get(bal_key) or 0.0)

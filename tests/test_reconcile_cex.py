@@ -130,6 +130,37 @@ def test_cex_reconcile_no_credentials(monkeypatch):
     assert bm.open_slots() == []
 
 
+def test_cex_reconcile_sub_accounts_without_uid(monkeypatch, capsys):
+    """gate.json 有 sub_accounts 但缺 UID → 明确诊断 + 安全跳过（不静默）。
+
+    HF Space 曾为 flat 形态（仅主账号），对账曾静默报「无天然持仓」——
+    本测试确保缺 UID 映射时有显式诊断，便于定位配置问题。
+    """
+    bm = _make_bm()
+    creds = {
+        "main": {"api_key": "k_main", "api_secret": "s_main"},
+        "sub_accounts": {
+            "gate_bot1": {"api_key": "k1", "api_secret": "s1"},  # 无 uid
+            "gate_bot2": {"api_key": "k2", "api_secret": "s2"},
+        },
+    }
+    runner = _make_runner(creds, _bal(), monkeypatch)
+    runner._reconcile_import_cex(bm, "CRCLX", _tokens())
+    assert bm.open_slots() == []
+    err = capsys.readouterr().err
+    assert "无 UID 映射" in err
+
+
+def test_cex_reconcile_empty_sub_balances(monkeypatch, capsys):
+    """主 key 无子账号权限/余额接口返回空 → 明确诊断 + 安全跳过。"""
+    bm = _make_bm()
+    runner = _make_runner(_creds(), [], monkeypatch)
+    runner._reconcile_import_cex(bm, "CRCLX", _tokens())
+    assert bm.open_slots() == []
+    err = capsys.readouterr().err
+    assert "子账号余额为空" in err
+
+
 def test_cex_reconcile_imports_multiple_slots(monkeypatch):
     """多子账号各有持仓 → 各自导入对应 slot。"""
     bm = _make_bm()
