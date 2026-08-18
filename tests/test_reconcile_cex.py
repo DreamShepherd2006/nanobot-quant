@@ -198,3 +198,20 @@ def test_cex_reconcile_dynamic_min_quote(monkeypatch):
     runner = _make_runner(_creds(), _bal(), monkeypatch, min_quote="10")
     runner._reconcile_import_cex(bm, "CRCLX", _tokens())
     assert bm.open_slots() == []
+
+
+def test_cex_reconcile_gate_symbol_full_pair(monkeypatch, capsys):
+    """tokens.json 配了 gate_symbol=CRCLX_USDT（完整 pair）时仍能导入。
+
+    回归：bal_key 曾直接取 gate_symbol → "CRCLX_USDT" 匹配不到
+    sub_account_balances available 键 "CRCLX" → 静默「无天然持仓」。
+    """
+    bm = _make_bm()
+    runner = _make_runner(_creds(), _bal(), monkeypatch)
+    runner._reconcile_import_cex(bm, "CRCLX", _tokens(gate_symbol="CRCLX_USDT"))
+    assert [s["slot"] for s in bm.open_slots()] == [2]
+    lot = bm.open_slots()[0]["lot"]
+    assert abs(lot["qty"] - 0.112069) < 1e-9
+    assert abs(lot["entry_price"] - 74.14) < 1e-9
+    err = capsys.readouterr().err
+    assert "导入 slot 2" in err

@@ -399,11 +399,10 @@ class _TdLiveRunner:
                 "（主 key 是否开通「子账号」权限？）——跳过导入",
                 file=sys.stderr, flush=True,
             )
-        # 币种匹配：tokens.json gate_symbol 优先，回退 symbol（Gate 币种大写）
-        bal_key = (
-            str(meta.get("gate_symbol") or "").upper()
-            or symbol.upper()
-        )
+        # 币种匹配：Gate available 键 = 基础币大写（如 "CRCLX"），
+        # 不能用 gate_symbol 原值——它可能是完整 pair（"CRCLX_USDT"）。
+        # 从 gate_pair 剥离 quote，与下单/取价同源。
+        bal_key = gate_pair(symbol, tokens_json).split("_")[0]
         reports: list[str] = []
         imported_any = False
         px: float | None = None
