@@ -428,6 +428,28 @@ class TdSequentialStrategy(Strategy):
         setup_sell = signal.get("setup_sell", 0) or 0
         cd_sell = signal.get("cd_sell", 0) or 0
         score = signal.get("score", 0) or 0
+
+        # ── 信号周期状态（2026-08-19 分批次建仓语义，per-symbol）──
+        # 一个信号周期内同一标的只建一次仓：建仓后 setup 计数单调不减
+        # （9→10→11→12）视为同周期，跳过 BUY；计数变小（12→8 / 9→1）
+        # 标记 reset → 新周期允许再建。slot 平仓释放后同周期也不建
+        # （信号级，用户 2026-08-19 拍板）。SELL 侧不受影响。
+        if not hasattr(self, "_cycle_state"):
+            self._cycle_state: dict[str, dict] = {}
+        st = self._cycle_state.get(self.symbol)
+        if st is None:
+            # 首次见到该标的：有 open 仓位 → 视为本周期已建仓（保守
+            # 不追——重启边界：setup 累加期重启会立即再建，此守卫避免）
+            st = {"bought": False, "prev_setup": 0, "reset": False}
+            _bm = (getattr(self, "_batch_managers", None) or {}).get(
+                self.symbol
+            ) or getattr(self, "batch_manager", None)
+            if _bm is not None and _bm.any_open():
+                st["bought"] = True
+            self._cycle_state[self.symbol] = st
+        if setup_buy < st["prev_setup"]:
+            st["reset"] = True  # 计数变小 → 新信号周期
+        st["prev_setup"] = setup_buy
         price = signal.get("price", 0) or 0
 
         # ── 实时状态共享（td-table「实时监控」tab，2026-08-11）──
@@ -460,6 +482,23 @@ class TdSequentialStrategy(Strategy):
         exit_setup = int(self._td_params.get("exit_setup", 9))
         exit_countdown = int(self._td_params.get("exit_countdown", 13))
         score_threshold = float(self._td_params.get("score_threshold", 0.0))
+
+        # 同周期已建仓 → 跳过 BUY（信号级：slot 平仓释放也不建，等 setup
+        # 重置后再现新信号；只拦截 BUY，不 return——SELL/止损仍正常评估）
+        if (
+            st["bought"]
+            and not st["reset"]
+            and setup_buy >= entry_setup
+            and score > score_threshold
+        ):
+            print(
+                f"[TD] BATCH WAIT | symbol={self.symbol} 同周期已建仓"
+                f"（setup_buy={setup_buy} 未重置），等新信号周期",
+                file=sys.stderr, flush=True,
+            )
+            self._record(
+                "WAIT", f"同周期已建仓 setup_buy={setup_buy}", symbol=self.symbol
+            )
         tdst_filter = bool(self._td_params.get("tdst_filter", False))
         support = signal.get("tdst_support")
 
@@ -476,6 +515,9 @@ class TdSequentialStrategy(Strategy):
             and score > score_threshold
             and can_buy
             and (not tdst_filter or (support is not None and price > support))
+            # 信号周期门控（2026-08-19 分批次建仓）：同周期已建仓（bought 且
+            # 未重置）→ 不 BUY；reset=True（计数变小）→ 新周期允许
+            and not (st["bought"] and not st["reset"])
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
@@ -532,6 +574,8 @@ class TdSequentialStrategy(Strategy):
                             chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
                         )
                         executed = True
+                        st["bought"] = True
+                        st["reset"] = False
                         break
                     # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
                     # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
@@ -572,6 +616,8 @@ class TdSequentialStrategy(Strategy):
                         chain=pend.get("chain", ""),
                     )
                     executed = True
+                    st["bought"] = True
+                    st["reset"] = False
                     break
                 if not executed:
                     self.logger.info(
@@ -603,6 +649,8 @@ class TdSequentialStrategy(Strategy):
                     "LONG",
                     f"qty={req.quantity:.6g} price={price:.2f}",
                 )
+                st["bought"] = True
+                st["reset"] = False
                 return
 
         # ── SELL signal / stop-loss / take-profit（分批：逐批独立）──

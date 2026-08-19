@@ -197,6 +197,11 @@ class BatchManager:
     def open_slots(self) -> list[dict[str, Any]]:
         return [s for s in self.slots if s["status"] == OPEN]
 
+    def any_open(self) -> bool:
+        """是否存在 open 仓位（信号周期状态初始化用：重启时
+        有 open 仓位视为本周期已建仓，保守不追同周期信号）。"""
+        return bool(self.open_slots())
+
     def next_buy_slot(self, start_slot: int = 1) -> Optional[dict[str, Any]]:
         """BUY 目标：从 start_slot（1-based）起循环扫描第一个 available。
 

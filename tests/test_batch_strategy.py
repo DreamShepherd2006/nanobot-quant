@@ -118,11 +118,23 @@ def test_batch_buy_occupies_slot(tmp_path):
 
 
 def test_batch_buy_accumulates_multiple_lots(tmp_path):
-    """连续两次 BUY 信号 → 两个批次（多仓位累积）。"""
+    """同一信号周期只建一个批次；setup 重置后的新周期再建下一个
+    （2026-08-19 分批次建仓：9→10→11 只算一次信号）。"""
     bm = _make_bm(tmp_path)
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    s.on_trading_iteration()  # 周期 1：BUY → slot 1
+    assert len(bm.open_slots()) == 1
+    s._captured.clear()
+    s.on_trading_iteration()  # 同周期（setup 未重置）→ 周期守卫，不建
+    assert "order" not in s._captured
+    assert len(bm.open_slots()) == 1
+    # 新周期：setup 计数归小（reset）后再触发 → 允许建第二个
+    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)])
+    s.on_trading_iteration()  # 中性 60 根 → setup_buy=0 → reset=True
+    s._bars = _bars_with(_buy_closes())
+    s._captured.clear()
     s.on_trading_iteration()
-    s.on_trading_iteration()
+    assert "order" in s._captured
     assert len(bm.open_slots()) == 2
     assert [x["slot"] for x in bm.open_slots()] == [1, 2]
 
@@ -213,13 +225,22 @@ def test_batch_take_profit_hit(tmp_path):
 # ── 回收复用 ─────────────────────────────────────────────────────────
 
 def test_batch_slot_reuse_after_close(tmp_path):
-    """平仓后 slot 回收，下一 BUY 信号复用同一 slot。"""
+    """平仓后同周期不重建（信号级：slot 释放也不建，等新信号周期）；
+    setup 重置后的新周期复用该 slot（2026-08-19 拍板）。"""
     bm = _make_bm(tmp_path)
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
     s.on_trading_iteration()  # BUY → slot 1 open
     bm.close_lot(1)           # 模拟平仓 → slot 1 回收
     s._captured.clear()
-    s.on_trading_iteration()  # 再 BUY
+    s.on_trading_iteration()  # 同周期（未重置）→ 信号级不建
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "available"
+    # 新周期：setup 归小后重新触发 → 复用 slot 1
+    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)])
+    s.on_trading_iteration()  # 中性 60 根 → reset=True
+    s._bars = _bars_with(_buy_closes())
+    s._captured.clear()
+    s.on_trading_iteration()
     assert "order" in s._captured
     assert bm.open_slots()[0]["slot"] == 1
 
@@ -271,12 +292,20 @@ def test_batch_buy_start_slot_offset(tmp_path):
 
 
 def test_batch_buy_start_slot_wraps_after_open(tmp_path):
-    """起点 slot 已 open → 从起点循环找下一 available（2→3→1）。"""
+    """起点 slot 已 open（历史持仓）→ 同周期保守不建；新周期信号
+    从起点循环找下一 available（2→3）。"""
     bm = _make_bm(tmp_path)
-    bm.open_lot(qty=5, entry_price=100.0, entry_time="t1", slot=2)
+    bm.open_lot(qty=5, entry_price=80.0, entry_time="t1", slot=2)  # 历史仓位（浮盈，不止损）
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()), td_start_slot=2)
+    s.on_trading_iteration()  # 有 open → 视为本周期已建（保守），同周期不建
+    assert len(bm.open_slots()) == 1  # 仅历史 slot 2
+    # 新周期：setup 归小后重新触发 → 允许建 → 从 slot 2 回绕找 slot 3
+    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)])
     s.on_trading_iteration()
-    assert len(bm.open_slots()) == 2          # 原 slot 2 + 新买入
+    s._bars = _bars_with(_buy_closes())
+    s._captured.clear()
+    s.on_trading_iteration()
+    assert len(bm.open_slots()) == 2          # 历史 slot 2 + 新买入
     assert bm.slots[2]["status"] == "open"   # 新买入落到 slot 3
 
 
