@@ -57,7 +57,8 @@ class TdSequentialStrategy(Strategy):
     parameters = {
         "symbol": "AAPL",
         "quantity": 10,
-        "quantity_mode": "fixed",  # "fixed" = fixed quantity; "value" = pv × pct
+        "quantity_mode": "fixed",  # "fixed" = fixed quantity; "value" = pv × pct; "fixed_amount" = fixed USD amount
+        "td_fixed_amount": 10.0,   # quantity_mode=fixed_amount 时的每笔建仓金额（U）
         "sleeptime": "1D",         # strategy main-loop cadence ("1m"…"1W")
         "max_position_pct": 0.20,   # max % of portfolio in one position
         "max_drawdown_pct": 0.15,   # skip new entries when drawdown > 15%
@@ -102,6 +103,8 @@ class TdSequentialStrategy(Strategy):
         self.symbols = list(self.parameters.get("symbols") or [self.symbol])
         self.quantity = quantity or self.parameters.get("quantity", 10)
         self.quantity_mode = quantity_mode or self.parameters.get("quantity_mode", "fixed")
+        # fixed_amount 模式的每笔固定金额（U；CEX=USDT / DEX=USDC，2026-08-19）
+        self.fixed_amount = float(self.parameters.get("td_fixed_amount", 10.0) or 10.0)
         self.sleeptime = sleeptime or self.parameters.get("sleeptime", "1D")
         self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
             self.sleeptime, "day"
@@ -1247,28 +1250,35 @@ class TdSequentialStrategy(Strategy):
                     f"pv=${pv_slot:.2f} < ${min_v:.2f}"
                 )
                 return None
-            # 数量：fixed=固定 td_quantity；value=pv_slot × max_position_pct / price
+            # 数量：fixed=固定 td_quantity；value=pv_slot × max_position_pct / price；
+            # fixed_amount=固定金额 td_fixed_amount / price（2026-08-19 新增）
             # （小数不取整——避免 SOL $77/CRCLX $68 等高价标的 int 截断成 0
             #  后被 max(...,1) 抬成 1 个导致永远 BLOCK；金额驱动自动适配价格差）
             if self.quantity_mode == "value":
                 qty = pv_slot * self._risk.max_position_pct / price if price > 0 else 0.0
+            elif self.quantity_mode == "fixed_amount":
+                # 固定金额：每笔建仓花固定 U（如 10U），与 slot 资产规模无关
+                qty = self.fixed_amount / price if price > 0 else 0.0
             else:
                 qty = float(self.quantity or 0)
             if qty <= 0:
                 return None
-            result = self._risk.can_enter(
-                position_value=qty * price,
-                portfolio_value=pv_slot,
-                peak_portfolio=pv_slot,
-            )
-            if not result.approved:
-                print(
-                    f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} slot={slot['slot']} "
-                    f"pos=${qty * price:.2f} > "
-                    f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
-                    file=sys.stderr, flush=True,
+            if self.quantity_mode != "fixed_amount":
+                # 2026-08-19 拍板：fixed_amount 跳过单仓上限校验（金额即用户显式仓位），
+                # 资金检查（下方 USDC/USDT 余额 ≥ needed）保留
+                result = self._risk.can_enter(
+                    position_value=qty * price,
+                    portfolio_value=pv_slot,
+                    peak_portfolio=pv_slot,
                 )
-                return None
+                if not result.approved:
+                    print(
+                        f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} slot={slot['slot']} "
+                        f"pos=${qty * price:.2f} > "
+                        f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
+                        file=sys.stderr, flush=True,
+                    )
+                    return None
             bal = self._slot_quote_balance("USDC")
             needed = qty * price
             if bal is None or bal < 0 or bal < needed:
@@ -1425,23 +1435,26 @@ class TdSequentialStrategy(Strategy):
                 return None
             if self.quantity_mode == "value":
                 qty = pv_slot * self._risk.max_position_pct / price if price > 0 else 0.0
+            elif self.quantity_mode == "fixed_amount":
+                qty = self.fixed_amount / price if price > 0 else 0.0
             else:
                 qty = float(self.quantity or 0)
             if qty <= 0:
                 return None
-            result = self._risk.can_enter(
-                position_value=qty * price,
-                portfolio_value=pv_slot,
-                peak_portfolio=pv_slot,
-            )
-            if not result.approved:
-                print(
-                    f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} slot={slot['slot']} "
-                    f"pos=${qty * price:.2f} > "
-                    f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
-                    file=sys.stderr, flush=True,
+            if self.quantity_mode != "fixed_amount":
+                result = self._risk.can_enter(
+                    position_value=qty * price,
+                    portfolio_value=pv_slot,
+                    peak_portfolio=pv_slot,
                 )
-                return None
+                if not result.approved:
+                    print(
+                        f"[TD] BLOCK ({result.check_name}) | symbol={self.symbol} slot={slot['slot']} "
+                        f"pos=${qty * price:.2f} > "
+                        f"{self._risk.max_position_pct * 100:.0f}% of slot pv=${pv_slot:.2f}",
+                        file=sys.stderr, flush=True,
+                    )
+                    return None
             bal = self._cex_slot_quote_balance(slot, "USDT")
             needed = qty * price
             if bal < needed:

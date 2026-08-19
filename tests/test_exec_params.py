@@ -81,6 +81,8 @@ def test_defaults_match_pre_parameterisation_hardcoded():
     assert DEFAULT_EXEC_PARAMS["td_symbols"] == ["SOL"]
     assert DEFAULT_EXEC_PARAMS["td_sleeptime"] == "1D"
     assert DEFAULT_EXEC_PARAMS["quantity_mode"] == "fixed"
+    # fixed_amount（2026-08-19）：默认每笔固定 10U
+    assert DEFAULT_EXEC_PARAMS["td_fixed_amount"] == 10.0
     # 固定 K 线窗口（方案 B，2026-08-10）：默认 120，低于 onchainos 300 上限
     assert DEFAULT_EXEC_PARAMS["td_bars"] == 120
 
@@ -131,8 +133,12 @@ def test_validation_rejects_out_of_range(key, bad):
         ("td_sleeptime", "1H"),
         ("td_sleeptime", "1W"),
         ("quantity_mode", "value"),
+        ("quantity_mode", "fixed_amount"),
         ("td_quantity", 1),
         ("td_quantity", 100000),
+        ("td_fixed_amount", 10.0),
+        ("td_fixed_amount", 1.0),
+        ("td_fixed_amount", 5000.0),
         ("td_enabled", True),
         ("td_enabled", False),
         ("execution_channel", "okx_dex"),
@@ -154,6 +160,9 @@ def test_validation_accepts_in_range(key, good):
         ("td_sleeptime", "1"),
         ("quantity_mode", "fixedx"),
         ("quantity_mode", "10"),
+        ("td_fixed_amount", 0.5),
+        ("td_fixed_amount", 5000.1),
+        ("td_fixed_amount", "ten"),
     ],
 )
 def test_validation_rejects_bad_td_fields(key, bad):
@@ -361,6 +370,8 @@ def test_page_renders_td_fields(tmp_path, monkeypatch):
     assert 'value="1D" selected' in html
     assert 'id="quantity_mode"' in html
     assert 'value="fixed" selected' in html
+    assert 'id="td_fixed_amount"' in html
+    assert 'value="10.0"' in html or 'value="10"' in html
     assert 'name="td_symbols"' in html
     assert 'class="multi"' in html
     # 标的池行式编辑（2026-08-10）：每候选一行 + 保留量/成本价输入
