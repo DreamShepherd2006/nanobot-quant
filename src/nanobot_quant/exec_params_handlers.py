@@ -212,8 +212,10 @@ def _field_html(
         )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
+    # 2026-08-19：td_batches 的 field div 带专属 id，JS 切换通道时同步换文案
+    fid = ' id="field_td_batches"' if key == "td_batches" else ""
     return (
-        f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
+        f'<div class="field" data-channel="{channels}"{fid}><label class="f-label" for="{key}">{label}</label>'
         f'<input type="number" id="{key}" name="{key}" value="{value}" '
         f'min="{lo}" max="{hi}" step="{step}">'
         f'<span class="f-std">默认 {std} · 范围 {lo}–{hi}</span>'
