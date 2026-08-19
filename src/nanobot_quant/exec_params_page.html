@@ -113,6 +113,9 @@
     });
     // 2026-08-19：批次数量文案随通道切换（DEX=子钱包 / CEX=子账号），
     // 服务端仅按初始通道渲染 label，JS 切换时同步更新（文案与 Python 端保持一致）
+    // 2026-08-19：标的池说明文案随通道切换（dex 含「保留量=每账户最低持有，」前缀）
+    const pf = document.getElementById('pool-fstd');
+    if (pf) pf.textContent = fam === 'cex' ? pf.dataset.fstdCex : pf.dataset.fstdDex;
     const fb = document.getElementById('field_td_batches');
     if (fb) {
       const l = fb.querySelector('.f-label');

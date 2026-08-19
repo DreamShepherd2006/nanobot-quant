@@ -189,7 +189,7 @@ def _field_html(
             return (
                 f'<div class="field" data-channel="both"><label class="f-label">{label}</label>'
                 f'<div class="pool">{"".join(rows)}</div>'
-                f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；{"保留量=每账户最低持有，" if family == "dex" else ""}成本价=天然持仓导入价）</span>'
+                f'<span class="f-std" id="pool-fstd" data-fstd-dex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）" data-fstd-cex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；成本价=天然持仓导入价）">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；{"保留量=每账户最低持有，" if family == "dex" else ""}成本价=天然持仓导入价）</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         boxes = [
