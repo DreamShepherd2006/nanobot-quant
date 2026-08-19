@@ -110,10 +110,12 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "slippage": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.01,
+        "channels": "dex",
         "label": "滑点容忍", "hint": "swap 滑点容忍（百分比，1=1%，如 0.5=0.5%）；过小易滑点超限失败（82112），过大成交价劣",
     },
     "sol_buffer_pct": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.05,
+        "channels": "dex",
         "label": "SOL 缓冲", "hint": "BUY 时按比例预留 SOL 覆盖 gas 与报价-成交间价格波动（仅 DEX 通道）",
     },
     "execution_channel": {
@@ -155,7 +157,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
     # ── ④ 子钱包分批 ──────────────────────────────────────────────────
     "td_batches": {
         "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
-        "label": "批次数量（子钱包）", "hint": "1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射",
+        "label": "批次数量（子钱包）",
+        "label_cex": "批次数量（子账号）",
+        "hint": "1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射",
+        "hint_cex": "1=单仓模式（现状）；>1 时每批绑定一个 Gate 子账号（slot↔gate_bot1-5），子账号下单用自身 API Key",
     },
     "exit_order": {
         "group": "batch", "type": "enum", "enum": list(EXIT_ORDERS), "std": "fifo",
@@ -175,8 +180,9 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "min_position_value": {
         "group": "batch", "min": 0, "max": 1000000, "step": 1, "std": 1.0,
+        "channels": "dex",
         "label": "对账导入阈值(USD)",
-        "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭",
+        "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。CEX 通道用 Gate min_quote 动态阈值（≈$3），不读此参数",
     },
     # ── ⑤ UI ────────────────────────────────────────────────────────────
     "td_ui_refresh_s": {

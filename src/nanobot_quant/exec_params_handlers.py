@@ -51,16 +51,37 @@ def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
 
 # ── Page rendering ───────────────────────────────────────────────────────
 
-def _field_html(key: str, value: object, options: list[str] | None = None) -> str:
+def _channel_family(channel: str) -> str:
+    """execution_channel 值 → 执行家族（dex/cex）。
+
+    2026-08-19：/config/exec 按通道过滤参数显示。值域为 broker 实例名
+    （okx_dex/gate），兼容旧值 dex/cex 归一化。
+    """
+    c = str(channel or "")
+    if c in ("gate", "cex"):
+        return "cex"
+    if c in ("okx_dex", "dex"):
+        return "dex"
+    return "dex"  # 未知值 fail-safe 按默认 DEX 显示
+
+
+def _field_html(
+    key: str, value: object, options: list[str] | None = None, family: str = "dex"
+) -> str:
     meta = PARAM_META[key]
     label = meta.get("label", key)
     hint = meta.get("hint", "")
     std = meta.get("std", "")
     vtype = meta.get("type", "float")
+    channels = meta.get("channels", "both")
+    # 2026-08-19：批次数量按通道换文案（DEX=子钱包 / CEX=子账号）
+    if key == "td_batches" and family == "cex":
+        label = meta.get("label_cex", label)
+        hint = meta.get("hint_cex", hint)
     if vtype == "bool":
         checked = " checked" if value else ""
         return (
-            f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+            f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
             f'<label class="switch">'
             f'<input type="checkbox" id="{key}" name="{key}"{checked}>'
             f'<span class="slider"></span></label>'
@@ -90,7 +111,7 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
         else:
             opts = "".join(_opt(c) for c in choices)
         return (
-            f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+            f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
             f'<select id="{key}" name="{key}">{opts}</select>'
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
@@ -105,13 +126,13 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
             if str(value) not in choices:
                 opts += f'<option value="{value}" selected>⚙️ 当前: {value}</option>'
             return (
-                f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+                f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
                 f'<select id="{key}" name="{key}">{opts}</select>'
                 f'<span class="f-std">默认 {std} · tokens.json 登记代币</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         return (
-            f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+            f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
             f'<input type="text" id="{key}" name="{key}" value="{value}">'
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
@@ -131,6 +152,14 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
             rows = []
             for c in ordered:
                 m = meta.get(c, {})
+                # 2026-08-19：保留量(min_hold)仅 DEX 显示——span 带
+                # data-channel="dex"，前端 JS 按执行通道隐藏/显示；
+                # CEX 下不提交（tokens.json 旧值保留，切回 DEX 恢复）。
+                hold_cell = (
+                    f'<span class="pool-meta" data-channel="dex">保留量 '
+                    f'<input type="number" name="meta_min_hold" data-sym="{c}" '
+                    f'value="{m.get("min_hold", 0.0)}" min="0" step="0.001"></span>'
+                )
                 rows.append(
                     f'<div class="pool-row">'
                     f'<button class="pool-mv" type="button" '
@@ -142,9 +171,7 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
                     f'<label class="chk"><input type="checkbox" class="multi" '
                     f'name="{key}" value="{c}"'
                     f'{" checked" if c in values else ""}>{c}</label>'
-                    f'<span class="pool-meta">保留量 '
-                    f'<input type="number" name="meta_min_hold" data-sym="{c}" '
-                    f'value="{m.get("min_hold", 0.0)}" min="0" step="0.001"></span>'
+                    f'{hold_cell}'
                     f'<span class="pool-meta">成本价 '
                     f'<input type="number" name="meta_cost_price" data-sym="{c}" '
                     f'value="{m.get("cost_price", "") or ""}" min="0" '
@@ -160,9 +187,9 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
                         f'value="{v}" checked>⚙️ {v}</label></div>'
                     )
             return (
-                f'<div class="field"><label class="f-label">{label}</label>'
+                f'<div class="field" data-channel="both"><label class="f-label">{label}</label>'
                 f'<div class="pool">{"".join(rows)}</div>'
-                f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）</span>'
+                f'<span class="f-std" id="pool-fstd" data-fstd-dex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）" data-fstd-cex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；成本价=天然持仓导入价）">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；{"保留量=每账户最低持有，" if family == "dex" else ""}成本价=天然持仓导入价）</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         boxes = [
@@ -178,15 +205,17 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
                     f'name="{key}" value="{v}" checked>⚙️ {v}</label>'
                 )
         return (
-            f'<div class="field"><label class="f-label">{label}</label>'
+            f'<div class="field" data-channel="{channels}"><label class="f-label">{label}</label>'
             f'<div class="chk-group">{"".join(boxes)}</div>'
             f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选）</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
+    # 2026-08-19：td_batches 的 field div 带专属 id，JS 切换通道时同步换文案
+    fid = ' id="field_td_batches"' if key == "td_batches" else ""
     return (
-        f'<div class="field"><label class="f-label" for="{key}">{label}</label>'
+        f'<div class="field" data-channel="{channels}"{fid}><label class="f-label" for="{key}">{label}</label>'
         f'<input type="number" id="{key}" name="{key}" value="{value}" '
         f'min="{lo}" max="{hi}" step="{step}">'
         f'<span class="f-std">默认 {std} · 范围 {lo}–{hi}</span>'
@@ -194,9 +223,13 @@ def _field_html(key: str, value: object, options: list[str] | None = None) -> st
     )
 
 
-def _group_html(group: str, params: dict, options: dict[str, list[str]] | None = None) -> str:
+def _group_html(
+    group: str, params: dict, options: dict[str, list[str]] | None = None, family: str = "dex"
+) -> str:
+    # 2026-08-19：所有字段渲染（含 data-channel 属性），前端 JS 按当前
+    # 执行通道统一显示/隐藏——服务端不过滤，切换通道往返不丢 DOM。
     fields = "".join(
-        _field_html(k, params[k], (options or {}).get(k))
+        _field_html(k, params[k], (options or {}).get(k), family)
         for k in PARAM_META
         if PARAM_META[k].get("group") == group
     )
@@ -272,8 +305,9 @@ def _render_page(params: dict, message: str = "") -> str:
     _STABLECOINS = {"USDC", "USDT"}
     token_opts = {"td_symbols": [s for s in load_token_symbols()
                                   if s not in _STABLECOINS]}
+    family = _channel_family(params.get("execution_channel", "okx_dex"))
     groups = "".join(
-        _group_html(g, params, token_opts)
+        _group_html(g, params, token_opts, family)
         for g in ("risk", "exec", "td", "batch")
     )
     return (

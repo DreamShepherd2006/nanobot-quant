@@ -96,6 +96,46 @@
   }
   window.movePoolRow = movePoolRow;
 
+  // 2026-08-19：执行通道切换时按 data-channel 隐藏/显示字段
+  // （dex-only 参数如滑点/SOL 缓冲/保留量/对账阈值在 cex 下隐藏，
+  //  值保留在 exec_params.json/tokens.json，切回 DEX 恢复）
+  function familyOf(v) {
+    if (v === 'gate' || v === 'cex') return 'cex';
+    return 'dex'; // okx_dex / dex / 未知值
+  }
+  function applyChannel() {
+    const sel = document.getElementById('execution_channel');
+    if (!sel) return;
+    const fam = familyOf(sel.value);
+    document.querySelectorAll('[data-channel]').forEach(function (el) {
+      const need = el.dataset.channel;
+      el.style.display = (need === 'both' || need === fam) ? '' : 'none';
+    });
+    // 2026-08-19：批次数量文案随通道切换（DEX=子钱包 / CEX=子账号），
+    // 服务端仅按初始通道渲染 label，JS 切换时同步更新（文案与 Python 端保持一致）
+    // 2026-08-19：标的池说明文案随通道切换（dex 含「保留量=每账户最低持有，」前缀）
+    const pf = document.getElementById('pool-fstd');
+    if (pf) pf.textContent = fam === 'cex' ? pf.dataset.fstdCex : pf.dataset.fstdDex;
+    const fb = document.getElementById('field_td_batches');
+    if (fb) {
+      const l = fb.querySelector('.f-label');
+      const h = fb.querySelector('.f-hint');
+      if (fam === 'cex') {
+        if (l) l.textContent = '批次数量（子账号）';
+        if (h) h.textContent = '1=单仓模式（现状）；>1 时每批绑定一个 Gate 子账号（slot↔gate_bot1-5），子账号下单用自身 API Key';
+      } else {
+        if (l) l.textContent = '批次数量（子钱包）';
+        if (h) h.textContent = '1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射';
+      }
+    }
+  }
+  window.applyChannel = applyChannel;
+  const chSel = document.getElementById('execution_channel');
+  if (chSel) {
+    chSel.addEventListener('change', applyChannel);
+    applyChannel(); // 页面初始即按当前通道隐藏（服务端渲染了全部字段）
+  }
+
   function show(m, ok) {
     msg.textContent = m;
     msg.className = 'banner msg ' + (ok ? 'ok' : 'err');
