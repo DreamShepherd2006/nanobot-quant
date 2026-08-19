@@ -22,6 +22,7 @@ from pathlib import Path
 LIVE_STATE: dict = {
     "running": False,
     "next_iteration": None,
+    "strategy_variant": None,  # 运行中循环实际使用的策略变体（td_live 启动时写入）
     "symbols": {},
     "updated_at": None,
 }
@@ -71,12 +72,24 @@ def set_loop(running: bool, next_iteration: str | None = None) -> None:
         LIVE_STATE["updated_at"] = _now_iso()
 
 
+def set_strategy(name: str) -> None:
+    """记录运行中循环实际使用的策略变体（TD live 启动时调用）。
+
+    2026-08-19：/config/exec 页需要区分 strategy.json 目标值与运行中
+    实际值——切换策略后不重启 TD 循环，两者会不一致。
+    """
+    with _lock:
+        LIVE_STATE["strategy_variant"] = str(name or "")
+        LIVE_STATE["updated_at"] = _now_iso()
+
+
 def get_state() -> dict:
     """供 td-table「实时监控」tab 读取（同进程，无 IO）。"""
     with _lock:
         return {
             "running": bool(LIVE_STATE["running"]),
             "next_iteration": LIVE_STATE["next_iteration"],
+            "strategy_variant": LIVE_STATE.get("strategy_variant"),
             "updated_at": LIVE_STATE["updated_at"],
             "symbols": dict(LIVE_STATE["symbols"]),
         }

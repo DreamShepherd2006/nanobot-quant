@@ -157,6 +157,13 @@ class _TdLiveRunner:
             f"symbols={params['td_symbols']} sleeptime={params['td_sleeptime']}",
             file=sys.stderr, flush=True,
         )
+        # 2026-08-19：记录运行中实际变体到 LIVE_STATE——/config/exec 页区分
+        # 「strategy.json 目标值 vs 运行中实际值」（切换策略后不重启循环时两者不一致）。
+        try:
+            from nanobot_quant.td_live_state import set_strategy
+            set_strategy(strategy_name)
+        except Exception:  # noqa: BLE001
+            pass
         # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
         # 策略进入分批模式（BUY 占 slot / SELL 按 exit_order 平批 / 逐批止损止盈）。
         # 标的池（多标的扫描）：每标的独立台账（batches.{channel}.{symbol}.json，
