@@ -346,3 +346,92 @@ def test_strategy_logger_binds_stderr():
     n = len(_lg.handlers)
     s.initialize()
     assert len(_lg.handlers) == n
+
+
+# ── 信号周期门控（2026-08-19 分批次建仓语义）────────────────────────
+# 一个信号周期（setup 计数未重置）内同一标的只建一次仓：
+# - setup=9 建仓后 10/11/12 累加（单调不减）→ 同周期，跳过（TD BATCH WAIT）
+# - 计数变小（12→8 / 9→1）→ 新周期，允许再建
+# - slot 平仓释放后同周期也不建（信号级）
+
+def _neutral_closes(n: int = 60) -> list[float]:
+    """交替震荡：setup 计数归小/不触发。"""
+    return [100.0 + (i % 2) * 2 for i in range(n)]
+
+
+def _swap_bars(s, closes: list[float]) -> None:
+    from lumibot.entities import Bars
+
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
+    )
+    s._bars = Bars(df, "ONCHAIN", None)
+
+
+def test_cycle_gate_same_period_skips_second_buy():
+    """setup>=9 建仓后同周期（未重置）不再建仓。"""
+    s = _make_strategy()
+    s._evaluate_symbol()
+    assert "order" in s._captured, "首次信号应建仓"
+    assert s._cycle_state["AAPL"]["bought"] is True
+    assert s._cycle_state["AAPL"]["prev_setup"] >= 9
+    s._captured.clear()
+    s._evaluate_symbol()  # 同一 bars → setup_buy 仍触发且未重置
+    assert "order" not in s._captured, "同周期不得再建仓"
+    assert s._cycle_state["AAPL"]["reset"] is False
+
+
+def test_cycle_gate_new_period_after_reset():
+    """setup 计数变小（重置）后重新触发 → 允许再建。"""
+    s = _make_strategy()
+    s._evaluate_symbol()
+    assert "order" in s._captured
+    first_setup = s._cycle_state["AAPL"]["prev_setup"]
+    assert first_setup >= 9
+    # 中性 bars：setup 计数归小 → 触发 reset
+    _swap_bars(s, _neutral_closes())
+    s._captured.clear()
+    s._evaluate_symbol()
+    assert "order" not in s._captured
+    assert s._cycle_state["AAPL"]["reset"] is True, "计数变小应标记新周期"
+    # 重新触发（setup 再数到 >= entry_setup）→ 新周期允许建仓
+    _swap_bars(s, _buy_signal_closes())
+    s._captured.clear()
+    s._evaluate_symbol()
+    assert "order" in s._captured, "重置后新周期应允许再建仓"
+    assert s._cycle_state["AAPL"]["reset"] is False
+
+
+def test_cycle_gate_open_position_on_start_blocks():
+    """重启边界：初始有 open 仓位 + 其他 available slot → 视为本周期
+    已建仓（保守不追同周期信号），BUY 被周期守卫拦截。"""
+    from nanobot_quant.batches import BatchManager
+
+    s = _make_strategy()
+    bm = BatchManager("AAPL", ["acc-1", "acc-2"], path="/tmp/test-cycle-open.json")
+    bm.open_lot(qty=1.0, entry_price=100.0, slot=1)  # slot1 open
+    s.batch_manager = bm
+    s._batch_managers = {"AAPL": bm}
+    s._captured.clear()
+    s._evaluate_symbol()  # signal 触发 + slot2 available → 周期守卫拦截
+    assert "order" not in s._captured, "有 open 仓位视为本周期已建仓，跳过 BUY"
+    assert s._cycle_state["AAPL"]["bought"] is True
+
+
+def test_cycle_gate_per_symbol_independent():
+    """每币独立：不同 symbol 各自周期状态，互不影响。"""
+    s = _make_strategy()
+    s.symbols = ["AAPL", "MSFT"]
+    # AAPL 触发建仓 → bought=True
+    s._evaluate_symbol()
+    assert s._cycle_state["AAPL"]["bought"] is True
+    # MSFT 从未评估过 → 首次评估视为新标的（bought=False）
+    s.symbol = "MSFT"
+    s._evaluate_symbol()
+    assert s._cycle_state["MSFT"]["bought"] is True
+    assert s._cycle_state["MSFT"]["prev_setup"] >= 9
+    # AAPL 状态未被 MSFT 评估污染
+    assert s._cycle_state["AAPL"]["bought"] is True
