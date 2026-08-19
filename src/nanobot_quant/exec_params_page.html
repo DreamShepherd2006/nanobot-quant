@@ -96,6 +96,29 @@
   }
   window.movePoolRow = movePoolRow;
 
+  // 2026-08-19：执行通道切换时按 data-channel 隐藏/显示字段
+  // （dex-only 参数如滑点/SOL 缓冲/保留量/对账阈值在 cex 下隐藏，
+  //  值保留在 exec_params.json/tokens.json，切回 DEX 恢复）
+  function familyOf(v) {
+    if (v === 'gate' || v === 'cex') return 'cex';
+    return 'dex'; // okx_dex / dex / 未知值
+  }
+  function applyChannel() {
+    const sel = document.getElementById('execution_channel');
+    if (!sel) return;
+    const fam = familyOf(sel.value);
+    document.querySelectorAll('[data-channel]').forEach(function (el) {
+      const need = el.dataset.channel;
+      el.style.display = (need === 'both' || need === fam) ? '' : 'none';
+    });
+  }
+  window.applyChannel = applyChannel;
+  const chSel = document.getElementById('execution_channel');
+  if (chSel) {
+    chSel.addEventListener('change', applyChannel);
+    applyChannel(); // 页面初始即按当前通道隐藏（服务端渲染了全部字段）
+  }
+
   function show(m, ok) {
     msg.textContent = m;
     msg.className = 'banner msg ' + (ok ? 'ok' : 'err');
