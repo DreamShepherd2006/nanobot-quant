@@ -138,6 +138,8 @@ class TestSubmitOrder:
         assert out.filled is True
         assert out.identifier == "123"
         assert out.custom_params["cex"]["pair"] == "CRCLX_USDT"
+        # 实际成交均价回填（avg_deal_price，含手续费摊薄）——交易记录「成交价」列
+        assert out.custom_params["cex"]["avg_price"] == 74.9
         # SDK contract: get_currency_pair(key, secret, pair)
         label, args, kwargs = state["calls"][0]
         assert label == "pair_meta" and args[2] == "CRCLX_USDT"

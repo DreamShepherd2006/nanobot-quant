@@ -337,6 +337,11 @@ class CexBroker(Broker):
         if status == "filled":
             order.set_filled()
             order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步（OrderStatus.FILLED="fill"）
+            # 实际成交均价回填（Gate avg_deal_price，含手续费摊薄）——策略层
+            # _record 交易记录「成交价」列用（CEX 无 swap_status 确认路径）
+            cex = order.custom_params.get("cex") or {}
+            cex["avg_price"] = avg
+            order.custom_params["cex"] = cex
             self._tracked[oid] = {
                 "symbol": symbol, "pair": pair, "side": side,
                 "quantity": quantity, "filled": filled,

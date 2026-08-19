@@ -573,6 +573,7 @@ class TdSequentialStrategy(Strategy):
                             f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
                             slot=slot["slot"], qty=qty, price=price,
                             direction="buy", status="ok",
+                            actual_price=self._cex_avg_price(order),
                             tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
                             chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
                         )
@@ -1369,6 +1370,20 @@ class TdSequentialStrategy(Strategy):
     # 「钱在哪、怎么下单」——子账号独立 key，无 wallet_switch；pv_slot = 子
     # 账号总资产（USDT + 持仓×Gate 价）；quote = USDT。
 
+    def _cex_avg_price(self, order) -> float | None:
+        """CEX 实际成交均价（Gate avg_deal_price，含手续费摊薄）。
+
+        从 CexBroker filled 后写入的 order.custom_params["cex"]["avg_price"]
+        读取；DEX order 无此字段返回 None（DEX 成交价走 swap_status
+        确认路径 _actual_price_from_st）。0 / 空值视为无成交均价。
+        """
+        cex = (getattr(order, "custom_params", None) or {}).get("cex") or {}
+        avg = cex.get("avg_price")
+        try:
+            return float(avg) if avg not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            return None
+
     def _is_cex(self) -> bool:
         """执行通道大类：cex=Gate 交易所子账号；dex=链上子钱包（默认）。"""
         return self.parameters.get("channel_family") == "cex"
@@ -1603,6 +1618,7 @@ class TdSequentialStrategy(Strategy):
                     f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
                     slot=slot["slot"], qty=qty, price=price,
                     direction="sell", status="ok",
+                    actual_price=self._cex_avg_price(order),
                 )
                 return
             # pending（5s 未 closed）→ 台账保持 open + pending 记录（Step 2 补确认）
