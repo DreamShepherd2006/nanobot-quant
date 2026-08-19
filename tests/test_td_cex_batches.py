@@ -170,6 +170,34 @@ def test_cex_buy_position_limit_block(tmp_path):
     assert len(s._captured["submitted"]) == 0
 
 
+def test_cex_buy_fixed_amount_skips_position_limit(tmp_path):
+    """CEX fixed_amount 跳过 position_limit（拍板 A）：固定 100U > 25%×pv_slot(11.45)
+    仍买入；资金检查保留（子账号余额充足 → 成功）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_cex_strategy(
+        bm, _bars_with(_buy_closes()),
+        quantity_mode="fixed_amount", td_fixed_amount=100.0,
+        max_position_pct=0.25,
+    )
+    s._cex_slot_portfolio_value = lambda slot: 11.45  # 小账号：100U 远超 25% 上限
+    s.on_trading_iteration()
+    assert len(s._captured["submitted"]) == 1
+    assert len(bm.open_slots()) == 1
+
+
+def test_cex_buy_fixed_amount_insufficient_funds(tmp_path):
+    """CEX fixed_amount 资金检查保留：USDT 余额 < 固定金额 → SKIP 不建仓。"""
+    bm = _make_bm(tmp_path)
+    s = _make_cex_strategy(
+        bm, _bars_with(_buy_closes()),
+        quantity_mode="fixed_amount", td_fixed_amount=10.0,
+    )
+    s._cex_slot_balances = lambda slot: {"USDT": {"available": 5.0, "locked": 0}}
+    s.on_trading_iteration()
+    assert s._captured["submitted"] == []
+    assert bm.open_slots() == []
+
+
 def test_cex_buy_order_error_no_open(tmp_path):
     bm = _make_bm(tmp_path)
     s = _make_cex_strategy(bm, _bars_with(_buy_closes()))

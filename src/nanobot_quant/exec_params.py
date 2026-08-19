@@ -52,8 +52,9 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "td_symbols": ["SOL"],     # TD 标的池（多标的扫描，谁 Setup 9 谁执行；
                                 #   /config/tokens 登记代币 symbol，稳定币不列入）
     "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
-    "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=portfolio_value × max_position_pct
+    "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=pv_slot × max_position_pct；fixed_amount=固定金额 td_fixed_amount
     "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
+    "td_fixed_amount": 10.0,    # float 1-5000 — quantity_mode=fixed_amount 时的每笔建仓金额（U；CEX=USDT / DEX=USDC）
     "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
     # ── ④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）─────────
     "td_batches": 1,            # int 1-50 — 批次/子钱包数量；1=单仓模式（现状）
@@ -70,7 +71,9 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
 TD_SLEEPTIMES: tuple[str, ...] = ("1m", "5m", "15m", "1H", "1D", "1W")
 
 #: Valid position-sizing modes for the TD autonomous strategy.
-QUANTITY_MODES: tuple[str, ...] = ("fixed", "value")
+#:  fixed = 固定数量（td_quantity 个币）；value = pv_slot × max_position_pct（百分比仓位）；
+#:  fixed_amount = 固定金额（td_fixed_amount U，每笔建仓花固定稳定币金额，2026-08-19 新增）。
+QUANTITY_MODES: tuple[str, ...] = ("fixed", "value", "fixed_amount")
 
 #: Valid batch exit orders.
 EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
@@ -144,11 +147,15 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "quantity_mode": {
         "group": "td", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
-        "label": "数量模式", "hint": "fixed=固定 td_quantity（默认 10，回测语义不变）；value=按实时 portfolio_value × 单仓上限计算",
+        "label": "数量模式", "hint": "fixed=固定 td_quantity（默认 10，回测语义不变）；value=按实时 slot 总资产 × 单仓上限；fixed_amount=每笔固定金额（td_fixed_amount）",
     },
     "td_quantity": {
         "group": "td", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
         "label": "TD 固定数量", "hint": "quantity_mode=fixed 时的下单数量（默认 10）",
+    },
+    "td_fixed_amount": {
+        "group": "td", "min": 1.0, "max": 5000.0, "step": 1.0, "std": 10.0,
+        "label": "TD 固定金额", "hint": "quantity_mode=fixed_amount 时的每笔建仓金额（U：CEX=USDT / DEX=USDC）。固定金额模式跳过单仓上限（max_position_pct）校验（金额即用户显式仓位），但资金检查保留；CEX 通道需 ≥3U（Gate 最小单），DEX 无下限",
     },
     "td_bars": {
         "group": "td", "min": 20, "max": 300, "step": 1, "std": 120, "integer": True,

@@ -128,12 +128,39 @@
         if (h) h.textContent = '1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射';
       }
     }
+    applyQuantityMode(); // 切通道后固定金额字段显隐/提示按新模式刷新（2026-08-19）
   }
   window.applyChannel = applyChannel;
   const chSel = document.getElementById('execution_channel');
   if (chSel) {
     chSel.addEventListener('change', applyChannel);
     applyChannel(); // 页面初始即按当前通道隐藏（服务端渲染了全部字段）
+  }
+
+  // 2026-08-19：数量模式切换时固定金额字段显隐（仅 fixed_amount 显示）
+  function applyQuantityMode() {
+    const sel = document.getElementById('quantity_mode');
+    if (!sel) return;
+    const field = document.getElementById('td_fixed_amount');
+    if (field) {
+      const fam = familyOf((document.getElementById('execution_channel') || {}).value);
+      if (sel.value !== 'fixed_amount') {
+        field.closest('.field').style.display = 'none';
+      } else {
+        field.closest('.field').style.display = '';
+        // 2026-08-19：固定金额选中时按通道给提示（CEX ≥3U Gate 最小单）
+        const h = field.closest('.field').querySelector('.f-hint');
+        if (h) h.textContent = fam === 'cex'
+          ? '每笔建仓固定金额（U/USDT）· CEX 需 ≥3U（Gate 最小单 $3，低于会被拒单）'
+          : '每笔建仓固定金额（U/USDC）· 与 slot 资产规模无关，跳过单仓上限校验，资金检查保留';
+      }
+    }
+  }
+  window.applyQuantityMode = applyQuantityMode;
+  const qmSel = document.getElementById('quantity_mode');
+  if (qmSel) {
+    qmSel.addEventListener('change', applyQuantityMode);
+    applyQuantityMode(); // 页面初始按当前模式显隐
   }
 
   function show(m, ok) {

@@ -115,6 +115,7 @@ class _TdLiveRunner:
                 "symbols": params["td_symbols"],
                 "quantity": params["td_quantity"],
                 "quantity_mode": params["quantity_mode"],
+                "td_fixed_amount": params.get("td_fixed_amount", 10.0),
                 "sleeptime": params["td_sleeptime"],
                 "max_position_pct": params["max_position_pct"],
                 "max_drawdown_pct": params["max_drawdown_pct"],

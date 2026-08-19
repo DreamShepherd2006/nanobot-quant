@@ -509,6 +509,57 @@ def test_buy_position_limit_based_on_slot_pv(tmp_path):
     assert bm.open_slots() == []
 
 
+def test_buy_fixed_amount_mode_qty(tmp_path):
+    """quantity_mode=fixed_amount（2026-08-19）：qty = td_fixed_amount / price。
+    fixed_amount=10, price=87.0 → qty≈0.1149；成功建仓。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_buy_closes()),
+        quantity_mode="fixed_amount", td_fixed_amount=10.0,
+    )
+    s.on_trading_iteration()
+    assert "order" in s._captured
+    _, qty, action = s._captured["order"]
+    assert action == "buy"
+    assert abs(qty - 10.0 / 87.0) < 1e-6  # _buy_closes 最后收盘价 87.0
+    assert len(bm.open_slots()) == 1
+
+
+def test_buy_fixed_amount_skips_position_limit(tmp_path):
+    """fixed_amount 跳过 position_limit（拍板 A）：固定 100U > 25%×pv_slot(11.45)=2.86
+    仍买入（金额即用户显式仓位）；资金检查保留（余额充足 → 成功）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_buy_closes()),
+        quantity_mode="fixed_amount", td_fixed_amount=100.0,
+        max_position_pct=0.25,
+    )
+    s._slot_portfolio_value = lambda: 11.45  # 小 slot：100U 远超 25% 上限
+    s.on_trading_iteration()
+    assert "order" in s._captured
+    assert len(bm.open_slots()) == 1
+
+
+def test_buy_fixed_amount_insufficient_funds(tmp_path):
+    """fixed_amount 资金检查保留：USDC 余额 < 固定金额 → TD SLOT SKIP 不建仓。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_buy_closes()),
+        quantity_mode="fixed_amount", td_fixed_amount=10.0,
+    )
+    s._slot_quote_balance = lambda quote_symbol="USDC": 5.0  # 只有 $5 < $10
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+    assert bm.open_slots() == []
+
+
+def test_buy_fixed_amount_default_10(tmp_path):
+    """td_fixed_amount 缺省回退 10.0（parameters 未传时）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()), quantity_mode="fixed_amount")
+    assert s.fixed_amount == 10.0
+
+
 def test_batch_managers_injected_after_init(tmp_path):
     """回归（2026-08-10）：td_live 在 Strategy 构造后注入 batch_managers，
     lumibot __init__ 先调 initialize() 导致快照空 dict → batch_mode=False
