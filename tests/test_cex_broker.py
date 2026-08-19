@@ -171,6 +171,42 @@ class TestSubmitOrder:
         assert label == "create" and args[3] == "sell"
         assert args[4] == "0.050"
 
+    def test_sell_amount_floors_not_rounds(self, monkeypatch):
+        # BALANCE_NOT_ENOUGH 根因回归（2026-08-20 实测）：3.07 买入扣 0.1% 手续费后
+        # 实际到账 3.06693；round 到 3 位小数得 3.067 > 余额 → Gate 拒单。
+        # 修复：SELL amount 向下取整（floor）到 amount_precision=3 → 3.066。
+        state = _fake_sdk(monkeypatch, [
+            self._PAIR_META,  # get_currency_pair
+            {"id": "55", "status": "closed", "left": "0",
+             "filled_amount": "3.066", "avg_deal_price": "1.3029"},  # create_order
+            {"id": "55", "status": "closed", "left": "0",
+             "filled_amount": "3.066", "avg_deal_price": "1.3029"},  # get_order
+        ])
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 1.30)
+        order = _mk_order(side="sell", quantity=3.06693)
+        out = b._submit_order(order)
+        assert out.filled is True
+        label, args, kwargs = state["calls"][1]
+        assert label == "create" and args[3] == "sell"
+        assert args[4] == "3.066"  # floor，非 round 的 3.067
+
+    def test_sell_amount_below_decimals_rejects(self, monkeypatch):
+        # amount 小于 1/10^ap（floor 后为 0）→ fail-closed 拒绝，不发单。
+        # 注：min_quote>0 时该分支被 min_quote 检查先行拦截，此处用 min_quote=0
+        # 的交易对元数据直接覆盖 floor-0 分支。
+        meta = dict(self._PAIR_META, min_quote_amount=0)
+        state = _fake_sdk(monkeypatch, [meta])  # 只查 pair meta，不应调 create
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 67.0)
+        order = _mk_order(side="sell", quantity=0.0004)
+        out = b._submit_order(order)
+        assert out.error is not None
+        assert "below 3 decimals" in out.error
+        assert out.filled is False
+        labels = [c[0] for c in state["calls"]]
+        assert "create" not in labels  # 未发单
+
     def test_create_error(self, monkeypatch):
         _fake_sdk(monkeypatch, [
             self._PAIR_META,  # get_currency_pair

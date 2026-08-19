@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -289,7 +290,23 @@ class CexBroker(Broker):
                 print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
                       file=sys.stderr, flush=True)
                 return order
-            amount_str = f"{quantity:.{ap}f}" if ap > 0 else f"{quantity:.8f}"
+            # SELL amount = base 数量。必须向下取整到 amount_precision，不能用 round——
+            # round 会进位（如 3.06693 → 3.067），超出子账号实际可用余额触发 Gate
+            # BALANCE_NOT_ENOUGH（2026-08-20 实测：3.07 买入扣 0.1% 手续费后实际
+            # 到账 3.06693，round 到 3.067 被拒）。floor 留少量 dust（<0.001），
+            # 与 min_hold 语义一致（dust 不锁槽）。
+            if ap > 0:
+                factor = 10 ** ap
+                qty_floor = math.floor(quantity * factor) / factor
+                if qty_floor <= 0:
+                    msg = f"Gate {pair} sell amount {quantity} below {ap} decimals (floors to 0)"
+                    order.set_error(msg)
+                    print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                          file=sys.stderr, flush=True)
+                    return order
+                amount_str = f"{qty_floor:.{ap}f}"
+            else:
+                amount_str = f"{quantity:.8f}"
 
         client_oid = f"nq{int(time.time())}{os.urandom(3).hex()}"
         try:
