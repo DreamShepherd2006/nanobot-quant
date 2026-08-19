@@ -221,6 +221,49 @@ def test_cex_buy_pending_not_open_by_caller(tmp_path):
     assert info["order_id"] == "cex-order-1"  # CEX：order_id 来自 identifier
 
 
+def test_cex_long_records_actual_price(tmp_path, monkeypatch):
+    """CEX LONG 事件携带实际成交均价（Gate avg_deal_price 回填）——交易记录「成交价」列。"""
+    bm = _make_bm(tmp_path)
+    s = _make_cex_strategy(bm, _bars_with(_buy_closes()))
+    events = []
+    monkeypatch.setattr(
+        "nanobot_quant.td_live_state.append_event", lambda e: events.append(e)
+    )
+    s.parameters["live_mode"] = True
+
+    def _submit(slot, req):
+        o = _mock_order(quantity=req.quantity)
+        o.custom_params = {"cex": {"pair": "CRCLX_USDT", "avg_price": 1.3029}}
+        return o
+
+    s._cex_submit = _submit
+    s.on_trading_iteration()
+    long_events = [e for e in events if e["event"] == "LONG"]
+    assert long_events
+    assert long_events[0]["actual_price"] == 1.3029
+    assert long_events[0]["price"] > 0  # 策略价仍在
+
+
+def test_cex_avg_price_helper():
+    """_cex_avg_price：无 cex 字段 / avg=0 / 空值 → None；有效值 → float。"""
+    bm = BatchManager(symbol="CRCLX", account_ids=["gate_bot1"], path="/tmp/x.json")
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60))
+
+    class _O:
+        def __init__(self, cp):
+            self.custom_params = cp
+
+    assert s._cex_avg_price(_O(None)) is None            # custom_params=None
+    assert s._cex_avg_price(_O({})) is None               # 空
+    assert s._cex_avg_price(_O({"cex": {}})) is None     # 无 avg_price
+    assert s._cex_avg_price(_O({"cex": {"avg_price": 0}})) is None     # 0
+    assert s._cex_avg_price(_O({"cex": {"avg_price": ""}})) is None   # 空串
+    assert s._cex_avg_price(_O({"cex": {"avg_price": "1.3029"}})) == 1.3029  # 字符串转 float
+    assert s._cex_avg_price(_O({"cex": {"avg_price": 74.9}})) == 74.9
+    # DEX order（onchain_pending 无 cex）→ None
+    assert s._cex_avg_price(_O({"onchain_pending": {"tx_hash": "x"}})) is None
+
+
 # ── SELL（_sell_lot → CEX 分支）─────────────────────────────────────
 
 def test_cex_sell_filled_closes_lot(tmp_path):
@@ -234,6 +277,33 @@ def test_cex_sell_filled_closes_lot(tmp_path):
     )
     assert bm.get_lot(1) is None  # filled → 平仓
     assert 1 not in s._pending_sells
+
+
+def test_cex_exit_records_actual_price(tmp_path, monkeypatch):
+    """CEX EXIT 事件携带实际成交均价（Gate avg_deal_price 回填）——交易记录「成交价」列。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=0.05, entry_price=70.0, entry_time="t1")
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60))
+    events = []
+    monkeypatch.setattr(
+        "nanobot_quant.td_live_state.append_event", lambda e: events.append(e)
+    )
+    s.parameters["live_mode"] = True
+    s._cex_slot_token_balance = lambda slot, symbol: 0.05
+
+    def _submit(slot, req):
+        o = _mock_order(quantity=req.quantity)
+        o.custom_params = {"cex": {"pair": "CRCLX_USDT", "avg_price": 70.5}}
+        return o
+
+    s._cex_submit = _submit
+    s._sell_lot(
+        bm.open_slots()[0], price=72.0,
+        signal={"recommendation": "SELL"}, exit_reason="setup_sell",
+    )
+    exit_events = [e for e in events if e["event"] == "EXIT"]
+    assert exit_events
+    assert exit_events[0]["actual_price"] == 70.5
 
 
 def test_cex_sell_pending_keeps_lot(tmp_path):
