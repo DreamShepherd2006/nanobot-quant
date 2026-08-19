@@ -14,6 +14,7 @@ and the save endpoint both enforce ``is_commander``.
 
 from __future__ import annotations
 
+import html
 import os
 
 from starlette.requests import Request
@@ -204,6 +205,46 @@ def _group_html(group: str, params: dict, options: dict[str, list[str]] | None =
     return f'<div class="card"><h3>{GROUP_TITLES[group]}</h3>{fields}</div>'
 
 
+def _strategy_banner_html() -> str:
+    """TD 循环当前策略模块横幅（2026-08-19）。
+
+    区分 strategy.json 目标值与运行中循环实际值：切换策略后不重启
+    TD 循环（td_enabled 关→开）时两者不一致，横幅显式提示。
+    """
+    try:
+        from .strategies.registry import get_strategy, load_selected
+        from .td_live_state import get_state as live_state
+
+        name = load_selected() or ""
+        try:
+            label = get_strategy(name).label
+        except Exception:  # noqa: BLE001
+            label = name
+        st = live_state()
+        running = bool(st.get("running"))
+        cur = st.get("strategy_variant") or ""
+        link = '<a href="/config/strategy" style="color:#4527a0;font-weight:600">⇄ 策略选择</a>'
+        base = f"🧭 当前策略模块：<b>{html.escape(label)}</b>（{html.escape(name)}）"
+        if running and cur and cur != name:
+            try:
+                cur_label = get_strategy(cur).label
+            except Exception:  # noqa: BLE001
+                cur_label = cur
+            return (
+                f'<div class="banner strategy">{base}'
+                f'｜ ⚙️ 运行中：<b>{html.escape(cur_label)}</b>'
+                f'（切换未生效——重启 TD 循环后应用）　{link}</div>'
+            )
+        if running:
+            return (
+                f'<div class="banner strategy">{base}'
+                f'｜ ⚙️ 运行中：{html.escape(label)}　{link}</div>'
+            )
+        return f'<div class="banner strategy">{base}｜ ⏸️ TD 循环未运行　{link}</div>'
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _render_page(params: dict, message: str = "") -> str:
     try:
         from .exec_params import exec_params_path
@@ -238,6 +279,7 @@ def _render_page(params: dict, message: str = "") -> str:
     return (
         _PAGE_HTML.replace("{banner}", banner)
         .replace("{msg}", msg)
+        .replace("{td_strategy_banner}", _strategy_banner_html())
         .replace("{groups}", groups)
     )
 
