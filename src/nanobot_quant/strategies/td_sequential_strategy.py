@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
 
 from lumibot.strategies.strategy import Strategy
 
@@ -26,6 +27,17 @@ from nanobot_quant.portfolio import PortfolioEngine
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.strategies.td_sequential import calculate
 from nanobot_quant.td_params import DEFAULT_TD_PARAMS
+
+
+_SLEEPTIME_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900,
+    "1H": 3600, "4H": 14400, "1D": 86400, "1W": 604800,
+}
+
+
+def _parse_sleeptime_seconds(value: str) -> int:
+    """S3a：场景周期字符串 → 秒（1m/5m/15m/1H/4H/1D/1W）。"""
+    return _SLEEPTIME_SECONDS.get(str(value).strip(), 60)
 
 
 def _order_error(order) -> str | None:
@@ -66,10 +78,12 @@ class TdSequentialStrategy(Strategy):
         **DEFAULT_TD_PARAMS,
     }
 
-    #: sleeptime → get_historical_prices timestep (lumibot granularity names)
+    #: sleeptime → get_historical_prices timestep（精确粒度，S3a 多场景：
+    #   mid=5m/15m 必须传 5min/15min 而非笼统 minute，否则数据源
+    #   _BAR_MAP 把粒度丢失成 1m——K 线窗口与场景周期不匹配）
     _TIMESTEP_BY_SLEEPTIME = {
-        "1m": "minute", "5m": "minute", "15m": "minute",
-        "1H": "hour", "1D": "day", "1W": "week",
+        "1m": "minute", "5m": "5min", "15m": "15min", "30m": "30min",
+        "1H": "hour", "4H": "4hour", "1D": "day", "1W": "week",
     }
 
     # ── lifecycle hooks ───────────────────────────────────────────
@@ -230,11 +244,42 @@ class TdSequentialStrategy(Strategy):
 
         标的池模式：按池子顺序（=优先级）逐标的评估，谁 Setup 9 谁执行；
         同 bar 多标的命中按顺序全部处理（资金天然隔离）。
+
+        S3a 场景调度（2026-08-20）：td_live 注入 ``_scene_runtimes`` 时按
+        场景到期调度（每场景独立 sleeptime/symbols/broker/批次台账，主循环
+        心跳=最小场景周期）；回测/纸交易（无场景运行时）保持旧逻辑。
         """
         # ── 链上补确认（2026-08-11）────────────────────────────────
         # 每轮迭代先处理 pending 卖出/买入的链上确认（SUCCESS 补台账、
         # ERROR/CANCELLED 记失败、PENDING 继续等），再评估新信号。
         self._check_pending_confirmations()
+
+        # ── S3a 场景调度（2026-08-20）──────────────────────────────
+        runtimes = getattr(self, "_scene_runtimes", None)
+        if runtimes:
+            now = datetime.now(timezone.utc)
+            self._batch_managers = {}
+            for name in sorted(runtimes.keys()):
+                rt = runtimes[name]
+                if not rt.get("enabled"):
+                    continue
+                last = rt.get("last_run")
+                if last is not None and (
+                    now - last
+                ).total_seconds() < _parse_sleeptime_seconds(
+                    rt.get("sleeptime") or "1m"
+                ) - 1:
+                    # 到期容差 1s：避免心跳边界抖动（lumibot 心跳与 wall clock
+                    # 对齐误差）导致场景被误跳过——跳过轮不拉数据，下一轮
+                    # 增量拉 2 根补上（kline_cache 多根判定已修复）。
+                    continue
+                rt["last_run"] = now
+                self._activate_scene(name, rt)
+                for sym in self.symbols:
+                    self.symbol = sym
+                    self.batch_manager = self.batch_managers.get(sym)
+                    self._evaluate_symbol()
+            return
 
         # ── 批次台账实时刷新（2026-08-10 修复）────────────────────────
         # td_live 在 Strategy 构造完成后才注入 batch_managers，而 lumibot
@@ -252,6 +297,57 @@ class TdSequentialStrategy(Strategy):
             self.symbol = sym
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
+
+    def _activate_scene(self, name: str, rt: dict) -> None:
+        """S3a（2026-08-20）：激活场景运行时。
+
+        td_live 为每个启用场景构造独立 broker（含独立数据源实例 →
+        KlineCache per-scene 天然隔离）与批次台账（场景 sub_accounts →
+        slot 映射），主循环（心跳=最小场景周期）按场景到期切换。回测/
+        纸交易不调用。
+
+        场景参数（sleeptime/symbols/数量模式/出场顺序/止盈/起扫槽位/最低
+        资产）覆盖 initialize 快照的全局参数；broker 同步替换 self.broker
+        与 executor.broker——lumibot v4.5.78 get_historical_prices/
+        get_position/submit_order 均动态读 self.broker（源码确认），executor
+        心跳循环读 executor.broker.should_continue() 亦动态，故切换安全。
+        """
+        p = rt.get("params") or {}
+        self.symbols = list(p.get("symbols") or [])
+        self.quantity_mode = str(p.get("quantity_mode") or "fixed")
+        self.fixed_amount = float(p.get("td_fixed_amount") or 10.0)
+        qty = p.get("td_quantity")
+        if qty is not None:
+            self.quantity = qty
+        self.sleeptime = str(p.get("sleeptime") or "1m")
+        self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
+            self.sleeptime, "day"
+        )
+        self._exit_order = str(p.get("exit_order") or "fifo")
+        self._take_profit_pct = float(p.get("take_profit_pct") or 0.0)
+        self._start_slot = int(p.get("td_start_slot") or 1)
+        self._min_account_value = float(p.get("min_account_value") or 0)
+        self.broker = rt.get("broker") or self.broker
+        self.batch_managers = rt.get("batch_managers") or {}
+        self._batch_managers = self.batch_managers
+        ex = getattr(self, "_executor", None)
+        if ex is not None:
+            try:
+                ex.broker = self.broker
+            except Exception:  # noqa: BLE001
+                pass
+        if not rt.get("_diag_shown"):
+            rt["_diag_shown"] = True
+            try:
+                broker_name = self.broker.__class__.__name__
+            except Exception:  # noqa: BLE001
+                broker_name = "?"
+            print(
+                f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
+                f"symbols={self.symbols} mode={self.quantity_mode} "
+                f"broker={broker_name}",
+                file=sys.stderr, flush=True,
+            )
 
     def _record(self, event: str, note: str = "", *, symbol=None, **extra) -> None:
         """更新实时状态 signal + 追加事件历史（仅 live 模式写文件）。
@@ -358,10 +454,17 @@ class TdSequentialStrategy(Strategy):
             # bar——与 TD 理论（bar 收盘时判定）及回测口径一致。
             fetch_len += 1
         try:
+            # live 直拉场景粒度：bar: 前缀让 lumibot 无法解析（_parse_timestep
+            # 返回 None → 原样透传），数据源 removeprefix 后直拉原生 bar（如
+            # 5m）——绕开 lumibot multi-timeframe 转换（length×multiplier 根
+            # 1m + 自己 resample），live 与回测完全同源（2026-08-20 定稿）。
+            # 回测（broker=None）保持标准 timestep（PandasDataBacktesting 只
+            # 认 lumibot 标准名）。
+            timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
             bars = self.get_historical_prices(
                 self.symbol,
                 length=fetch_len,
-                timestep=self._timestep,
+                timestep=timestep,
             )
         except Exception as e:
             # 黑名单标的（Gate 无交易对/已下架，如 MU/VSC）静默跳过——

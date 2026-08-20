@@ -877,3 +877,64 @@ def test_check_pending_buy_confirmed_opens(monkeypatch, tmp_path):
     assert open_slots[0]["slot"] == 1
     assert open_slots[0]["lot"]["qty"] == 0.0372
     assert s._pending_buys == {}
+def _make_live_strategy(captured, **params):
+    """live broker 策略（CexBroker 类名）——timestep 直拉前缀测试用。"""
+    s = TdSequentialStrategy()
+    s.parameters = dict(TdSequentialStrategy.parameters, min_history=50, **params)
+    s.logger = logging.getLogger("td-live-timestep")
+    s.portfolio_value = 100_000.0
+    s.cash = 100_000.0
+    s._bars = _bars_with(_oscillate())
+    s.get_position = lambda symbol: None
+    s.get_historical_prices = lambda symbol, length, timestep: (
+        captured.update({"timestep": timestep, "length": length}) or s._bars
+    )
+    s.broker = type("CexBroker", (), {})()  # live broker 类名（initialize 判定）
+    return s
+
+
+def test_live_timestep_uses_bar_prefix():
+    """live broker → timestep 加 bar: 前缀：lumibot 无法解析 → 原样透传 →
+    数据源直拉场景粒度（5m），绕开 multi-timeframe 转换（600 根 1m +
+    resample）。CEX drops_in_progress=True → 不多拉 1 根。"""
+    captured: dict = {}
+    s = _make_live_strategy(captured, drops_in_progress_bars=True)
+    s.initialize(symbol="SPCXB", sleeptime="5m")
+    assert s._timestep == "5min"
+    s._evaluate_symbol()
+    assert captured["timestep"] == "bar:5min"
+    assert captured["length"] == 50
+
+
+def test_live_timestep_bar_prefix_drop_in_progress():
+    """DEX（OnchainOS，drops_in_progress=False）live：bar: 前缀同时多拉
+    1 根供丢弃（与旧行为一致）。"""
+    captured: dict = {}
+    s = _make_live_strategy(captured)  # 无 drops_in_progress_bars → drop=True
+    s.initialize(symbol="SPCXB", sleeptime="1m")
+    assert s._timestep == "minute"
+    s._evaluate_symbol()
+    assert captured["timestep"] == "bar:minute"
+    assert captured["length"] == 51  # 多拉 1 根丢进行中 bar
+
+
+def test_backtest_timestep_unchanged():
+    """回测（broker=None）→ 标准 timestep（"5min"）不带 bar: 前缀——
+    PandasDataBacktesting 只认 lumibot 标准名，前缀会让回测数据源挂。"""
+    captured: dict = {}
+    s = TdSequentialStrategy()
+    s.parameters = dict(TdSequentialStrategy.parameters, min_history=50)
+    s.logger = logging.getLogger("td-backtest-timestep")
+    s.portfolio_value = 100_000.0
+    s.cash = 100_000.0
+    s._bars = _bars_with(_oscillate())
+    s.get_position = lambda symbol: None
+    s.get_historical_prices = lambda symbol, length, timestep: (
+        captured.update({"timestep": timestep}) or s._bars
+    )
+    s.initialize(symbol="SPCXB", sleeptime="5m")
+    s._evaluate_symbol()
+    assert captured["timestep"] == "5min"
+
+
+# ── BUY：占用 slot ───────────────────────────────────────────────────

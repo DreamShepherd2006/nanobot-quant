@@ -82,16 +82,19 @@ def test_initialize_value_mode():
 
 
 def test_initialize_sleeptime_mapping():
+    """场景 sleeptime → 精确 K 线粒度（S3a：5m/15m/30m 不再笼统成 minute）。"""
     for sleeptime, timestep in [
-        ("1m", "minute"), ("5m", "minute"), ("15m", "minute"),
-        ("1H", "hour"), ("1D", "day"), ("1W", "week"),
+        ("1m", "minute"), ("5m", "5min"), ("15m", "15min"),
+        ("30m", "30min"), ("1H", "hour"), ("4H", "4hour"),
+        ("1D", "day"), ("1W", "week"),
     ]:
         s = _make_strategy(sleeptime=sleeptime)
         assert s._timestep == timestep, f"{sleeptime} → {s._timestep}"
 
 
 def test_initialize_unknown_sleeptime_falls_back_to_day():
-    s = _make_strategy(sleeptime="4H")
+    """未知 sleeptime 回退 day（fail-safe，不抛错）。"""
+    s = _make_strategy(sleeptime="2m")
     assert s._timestep == "day"
 
 

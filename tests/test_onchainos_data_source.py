@@ -157,6 +157,15 @@ class TestGetHistoricalPrices:
         assert call["bar"] == "1D"
         assert call["limit"] == 5
 
+    def test_bar_prefix_passthrough(self, ds, fake):
+        """bar: 前缀 = live 直拉场景粒度（策略对 live broker 添加，lumibot
+        无法解析 → 原样透传）；数据源 removeprefix 后直拉原生 bar（如
+        "bar:5min" → 5m），绕开 lumibot multi-timeframe 转换。"""
+        fake.kline = _df()
+        ds.get_historical_prices(_asset(), length=120, timestep="bar:5min")
+        assert fake.kline_calls[-1]["bar"] == "5m"
+        assert fake.kline_calls[-1]["limit"] == 120
+
     def test_get_last_price_via_registry(self, ds, fake):
         assert ds.get_last_price(_asset("SOL")) == 137.08
         assert fake.price_calls == ["SOL"]

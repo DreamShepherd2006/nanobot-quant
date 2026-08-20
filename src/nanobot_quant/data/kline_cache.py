@@ -40,6 +40,17 @@ def _diag(msg: str) -> None:
     """TD 风格 stderr 诊断（gatekeeper 上下文 logger.info 被静默丢弃）。"""
     print(f"[KLINE-CACHE] {msg}", file=sys.stderr, flush=True)
 
+
+def _now_for(tail_ts: pd.Timestamp) -> pd.Timestamp:
+    """UTC now，时区与缓存尾对齐（缓存 index 可能 naive UTC 或 tz-aware）。
+
+    独立函数便于测试注入（模拟调用方跳过多轮后的 wall clock）。
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    if tail_ts.tz is None:
+        now = now.tz_localize(None)
+    return now
+
 # bar 粒度 → 周期秒数（缺口判定：新 bar ts 必须恰为尾 ts + 该周期）
 _BAR_SECONDS = {
     "1m": 60,
@@ -116,15 +127,24 @@ class KlineCache:
 
     def _incremental(self, e: _Entry, symbol: str, bar: str) -> None:
         try:
-            new = self._fetch(symbol, bar, 2)
+            # 自适应增量窗口：调用方可能跳过若干周期才访问一次（S3a 多场景
+            # 调度：mid=5m 每 5 轮才访问 1m 缓存，期间产生多根新 bar）。
+            # 固定 limit=2 在跳过多轮时会把第 3 根起误判为缺口 → 每轮
+            # 全量重拉（120 倍退化）。按距缓存尾的时间差估算需要拉多少根：
+            #   need = elapsed_bars + 2  （+2 = 1 根进行中容差 + 1 根余量）
+            # elapsed 为 0（同周期内重复访问）时退化为固定 limit=2。
+            tail_ts = e.df.index[-1]
+            now = _now_for(tail_ts)
+            period = pd.Timedelta(seconds=_BAR_SECONDS.get(bar, 60))
+            elapsed = max(0, int((now - tail_ts) / period))
+            need = min(max(elapsed + 2, 2), 1000)
+            new = self._fetch(symbol, bar, need)
         except Exception as exc:  # 增量失败 → 保留缓存，下一轮再试
             _diag(f"incr-fail symbol={symbol}: {exc} (cache kept)")
             return
         if new is None or new.empty:
             return
         new = new.sort_index()
-        period = pd.Timedelta(seconds=_BAR_SECONDS.get(bar, 60))
-        tail_ts = e.df.index[-1]
         gap = False
         appended = 0
         for ts, row in new.iterrows():
@@ -136,6 +156,7 @@ class KlineCache:
             elif diff == period:
                 e.df = pd.concat([e.df, row.to_frame().T])  # 恰 +1 周期 → append
                 appended += 1
+                tail_ts = ts                 # 更新尾——多根新 bar 按顺序逐根判定
             else:
                 gap = True                   # 跳跃 → 缺口 → 全量重拉
                 break

@@ -64,7 +64,15 @@ class _TdLiveRunner:
 
     # ── 构造 ──────────────────────────────────────────────────────────
     def _build_executor(self, params: dict[str, Any]) -> Any:
-        """构造 StrategyExecutor（lumibot 真包延迟导入，测试容器无 lumibot）。"""
+        """构造 StrategyExecutor（lumibot 真包延迟导入，测试容器无 lumibot）。
+
+        S3a 场景调度（2026-08-20）：按 exec_params.scenes 启用的场景构造
+        运行时——每场景独立 broker（含独立数据源实例 → KlineCache per-scene
+        天然隔离）+ 独立批次台账（场景 batches/sub_accounts → slot 映射）；
+        主循环心跳 = 最小场景周期，策略 on_trading_iteration 内按场景到期
+        调度（单线程，无并发风险）。仅 high 启用时行为与旧扁平参数一致
+        （high 与扁平同步）。
+        """
         from lumibot.strategies.strategy_executor import StrategyExecutor
 
         from nanobot_quant.strategies.registry import load_selected
@@ -87,62 +95,98 @@ class _TdLiveRunner:
         )
 
         # 通道大类（family）：从 broker spec 解析（gate→cex、okx_dex→dex），
-        # 不可直接用 execution_channel 实例名判断——方案 C 值域已从大类改为
-        # 实例名（2026-08-17 修复：曾注入实例名导致 gate 通道下
-        # channel_family="gate"≠"cex"，CEX 对账跳过判断失效、DEX 对账误跑）。
+        # 不可直接用 execution_channel 实例名判断（2026-08-17 修复）。
         family = spec_for_channel(channel).family
+        strategy_name = load_selected()
+        td_params = load_td_params(strategy_name)
+
+        # ── S3a 场景运行时（2026-08-20）────────────────────────────────
+        scenes = params.get("scenes")
+        if not scenes:
+            # 旧扁平调用兜底（测试/execute_signal 直调）：合成 high 场景，
+            # 与 exec_params 的扁平→scenes.high 迁移语义一致。
+            scenes = {
+                "high": {
+                    "enabled": True,
+                    "sleeptime": str(params.get("td_sleeptime", "1D")),
+                    "symbols": list(params.get("td_symbols") or []),
+                    "quantity_mode": str(params.get("quantity_mode", "fixed")),
+                    "td_quantity": params.get("td_quantity", 10),
+                    "td_fixed_amount": float(
+                        params.get("td_fixed_amount", 10.0) or 10.0
+                    ),
+                    "batches": int(params.get("td_batches", 1) or 1),
+                    "sub_accounts": [],
+                    "exit_order": str(params.get("exit_order", "fifo")),
+                    "take_profit_pct": float(
+                        params.get("take_profit_pct", 0.0) or 0.0
+                    ),
+                    "td_start_slot": int(params.get("td_start_slot", 1) or 1),
+                    "min_account_value": float(
+                        params.get("min_account_value", 0) or 0
+                    ),
+                }
+            }
+        enabled = {
+            k: dict(v)
+            for k, v in scenes.items()
+            if isinstance(v, dict) and v.get("enabled")
+        }
+        if not enabled:
+            raise ValueError("没有启用的场景（scenes.*.enabled 全为 false）")
+        # 统一心跳 = 最小场景周期（策略内按场景到期调度）
+        heartbeat_str = min(
+            (str(sc.get("sleeptime") or "1m") for sc in enabled.values()),
+            key=lambda s: _parse_sleeptime_seconds(s),
+        )
+
+        # 主 broker：构造策略必需（lumibot Strategy.__init__ 在 broker=None
+        # 时直接 raise "No broker is set"，必须构造时传入 broker + data_source）。
+        # 实际每轮由 _activate_scene 切换到场景 broker。
         broker = broker_for_channel(
             channel,
             tokens_json=tokens,
             slippage=str(params["slippage"]),
             sol_buffer_pct=float(params["sol_buffer_pct"]),
         )
-        # lumibot Strategy.__init__ 在 broker=None 时直接 raise
-        # ("No broker is set")，必须构造时传入 broker + data_source。
         strategy = TdSequentialStrategy(
             broker=broker,
             data_source=broker.data_source,
         )
-        # 方案 A（2026-08-12）：TD 循环与策略选择页 / td-params 参数集对齐——
-        # ① 按 strategy.json 注入 strategy_variant（_calc 分发原版/cycle/futu）；
-        # ② merge load_td_params(strategy) 的算法参数（entry_setup 等）进
-        #    strategy.parameters——td-params 页面的修改对 TD 自主循环生效。
-        strategy_name = load_selected()
-        td_params = load_td_params(strategy_name)
+        # 基础参数（场景激活时由 _activate_scene 覆盖场景字段）
         strategy.parameters = dict(
             TdSequentialStrategy.parameters,
             **{
-                "symbols": params["td_symbols"],
-                "quantity": params["td_quantity"],
-                "quantity_mode": params["quantity_mode"],
-                "td_fixed_amount": params.get("td_fixed_amount", 10.0),
-                "sleeptime": params["td_sleeptime"],
+                "symbols": next(iter(enabled.values())).get("symbols") or [],
+                "quantity": 10,
+                "quantity_mode": "fixed",
+                "td_fixed_amount": 10.0,
+                # 固定 K 线窗口（方案 B）：每轮拉最近 N 根，不累积增长
+                "sleeptime": heartbeat_str,  # 统一心跳 = 最小场景周期
                 "max_position_pct": params["max_position_pct"],
                 "max_drawdown_pct": params["max_drawdown_pct"],
                 "stop_loss_pct": params["stop_loss_pct"],
-                # 子钱包分批（真分账 v1.1）：exit_order / take_profit_pct / td_start_slot
-                "exit_order": params.get("exit_order", "fifo"),
-                "take_profit_pct": float(params.get("take_profit_pct", 0.0) or 0.0),
-                "td_start_slot": int(params.get("td_start_slot", 1) or 1),
-                # BUY 门槛：目标 slot 子钱包总资产低于该值则跳过该槽位（0=关闭）
-                "min_account_value": float(params.get("min_account_value", 0) or 0),
-                # 固定 K 线窗口（方案 B）：每轮拉最近 N 根，不累积增长
+                "exit_order": "fifo",
+                "take_profit_pct": 0.0,
+                "td_start_slot": 1,
+                "min_account_value": 0,
                 "min_history": int(params.get("td_bars", 120) or 120),
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
                 "strategy_variant": strategy_name,
                 # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据；
-                # 2026-08-17 修复：取 broker spec.family（gate→cex、okx_dex→dex），
-                # 不可用 execution_channel 实例名（"gate"≠"cex" 会误判）。
+                # 取 broker spec.family（gate→cex、okx_dex→dex）。
                 "channel_family": family,
                 # 2026-08-17 A 修复第二部分：数据源契约（是否已过滤进行中 bar）。
-                # lumibot v4.5.78 Strategy 基类不保存 data_source kwarg（源码
-                # 确认无 self.data_source），策略读不到 broker.data_source——
-                # 由 td_live 从 broker.data_source 读契约后显式注入 parameters。
                 # CexDataSource（gate_cex，rows_to_df 已过滤 closed=false）=True；
                 # OnchainOSDataSource（DEX，含进行中 bar）无该属性=False。
+                # 同一通道契约相同，取主 broker 契约即可。
                 "drops_in_progress_bars": bool(
-                    getattr(getattr(broker, "data_source", None), "drops_in_progress_bars", False)
+                    getattr(
+                        getattr(broker, "data_source", None),
+                        "drops_in_progress_bars",
+                        False,
+                    )
                 ),
             },
             **td_params,
@@ -154,33 +198,85 @@ class _TdLiveRunner:
             f"entry_setup={strategy.parameters.get('entry_setup')} "
             f"exit_setup={strategy.parameters.get('exit_setup')} "
             f"setup_period={strategy.parameters.get('setup_period')} "
-            f"compare_length={strategy.parameters.get('compare_length')} "
-            f"symbols={params['td_symbols']} sleeptime={params['td_sleeptime']}",
+            f"compare_length={strategy.parameters.get('compare_length')}",
             file=sys.stderr, flush=True,
         )
-        # 2026-08-19：记录运行中实际变体到 LIVE_STATE——/config/exec 页区分
-        # 「strategy.json 目标值 vs 运行中实际值」（切换策略后不重启循环时两者不一致）。
+        # 2026-08-19：记录运行中实际变体到 LIVE_STATE
         try:
             from nanobot_quant.td_live_state import set_strategy
             set_strategy(strategy_name)
         except Exception:  # noqa: BLE001
             pass
-        # 批次（子钱包）台账：td_batches > 1 时注入每标的 BatchManager，
-        # 策略进入分批模式（BUY 占 slot / SELL 按 exit_order 平批 / 逐批止损止盈）。
-        # 标的池（多标的扫描）：每标的独立台账（batches.{channel}.{symbol}.json，
-        # 2026-08-17 通道隔离——DEX 与 CEX 台账互不复用）。
-        td_batches = int(params.get("td_batches", 1) or 1)
-        symbols = params["td_symbols"]
-        channel = str(params.get("execution_channel", "okx_dex"))
-        if td_batches > 1:
-            strategy.batch_managers = self._prepare_all_batches(
-                td_batches, symbols, channel
+
+        # 每场景独立 broker（独立数据源 → KlineCache per-scene 隔离）+
+        # 独立批次台账（场景 batches/sub_accounts → slot 映射）。
+        scene_runtimes: dict[str, dict[str, Any]] = {}
+        for name, sc in enabled.items():
+            sc_broker = broker_for_channel(
+                channel,
+                tokens_json=tokens,
+                slippage=str(params["slippage"]),
+                sol_buffer_pct=float(params["sol_buffer_pct"]),
             )
-        # 启动对账（天然持仓导入）在 _run() 线程内执行，避免阻塞 HTTP 保存。
+            bms: dict[str, Any] = {}
+            try:
+                bms = self._prepare_scene_batches(
+                    sc, list(sc.get("symbols") or []), channel
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[DIAG] td_live 场景 {name} 批次准备失败: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+            scene_runtimes[name] = {
+                "enabled": True,
+                "sleeptime": str(sc.get("sleeptime") or "1m"),
+                "params": sc,
+                "broker": sc_broker,
+                "batch_managers": bms,
+                "last_run": None,
+                "_diag_shown": False,
+            }
+        strategy._scene_runtimes = scene_runtimes
+        print(
+            "[DIAG] td_live 场景: "
+            + "; ".join(
+                f"{k}[{rt['sleeptime']}, "
+                f"{len(rt['params'].get('symbols') or [])}标的, "
+                f"{len(rt['batch_managers'])}台账, "
+                f"mode={rt['params'].get('quantity_mode')}]"
+                for k, rt in scene_runtimes.items()
+            )
+            + f"（heartbeat={heartbeat_str}）",
+            file=sys.stderr, flush=True,
+        )
         self._strategy = strategy
         executor = StrategyExecutor(strategy)
         executor.daemon = True
+        strategy._executor = executor
         return executor
+
+    def _prepare_scene_batches(
+        self, sc: dict, symbols: list[str], channel: str
+    ) -> dict[str, Any]:
+        """S3a（2026-08-20）：场景批次台账。
+
+        场景 batches >1 时按场景 sub_accounts 作为 slot 账户池
+        （slot i ↔ sub_accounts[i-1]）；sub_accounts 缺失时回退现有
+        slot_map/前 N 账户逻辑（与旧扁平行为一致）。
+        """
+        batches_n = int(sc.get("batches", 1) or 1)
+        if batches_n <= 1:
+            return {}
+        account_ids = sc.get("sub_accounts") or None
+        bms: dict[str, Any] = {}
+        for sym in symbols:
+            bm = self._prepare_batches(
+                batches_n, sym, channel, account_ids=account_ids
+            )
+            if bm is not None:
+                bms[sym] = bm
+        return bms
 
     def _reconcile_import(
         self, bm: Any, symbol: str, tokens_json: list[dict] | None
@@ -489,7 +585,11 @@ class _TdLiveRunner:
         return managers
 
     def _prepare_batches(
-        self, td_batches: int, symbol: str, channel: str = "okx_dex"
+        self,
+        td_batches: int,
+        symbol: str,
+        channel: str = "okx_dex",
+        account_ids: list[str] | None = None,
     ) -> Any:
         """加载/创建批次台账（通道隔离，2026-08-17 拍板）。
 
@@ -500,6 +600,8 @@ class _TdLiveRunner:
         - cex（gate）：子账号映射（load_slot_map：slot→gate_botN；不足按
           1..N 兜底 fallback）——不创建子钱包（子账号已存在于交易所）
         - 旧格式（无通道前缀）台账由 _load_or_migrate 自动归 okx_dex 命名空间
+        - S3a（2026-08-20）：传入 account_ids（场景 sub_accounts）时优先使用
+          ——slot i ↔ sub_accounts[i-1]；缺失时回退上述默认映射。
         """
         import sys
 
@@ -544,20 +646,59 @@ class _TdLiveRunner:
                 )
                 bm = None  # 走下方按通道创建流程
             else:
-                print(
-                    f"[DIAG] td_live: batches restored ({symbol}, "
-                    f"{len(bm.slots)} slots, {channel})",
-                    file=sys.stderr, flush=True,
+                # S3a 场景池子变更检测：场景 sub_accounts 与台账 slot 账号
+                # 不一致时（无 open lot）快照后按新池子重建；有 open lot
+                # fail-closed（不可丢台账，与 UUID 自愈同模式）。
+                cur_ids = [
+                    str(s.get("account_id") or "") for s in bm.slots
+                ]
+                want_ids = (
+                    [str(a) for a in account_ids][:td_batches]
+                    if account_ids else None
                 )
-                return bm
+                if want_ids is not None and cur_ids != want_ids:
+                    opens = [
+                        s["slot"]
+                        for s in bm.slots
+                        if s.get("status") != "available"
+                    ]
+                    if opens:
+                        print(
+                            f"[DIAG] td_live: {symbol} 场景池子变更"
+                            f"（{cur_ids} → {want_ids}）且 slot {opens}"
+                            f" 有 open lot——拒绝重建，请人工处理",
+                            file=sys.stderr, flush=True,
+                        )
+                        return bm
+                    ts = time.strftime("%Y%m%d%H%M%S")
+                    src = bm.path
+                    bak = src.with_name(f"{src.name}.scene.bak.{ts}")
+                    os.replace(src, bak)
+                    print(
+                        f"[DIAG] td_live: {symbol} 场景池子变更"
+                        f"（{cur_ids} → {want_ids}，全部 available），"
+                        f"快照 {bak.name} 后重建",
+                        file=sys.stderr, flush=True,
+                    )
+                    bm = None  # 走下方按新池子创建流程
+                else:
+                    print(
+                        f"[DIAG] td_live: batches restored ({symbol}, "
+                        f"{len(bm.slots)} slots, {channel})",
+                        file=sys.stderr, flush=True,
+                    )
+                    return bm
         if family == "cex":
             from nanobot_quant.gate_credentials import load_slot_map
 
-            slot_map = load_slot_map() or {}
-            ids = [
-                str(slot_map.get(str(i)) or f"gate_bot{i}")
-                for i in range(1, td_batches + 1)
-            ]
+            if account_ids:
+                ids = [str(a) for a in account_ids][:td_batches]
+            else:
+                slot_map = load_slot_map() or {}
+                ids = [
+                    str(slot_map.get(str(i)) or f"gate_bot{i}")
+                    for i in range(1, td_batches + 1)
+                ]
             if not ids:
                 print(
                     "[DIAG] td_live: slot_map 为空",
@@ -567,37 +708,40 @@ class _TdLiveRunner:
         else:
             from nanobot_quant.tools.tools_wallet import wallet_accounts
 
-            try:
-                acc = wallet_accounts()
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"[DIAG] td_live: wallet_accounts failed: {exc}",
-                    file=sys.stderr, flush=True,
-                )
-                return None
-            if acc.get("status") != "ok":
-                print(
-                    f"[DIAG] td_live: wallet_accounts error: "
-                    f"{acc.get('error')}",
-                    file=sys.stderr, flush=True,
-                )
-                return None
-            ids = [
-                a["account_id"]
-                for a in acc.get("data", {}).get("accounts", [])[:td_batches]
-            ]
-            if not ids:
-                print(
-                    "[DIAG] td_live: no sub-accounts in wallets.json",
-                    file=sys.stderr, flush=True,
-                )
-                return None
-            if len(ids) < td_batches:
-                print(
-                    f"[DIAG] td_live: only {len(ids)} sub-accounts, "
-                    f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
-                    file=sys.stderr, flush=True,
-                )
+            if account_ids:
+                ids = [str(a) for a in account_ids][:td_batches]
+            else:
+                try:
+                    acc = wallet_accounts()
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[DIAG] td_live: wallet_accounts failed: {exc}",
+                        file=sys.stderr, flush=True,
+                    )
+                    return None
+                if acc.get("status") != "ok":
+                    print(
+                        f"[DIAG] td_live: wallet_accounts error: "
+                        f"{acc.get('error')}",
+                        file=sys.stderr, flush=True,
+                    )
+                    return None
+                ids = [
+                    a["account_id"]
+                    for a in acc.get("data", {}).get("accounts", [])[:td_batches]
+                ]
+                if not ids:
+                    print(
+                        "[DIAG] td_live: no sub-accounts in wallets.json",
+                        file=sys.stderr, flush=True,
+                    )
+                    return None
+                if len(ids) < td_batches:
+                    print(
+                        f"[DIAG] td_live: only {len(ids)} sub-accounts, "
+                        f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
+                        file=sys.stderr, flush=True,
+                    )
         bm = BatchManager(symbol=symbol, account_ids=ids, channel=channel)
         bm.save()
         print(
@@ -654,10 +798,11 @@ class _TdLiveRunner:
                 symbols=params["td_symbols"],
                 sleeptime=params["td_sleeptime"],
                 quantity_mode=params["quantity_mode"],
+                scenes_fp=_scenes_fingerprint(params),
             )
             print(
                 f"[DIAG] td_live: StrategyExecutor started "
-                f"(symbols={params['td_symbols']} @ {params['td_sleeptime']}, "
+                f"(scenes={sorted(k for k, v in (params.get('scenes') or {}).items() if isinstance(v, dict) and v.get('enabled'))}, "
                 f"mode={params['quantity_mode']})",
                 file=sys.stderr, flush=True,
             )
@@ -699,12 +844,21 @@ class _TdLiveRunner:
 
         Step 1（2026-08-17）：CEX 通道跳过——子账号持仓对账导入在
         Step 2 实现（对标 DEX _reconcile_import，按子账号余额导入）。
+        S3a（2026-08-20）：遍历所有启用场景的 batch_managers（场景隔离）。
         """
         try:
             strategy = getattr(self, "_strategy", None)
             if strategy is None:
                 return
-            managers = getattr(strategy, "batch_managers", None) or {}
+            managers: dict[str, Any] = {}
+            runtimes = getattr(strategy, "_scene_runtimes", None)
+            if runtimes:
+                for name, rt in runtimes.items():
+                    if not rt.get("enabled"):
+                        continue
+                    managers.update(rt.get("batch_managers") or {})
+            else:
+                managers = getattr(strategy, "batch_managers", None) or {}
             tokens_json = getattr(strategy, "tokens_json", None)
             if (strategy.parameters or {}).get("channel_family") == "cex":
                 importer = self._reconcile_import_cex
@@ -775,6 +929,7 @@ class _TdLiveRunner:
                 or (self._thread is not None and self._thread.is_alive())
             )
             if running:
+                scenes_fp = _scenes_fingerprint(params)
                 changed = any(
                     self._state.get(k) != params.get(pk)
                     for k, pk in (
@@ -782,7 +937,7 @@ class _TdLiveRunner:
                         ("sleeptime", "td_sleeptime"),
                         ("quantity_mode", "quantity_mode"),
                     )
-                )
+                ) or self._state.get("scenes_fp") != scenes_fp
                 if not changed:
                     return self.status()
                 # 参数变化 → 重启循环（先停旧的，避免双循环）；
@@ -806,6 +961,29 @@ class _TdLiveRunner:
         ):
             return self.stop()
         return self.status()
+
+
+def _scenes_fingerprint(params: dict[str, Any]) -> str:
+    """S3a：场景配置指纹（含字段变化，供 sync_from_params 判定重启）。"""
+    import json
+
+    scenes = params.get("scenes") or {}
+    return json.dumps(scenes, sort_keys=True, ensure_ascii=False, default=str)
+
+
+_SLEEPTIME_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900,
+    "1H": 3600, "4H": 14400, "1D": 86400, "1W": 604800,
+}
+
+
+def _parse_sleeptime_seconds(value: str) -> int:
+    """场景周期字符串 → 秒（1m/5m/15m/1H/4H/1D/1W）。
+
+    S3a 起 td_live 自行定义（不从策略模块导入，避免测试 fake 模块拦截
+    _build_executor 延迟 import 时缺属性）。
+    """
+    return _SLEEPTIME_SECONDS.get(str(value).strip(), 60)
 
 
 def get_runner() -> _TdLiveRunner:

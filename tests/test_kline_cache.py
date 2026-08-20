@@ -14,9 +14,21 @@ from nanobot_quant.data.kline_cache import KlineCache
 
 # ── helpers ─────────────────────────────────────────────────────
 
-def _df(n=130, start="2026-08-01", period_s=60, tz="UTC", col=None):
-    """Synthetic OHLCV frame: tz-aware UTC DatetimeIndex, ascending."""
-    idx = pd.date_range(start, periods=n, freq=f"{period_s}s", tz=tz)
+def _df(n=130, start=None, period_s=60, tz="UTC", col=None):
+    """Synthetic OHLCV frame: tz-aware UTC DatetimeIndex, ascending.
+
+    end 默认 = now（自适应增量 limit 依赖缓存尾与 wall clock 的
+    时间差；固定历史日期会算出巨大 elapsed → limit 封顶 1000）。
+    """
+    if start is None:
+        idx = pd.date_range(
+            end=pd.Timestamp.now(tz="UTC"), periods=n,
+            freq=f"{period_s}s", tz=tz,
+        )
+    else:
+        idx = pd.date_range(
+            start, periods=n, freq=f"{period_s}s", tz=tz,
+        )
     base = pd.DataFrame(
         {
             "open": [10.0 + i * 0.1 for i in range(n)],
@@ -162,6 +174,49 @@ class TestIncremental:
         assert len(out) == 120
         assert src.calls[-1] == ("SOL", "1m", 120)  # 全量重拉
         pd.testing.assert_frame_equal(out, src.df.iloc[-120:])
+
+    def test_multi_new_bars_appended_without_false_gap(self):
+        """跳过一轮后 limit=2 返回 2 根新收盘 bar → 顺序逐根 append，不误判 gap。
+
+        S3a 场景调度下心跳边界抖动可能跳过一轮（不拉数据），下一轮增量
+        limit=2 会拿到 2 根新收盘 bar；旧实现逐根相对原始尾判定，第二根
+        diff=2×period 误判缺口触发全量重拉。修复：append 后更新尾 ts。
+        """
+        src = _FakeFetch(_df(130))
+        cache = KlineCache(src)
+        cache.get("SOL", "1m", 120)
+        src.grow(2)  # 跳过一轮：一次长 2 根
+        before = len(src.calls)
+        out = cache.get("SOL", "1m", 120)
+        assert len(out) == 120
+        # 增量路径：仅 limit=2 拉取，无全量重拉
+        assert all(c[2] == 2 for c in src.calls[before:])
+        pd.testing.assert_frame_equal(out, src.df.iloc[-120:])
+
+    def test_skip_rounds_adaptive_fetch_limit(self, monkeypatch):
+        """S3a 多场景：调用方跳过多轮才访问（如 mid=5m 每 5 轮访问 1m
+        缓存，期间产生 5 根新 bar）→ 增量 limit 按距缓存尾的 elapsed
+        自适应拉取，不误判 gap 全量重拉。"""
+        src = _FakeFetch(_df(125))
+        cache = KlineCache(src)
+        cache.get("SOL", "1m", 120)   # 首轮 prefetch，缓存尾 = now
+        src.grow(5)                     # 世界推进 5 分钟：src 尾 = now + 5min
+        real_now = pd.Timestamp.now(tz="UTC")
+        # 模拟调用方 5 分钟未访问（wall clock 推进）
+        monkeypatch.setattr(
+            "nanobot_quant.data.kline_cache._now_for",
+            lambda ts: real_now + pd.Timedelta(minutes=5),
+        )
+        before = len(src.calls)
+        out = cache.get("SOL", "1m", 120)
+        assert len(out) == 120
+        # 自适应 limit：elapsed≈5 → need=7（5 根缺口 + 2 容差），非全量 120
+        assert src.calls[-1][2] == 7
+        assert src.calls[-1][2] != 120
+        # 数据一致：out 是 src 的连续子序列（时间戳对齐、值相同）
+        pd.testing.assert_frame_equal(
+            out, src.df.loc[out.index], check_freq=False,
+        )
 
     def test_incremental_fetch_failure_keeps_cache(self):
         """增量拉取失败 → 保留缓存返回（下一轮再试），不中断循环。"""
