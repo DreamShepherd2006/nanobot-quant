@@ -444,6 +444,86 @@ def test_prepare_batches_cex_keeps_dex_ledger(tmp_path, monkeypatch):
     assert (tmp_path / "batches.gate.CRCLX.json").exists()
 
 
+# ── S3a 场景池子变更检测（2026-08-20） ─────────────────────────────
+
+def test_prepare_batches_scene_pool_change_rebuilds(tmp_path, monkeypatch):
+    """场景池子变更（台账 slot 账号 ≠ 场景 sub_accounts）→ 无 open 快照重建。
+
+    high 从 gate_bot1-5 收窄到 gate_bot1-2：台账 5 slots → 2 slots，
+    旧台账快照 .scene.bak.* 保留可追溯。
+    """
+    from nanobot_quant import td_live as td_live_mod
+
+    loader = td_live_mod._TdLiveRunner()
+    bm0 = BatchManager(
+        symbol="CRCLX",
+        account_ids=[f"gate_bot{i}" for i in range(1, 6)],
+        path=tmp_path / "batches.gate.CRCLX.json",
+    )
+    bm0.save()
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+    )
+    bm = loader._prepare_batches(
+        2, "CRCLX", channel="cex",
+        account_ids=["gate_bot1", "gate_bot2"],
+    )
+    assert [s["account_id"] for s in bm.slots] == ["gate_bot1", "gate_bot2"]
+    assert len(list(tmp_path.glob("batches.gate.CRCLX.json.scene.bak.*"))) == 1
+
+
+def test_prepare_batches_scene_pool_change_open_lot_fail_closed(tmp_path, monkeypatch):
+    """场景池子变更但台账有 open lot → fail-closed 拒绝重建（不丢台账）。"""
+    from nanobot_quant import td_live as td_live_mod
+
+    loader = td_live_mod._TdLiveRunner()
+    bm0 = BatchManager(
+        symbol="CRCLX",
+        account_ids=[f"gate_bot{i}" for i in range(1, 4)],
+        path=tmp_path / "batches.gate.CRCLX.json",
+    )
+    bm0.open_lot(qty=0.05, entry_price=70.0, entry_time="t1")
+    bm0.save()
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+    )
+    bm = loader._prepare_batches(
+        2, "CRCLX", channel="cex",
+        account_ids=["gate_bot1", "gate_bot2"],
+    )
+    # 保留原台账（含 open lot），不重建
+    assert [s["account_id"] for s in bm.slots] == [
+        "gate_bot1", "gate_bot2", "gate_bot3",
+    ]
+    assert bm.open_slots() != []
+    assert list(tmp_path.glob("batches.gate.CRCLX.json.scene.bak.*")) == []
+
+
+def test_prepare_batches_scene_pool_unchanged_keeps(tmp_path, monkeypatch):
+    """场景池子与台账一致 → 直接复用，不重建（幂等）。"""
+    from nanobot_quant import td_live as td_live_mod
+
+    loader = td_live_mod._TdLiveRunner()
+    bm0 = BatchManager(
+        symbol="CRCLX",
+        account_ids=["gate_bot1", "gate_bot2"],
+        path=tmp_path / "batches.gate.CRCLX.json",
+    )
+    bm0.save()
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+    )
+    bm = loader._prepare_batches(
+        2, "CRCLX", channel="cex",
+        account_ids=["gate_bot1", "gate_bot2"],
+    )
+    assert [s["account_id"] for s in bm.slots] == ["gate_bot1", "gate_bot2"]
+    assert list(tmp_path.glob("batches.gate.CRCLX.json.scene.bak.*")) == []
+
+
 def test_prepare_batches_dex_keeps_cex_ledger(tmp_path, monkeypatch):
     """CEX 台账 → 切回 dex：gate 文件保留，dex 台账独立新建/复用。"""
     from nanobot_quant import td_live as td_live_mod

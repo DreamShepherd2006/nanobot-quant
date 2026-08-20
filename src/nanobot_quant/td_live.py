@@ -646,12 +646,48 @@ class _TdLiveRunner:
                 )
                 bm = None  # 走下方按通道创建流程
             else:
-                print(
-                    f"[DIAG] td_live: batches restored ({symbol}, "
-                    f"{len(bm.slots)} slots, {channel})",
-                    file=sys.stderr, flush=True,
+                # S3a 场景池子变更检测：场景 sub_accounts 与台账 slot 账号
+                # 不一致时（无 open lot）快照后按新池子重建；有 open lot
+                # fail-closed（不可丢台账，与 UUID 自愈同模式）。
+                cur_ids = [
+                    str(s.get("account_id") or "") for s in bm.slots
+                ]
+                want_ids = (
+                    [str(a) for a in account_ids][:td_batches]
+                    if account_ids else None
                 )
-                return bm
+                if want_ids is not None and cur_ids != want_ids:
+                    opens = [
+                        s["slot"]
+                        for s in bm.slots
+                        if s.get("status") != "available"
+                    ]
+                    if opens:
+                        print(
+                            f"[DIAG] td_live: {symbol} 场景池子变更"
+                            f"（{cur_ids} → {want_ids}）且 slot {opens}"
+                            f" 有 open lot——拒绝重建，请人工处理",
+                            file=sys.stderr, flush=True,
+                        )
+                        return bm
+                    ts = time.strftime("%Y%m%d%H%M%S")
+                    src = bm.path
+                    bak = src.with_name(f"{src.name}.scene.bak.{ts}")
+                    os.replace(src, bak)
+                    print(
+                        f"[DIAG] td_live: {symbol} 场景池子变更"
+                        f"（{cur_ids} → {want_ids}，全部 available），"
+                        f"快照 {bak.name} 后重建",
+                        file=sys.stderr, flush=True,
+                    )
+                    bm = None  # 走下方按新池子创建流程
+                else:
+                    print(
+                        f"[DIAG] td_live: batches restored ({symbol}, "
+                        f"{len(bm.slots)} slots, {channel})",
+                        file=sys.stderr, flush=True,
+                    )
+                    return bm
         if family == "cex":
             from nanobot_quant.gate_credentials import load_slot_map
 
