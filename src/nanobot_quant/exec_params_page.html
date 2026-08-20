@@ -196,7 +196,10 @@
     // 2026-08-20（S1）：场景字段 name 带前缀（scenes_high_sleeptime 等），
     // 收集到 params.scenes.<scene>.<field>；非前缀字段保持扁平。
     function sceneField(name) {
-      const m = name.match(/^scenes_(\w+)_(.+)$/);
+      // 场景名固定集合 high/mid/low：\w+ 贪婪会把字段名中的下划线吞进场景名
+      // （scenes_high_quantity_mode → 错误解析成场景 "high_quantity"），
+      // 必须用固定列表显式匹配场景名前缀（2026-08-20 修复）。
+      const m = name.match(/^scenes_(high|mid|low)_(.+)$/);
       if (!m) return null;
       const sc = m[1], fld = m[2];
       if (!params.scenes[sc]) params.scenes[sc] = {};

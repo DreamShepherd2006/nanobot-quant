@@ -100,7 +100,7 @@ def _field_html(
     # 如 enabled/sleeptime/symbols），meta 查表用扁平键（key，如 td_sleeptime）。
     fname = field_name or key
     showif = _showif_attr(key, prefix, fname)
-    fid = prefix + fname  # 如 scenes_high_sleeptime（collect() 正则 ^scenes_(\w+)_(.+)$ 解析）
+    fid = prefix + fname  # 如 scenes_high_sleeptime（前端 collect() 正则 ^scenes_(high|mid|low)_(.+)$ 解析，场景名固定集合）
     # 2026-08-20：场景字段的通道联动标记（JS applyChannel/applyShowIf 遍历）
     scene_mark = ""
     if fname == "batches":
