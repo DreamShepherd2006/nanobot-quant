@@ -78,10 +78,12 @@ class TdSequentialStrategy(Strategy):
         **DEFAULT_TD_PARAMS,
     }
 
-    #: sleeptime → get_historical_prices timestep (lumibot granularity names)
+    #: sleeptime → get_historical_prices timestep（精确粒度，S3a 多场景：
+    #   mid=5m/15m 必须传 5min/15min 而非笼统 minute，否则数据源
+    #   _BAR_MAP 把粒度丢失成 1m——K 线窗口与场景周期不匹配）
     _TIMESTEP_BY_SLEEPTIME = {
-        "1m": "minute", "5m": "minute", "15m": "minute",
-        "1H": "hour", "1D": "day", "1W": "week",
+        "1m": "minute", "5m": "5min", "15m": "15min", "30m": "30min",
+        "1H": "hour", "4H": "4hour", "1D": "day", "1W": "week",
     }
 
     # ── lifecycle hooks ───────────────────────────────────────────

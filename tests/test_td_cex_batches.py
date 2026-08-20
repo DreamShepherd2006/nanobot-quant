@@ -552,3 +552,33 @@ def test_prepare_batches_dex_keeps_cex_ledger(tmp_path, monkeypatch):
     assert (tmp_path / "batches.gate.CRCLX.json").exists()
     data = json.loads((tmp_path / "batches.gate.CRCLX.json").read_text())
     assert data["slots"][0]["account_id"] == "gate_bot1"
+
+# ── S3a 场景周期 → K 线粒度精确映射（2026-08-20） ─────────────────
+
+def test_scene_timestep_exact_granularity():
+    """场景 sleeptime 必须映射到精确 K 线粒度，不能笼统成 minute。
+
+    S3a 多场景下 mid=5m 传 "minute" 会被数据源 _BAR_MAP 丢失成 1m——
+    窗口粒度与场景周期不匹配（回归：SPYX mid=5m 曾拉 1m K 线）。
+    """
+    from nanobot_quant.strategies.td_sequential_strategy import (
+        TdSequentialStrategy,
+    )
+
+    m = TdSequentialStrategy._TIMESTEP_BY_SLEEPTIME
+    assert m["1m"] == "minute"
+    assert m["5m"] == "5min"
+    assert m["15m"] == "15min"
+    assert m["30m"] == "30min"
+    assert m["1H"] == "hour"
+    assert m["4H"] == "4hour"
+    assert m["1D"] == "day"
+    assert m["1W"] == "week"
+
+    # 数据源侧契约：5min/15min 必须能映射到真实 bar 粒度
+    from nanobot_quant.data.cex_data_source import _BAR_MAP
+    assert _BAR_MAP["minute"] == "1m"
+    assert _BAR_MAP["5min"] == "5m"
+    assert _BAR_MAP["15min"] == "15m"
+    assert _BAR_MAP["hour"] == "1H"
+    assert _BAR_MAP["day"] == "1D"
