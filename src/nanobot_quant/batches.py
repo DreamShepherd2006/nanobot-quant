@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -28,17 +29,27 @@ OPEN = "open"
 EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
 
 
-def batches_path(symbol: Optional[str] = None, channel: Optional[str] = None) -> Path:
+def batches_path(
+    symbol: Optional[str] = None,
+    channel: Optional[str] = None,
+    scene: Optional[str] = None,
+) -> Path:
     """持久化路径（与 exec_params.json 同一 credentials 目录）。
 
     channel + symbol → ``batches.{channel}.{symbol}.json``（通道隔离，
     2026-08-17 拍板：DEX 与 CEX 台账独立，切通道不复用对方台账——
-    此前同路径切换导致双向覆盖/快照堆积）；symbol 无 channel 时
-    返回 ``batches.{symbol}.json``（旧格式，迁移用）；None 时返回旧式
-    单文件路径（兼容/迁移用）。
+    此前同路径切换导致双向覆盖/快照堆积）；scene 时 →
+    ``batches.{channel}.{scene}.{symbol}.json``（S3b 场景化台账，
+    2026-08-20 拍板：场景独立台账，同标的跨场景互不复用）；
+    symbol 无 channel 时返回 ``batches.{symbol}.json``（旧格式，迁移用）；
+    None 时返回旧式单文件路径（兼容/迁移用）。
     """
     if channel and symbol:
-        fname = f"batches.{channel}.{symbol}.json"
+        fname = (
+            f"batches.{channel}.{scene}.{symbol}.json"
+            if scene
+            else f"batches.{channel}.{symbol}.json"
+        )
     elif symbol:
         fname = f"batches.{symbol}.json"
     else:
@@ -103,19 +114,65 @@ def _migrate_channel_legacy() -> None:
 
 
 def _load_or_migrate(
-    symbol: str, channel: Optional[str] = None
+    symbol: str,
+    channel: Optional[str] = None,
+    scene: Optional[str] = None,
+    account_ids: Optional[list[str]] = None,
 ) -> Optional["BatchManager"]:
     """通道化 per-symbol 加载；缺失时先迁移旧格式再试一次。
 
     旧格式（无通道前缀 / 单文件）一律归 okx_dex 命名空间，不污染
     当前通道（gate 通道请求时 DEX 台账原地保留，不迁移到 gate）。
+    scene 时读场景文件 ``batches.{channel}.{scene}.{symbol}.json``；
+    无场景文件且存在旧无场景文件（``batches.{channel}.{symbol}.json``）
+    且其 slot 账号与期望池 account_ids 一致 → .bak 快照后迁移到场景
+    文件（S3b，2026-08-20 拍板：旧文件 .bak 快照后迁移、幂等不覆盖）；
+    不一致 → 原地保留（留给匹配场景迁移）。
     """
-    bm = BatchManager.load(symbol=symbol, channel=channel)
+    bm = BatchManager.load(symbol=symbol, channel=channel, scene=scene)
     if bm is not None and bm.slots:
         return bm
     migrate_legacy_batches()
     _migrate_channel_legacy()
-    return BatchManager.load(symbol=symbol, channel=channel)
+    if scene:
+        _migrate_scene_legacy(symbol, channel, scene, account_ids)
+    return BatchManager.load(symbol=symbol, channel=channel, scene=scene)
+
+
+def _migrate_scene_legacy(
+    symbol: str,
+    channel: Optional[str],
+    scene: str,
+    account_ids: Optional[list[str]],
+) -> None:
+    """S3b：旧无场景台账（``batches.{channel}.{symbol}.json``）→ 场景文件。
+
+    规则（2026-08-20 用户拍板）：
+    - 旧文件 slot 账号与期望池（场景 sub_accounts）一致 → .bak 快照后
+      rename 到场景文件（迁移）；
+    - 不一致 → 原地保留（留给匹配场景迁移，不误迁）；
+    - 目标场景文件已存在 → 不迁移（幂等不覆盖，新文件优先）。
+    失败（读取/解析错误）静默跳过——不影响场景正常新建台账。
+    """
+    src = batches_path(symbol, channel)
+    tgt = batches_path(symbol, channel, scene)
+    if not src.exists() or tgt.exists():
+        return
+    try:
+        raw = json.loads(src.read_text(encoding="utf-8"))
+        cur = [str(s.get("account_id") or "") for s in raw.get("slots", [])]
+        want = [str(a) for a in (account_ids or [])]
+        if want and cur != want:
+            return  # 账号池不匹配 → 留给匹配场景
+    except (OSError, ValueError):
+        return
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    bak = src.with_name(f"{src.name}.scene.bak.{ts}")
+    try:
+        shutil.copy2(src, bak)  # .bak 快照（保留可追溯）
+        os.replace(src, tgt)    # 迁移
+    except OSError:
+        return
 
 
 class BatchManager:
@@ -127,10 +184,16 @@ class BatchManager:
         account_ids: list[str],
         path: Optional[Path | str] = None,
         channel: Optional[str] = None,
+        scene: Optional[str] = None,
     ) -> None:
         self.symbol = symbol
         self.channel = channel
-        self.path = Path(path) if path else batches_path(self.symbol, channel)
+        self.scene = scene
+        self.path = (
+            Path(path)
+            if path
+            else batches_path(self.symbol, channel, scene)
+        )
         self.slots: list[dict[str, Any]] = []
         self._init_slots(account_ids)
 
@@ -167,15 +230,20 @@ class BatchManager:
         path: Optional[Path | str] = None,
         symbol: Optional[str] = None,
         channel: Optional[str] = None,
+        scene: Optional[str] = None,
     ) -> Optional["BatchManager"]:
         """从磁盘加载；文件缺失/损坏 → None。
 
-        path 显式时用 path；否则 symbol 提供时读 ``batches.{channel}.{symbol}.json``
-        （channel 缺省时读旧格式 ``batches.{symbol}.json``），都不提供时
-        读旧式 ``batches.json``。
+        path 显式时用 path；否则 symbol 提供时读
+        ``batches.{channel}.{symbol}.json``（scene 时读
+        ``batches.{channel}.{scene}.{symbol}.json``；channel 缺省时读旧
+        格式 ``batches.{symbol}.json``），都不提供时读旧式 ``batches.json``。
         """
         if path is None:
-            path = batches_path(symbol, channel) if symbol else batches_path()
+            if symbol:
+                path = batches_path(symbol, channel, scene)
+            else:
+                path = batches_path()
         p = Path(path)
         if not p.exists():
             return None
@@ -185,6 +253,7 @@ class BatchManager:
             bm.symbol = raw.get("symbol", "")
             bm.path = p
             bm.channel = channel
+            bm.scene = scene
             bm.slots = raw.get("slots", [])
             return bm
         except (OSError, ValueError, KeyError):
@@ -349,21 +418,46 @@ class BatchManager:
 
 
 def ensure_batches(
-    td_batches: int, symbol: str, channel: Optional[str] = None
+    td_batches: int,
+    symbol: str,
+    channel: Optional[str] = None,
+    scene: Optional[str] = None,
 ) -> tuple[Optional[BatchManager], str]:
     """WebUI 保存 td_batches 时调用：确保子钱包/子账号数量 ≥ td_batches 并建/复用批次映射。
 
     - 子钱包不足 → ``wallet add`` 补足（add 会自动切换活跃账户，
       补足后 switch 回原活跃账户）。
-    - 已有本通道 batches.{channel}.{symbol}.json 且 symbol 一致 → 复用
-      （保留 open 批次，不重建）。
+    - 已有本通道 ``batches.{channel}.{symbol}.json``（scene 时
+      ``batches.{channel}.{scene}.{symbol}.json``，S3b 场景化）且
+      symbol 一致 → 复用（保留 open 批次，不重建）。
     - 返回 ``(BatchManager | None, 日志信息)``。
     """
     from .tools.tools_wallet import wallet_accounts, wallet_add, wallet_switch
 
-    bm = _load_or_migrate(symbol, channel)
+    bm = _load_or_migrate(symbol, channel, scene=scene)
     if bm is not None and bm.symbol == symbol and bm.slots:
         return bm, f"复用已有批次台账（{symbol}，{len(bm.slots)} slots）"
+
+    # CEX（gate）：子账号已在交易所存在，用 slot_map 建 gate_botN
+    #（不调 wallet_add；S3b 修复：此前 CEX 通道新建会误用 DEX 子钱包
+    # UUID，靠 td_live 的 UUID 自愈兜底）。
+    from .brokers.registry import spec_for_channel
+    from .exec_params import normalize_execution_channel
+
+    ch = normalize_execution_channel(channel)
+    if spec_for_channel(ch).family == "cex":
+        from .gate_credentials import load_slot_map
+
+        slot_map = load_slot_map() or {}
+        ids = [
+            str(slot_map.get(str(i)) or f"gate_bot{i}")
+            for i in range(1, td_batches + 1)
+        ]
+        bm = BatchManager(
+            symbol=symbol, account_ids=ids, channel=ch, scene=scene
+        )
+        bm.save()
+        return bm, f"批次初始化完成：{len(bm.slots)} slots（CEX 子账号）"
 
     acc = wallet_accounts()
     if acc.get("status") != "ok":
@@ -394,6 +488,11 @@ def ensure_batches(
             f"子钱包不足：现有 {len(ids)}，要求 {td_batches} "
             "（wallet add 失败或达到 50 上限）"
         )
-    bm = BatchManager(symbol=symbol, account_ids=ids[:td_batches], channel=channel)
+    bm = BatchManager(
+        symbol=symbol,
+        account_ids=ids[:td_batches],
+        channel=channel,
+        scene=scene,
+    )
     bm.save()
     return bm, f"批次初始化完成：{len(bm.slots)} slots（新建 {created}）"

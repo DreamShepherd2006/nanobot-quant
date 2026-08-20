@@ -235,8 +235,10 @@ def test_prepare_batches_heals_dex_uuid_ledger(monkeypatch, tmp_path):
         ],
         path=tmp_path / "batches.gate.CRCLX.json",
     )
-    monkeypatch.setattr("nanobot_quant.batches._load_or_migrate",
-                        lambda symbol, channel=None: uuid_ledger)
+    monkeypatch.setattr(
+        "nanobot_quant.batches._load_or_migrate",
+        lambda symbol, channel=None, scene=None, account_ids=None: uuid_ledger,
+    )
     monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials",
                         lambda: _creds())
     monkeypatch.setattr("nanobot_quant.gate_credentials.load_slot_map",

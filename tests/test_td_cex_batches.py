@@ -386,7 +386,7 @@ def test_prepare_batches_cex_uses_slot_map(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(2, "CRCLX", channel="cex")
     assert bm is not None
@@ -403,7 +403,7 @@ def test_prepare_batches_cex_fallback_slot_map(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(3, "CRCLX", channel="cex")
     assert [s["account_id"] for s in bm.slots] == [
@@ -430,7 +430,7 @@ def test_prepare_batches_cex_keeps_dex_ledger(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(2, "CRCLX", channel="cex")
     assert [s["account_id"] for s in bm.slots] == ["gate_bot1", "gate_bot2"]
@@ -463,7 +463,7 @@ def test_prepare_batches_scene_pool_change_rebuilds(tmp_path, monkeypatch):
     bm0.save()
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(
         2, "CRCLX", channel="cex",
@@ -487,7 +487,7 @@ def test_prepare_batches_scene_pool_change_open_lot_fail_closed(tmp_path, monkey
     bm0.save()
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(
         2, "CRCLX", channel="cex",
@@ -514,7 +514,7 @@ def test_prepare_batches_scene_pool_unchanged_keeps(tmp_path, monkeypatch):
     bm0.save()
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     bm = loader._prepare_batches(
         2, "CRCLX", channel="cex",
@@ -538,7 +538,7 @@ def test_prepare_batches_dex_keeps_cex_ledger(tmp_path, monkeypatch):
     cex_bm.save()
     monkeypatch.setattr(
         "nanobot_quant.batches.batches_path",
-        lambda s=None, c=None: tmp_path / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
+        lambda s=None, c=None, scene=None: tmp_path / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json"),
     )
     monkeypatch.setattr(
         "nanobot_quant.tools.tools_wallet.wallet_accounts",

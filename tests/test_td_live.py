@@ -301,3 +301,38 @@ class TestBuildExecutorChannel:
             runner._build_executor(
                 _params(td_enabled=True, execution_channel="coinbase")
             )
+def test_prepare_scene_batches_fail_closed_sub_accounts_short():
+    """S3b：场景 sub_accounts 长度 < batches → ValueError（fail-closed，
+    不静默截断）；匹配时把 scene 传给 _prepare_batches（场景化台账）。"""
+    tl = td_live._TdLiveRunner()
+    with pytest.raises(ValueError, match="子账号池不足"):
+        tl._prepare_scene_batches(
+            {"batches": 5, "sub_accounts": ["gate_bot1", "gate_bot2"]},
+            ["CRCLX"], "gate", "high",
+        )
+    # 缺省 sub_accounts（None）不触发 fail-closed（回退旧映射）
+    tl2 = td_live._TdLiveRunner()
+    tl2._prepare_batches = lambda *a, **k: None
+    assert tl2._prepare_scene_batches(
+        {"batches": 2}, ["CRCLX"], "gate", "high",
+    ) == {}
+
+
+def test_prepare_scene_batches_passes_scene(monkeypatch):
+    """S3b：场景台账路径——_prepare_batches 收到 scene（batches.gate.high.*）。"""
+    tl = td_live._TdLiveRunner()
+    seen = {}
+
+    def fake_prepare(batches_n, sym, channel, account_ids=None, scene=None):
+        seen.update({"n": batches_n, "sym": sym, "channel": channel,
+                     "scene": scene, "ids": account_ids})
+        return object()
+
+    tl._prepare_batches = fake_prepare
+    bms = tl._prepare_scene_batches(
+        {"batches": 2, "sub_accounts": ["gate_bot1", "gate_bot2"]},
+        ["CRCLX"], "gate", "high",
+    )
+    assert seen == {"n": 2, "sym": "CRCLX", "channel": "gate",
+                    "scene": "high", "ids": ["gate_bot1", "gate_bot2"]}
+    assert len(bms) == 1
