@@ -65,6 +65,19 @@ def _channel_family(channel: str) -> str:
     return "dex"  # 未知值 fail-safe 按默认 DEX 显示
 
 
+def _showif_attr(key: str) -> str:
+    """data-show-if 属性（2026-08-20 方案2：④ 仓位与分批互斥显隐）。
+
+    格式 ``data-show-if="quantity_mode=fixed"``，前端 JS 按当前 select 值
+    显隐；多条件暂未使用（单仓模式 td_batches 显隐按用户拍板保持不动）。
+    """
+    si = PARAM_META[key].get("show_if")
+    if not si:
+        return ""
+    k, v = next(iter(si.items()))
+    return f' data-show-if="{k}={v}"'
+
+
 def _field_html(
     key: str, value: object, options: list[str] | None = None, family: str = "dex"
 ) -> str:
@@ -74,6 +87,7 @@ def _field_html(
     std = meta.get("std", "")
     vtype = meta.get("type", "float")
     channels = meta.get("channels", "both")
+    showif = _showif_attr(key)
     # 2026-08-19：批次数量按通道换文案（DEX=子钱包 / CEX=子账号）
     if key == "td_batches" and family == "cex":
         label = meta.get("label_cex", label)
@@ -81,7 +95,7 @@ def _field_html(
     if vtype == "bool":
         checked = " checked" if value else ""
         return (
-            f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
+            f'<div class="field" data-channel="{channels}"{showif}><label class="f-label" for="{key}">{label}</label>'
             f'<label class="switch">'
             f'<input type="checkbox" id="{key}" name="{key}"{checked}>'
             f'<span class="slider"></span></label>'
@@ -126,13 +140,13 @@ def _field_html(
             if str(value) not in choices:
                 opts += f'<option value="{value}" selected>⚙️ 当前: {value}</option>'
             return (
-                f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
+                f'<div class="field" data-channel="{channels}"{showif}><label class="f-label" for="{key}">{label}</label>'
                 f'<select id="{key}" name="{key}">{opts}</select>'
                 f'<span class="f-std">默认 {std} · tokens.json 登记代币</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         return (
-            f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
+            f'<div class="field" data-channel="{channels}"{showif}><label class="f-label" for="{key}">{label}</label>'
             f'<input type="text" id="{key}" name="{key}" value="{value}">'
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
@@ -187,7 +201,7 @@ def _field_html(
                         f'value="{v}" checked>⚙️ {v}</label></div>'
                     )
             return (
-                f'<div class="field" data-channel="both"><label class="f-label">{label}</label>'
+                f'<div class="field" data-channel="both"{showif}><label class="f-label">{label}</label>'
                 f'<div class="pool">{"".join(rows)}</div>'
                 f'<span class="f-std" id="pool-fstd" data-fstd-dex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）" data-fstd-cex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；成本价=天然持仓导入价）">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；{"保留量=每账户最低持有，" if family == "dex" else ""}成本价=天然持仓导入价）</span>'
                 f'<span class="f-hint">{hint}</span></div>'
@@ -205,7 +219,7 @@ def _field_html(
                     f'name="{key}" value="{v}" checked>⚙️ {v}</label>'
                 )
         return (
-            f'<div class="field" data-channel="{channels}"><label class="f-label">{label}</label>'
+            f'<div class="field" data-channel="{channels}"{showif}><label class="f-label">{label}</label>'
             f'<div class="chk-group">{"".join(boxes)}</div>'
             f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选）</span>'
             f'<span class="f-hint">{hint}</span></div>'
@@ -215,7 +229,7 @@ def _field_html(
     # 2026-08-19：td_batches 的 field div 带专属 id，JS 切换通道时同步换文案
     fid = ' id="field_td_batches"' if key == "td_batches" else ""
     return (
-        f'<div class="field" data-channel="{channels}"{fid}><label class="f-label" for="{key}">{label}</label>'
+        f'<div class="field" data-channel="{channels}"{showif}{fid}><label class="f-label" for="{key}">{label}</label>'
         f'<input type="number" id="{key}" name="{key}" value="{value}" '
         f'min="{lo}" max="{hi}" step="{step}">'
         f'<span class="f-std">默认 {std} · 范围 {lo}–{hi}</span>'
