@@ -25,6 +25,7 @@
   .banner.msg.err { background:#fce4ec; border-color:#ef9a9a; color:#c62828; }
   .card { background:#fff; border-radius:8px; padding:18px 16px; margin-bottom:14px; border:1px solid #e0e0e0; }
   .card h3 { font-size:1em; margin-bottom:4px; color:#444; }
+  .scene-card { border-left:4px solid #1565c0; }
   .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 0; border-top:1px solid #f0f0f0; }
   .field:first-of-type { border-top:none; }
   .f-label { width:200px; font-weight:600; font-size:.9em; }
@@ -72,6 +73,7 @@
 
 {td_strategy_banner}
 {groups}
+{scene_cards}
 
 <div class="actions">
   <button class="btn-primary" id="btn-save">💾 保存参数</button>
@@ -111,13 +113,16 @@
       const need = el.dataset.channel;
       el.style.display = (need === 'both' || need === fam) ? '' : 'none';
     });
-    // 2026-08-19：批次数量文案随通道切换（DEX=子钱包 / CEX=子账号），
-    // 服务端仅按初始通道渲染 label，JS 切换时同步更新（文案与 Python 端保持一致）
-    // 2026-08-19：标的池说明文案随通道切换（dex 含「保留量=每账户最低持有，」前缀）
-    const pf = document.getElementById('pool-fstd');
-    if (pf) pf.textContent = fam === 'cex' ? pf.dataset.fstdCex : pf.dataset.fstdDex;
-    const fb = document.getElementById('field_td_batches');
-    if (fb) {
+    // 2026-08-20（S1）：标的池说明文案随通道切换——场景化后可能有多个标的池
+    // （scenes_high_symbols 等），统一 class="pool-fstd" 遍历更新。
+    document.querySelectorAll('.pool-fstd').forEach(function (pf) {
+      if (pf.dataset.fstdCex && pf.dataset.fstdDex) {
+        pf.textContent = fam === 'cex' ? pf.dataset.fstdCex : pf.dataset.fstdDex;
+      }
+    });
+    // 2026-08-20（S1）：批次数量文案随通道切换——场景化后每个场景的
+    // batches 字段独立（data-batches-field 标记），文案逻辑与 Python 端一致。
+    document.querySelectorAll('[data-batches-field]').forEach(function (fb) {
       const l = fb.querySelector('.f-label');
       const h = fb.querySelector('.f-hint');
       if (fam === 'cex') {
@@ -127,7 +132,7 @@
         if (l) l.textContent = '批次数量（子钱包）';
         if (h) h.textContent = '1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射';
       }
-    }
+    });
     applyShowIf(); // 切通道后按模式刷新显隐（2026-08-20）
   }
   window.applyChannel = applyChannel;
@@ -150,14 +155,16 @@
       const match = src && String(src.value) === kv[1];
       el.style.display = match ? '' : 'none';
     });
-    // fixed_amount 提示按通道切换（CEX ≥3U Gate 最小单 / DEX 无下限）
-    const famField = document.getElementById('td_fixed_amount');
-    if (famField && famField.closest('.field').style.display !== 'none') {
-      const h = famField.closest('.field').querySelector('.f-hint');
-      if (h) h.textContent = fam === 'cex'
-        ? '每笔建仓固定金额（U/USDT）· CEX 需 ≥3U（Gate 最小单 $3，低于会被拒单）'
-        : '每笔建仓固定金额（U/USDC）· 与 slot 资产规模无关，跳过单仓上限校验，资金检查保留';
-    }
+    // fixed_amount 提示按通道切换（CEX ≥3U Gate 最小单 / DEX 无下限）——
+    // 场景化后每个场景的固定金额字段独立（data-fam-field 标记）。
+    document.querySelectorAll('[data-fam-field]').forEach(function (f) {
+      if (f.style.display !== 'none') {
+        const h = f.querySelector('.f-hint');
+        if (h) h.textContent = fam === 'cex'
+          ? '每笔建仓固定金额（U/USDT）· CEX 需 ≥3U（Gate 最小单 $3，低于会被拒单）'
+          : '每笔建仓固定金额（U/USDC）· 与 slot 资产规模无关，跳过单仓上限校验，资金检查保留';
+      }
+    });
   }
   window.applyShowIf = applyShowIf;
   const qmSel = document.getElementById('quantity_mode');
@@ -175,35 +182,64 @@
 
   async function collect() {
     const params = {};
+    params.scenes = {};
     const metaMinHold = {};
     const metaCost = {};
+    // 2026-08-20（S1）：场景字段 name 带前缀（scenes_high_sleeptime 等），
+    // 收集到 params.scenes.<scene>.<field>；非前缀字段保持扁平。
+    function sceneField(name) {
+      const m = name.match(/^scenes_(\w+)_(.+)$/);
+      if (!m) return null;
+      const sc = m[1], fld = m[2];
+      if (!params.scenes[sc]) params.scenes[sc] = {};
+      return { sc: sc, fld: fld };
+    }
     document.querySelectorAll('input[type=number]').forEach(function (inp) {
       const sym = inp.dataset.sym;
       if (sym) {
-        // 标的池行式元数据：{symbol: value}
         if (inp.name === 'meta_min_hold') metaMinHold[sym] = parseFloat(inp.value) || 0;
         if (inp.name === 'meta_cost_price') metaCost[sym] = parseFloat(inp.value) || 0;
         return;
       }
-      params[inp.name] = parseFloat(inp.value);
+      const sf = sceneField(inp.name);
+      if (sf) params.scenes[sf.sc][sf.fld] = parseFloat(inp.value);
+      else params[inp.name] = parseFloat(inp.value);
     });
     document.querySelectorAll('input[type=text]').forEach(function (inp) {
-      params[inp.name] = inp.value.trim();
+      const sf = sceneField(inp.name);
+      if (sf) params.scenes[sf.sc][sf.fld] = inp.value.trim();
+      else params[inp.name] = inp.value.trim();
     });
     document.querySelectorAll('select').forEach(function (sel) {
-      params[sel.name] = sel.value;
+      const sf = sceneField(sel.name);
+      if (sf) params.scenes[sf.sc][sf.fld] = sel.value;
+      else params[sel.name] = sel.value;
     });
     document.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
       if (cb.classList.contains('multi')) {
-        // 多选（标的池）：同名 checkbox 收集为数组
+        const sf = sceneField(cb.name);
+        if (sf) {
+          if (!Array.isArray(params.scenes[sf.sc][sf.fld])) params.scenes[sf.sc][sf.fld] = [];
+          if (cb.checked) params.scenes[sf.sc][sf.fld].push(cb.value);
+          return;
+        }
         if (!Array.isArray(params[cb.name])) params[cb.name] = [];
         if (cb.checked) params[cb.name].push(cb.value);
       } else {
-        params[cb.name] = cb.checked;
+        const sf = sceneField(cb.name);
+        if (sf) params.scenes[sf.sc][sf.fld] = cb.checked;
+        else params[cb.name] = cb.checked;
       }
     });
-    // 只提交勾选标的的元数据（未勾选的 min_hold/cost_price 不落盘）
-    const selected = params.td_symbols || [];
+    // 只提交勾选标的的元数据（未勾选的 min_hold/cost_price 不落盘）——
+    // 2026-08-20（S1）：标的池已场景化，收集全部场景勾选标的的并集。
+    const selected = [];
+    Object.keys(params.scenes || {}).forEach(function (sc) {
+      const syms = params.scenes[sc].symbols || [];
+      syms.forEach(function (s) {
+        if (selected.indexOf(s) === -1) selected.push(s);
+      });
+    });
     if (selected.length) {
       params.meta_min_hold = {};
       params.meta_cost_price = {};

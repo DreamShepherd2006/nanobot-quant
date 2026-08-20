@@ -21,8 +21,12 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
 from .exec_params import (
+    DEFAULT_SUB_ACCOUNTS,
     GROUP_TITLES,
     PARAM_META,
+    SCENES,
+    SCENE_FIELD_MAP,
+    SCENE_FIELD_ORDER,
     load_exec_params,
     save_exec_params,
 )
@@ -65,21 +69,26 @@ def _channel_family(channel: str) -> str:
     return "dex"  # 未知值 fail-safe 按默认 DEX 显示
 
 
-def _showif_attr(key: str) -> str:
+def _showif_attr(key: str, prefix: str = "", fname: str | None = None) -> str:
     """data-show-if 属性（2026-08-20 方案2：④ 仓位与分批互斥显隐）。
 
-    格式 ``data-show-if="quantity_mode=fixed"``，前端 JS 按当前 select 值
-    显隐；多条件暂未使用（单仓模式 td_batches 显隐按用户拍板保持不动）。
+    格式 ``data-show-if="quantity_mode=fixed"``；场景字段带前缀 + 场景字段名
+    （``scenes_high_quantity_mode=fixed``），前端按完整元素 id 匹配。
     """
     si = PARAM_META[key].get("show_if")
     if not si:
         return ""
     k, v = next(iter(si.items()))
-    return f' data-show-if="{k}={v}"'
+    return f' data-show-if="{prefix}{k}={v}"'
 
 
 def _field_html(
-    key: str, value: object, options: list[str] | None = None, family: str = "dex"
+    key: str,
+    value: object,
+    options: list[str] | None = None,
+    family: str = "dex",
+    prefix: str = "",
+    field_name: str | None = None,
 ) -> str:
     meta = PARAM_META[key]
     label = meta.get("label", key)
@@ -87,17 +96,27 @@ def _field_html(
     std = meta.get("std", "")
     vtype = meta.get("type", "float")
     channels = meta.get("channels", "both")
-    showif = _showif_attr(key)
+    # 2026-08-20（S1）：场景字段 id/name 用场景字段名（field_name=场景字段名，
+    # 如 enabled/sleeptime/symbols），meta 查表用扁平键（key，如 td_sleeptime）。
+    fname = field_name or key
+    showif = _showif_attr(key, prefix, fname)
+    fid = prefix + fname  # 如 scenes_high_sleeptime（collect() 正则 ^scenes_(\w+)_(.+)$ 解析）
+    # 2026-08-20：场景字段的通道联动标记（JS applyChannel/applyShowIf 遍历）
+    scene_mark = ""
+    if fname == "batches":
+        scene_mark = ' data-batches-field="1"'
+    elif fname == "td_fixed_amount":
+        scene_mark = ' data-fam-field="1"'
     # 2026-08-19：批次数量按通道换文案（DEX=子钱包 / CEX=子账号）
-    if key == "td_batches" and family == "cex":
+    if fname == "batches" and family == "cex":
         label = meta.get("label_cex", label)
         hint = meta.get("hint_cex", hint)
     if vtype == "bool":
         checked = " checked" if value else ""
         return (
-            f'<div class="field" data-channel="{channels}"{showif}><label class="f-label" for="{key}">{label}</label>'
+            f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
             f'<label class="switch">'
-            f'<input type="checkbox" id="{key}" name="{key}"{checked}>'
+            f'<input type="checkbox" id="{fid}" name="{fid}"{checked}>'
             f'<span class="slider"></span></label>'
             f'<span class="f-std">默认 {'开' if std else '关'}</span>'
             f'<span class="f-hint">{hint}</span></div>'
@@ -125,8 +144,8 @@ def _field_html(
         else:
             opts = "".join(_opt(c) for c in choices)
         return (
-            f'<div class="field" data-channel="{channels}"><label class="f-label" for="{key}">{label}</label>'
-            f'<select id="{key}" name="{key}">{opts}</select>'
+            f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
+            f'<select id="{fid}" name="{fid}">{opts}</select>'
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
@@ -140,14 +159,14 @@ def _field_html(
             if str(value) not in choices:
                 opts += f'<option value="{value}" selected>⚙️ 当前: {value}</option>'
             return (
-                f'<div class="field" data-channel="{channels}"{showif}><label class="f-label" for="{key}">{label}</label>'
-                f'<select id="{key}" name="{key}">{opts}</select>'
+                f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
+                f'<select id="{fid}" name="{fid}">{opts}</select>'
                 f'<span class="f-std">默认 {std} · tokens.json 登记代币</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         return (
-            f'<div class="field" data-channel="{channels}"{showif}><label class="f-label" for="{key}">{label}</label>'
-            f'<input type="text" id="{key}" name="{key}" value="{value}">'
+            f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
+            f'<input type="text" id="{fid}" name="{fid}" value="{value}">'
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
@@ -183,7 +202,7 @@ def _field_html(
                     f'onclick="movePoolRow(this.closest(\'.pool-row\'), 1)" '
                     f'title="下移（降低优先级）">↓</button>'
                     f'<label class="chk"><input type="checkbox" class="multi" '
-                    f'name="{key}" value="{c}"'
+                    f'name="{fid}" value="{c}"'
                     f'{" checked" if c in values else ""}>{c}</label>'
                     f'{hold_cell}'
                     f'<span class="pool-meta">成本价 '
@@ -197,17 +216,17 @@ def _field_html(
                 if v not in choices:
                     rows.append(
                         f'<div class="pool-row"><label class="chk">'
-                        f'<input type="checkbox" class="multi" name="{key}" '
+                        f'<input type="checkbox" class="multi" name="{fid}" '
                         f'value="{v}" checked>⚙️ {v}</label></div>'
                     )
             return (
-                f'<div class="field" data-channel="both"{showif}><label class="f-label">{label}</label>'
+                f'<div class="field" data-channel="both"{showif}{scene_mark}><label class="f-label">{label}</label>'
                 f'<div class="pool">{"".join(rows)}</div>'
-                f'<span class="f-std" id="pool-fstd" data-fstd-dex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）" data-fstd-cex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；成本价=天然持仓导入价）">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；{"保留量=每账户最低持有，" if family == "dex" else ""}成本价=天然持仓导入价）</span>'
+                f'<span class="f-std pool-fstd" data-fstd-dex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；保留量=每账户最低持有，成本价=天然持仓导入价）" data-fstd-cex="默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；成本价=天然持仓导入价）">默认 {std} · tokens.json 登记代币（多选；↑↓ 调整优先级——同 bar 多标的 Setup 9 按此顺序依次执行；{"保留量=每账户最低持有，" if family == "dex" else ""}成本价=天然持仓导入价）</span>'
                 f'<span class="f-hint">{hint}</span></div>'
             )
         boxes = [
-            f'<label class="chk"><input type="checkbox" class="multi" name="{key}" '
+            f'<label class="chk"><input type="checkbox" class="multi" name="{fid}" '
             f'value="{c}"{" checked" if c in values else ""}>{c}</label>'
             for c in choices
         ]
@@ -216,24 +235,57 @@ def _field_html(
             if v not in choices:
                 boxes.append(
                     f'<label class="chk"><input type="checkbox" class="multi" '
-                    f'name="{key}" value="{v}" checked>⚙️ {v}</label>'
+                    f'name="{fid}" value="{v}" checked>⚙️ {v}</label>'
                 )
         return (
-            f'<div class="field" data-channel="{channels}"{showif}><label class="f-label">{label}</label>'
+            f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label">{label}</label>'
             f'<div class="chk-group">{"".join(boxes)}</div>'
-            f'<span class="f-std">默认 {std} · tokens.json 登记代币（多选）</span>'
+            f'<span class="f-std">默认 {std} · {"可多选" if key == "sub_accounts" else "tokens.json 登记代币（多选）"}</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
-    # 2026-08-19：td_batches 的 field div 带专属 id，JS 切换通道时同步换文案
-    fid = ' id="field_td_batches"' if key == "td_batches" else ""
     return (
-        f'<div class="field" data-channel="{channels}"{showif}{fid}><label class="f-label" for="{key}">{label}</label>'
-        f'<input type="number" id="{key}" name="{key}" value="{value}" '
+        f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
+        f'<input type="number" id="{fid}" name="{fid}" value="{value}" '
         f'min="{lo}" max="{hi}" step="{step}">'
         f'<span class="f-std">默认 {std} · 范围 {lo}–{hi}</span>'
         f'<span class="f-hint">{hint}</span></div>'
+    )
+
+
+def _scene_card_html(
+    scene_key: str,
+    scene: dict,
+    options: dict[str, list[str]] | None,
+    family: str,
+    gate_accounts: list[str],
+    idx: int,
+) -> str:
+    """④ 多场景卡片（S1 配置层，2026-08-20）。
+
+    每场景独立：启用/周期/标的池/数量/批次/子账号池/出场参数。
+    high 场景与扁平参数同步（S1 阶段 td_live 消费扁平）。
+    字段 id/name 用场景字段名（field_name=fk），meta 查表用扁平键。
+    """
+    sdef = SCENES[scene_key]
+    prefix = f"scenes_{scene_key}_"
+    opts = options or {}
+    fields = []
+    for fk in SCENE_FIELD_ORDER:
+        pk = SCENE_FIELD_MAP.get(fk, fk)  # sub_accounts 无扁平键 → 自身
+        if fk == "sub_accounts":
+            fields.append(_field_html(pk, scene.get(fk), gate_accounts, family,
+                                      prefix, field_name=fk))
+        else:
+            fields.append(_field_html(pk, scene.get(fk), opts.get(pk), family,
+                                      prefix, field_name=fk))
+    badge = "🟢 启用" if scene.get("enabled") else "⚪ 停用"
+    return (
+        f'<div class="card scene-card" data-scene="{scene_key}">'
+        f'<h3>④-{idx} {sdef["label"]}（{sdef["freq"]} · {sdef["desc"]}）　{badge}</h3>'
+        f'{"".join(fields)}'
+        f'</div>'
     )
 
 
@@ -292,6 +344,30 @@ def _strategy_banner_html() -> str:
         return ""
 
 
+def _gate_accounts() -> list[str]:
+    """Gate 子账号可选列表（gate.json slot_map / sub_accounts），兜底 gate_bot1-5。
+
+    S1 配置层：子账号池多选来源；S3 消费时按 gate.json 实际账号验证。
+    """
+    try:
+        from .gate_credentials import load_gate_credentials, load_slot_map
+
+        creds = load_gate_credentials() or {}
+        slot_map = load_slot_map(creds)
+        names: list[str] = []
+        for i in sorted(slot_map, key=int):
+            if slot_map[i] not in names:
+                names.append(slot_map[i])
+        for k in (creds.get("sub_accounts") or {}).keys():
+            if str(k) not in names:
+                names.append(str(k))
+        if names:
+            return names
+    except Exception:
+        pass
+    return list(DEFAULT_SUB_ACCOUNTS)
+
+
 def _render_page(params: dict, message: str = "") -> str:
     try:
         from .exec_params import exec_params_path
@@ -320,15 +396,23 @@ def _render_page(params: dict, message: str = "") -> str:
     token_opts = {"td_symbols": [s for s in load_token_symbols()
                                   if s not in _STABLECOINS]}
     family = _channel_family(params.get("execution_channel", "okx_dex"))
+    gate_accounts = _gate_accounts()
     groups = "".join(
         _group_html(g, params, token_opts, family)
-        for g in ("risk", "exec", "td", "batch")
+        for g in ("risk", "exec", "td")
+    )
+    scenes = params.get("scenes") or {}
+    scene_cards = "".join(
+        _scene_card_html(sk, scenes.get(sk, {}), token_opts, family,
+                         gate_accounts, i + 1)
+        for i, sk in enumerate(SCENES)
     )
     return (
         _PAGE_HTML.replace("{banner}", banner)
         .replace("{msg}", msg)
         .replace("{td_strategy_banner}", _strategy_banner_html())
         .replace("{groups}", groups)
+        .replace("{scene_cards}", scene_cards)
     )
 
 

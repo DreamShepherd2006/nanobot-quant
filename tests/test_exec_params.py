@@ -10,7 +10,9 @@ import pytest
 from nanobot_quant import exec_params as exec_params_mod
 from nanobot_quant.exec_params import (
     DEFAULT_EXEC_PARAMS,
+    DEFAULT_SCENES,
     PARAM_META,
+    SCENE_FIELD_MAP,
     load_exec_params,
     save_exec_params,
     validate_exec_param,
@@ -77,26 +79,32 @@ def test_defaults_match_pre_parameterisation_hardcoded():
     assert DEFAULT_EXEC_PARAMS["stop_loss_pct"] == 0.10
     assert DEFAULT_EXEC_PARAMS["slippage"] == 0.01
     assert DEFAULT_EXEC_PARAMS["sol_buffer_pct"] == 0.05
-    # TD 自主运行（P2 B2）默认值
-    assert DEFAULT_EXEC_PARAMS["td_symbols"] == ["SOL"]
-    assert DEFAULT_EXEC_PARAMS["td_sleeptime"] == "1D"
-    assert DEFAULT_EXEC_PARAMS["quantity_mode"] == "fixed"
+    # TD 运行参数已场景化（S1，2026-08-20）→ 默认值在 scenes.high
+    high = DEFAULT_SCENES["high"]
+    assert high["symbols"] == ["SOL"]
+    assert high["sleeptime"] == "1m"
+    assert high["quantity_mode"] == "fixed"
+    assert high["td_quantity"] == 10
     # fixed_amount（2026-08-19）：默认每笔固定 10U
-    assert DEFAULT_EXEC_PARAMS["td_fixed_amount"] == 10.0
-    # 固定 K 线窗口（方案 B，2026-08-10）：默认 120，低于 onchainos 300 上限
+    assert high["td_fixed_amount"] == 10.0
     assert DEFAULT_EXEC_PARAMS["td_bars"] == 120
 
 
 def test_meta_covers_all_defaults_and_three_groups():
-    # 全部默认值（含 td 组 6 字段 + batch 组 4 字段）都有 PARAM_META 元数据；
-    # P1 loop 模式（execution_mode/loop_interval_seconds）已随 B3 退役。
-    ui_params = set(DEFAULT_EXEC_PARAMS)
-    assert set(PARAM_META) == ui_params
+    # 全部默认值（全局键 + scenes 子键）都有 PARAM_META 元数据；
+    # 场景字段 group="scene"（batch 组已退役）；P1 loop 模式已随 B3 退役。
+    flat_keys = set(DEFAULT_EXEC_PARAMS) - {"scenes"}
+    scene_flat_keys = set(SCENE_FIELD_MAP.values())  # td_enabled/td_symbols/...
+    assert set(PARAM_META) == flat_keys | scene_flat_keys | {"sub_accounts"}
     groups = {m["group"] for m in PARAM_META.values()}
-    assert groups == {"risk", "exec", "td", "batch"}
+    assert groups == {"risk", "exec", "td", "scene"}
     # td_bars：固定窗口，范围 20-300（onchainos CLI 单次上限）
     bars = PARAM_META["td_bars"]
     assert bars["min"] == 20 and bars["max"] == 300 and bars["std"] == 120
+    # 场景字段全部归入 scene 组（渲染由场景卡片负责，不再按组渲染）
+    scene_keys = set(SCENE_FIELD_MAP.values()) | {"sub_accounts"}
+    assert all(PARAM_META[k]["group"] == "scene" for k in scene_keys)
+    assert PARAM_META["sub_accounts"]["group"] == "scene"
 
 
 @pytest.mark.parametrize(
@@ -186,7 +194,7 @@ def test_validation_rejects_bad_td_runtime_fields(key, bad):
 
 
 def test_td_quantity_default_and_roundtrip(tmp_path):
-    assert DEFAULT_EXEC_PARAMS["td_quantity"] == 10
+    assert DEFAULT_SCENES["high"]["td_quantity"] == 10
     res = save_exec_params({"td_quantity": 30})
     assert res["ok"] is True
     assert load_exec_params()["td_quantity"] == 30
@@ -197,7 +205,8 @@ def test_td_quantity_default_and_roundtrip(tmp_path):
 
 
 def test_td_enabled_roundtrip(tmp_path):
-    assert DEFAULT_EXEC_PARAMS["td_enabled"] is False
+    # 默认关：scenes.high.enabled=False 同步到扁平 td_enabled
+    assert load_exec_params()["td_enabled"] is False
     res = save_exec_params({"td_enabled": True})
     assert res["ok"] is True
     assert load_exec_params()["td_enabled"] is True
@@ -212,8 +221,20 @@ def test_unknown_key_rejected():
 
 # ── Load / save ──────────────────────────────────────────────────────────
 
+def _expected_defaults() -> dict:
+    """默认参数 + high 场景同步出的扁平键（S1，2026-08-20）。
+
+    load_exec_params 无文件/损坏时返回默认 scenes，并把 high 场景
+    同步回扁平（td_enabled/td_symbols/... 共 11 个键）供 td_live 消费。
+    """
+    exp = dict(DEFAULT_EXEC_PARAMS)
+    for fk, pk in SCENE_FIELD_MAP.items():
+        exp[pk] = exp["scenes"]["high"][fk]
+    return exp
+
+
 def test_load_without_file_returns_defaults(tmp_path):
-    assert load_exec_params() == DEFAULT_EXEC_PARAMS
+    assert load_exec_params() == _expected_defaults()
 
 
 def test_save_then_load_roundtrip(tmp_path):
@@ -249,7 +270,7 @@ def test_save_partial_update_keeps_rest(tmp_path):
 
 def test_corrupt_file_falls_back_to_defaults(tmp_path):
     exec_params_mod.exec_params_path().write_text("{not json", encoding="utf-8")
-    assert load_exec_params() == DEFAULT_EXEC_PARAMS
+    assert load_exec_params() == _expected_defaults()
 
 
 # ── 执行通道值域迁移（方案 C，2026-08-17）────────────────────────────────
@@ -312,7 +333,7 @@ def test_reset_removes_file(tmp_path):
     res = save_exec_params({"reset": True})
     assert res["ok"] is True
     assert not exec_params_mod.exec_params_path().exists()
-    assert load_exec_params() == DEFAULT_EXEC_PARAMS
+    assert load_exec_params() == _expected_defaults()
 
 
 # ── WebUI handlers ───────────────────────────────────────────────────────
@@ -352,12 +373,13 @@ def test_page_renders_groups_with_current_values(tmp_path):
     assert "执行参数" in html
     assert "风险控制" in html
     assert "执行通道" in html
-    assert "TD 自主运行" in html
+    assert "TD 循环运行" in html
+    assert "高频" in html and "中频" in html and "低频" in html  # 场景卡片
     assert 'value="0.4"' in html  # current value rendered
 
 
 def test_page_renders_td_fields(tmp_path, monkeypatch):
-    """TD 自主运行组渲染：周期/数量模式下拉 + 标的候选（默认值选中）。"""
+    """场景卡片渲染：周期/数量模式下拉 + 标的候选（默认值选中）。"""
     monkeypatch.setattr(
         "nanobot_quant.exec_params_handlers.load_token_symbols",
         lambda: ["SOL", "CRCLX"],
@@ -366,13 +388,13 @@ def test_page_renders_td_fields(tmp_path, monkeypatch):
     register_exec_params_routes(app, _FakeGatekeeper())
     page = next(fn for p, fn, m in app.routes if p == "/config/exec" and "GET" in m)
     html = asyncio.run(page(_FakeRequest(session_user="commander"))).body.decode()
-    assert 'id="td_sleeptime"' in html
-    assert 'value="1D" selected' in html
-    assert 'id="quantity_mode"' in html
+    # 场景字段带前缀（S1，2026-08-20）
+    assert 'id="scenes_high_sleeptime"' in html
+    assert 'value="1m" selected' in html
+    assert 'id="scenes_high_quantity_mode"' in html
     assert 'value="fixed" selected' in html
-    assert 'id="td_fixed_amount"' in html
-    assert 'value="10.0"' in html or 'value="10"' in html
-    assert 'name="td_symbols"' in html
+    assert 'id="scenes_high_td_fixed_amount"' in html
+    assert 'name="scenes_high_symbols"' in html
     assert 'class="multi"' in html
     # 标的池行式编辑（2026-08-10）：每候选一行 + 保留量/成本价输入
     assert 'class="pool-row"' in html
@@ -382,6 +404,8 @@ def test_page_renders_td_fields(tmp_path, monkeypatch):
     # 优先级上下移按钮（2026-08-10 拍板 B）：↑↓ 调整池子顺序 → 保存即顺序
     assert 'class="pool-mv"' in html
     assert 'movePoolRow' in html
+    # 子账号池多选（S1）
+    assert 'name="scenes_high_sub_accounts"' in html
 
 
 def test_save_via_handler_persists(tmp_path):
@@ -592,7 +616,7 @@ def test_run_from_signals_uses_file_values(monkeypatch, tmp_path):
     assert results[0]["risk_passed"] is True
     assert results[0]["tx_hash"] == "mock-tx"
 def test_load_without_file_returns_defaults(tmp_path):
-    assert load_exec_params() == DEFAULT_EXEC_PARAMS
+    assert load_exec_params() == _expected_defaults()
 
 
 def test_legacy_td_symbol_migrates_to_symbols_pool(tmp_path):
@@ -614,14 +638,69 @@ def test_grouping_scheme2():
     """④ 仓位与分批吸收数量三参；③ 纯调度；标题按方案 2。"""
     from nanobot_quant.exec_params import GROUP_TITLES
     td_group = {k for k, v in PARAM_META.items() if v["group"] == "td"}
-    batch_group = {k for k, v in PARAM_META.items() if v["group"] == "batch"}
-    # 数量三参（数量模式/固定数量/固定金额）移入 ④
-    assert {"quantity_mode", "td_quantity", "td_fixed_amount"} <= batch_group
-    # ③ 只剩循环调度（开关/标的/周期/窗口/刷新）
-    assert td_group == {"td_enabled", "td_symbols", "td_sleeptime", "td_bars", "td_ui_refresh_s"}
-    assert GROUP_TITLES["batch"] == "④ 仓位与分批"
-    assert "子钱包" not in GROUP_TITLES["batch"]
-    assert "lumibot" in GROUP_TITLES["td"]  # ③ 体现 lumibot 框架
+    scene_group = {k for k, v in PARAM_META.items() if v["group"] == "scene"}
+    # 场景字段（数量三参/批次/出场）全部归入 scene 组
+    assert {"quantity_mode", "td_quantity", "td_fixed_amount", "td_batches",
+            "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
+            "td_symbols", "td_sleeptime", "sub_accounts"} <= scene_group
+    # ③ 只剩全局循环运行（K线窗口 + 监控刷新）
+    assert td_group == {"td_bars", "td_ui_refresh_s"}
+    assert "scene" in GROUP_TITLES
+    assert "batch" not in GROUP_TITLES
+
+
+def test_scenes_defaults_and_roundtrip(tmp_path):
+    """S1：scenes 默认结构 + 保存/加载往返（mid/low 独立、high 同步扁平）。"""
+    loaded = load_exec_params()
+    assert set(loaded["scenes"]) == {"high", "mid", "low"}
+    assert loaded["scenes"]["mid"]["sleeptime"] == "15m"
+    assert loaded["scenes"]["low"]["sleeptime"] == "1D"
+    assert loaded["scenes"]["mid"]["enabled"] is False  # 默认停用
+    # mid 场景保存独立（不影响 high/扁平）
+    res = save_exec_params({"scenes": {
+        "mid": {"enabled": True, "sleeptime": "1H", "symbols": ["RENDER"],
+                "batches": 2, "sub_accounts": ["gate_bot5", "gate_bot6"]}}})
+    assert res["ok"] is True
+    loaded2 = load_exec_params()
+    assert loaded2["scenes"]["mid"]["sleeptime"] == "1H"
+    assert loaded2["scenes"]["mid"]["enabled"] is True
+    assert loaded2["scenes"]["mid"]["sub_accounts"] == ["gate_bot5", "gate_bot6"]
+    assert loaded2["scenes"]["high"]["sleeptime"] == "1m"  # high 未动
+
+
+def test_scene_migration_from_flat(tmp_path):
+    """S1 迁移：旧扁平 exec_params.json（无 scenes）→ high=扁平值，mid/low 默认。"""
+    import nanobot_quant.exec_params as ep
+    fake = tmp_path / "exec_params.json"
+    fake.write_text(json.dumps({
+        "execution_channel": "gate",
+        "td_symbols": ["CRCLX", "SPCX"], "td_sleeptime": "1m",
+        "td_batches": 5, "quantity_mode": "fixed_amount",
+        "td_fixed_amount": 4.0, "take_profit_pct": 0.0,
+        "exit_order": "lifo", "td_start_slot": 1, "min_account_value": 0,
+    }), encoding="utf-8")
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(ep, "exec_params_path", lambda: fake)
+    try:
+        loaded = ep.load_exec_params()
+        assert loaded["scenes"]["high"]["symbols"] == ["CRCLX", "SPCX"]
+        assert loaded["scenes"]["high"]["sleeptime"] == "1m"
+        assert loaded["scenes"]["high"]["batches"] == 5
+        assert loaded["scenes"]["high"]["sub_accounts"] == [
+            "gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4", "gate_bot5"]
+        # high 同步回扁平（td_live 消费扁平）
+        assert loaded["td_symbols"] == ["CRCLX", "SPCX"]
+        assert loaded["td_batches"] == 5
+        assert loaded["td_sleeptime"] == "1m"
+    finally:
+        monkeypatch.undo()
+
+
+def test_scene_invalid_rejected(tmp_path):
+    """S1：场景字段非法值保存被拒（如 low 周期不在枚举）。"""
+    res = save_exec_params({"scenes": {"low": {"sleeptime": "9m"}}})
+    assert res["ok"] is False
+    assert "场景低频.sleeptime" in res["error"]
 
 
 def test_show_if_rendering():
@@ -633,3 +712,19 @@ def test_show_if_rendering():
     # 单仓模式（td_batches=1）批次参数常显（用户拍板保持不动）
     assert "data-show-if" not in _field_html("exit_order", "fifo")
     assert "data-show-if" not in _field_html("min_account_value", 0)
+def test_save_flat_scene_patch_does_not_poison_globals(tmp_path):
+    # 回归（2026-08-20）：旧式扁平调用（不带 scenes 键）曾就地写入
+    # merged["scenes"]（浅拷贝下指向全局 DEFAULT_SCENES），污染默认值后
+    # 所有后续 load_exec_params() 都读到 td_enabled=True，wallet 测试 409。
+    enabled_before = DEFAULT_SCENES["high"]["enabled"]
+    res = save_exec_params({"td_enabled": True, "max_position_pct": 0.30})
+    assert res["ok"] is True
+    # 全局默认值必须保持原样
+    assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
+    # 保存内容本身生效
+    loaded = load_exec_params()
+    assert loaded["td_enabled"] is True
+    assert loaded["max_position_pct"] == 0.30
+    # 再次加载（模拟后续其他模块消费）仍只反映文件内容，不再被全局污染
+    assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
+

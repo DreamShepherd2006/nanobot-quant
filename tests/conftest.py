@@ -11,6 +11,8 @@ not touch lumibot at all.
 import sys
 import types
 
+import pytest
+
 try:
     import lumibot  # noqa: F401
 except ImportError:
@@ -243,3 +245,24 @@ except ImportError:
     }.items():
         setattr(_gate, _name, _obj)
     sys.modules.setdefault("gate_api", _gate)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_batches_path(tmp_path, monkeypatch):
+    """隔离批次台账写盘路径（2026-08-20 S1）。
+
+    batches_path() 硬编码探测 /data、/mnt/workspace——测试环境（Nightly
+    容器存在 /data）会写真实 /data/legion/credentials/batches.*.json。
+    """
+    from nanobot_quant import batches as _batches
+
+    def fake_batches_path(symbol=None, channel=None):
+        if channel and symbol:
+            fname = f"batches.{channel}.{symbol}.json"
+        elif symbol:
+            fname = f"batches.{symbol}.json"
+        else:
+            fname = "batches.json"
+        return tmp_path / fname
+
+    monkeypatch.setattr(_batches, "batches_path", fake_batches_path)
