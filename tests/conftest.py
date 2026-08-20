@@ -256,9 +256,13 @@ def _isolate_batches_path(tmp_path, monkeypatch):
     """
     from nanobot_quant import batches as _batches
 
-    def fake_batches_path(symbol=None, channel=None):
+    def fake_batches_path(symbol=None, channel=None, scene=None):
         if channel and symbol:
-            fname = f"batches.{channel}.{symbol}.json"
+            fname = (
+                f"batches.{channel}.{scene}.{symbol}.json"
+                if scene
+                else f"batches.{channel}.{symbol}.json"
+            )
         elif symbol:
             fname = f"batches.{symbol}.json"
         else:

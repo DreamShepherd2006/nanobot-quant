@@ -219,17 +219,20 @@ class _TdLiveRunner:
                 sol_buffer_pct=float(params["sol_buffer_pct"]),
             )
             bms: dict[str, Any] = {}
+            scene_ok = True
             try:
                 bms = self._prepare_scene_batches(
-                    sc, list(sc.get("symbols") or []), channel
+                    sc, list(sc.get("symbols") or []), channel, name
                 )
             except Exception as exc:  # noqa: BLE001
+                scene_ok = False
                 print(
-                    f"[DIAG] td_live 场景 {name} 批次准备失败: {exc}",
+                    f"[DIAG] td_live 场景 {name} 批次准备失败: {exc}"
+                    f"——场景跳过（fail-closed）",
                     file=sys.stderr, flush=True,
                 )
             scene_runtimes[name] = {
-                "enabled": True,
+                "enabled": scene_ok,
                 "sleeptime": str(sc.get("sleeptime") or "1m"),
                 "params": sc,
                 "broker": sc_broker,
@@ -257,22 +260,32 @@ class _TdLiveRunner:
         return executor
 
     def _prepare_scene_batches(
-        self, sc: dict, symbols: list[str], channel: str
+        self, sc: dict, symbols: list[str], channel: str, scene_name: str
     ) -> dict[str, Any]:
         """S3a（2026-08-20）：场景批次台账。
 
         场景 batches >1 时按场景 sub_accounts 作为 slot 账户池
         （slot i ↔ sub_accounts[i-1]）；sub_accounts 缺失时回退现有
         slot_map/前 N 账户逻辑（与旧扁平行为一致）。
+        S3b（2026-08-20 拍板）：台账场景化——
+        ``batches.{channel}.{scene}.{symbol}.json``（同标的跨场景
+        互不复用）；sub_accounts 长度 < batches 时 fail-closed
+        （raise，场景跳过，不静默截断）。
         """
         batches_n = int(sc.get("batches", 1) or 1)
         if batches_n <= 1:
             return {}
         account_ids = sc.get("sub_accounts") or None
+        if account_ids and len(account_ids) < batches_n:
+            raise ValueError(
+                f"场景 {scene_name} 子账号池不足: "
+                f"sub_accounts={len(account_ids)} < batches={batches_n}"
+            )
         bms: dict[str, Any] = {}
         for sym in symbols:
             bm = self._prepare_batches(
-                batches_n, sym, channel, account_ids=account_ids
+                batches_n, sym, channel, account_ids=account_ids,
+                scene=scene_name,
             )
             if bm is not None:
                 bms[sym] = bm
@@ -590,12 +603,17 @@ class _TdLiveRunner:
         symbol: str,
         channel: str = "okx_dex",
         account_ids: list[str] | None = None,
+        scene: str | None = None,
     ) -> Any:
         """加载/创建批次台账（通道隔离，2026-08-17 拍板）。
 
         - 文件按通道独立：``batches.{channel}.{symbol}.json``——DEX 与
           CEX 台账互不复用（此前同路径切换双向覆盖/快照堆积，导致
           DEX lot 被 CEX 通道误卖/误释放）。
+        - S3b（2026-08-20 拍板）：scene 时按场景文件
+          ``batches.{channel}.{scene}.{symbol}.json``——同标的跨场景
+          互不复用；旧无场景文件由 _load_or_migrate 按账号池匹配
+          .bak 快照后迁移（幂等不覆盖）。
         - dex（okx_dex）：子钱包映射（wallet_accounts 前 N 个 account_id）
         - cex（gate）：子账号映射（load_slot_map：slot→gate_botN；不足按
           1..N 兜底 fallback）——不创建子钱包（子账号已存在于交易所）
@@ -612,7 +630,7 @@ class _TdLiveRunner:
         channel = normalize_execution_channel(channel)
         family = spec_for_channel(channel).family  # gate→cex、okx_dex→dex
 
-        bm = _load_or_migrate(symbol, channel)
+        bm = _load_or_migrate(symbol, channel, scene=scene, account_ids=account_ids)
         if bm is not None and bm.symbol == symbol and bm.slots:
             if family == "cex" and not all(
                 re.match(r"^gate_bot\d+$", str(s.get("account_id") or ""))
@@ -742,11 +760,14 @@ class _TdLiveRunner:
                         f"requested {td_batches} — 请先在 WebUI 批次设置中创建",
                         file=sys.stderr, flush=True,
                     )
-        bm = BatchManager(symbol=symbol, account_ids=ids, channel=channel)
+        bm = BatchManager(
+            symbol=symbol, account_ids=ids, channel=channel, scene=scene
+        )
         bm.save()
         print(
             f"[DIAG] td_live: batches created ({symbol}, "
-            f"{len(ids)} slots, {channel})",
+            f"{len(ids)} slots, {channel}"
+            + (f", scene={scene}" if scene else ""),
             file=sys.stderr, flush=True,
         )
         return bm

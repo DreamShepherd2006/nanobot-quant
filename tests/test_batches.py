@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from nanobot_quant.batches import BatchManager, EXIT_ORDERS
+from nanobot_quant.batches import (
+    BatchManager,
+    EXIT_ORDERS,
+    _load_or_migrate,
+    batches_path,
+)
 
 
 @pytest.fixture
@@ -267,8 +272,11 @@ def test_load_per_symbol(monkeypatch, tmp_path):
     d.mkdir(parents=True)
     target = d / "batches.SPXCB.json"
     target.write_text(json.dumps({"symbol": "SPXCB", "slots": [{"slot": 1}]}))
-    monkeypatch.setattr("nanobot_quant.batches.batches_path",
-                        lambda s=None, c=None: d / (f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"))
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None, scene=None: d
+        / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
+    )
     bm = BatchManager.load(symbol="SPXCB")
     assert bm is not None and bm.symbol == "SPXCB"
     assert BatchManager.load(symbol="OTHER") is None
@@ -311,5 +319,103 @@ def test_migrate_does_not_clobber_existing(monkeypatch, tmp_path):
     assert legacy.exists()
     raw = json.loads(target.read_text())
     assert raw["slots"][0]["slot"] == 1
+
+
+def test_scene_path_namespaced(monkeypatch, tmp_path):
+    """S3b：场景化台账文件名 batches.{channel}.{scene}.{symbol}.json。"""
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None, scene=None: d
+        / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
+    )
+    assert batches_path("CRCLX", "gate", "high").name == "batches.gate.high.CRCLX.json"
+    assert batches_path("CRCLX", "gate").name == "batches.gate.CRCLX.json"
+
+
+def test_scene_migrate_legacy_when_pool_matches(monkeypatch, tmp_path):
+    """S3b：旧无场景台账账号池匹配场景 → .bak 快照 + 迁移到场景文件。"""
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    legacy = d / "batches.gate.CRCLX.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "symbol": "CRCLX",
+                "slots": [
+                    {"slot": 1, "account_id": "gate_bot1"},
+                    {"slot": 2, "account_id": "gate_bot2"},
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None, scene=None: d
+        / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
+    )
+    bm = _load_or_migrate(
+        "CRCLX", "gate", scene="high",
+        account_ids=["gate_bot1", "gate_bot2"],
+    )
+    assert bm is not None and bm.scene == "high"
+    assert (d / "batches.gate.high.CRCLX.json").exists()
+    assert not legacy.exists()  # 已迁移走
+    assert list(d.glob("batches.gate.CRCLX.json.scene.bak.*"))  # .bak 快照保留
+
+
+def test_scene_migrate_keeps_legacy_when_pool_mismatch(monkeypatch, tmp_path):
+    """S3b：账号池不匹配 → 原地保留（留给匹配场景迁移），不误迁。"""
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    legacy = d / "batches.gate.SPYX.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "symbol": "SPYX",
+                "slots": [
+                    {"slot": 1, "account_id": "gate_bot3"},
+                    {"slot": 2, "account_id": "gate_bot4"},
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None, scene=None: d
+        / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
+    )
+    bm = _load_or_migrate(
+        "SPYX", "gate", scene="high",
+        account_ids=["gate_bot1", "gate_bot2"],
+    )
+    assert bm is None  # 不迁移 → 该场景无台账
+    assert legacy.exists()  # 旧文件保留（等 mid 场景匹配迁移）
+    assert not (d / "batches.gate.high.SPYX.json").exists()
+
+
+def test_scene_migrate_idempotent_target_exists(monkeypatch, tmp_path):
+    """S3b：目标场景文件已存在 → 不覆盖（幂等），新文件优先。"""
+    d = tmp_path / "legion" / "credentials"
+    d.mkdir(parents=True)
+    legacy = d / "batches.gate.CRCLX.json"
+    legacy.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 9}]}))
+    target = d / "batches.gate.high.CRCLX.json"
+    target.write_text(json.dumps({"symbol": "CRCLX", "slots": [{"slot": 1}]}))
+    monkeypatch.setattr(
+        "nanobot_quant.batches.batches_path",
+        lambda s=None, c=None, scene=None: d
+        / (f"batches.{c}.{scene}.{s}.json" if scene else f"batches.{c}.{s}.json" if c else f"batches.{s}.json" if s else "batches.json"),
+    )
+    bm = _load_or_migrate(
+        "CRCLX", "gate", scene="high", account_ids=["gate_bot1"],
+    )
+    assert bm is not None and bm.scene == "high"
+    raw = json.loads(target.read_text())
+    assert raw["slots"][0]["slot"] == 1  # 新场景文件优先
+    assert legacy.exists()  # 旧文件未被覆盖
+
+
 
 

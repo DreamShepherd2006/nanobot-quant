@@ -522,20 +522,36 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                                 status_code=400)
         _persist_token_meta(data)
-        # 批次（子钱包）初始化：td_batches 变更时立即补足子钱包并建映射（每标的独立台账）
+        # 批次（子钱包/子账号）初始化：按场景建/复用独立台账
+        #（S3b 2026-08-20：batches.{channel}.{scene}.{symbol}.json，
+        # 同标的跨场景互不复用）；无 scenes 时回退旧扁平 td_* 路径。
         try:
             from nanobot_quant.batches import ensure_batches
 
             _channel = result["params"].get("execution_channel", "okx_dex")
-            _symbols = result["params"].get("td_symbols") or ["SOL"]
+            _scenes = result["params"].get("scenes") or {}
             _msgs = []
-            for _sym in _symbols:
-                _b, _msg = ensure_batches(
-                    int(result["params"].get("td_batches", 1) or 1),
-                    _sym,
-                    _channel,
-                )
-                _msgs.append(f"{_sym}: {_msg}")
+            for _name, _sc in _scenes.items():
+                if not _sc.get("enabled") or int(_sc.get("batches", 1) or 1) <= 1:
+                    continue
+                _syms = _sc.get("symbols") or []
+                for _sym in _syms:
+                    _b, _msg = ensure_batches(
+                        int(_sc.get("batches", 1) or 1),
+                        _sym,
+                        _channel,
+                        scene=_name,
+                    )
+                    _msgs.append(f"{_sym}[{_name}]: {_msg}")
+            if not _scenes:
+                _symbols = result["params"].get("td_symbols") or ["SOL"]
+                for _sym in _symbols:
+                    _b, _msg = ensure_batches(
+                        int(result["params"].get("td_batches", 1) or 1),
+                        _sym,
+                        _channel,
+                    )
+                    _msgs.append(f"{_sym}: {_msg}")
             gatekeeper._log(f"🧩 批次同步: {'; '.join(_msgs)}")
         except Exception as exc:
             gatekeeper._log(f"⚠️ 批次同步失败: {exc}")
