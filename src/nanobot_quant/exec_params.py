@@ -146,22 +146,24 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "TD 周期", "hint": "主循环周期 = lumibot sleeptime 与 K 线粒度（1D 默认）",
     },
     "quantity_mode": {
-        "group": "td", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
+        "group": "batch", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
         "label": "数量模式", "hint": "fixed=固定 td_quantity（默认 10，回测语义不变）；value=按实时 slot 总资产 × 单仓上限；fixed_amount=每笔固定金额（td_fixed_amount）",
     },
     "td_quantity": {
-        "group": "td", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
+        "group": "batch", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
+        "show_if": {"quantity_mode": "fixed"},
         "label": "TD 固定数量", "hint": "quantity_mode=fixed 时的下单数量（默认 10）",
     },
     "td_fixed_amount": {
-        "group": "td", "min": 1.0, "max": 5000.0, "step": 1.0, "std": 10.0,
+        "group": "batch", "min": 1.0, "max": 5000.0, "step": 1.0, "std": 10.0,
+        "show_if": {"quantity_mode": "fixed_amount"},
         "label": "TD 固定金额", "hint": "quantity_mode=fixed_amount 时的每笔建仓金额（U：CEX=USDT / DEX=USDC）。固定金额模式跳过单仓上限（max_position_pct）校验（金额即用户显式仓位），但资金检查保留；CEX 通道需 ≥3U（Gate 最小单），DEX 无下限",
     },
     "td_bars": {
         "group": "td", "min": 20, "max": 300, "step": 1, "std": 120, "integer": True,
         "label": "K 线窗口", "hint": "TD 每轮拉取最近 N 根 K 线（固定窗口，不累积增长；300 = onchainos CLI 单次上限）。与分析页 K 线数设一致可完全对照",
     },
-    # ── ④ 子钱包分批 ──────────────────────────────────────────────────
+    # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {
         "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
         "label": "批次数量（子钱包）",
@@ -201,8 +203,8 @@ PARAM_META: dict[str, dict[str, Any]] = {
 GROUP_TITLES = {
     "risk": "① 风险控制（WebUI 锁死 — LLM 不可改）",
     "exec": "② 执行通道与质量（WebUI 锁死 — LLM 不可改）",
-    "td": "③ TD 自主运行（P2 — StrategyExecutor 主循环）",
-    "batch": "④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）",
+    "td": "③ TD 自主循环（lumibot 框架 — StrategyExecutor 主循环）",
+    "batch": "④ 仓位与分批",
 }
 
 

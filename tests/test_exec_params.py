@@ -606,3 +606,30 @@ def test_legacy_td_symbol_migrates_to_symbols_pool(tmp_path):
     assert loaded["td_enabled"] is True
     # 其余保持默认
     assert loaded["td_bars"] == 120
+
+
+# ── 方案2 分组（2026-08-20）─────────────────────────────────────────────
+
+def test_grouping_scheme2():
+    """④ 仓位与分批吸收数量三参；③ 纯调度；标题按方案 2。"""
+    from nanobot_quant.exec_params import GROUP_TITLES
+    td_group = {k for k, v in PARAM_META.items() if v["group"] == "td"}
+    batch_group = {k for k, v in PARAM_META.items() if v["group"] == "batch"}
+    # 数量三参（数量模式/固定数量/固定金额）移入 ④
+    assert {"quantity_mode", "td_quantity", "td_fixed_amount"} <= batch_group
+    # ③ 只剩循环调度（开关/标的/周期/窗口/刷新）
+    assert td_group == {"td_enabled", "td_symbols", "td_sleeptime", "td_bars", "td_ui_refresh_s"}
+    assert GROUP_TITLES["batch"] == "④ 仓位与分批"
+    assert "子钱包" not in GROUP_TITLES["batch"]
+    assert "lumibot" in GROUP_TITLES["td"]  # ③ 体现 lumibot 框架
+
+
+def test_show_if_rendering():
+    """互斥显隐元数据渲染为 data-show-if（前端 applyShowIf 消费）。"""
+    from nanobot_quant.exec_params_handlers import _field_html
+    assert 'data-show-if="quantity_mode=fixed"' in _field_html("td_quantity", 1)
+    assert 'data-show-if="quantity_mode=fixed_amount"' in _field_html("td_fixed_amount", 4.0)
+    assert "data-show-if" not in _field_html("td_bars", 120)  # 无互斥
+    # 单仓模式（td_batches=1）批次参数常显（用户拍板保持不动）
+    assert "data-show-if" not in _field_html("exit_order", "fifo")
+    assert "data-show-if" not in _field_html("min_account_value", 0)

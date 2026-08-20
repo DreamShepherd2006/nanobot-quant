@@ -128,7 +128,7 @@
         if (h) h.textContent = '1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射';
       }
     }
-    applyQuantityMode(); // 切通道后固定金额字段显隐/提示按新模式刷新（2026-08-19）
+    applyShowIf(); // 切通道后按模式刷新显隐（2026-08-20）
   }
   window.applyChannel = applyChannel;
   const chSel = document.getElementById('execution_channel');
@@ -137,30 +137,33 @@
     applyChannel(); // 页面初始即按当前通道隐藏（服务端渲染了全部字段）
   }
 
-  // 2026-08-19：数量模式切换时固定金额字段显隐（仅 fixed_amount 显示）
-  function applyQuantityMode() {
-    const sel = document.getElementById('quantity_mode');
-    if (!sel) return;
-    const field = document.getElementById('td_fixed_amount');
-    if (field) {
-      const fam = familyOf((document.getElementById('execution_channel') || {}).value);
-      if (sel.value !== 'fixed_amount') {
-        field.closest('.field').style.display = 'none';
-      } else {
-        field.closest('.field').style.display = '';
-        // 2026-08-19：固定金额选中时按通道给提示（CEX ≥3U Gate 最小单）
-        const h = field.closest('.field').querySelector('.f-hint');
-        if (h) h.textContent = fam === 'cex'
-          ? '每笔建仓固定金额（U/USDT）· CEX 需 ≥3U（Gate 最小单 $3，低于会被拒单）'
-          : '每笔建仓固定金额（U/USDC）· 与 slot 资产规模无关，跳过单仓上限校验，资金检查保留';
-      }
+  // 2026-08-20（方案2）：通用 data-show-if 显隐——④ 仓位与分批互斥显示。
+  // 数量模式三选一：fixed→显示 TD 固定数量；fixed_amount→显示 TD 固定金额；
+  // value→两者隐藏。取代原 applyQuantityMode 硬编码（td_fixed_amount 逻辑
+  // 行为不变，迁移到 data-show-if 机制）。
+  // 注：单仓模式（td_batches=1）的批次参数显隐按用户拍板保持不动（常显）。
+  function applyShowIf() {
+    const fam = familyOf((document.getElementById('execution_channel') || {}).value);
+    document.querySelectorAll('[data-show-if]').forEach(function (el) {
+      const kv = el.dataset.showIf.split('=');
+      const src = document.getElementById(kv[0]);
+      const match = src && String(src.value) === kv[1];
+      el.style.display = match ? '' : 'none';
+    });
+    // fixed_amount 提示按通道切换（CEX ≥3U Gate 最小单 / DEX 无下限）
+    const famField = document.getElementById('td_fixed_amount');
+    if (famField && famField.closest('.field').style.display !== 'none') {
+      const h = famField.closest('.field').querySelector('.f-hint');
+      if (h) h.textContent = fam === 'cex'
+        ? '每笔建仓固定金额（U/USDT）· CEX 需 ≥3U（Gate 最小单 $3，低于会被拒单）'
+        : '每笔建仓固定金额（U/USDC）· 与 slot 资产规模无关，跳过单仓上限校验，资金检查保留';
     }
   }
-  window.applyQuantityMode = applyQuantityMode;
+  window.applyShowIf = applyShowIf;
   const qmSel = document.getElementById('quantity_mode');
   if (qmSel) {
-    qmSel.addEventListener('change', applyQuantityMode);
-    applyQuantityMode(); // 页面初始按当前模式显隐
+    qmSel.addEventListener('change', applyShowIf);
+    applyShowIf(); // 页面初始按当前模式显隐
   }
 
   function show(m, ok) {
