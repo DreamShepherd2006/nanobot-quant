@@ -266,7 +266,10 @@ class TdSequentialStrategy(Strategy):
                     now - last
                 ).total_seconds() < _parse_sleeptime_seconds(
                     rt.get("sleeptime") or "1m"
-                ):
+                ) - 1:
+                    # 到期容差 1s：避免心跳边界抖动（lumibot 心跳与 wall clock
+                    # 对齐误差）导致场景被误跳过——跳过轮不拉数据，下一轮
+                    # 增量拉 2 根补上（kline_cache 多根判定已修复）。
                     continue
                 rt["last_run"] = now
                 self._activate_scene(name, rt)

@@ -136,6 +136,7 @@ class KlineCache:
             elif diff == period:
                 e.df = pd.concat([e.df, row.to_frame().T])  # 恰 +1 周期 → append
                 appended += 1
+                tail_ts = ts                 # 更新尾——多根新 bar 按顺序逐根判定
             else:
                 gap = True                   # 跳跃 → 缺口 → 全量重拉
                 break

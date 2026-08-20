@@ -163,6 +163,24 @@ class TestIncremental:
         assert src.calls[-1] == ("SOL", "1m", 120)  # 全量重拉
         pd.testing.assert_frame_equal(out, src.df.iloc[-120:])
 
+    def test_multi_new_bars_appended_without_false_gap(self):
+        """跳过一轮后 limit=2 返回 2 根新收盘 bar → 顺序逐根 append，不误判 gap。
+
+        S3a 场景调度下心跳边界抖动可能跳过一轮（不拉数据），下一轮增量
+        limit=2 会拿到 2 根新收盘 bar；旧实现逐根相对原始尾判定，第二根
+        diff=2×period 误判缺口触发全量重拉。修复：append 后更新尾 ts。
+        """
+        src = _FakeFetch(_df(130))
+        cache = KlineCache(src)
+        cache.get("SOL", "1m", 120)
+        src.grow(2)  # 跳过一轮：一次长 2 根
+        before = len(src.calls)
+        out = cache.get("SOL", "1m", 120)
+        assert len(out) == 120
+        # 增量路径：仅 limit=2 拉取，无全量重拉
+        assert all(c[2] == 2 for c in src.calls[before:])
+        pd.testing.assert_frame_equal(out, src.df.iloc[-120:])
+
     def test_incremental_fetch_failure_keeps_cache(self):
         """增量拉取失败 → 保留缓存返回（下一轮再试），不中断循环。"""
         src = _FakeFetch(_df(130))
