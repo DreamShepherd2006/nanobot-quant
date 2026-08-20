@@ -245,10 +245,12 @@ def _field_html(
         )
     lo, hi = meta["min"], meta["max"]
     step = str(meta.get("step", 0.01))
+    # S3b-2：场景级阈值字段（缺省 None）渲染为空输入框（留空 = 回退全局）
+    val = "" if value is None else value
     return (
         f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
-        f'<input type="number" id="{fid}" name="{fid}" value="{value}" '
-        f'min="{lo}" max="{hi}" step="{step}">'
+        f'<input type="number" id="{fid}" name="{fid}" value="{val}" '
+        f'min="{lo}" max="{hi}" step="{step}" placeholder="{std}">'
         f'<span class="f-std">默认 {std} · 范围 {lo}–{hi}</span>'
         f'<span class="f-hint">{hint}</span></div>'
     )

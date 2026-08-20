@@ -64,10 +64,17 @@ SCENE_FIELD_MAP: dict[str, str] = {
     "min_account_value": "min_account_value",
 }
 
+#: 场景级 TD 阈值字段（S3b-2）：值域同 td_params，但缺省 None = 回退全局
+#: td_params.json（策略选择页设置），不参与 high↔扁平同步。
+SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
+    "entry_setup", "exit_setup", "exit_countdown",
+)
+
 #: 场景卡片字段渲染顺序。
 SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
+    "entry_setup", "exit_setup", "exit_countdown",
     "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
 )
 
@@ -83,6 +90,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
+        "entry_setup": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "take_profit_pct": 0.0,
         "td_start_slot": 1, "min_account_value": 0,
     },
@@ -91,6 +99,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
+        "entry_setup": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "take_profit_pct": 0.0,
         "td_start_slot": 1, "min_account_value": 0,
     },
@@ -99,6 +108,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
+        "entry_setup": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "take_profit_pct": 0.0,
         "td_start_slot": 1, "min_account_value": 0,
     },
@@ -254,6 +264,18 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "对账导入阈值(USD)",
         "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。CEX 通道用 Gate min_quote 动态阈值（≈$3），不读此参数",
     },
+    "entry_setup": {
+        "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,
+        "label": "入场 Setup 阈值", "hint": "场景级覆盖（S3b-2）；留空 = 跟随全局 td_params（策略选择页设置）",
+    },
+    "exit_setup": {
+        "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,
+        "label": "平仓 Setup 阈值", "hint": "场景级覆盖（S3b-2）；留空 = 跟随全局 td_params（策略选择页设置）",
+    },
+    "exit_countdown": {
+        "group": "scene", "min": 1, "max": 20, "step": 1, "std": 13, "integer": True,
+        "label": "平仓 Countdown 阈值", "hint": "场景级覆盖（S3b-2）；留空 = 跟随全局 td_params（策略选择页设置）",
+    },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],
         "label": "子账号池", "hint": "本场景使用的 Gate 子账号（slot i ↔ 列表第 i 个；S3 调度分频起消费，S1 仅配置）",
@@ -372,6 +394,12 @@ def _load_scenes(raw: dict) -> dict[str, dict[str, Any]]:
                 elif fk in SCENE_FIELD_MAP:
                     if validate_exec_param(SCENE_FIELD_MAP[fk], fv) is None:
                         scene[fk] = fv
+                elif fk in SCENE_THRESHOLD_FIELDS:
+                    # S3b-2：场景级 TD 阈值，空/非法 → None（回退全局 td_params）
+                    if fv in (None, ""):
+                        scene[fk] = None
+                    elif validate_exec_param(fk, fv) is None:
+                        scene[fk] = int(fv)
         scenes[sk] = scene
     return scenes
 
@@ -425,6 +453,18 @@ def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
                 ):
                     scene["sub_accounts"] = [str(x).strip() for x in v]
                 # 空/缺失 → 保持默认
+                continue
+            if fk in SCENE_THRESHOLD_FIELDS:
+                # S3b-2：场景级 TD 阈值；空/缺失 → None（回退全局 td_params）
+                v = src.get(fk)
+                if v in (None, ""):
+                    scene[fk] = None
+                else:
+                    err = validate_exec_param(fk, v)
+                    if err is not None:
+                        label = SCENES[sk]["label"]
+                        return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
+                    scene[fk] = int(v)
                 continue
             if fk not in src:
                 continue
