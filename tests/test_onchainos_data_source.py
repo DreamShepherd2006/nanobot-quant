@@ -47,7 +47,7 @@ class _FakeOnchain:
             raise RuntimeError(self.resolve_error)
         if self.kline is None:
             raise RuntimeError("no kline data")
-        return self.kline
+        return self.kline.iloc[-limit:]  # 真实源语义：返回最近 limit 根
 
     def get_price(self, symbol):
         self.price_calls.append(symbol)
