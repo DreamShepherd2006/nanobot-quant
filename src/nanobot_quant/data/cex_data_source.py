@@ -11,6 +11,7 @@ from typing import Optional
 
 from lumibot.data_sources import DataSource
 
+from nanobot_quant.data.kline_cache import KlineCache
 from nanobot_quant.data_sources import get_data_source
 
 logger = logging.getLogger("nanobot_quant.data.cex")
@@ -39,9 +40,19 @@ class CexDataSource(DataSource):
     # 导致 bars=119 < min_history 永久 SKIP（2026-08-17 A 修复第二部分）。
     drops_in_progress_bars = True
 
-    def __init__(self, tokens_json: Optional[list[dict]] = None, **kwargs):
+    def __init__(self, tokens_json: Optional[list[dict]] = None,
+                 use_cache: bool = True, **kwargs):
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
+        self._use_cache = use_cache
+        self._cache = KlineCache(self._fetch_kline) if use_cache else None
+
+    def _fetch_kline(self, symbol: str, bar: str, limit: int) -> "pd.DataFrame":
+        """Registry fetch + non-empty guard (shared by full/incremental paths)."""
+        df = get_data_source("gate_cex").fetch_kline(symbol, bar=bar, limit=limit)
+        if df is None or df.empty:
+            raise RuntimeError(f"No Gate CEX kline for {symbol} (bar={bar})")
+        return df
 
     def get_chains(self, asset=None, quote=None):
         return {}
@@ -59,14 +70,17 @@ class CexDataSource(DataSource):
     ):
         """Return lumibot Bars for the asset from Gate spot candles.
 
-        K 线统一经数据源注册表（gate_cex = CEX 执行通道同所）获取。
+        K 线统一经数据源注册表（gate_cex = CEX 执行通道同所）获取；S2 增量
+        K 线缓存（docs/quant-system.md §22.6）：首轮全量预取，后续每轮只拉
+        最近 2 根增量合并，缺口自动全量重拉。
         """
         symbol = asset.symbol
         bar = _BAR_MAP.get(str(timestep or "").lower(), _DEFAULT_BAR)
         limit = max(1, min(int(length), 1000))
-        df = get_data_source("gate_cex").fetch_kline(symbol, bar=bar, limit=limit)
-        if df is None or df.empty:
-            raise RuntimeError(f"No Gate CEX kline for {symbol} (bar={bar})")
+        if self._cache is not None:
+            df = self._cache.get(symbol, bar, limit)
+        else:
+            df = self._fetch_kline(symbol, bar, limit)
         # lumibot v4.5.78 Bars.__init__ 构造时访问小写列 df["close"] 派生 return 列；
         # 而 gate_cex 数据源（rows_to_df）输出大写列 Open/High/Low/Close/Volume（td-table
         # 页面契约）——列名不一致会抛 KeyError: 'close'（2026-08-17 A 修复）。此处统一

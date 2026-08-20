@@ -12,6 +12,7 @@ from typing import Optional
 
 from lumibot.data_sources import DataSource
 
+from nanobot_quant.data.kline_cache import KlineCache
 from nanobot_quant.data_sources import get_data_source
 
 logger = logging.getLogger("nanobot_quant.data.onchainos")
@@ -27,9 +28,20 @@ class OnchainOSDataSource(DataSource):
 
     SOURCE = "onchainos"
 
-    def __init__(self, tokens_json: list[dict] | None = None, **kwargs):
+    def __init__(self, tokens_json: list[dict] | None = None,
+                 use_cache: bool = True, **kwargs):
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
+        self._use_cache = use_cache
+        self._cache = KlineCache(self._fetch_kline) if use_cache else None
+
+    def _fetch_kline(self, symbol: str, bar: str, limit: int) -> "pd.DataFrame":
+        """Registry fetch + non-empty guard (shared by full/incremental paths)."""
+        df = get_data_source("onchainos").fetch_kline(
+            symbol, bar=bar, limit=min(limit, 299))
+        if df is None or df.empty:
+            raise RuntimeError(f"No kline data returned for {symbol}")
+        return df
 
     # ── abstract methods ──────────────────────────────────────────
 
@@ -59,9 +71,12 @@ class OnchainOSDataSource(DataSource):
         # Per-target chain resolution happens inside the onchainos source
         # (resolve_token: tokens.json entry wins, default solana).
         resolution = self._map_timestep(timestep or "day")
+        limit = max(1, min(int(length), 299))
         try:
-            df = get_data_source("onchainos").fetch_kline(
-                symbol, bar=resolution, limit=min(length, 299))
+            if self._cache is not None:
+                df = self._cache.get(symbol, resolution, limit)
+            else:
+                df = self._fetch_kline(symbol, resolution, limit)
         except Exception as exc:
             raise RuntimeError(f"No kline data returned for {symbol}: {exc}")
         if df is None or df.empty:

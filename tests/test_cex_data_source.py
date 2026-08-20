@@ -72,7 +72,7 @@ class _FakeGate:
         self.kline_calls.append({"symbol": symbol, "bar": bar, "limit": limit})
         if self.kline is None:
             return None  # 模拟真实源网络失败返回 None（DataSource 的 if 检查触发）
-        return self.kline
+        return self.kline.iloc[-limit:]  # 真实源语义：返回最近 limit 根
 
     def get_price(self, symbol):
         self.price_calls.append(symbol)
@@ -140,3 +140,34 @@ class TestGetLastPrice:
     def test_empty_ticker(self, ds, fake):
         fake.price = None
         assert ds.get_last_price(_asset()) is None
+
+class TestIncrementalCache:
+    """S2 增量 K 线缓存（docs/quant-system.md §22.6）—— 数据源集成。"""
+
+    def _df(self, n=130):
+        idx = pd.date_range("2026-08-01", periods=n, freq="60s", tz="UTC")
+        return pd.DataFrame({
+            "Open": [70.0 + i * 0.01 for i in range(n)],
+            "High": [72.0 + i * 0.01 for i in range(n)],
+            "Low": [69.0 + i * 0.01 for i in range(n)],
+            "Close": [71.5 + i * 0.01 for i in range(n)],
+            "Volume": [1000.0] * n,
+        }, index=idx)
+
+    def test_first_full_then_incremental(self, fake):
+        fake.kline = self._df()
+        ds = CexDataSource(tokens_json=TOKENS)  # 默认 use_cache=True
+        bars1 = ds.get_historical_prices(_asset(), length=120, timestep="minute")
+        assert fake.kline_calls[-1]["limit"] == 120       # 首轮全量预取
+        assert len(bars1.df) == 120
+        bars2 = ds.get_historical_prices(_asset(), length=120, timestep="minute")
+        assert fake.kline_calls[-1]["limit"] == 2         # 次轮增量
+        assert len(bars2.df) == 120                        # 缓存尾部返回
+        assert list(bars2.df.columns) == ["open", "high", "low", "close", "volume"]
+
+    def test_use_cache_false_full_every_time(self, fake):
+        fake.kline = self._df()
+        ds = CexDataSource(tokens_json=TOKENS, use_cache=False)
+        for _ in range(2):
+            ds.get_historical_prices(_asset(), length=120, timestep="minute")
+        assert fake.kline_calls[-1]["limit"] == 120
