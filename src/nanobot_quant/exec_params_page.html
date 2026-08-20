@@ -167,11 +167,19 @@
     });
   }
   window.applyShowIf = applyShowIf;
-  const qmSel = document.getElementById('quantity_mode');
-  if (qmSel) {
-    qmSel.addEventListener('change', applyShowIf);
-    applyShowIf(); // 页面初始按当前模式显隐
-  }
+  // 2026-08-20（S1 修复）：场景化后数量模式 select 的 id 带场景前缀
+  // （scenes_high_quantity_mode 等），不能硬编码扁平 id——通用绑定：
+  // 遍历所有 data-show-if 的源字段（kv[0]）去重后逐个挂 change 监听。
+  const srcIds = {};
+  document.querySelectorAll('[data-show-if]').forEach(function (el) {
+    const kv = (el.dataset.showIf || '').split('=');
+    if (kv[0]) srcIds[kv[0]] = true;
+  });
+  Object.keys(srcIds).forEach(function (sid) {
+    const s = document.getElementById(sid);
+    if (s) s.addEventListener('change', applyShowIf);
+  });
+  applyShowIf(); // 页面初始按当前模式显隐
 
   function show(m, ok) {
     msg.textContent = m;
