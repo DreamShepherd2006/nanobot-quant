@@ -454,10 +454,17 @@ class TdSequentialStrategy(Strategy):
             # bar——与 TD 理论（bar 收盘时判定）及回测口径一致。
             fetch_len += 1
         try:
+            # live 直拉场景粒度：bar: 前缀让 lumibot 无法解析（_parse_timestep
+            # 返回 None → 原样透传），数据源 removeprefix 后直拉原生 bar（如
+            # 5m）——绕开 lumibot multi-timeframe 转换（length×multiplier 根
+            # 1m + 自己 resample），live 与回测完全同源（2026-08-20 定稿）。
+            # 回测（broker=None）保持标准 timestep（PandasDataBacktesting 只
+            # 认 lumibot 标准名）。
+            timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
             bars = self.get_historical_prices(
                 self.symbol,
                 length=fetch_len,
-                timestep=self._timestep,
+                timestep=timestep,
             )
         except Exception as e:
             # 黑名单标的（Gate 无交易对/已下架，如 MU/VSC）静默跳过——

@@ -70,7 +70,10 @@ class OnchainOSDataSource(DataSource):
 
         # Per-target chain resolution happens inside the onchainos source
         # (resolve_token: tokens.json entry wins, default solana).
-        resolution = self._map_timestep(timestep or "day")
+        # bar: 前缀 = live 直拉场景粒度（策略对 live broker 添加，lumibot
+        # 无法解析 → 原样透传）；removeprefix 后直拉原生 bar（如 5m），
+        # 绕开 lumibot multi-timeframe 转换（600 根 1m + resample）。
+        resolution = self._map_timestep((timestep or "day").removeprefix("bar:"))
         limit = max(1, min(int(length), 299))
         try:
             if self._cache is not None:

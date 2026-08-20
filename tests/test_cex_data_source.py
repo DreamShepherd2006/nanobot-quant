@@ -121,6 +121,17 @@ class TestGetHistoricalPrices:
         ds.get_historical_prices(_asset(), length=5, timestep="5min")
         assert fake.kline_calls[-1]["bar"] == "5m"
 
+    def test_bar_prefix_passthrough(self, ds, fake):
+        """bar: 前缀 = live 直拉场景粒度（策略对 live broker 添加，lumibot
+        无法解析 → 原样透传）；数据源 removeprefix 后按原生粒度直拉（如
+        "bar:5min" → 5m、"bar:minute" → 1m），绕开 lumibot multi-timeframe
+        转换（600 根 1m + resample）。回测（无前缀）路径不受影响。"""
+        ds.get_historical_prices(_asset(), length=120, timestep="bar:5min")
+        assert fake.kline_calls[-1]["bar"] == "5m"
+        assert fake.kline_calls[-1]["limit"] == 120  # 直拉 5m 120 根，非 600×1m
+        ds.get_historical_prices(_asset(), length=120, timestep="bar:minute")
+        assert fake.kline_calls[-1]["bar"] == "1m"
+
     def test_length_clamped_to_1000(self, ds, fake):
         ds.get_historical_prices(_asset(), length=5000, timestep="day")
         assert fake.kline_calls[-1]["limit"] == 1000
@@ -145,7 +156,10 @@ class TestIncrementalCache:
     """S2 增量 K 线缓存（docs/quant-system.md §22.6）—— 数据源集成。"""
 
     def _df(self, n=130):
-        idx = pd.date_range("2026-08-01", periods=n, freq="60s", tz="UTC")
+        # end=now：elapsed 自适应增量按真实墙钟算缺口，缓存尾必须≈now
+        # （真实场景每次拉取更新缓存尾）；固定日期会让第二次调用误判 gap。
+        end = pd.Timestamp.now(tz="UTC")
+        idx = pd.date_range(end=end, periods=n, freq="60s", tz="UTC")
         return pd.DataFrame({
             "Open": [70.0 + i * 0.01 for i in range(n)],
             "High": [72.0 + i * 0.01 for i in range(n)],

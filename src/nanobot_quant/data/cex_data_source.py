@@ -75,7 +75,12 @@ class CexDataSource(DataSource):
         最近 2 根增量合并，缺口自动全量重拉。
         """
         symbol = asset.symbol
-        bar = _BAR_MAP.get(str(timestep or "").lower(), _DEFAULT_BAR)
+        # bar: 前缀 = live 直拉场景粒度（策略对 live broker 添加，lumibot
+        # 无法解析 → 原样透传）；removeprefix 后按原生粒度直拉（如
+        # "bar:5min" → 5m），绕开 lumibot multi-timeframe 转换。
+        bar = _BAR_MAP.get(
+            str(timestep or "").lower().removeprefix("bar:"), _DEFAULT_BAR
+        )
         limit = max(1, min(int(length), 1000))
         if self._cache is not None:
             df = self._cache.get(symbol, bar, limit)
