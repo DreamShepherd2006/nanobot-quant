@@ -37,6 +37,74 @@ from typing import Any
 
 # ── Schema / defaults ────────────────────────────────────────────────────
 
+#: 多场景（多时间框架）定义（2026-08-20 S1，第二十二章）。
+#: 三个场景各自独立周期/参数/子账号池，捕捉不同尺度的能量衰减：
+#:   high = 高频短线（1m，~5次/天）；mid = 中频波段（15m/1H，~1次/天）；
+#:   low = 低频趋势（1D，~1次/周）。
+#: S1 仅配置层：high 场景与扁平参数双向同步（td_live 仍消费扁平），
+#: mid/low 独立配置但暂不消费（S3 调度分频接入）。
+SCENES: dict[str, dict[str, str]] = {
+    "high": {"label": "高频", "freq": "1m", "desc": "~5次/天 · 短线能量衰减"},
+    "mid": {"label": "中频", "freq": "15m/1H", "desc": "~1次/天 · 波段能量衰减"},
+    "low": {"label": "低频", "freq": "1D", "desc": "~1次/周 · 趋势能量衰减"},
+}
+
+#: 场景字段 → 扁平参数键（high 场景与扁平双向同步；sub_accounts 无扁平对应）。
+SCENE_FIELD_MAP: dict[str, str] = {
+    "enabled": "td_enabled",
+    "sleeptime": "td_sleeptime",
+    "symbols": "td_symbols",
+    "quantity_mode": "quantity_mode",
+    "td_quantity": "td_quantity",
+    "td_fixed_amount": "td_fixed_amount",
+    "batches": "td_batches",
+    "exit_order": "exit_order",
+    "take_profit_pct": "take_profit_pct",
+    "td_start_slot": "td_start_slot",
+    "min_account_value": "min_account_value",
+}
+
+#: 场景卡片字段渲染顺序。
+SCENE_FIELD_ORDER: tuple[str, ...] = (
+    "enabled", "sleeptime", "symbols", "quantity_mode",
+    "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
+    "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
+)
+
+#: 默认 Gate 子账号池（S1 配置层默认值；S3 消费时按 gate.json 实际列表）。
+DEFAULT_SUB_ACCOUNTS: tuple[str, ...] = (
+    "gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4", "gate_bot5",
+)
+
+#: 场景默认配置（mid/low 默认停用；high 默认与扁平 td_* 一致）。
+DEFAULT_SCENES: dict[str, dict[str, Any]] = {
+    "high": {
+        "enabled": False, "sleeptime": "1m", "symbols": ["SOL"],
+        "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
+        "batches": 4,
+        "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
+        "exit_order": "fifo", "take_profit_pct": 0.0,
+        "td_start_slot": 1, "min_account_value": 0,
+    },
+    "mid": {
+        "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
+        "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
+        "batches": 3,
+        "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
+        "exit_order": "fifo", "take_profit_pct": 0.0,
+        "td_start_slot": 1, "min_account_value": 0,
+    },
+    "low": {
+        "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
+        "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
+        "batches": 3,
+        "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
+        "exit_order": "fifo", "take_profit_pct": 0.0,
+        "td_start_slot": 1, "min_account_value": 0,
+    },
+}
+
+
 #: Full execution parameter set. Defaults == old hardcoded values.
 DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ① Risk control ───────────────────────────────────────────────
@@ -47,24 +115,17 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     "execution_channel": "okx_dex", # enum — 实例名（okx_dex=OKX DEX 链上 / gate=Gate.io 交易所）；旧值 dex/cex 自动迁移
-    # ── ③ TD 自主运行（P2 B2/B3, StrategyExecutor 主循环）─────────────
-    "td_enabled": False,        # WebUI 开关：TD 自主 live 循环启停
-    "td_symbols": ["SOL"],     # TD 标的池（多标的扫描，谁 Setup 9 谁执行；
-                                #   /config/tokens 登记代币 symbol，稳定币不列入）
-    "td_sleeptime": "1D",      # 主循环周期（对应 lumibot sleeptime + K 线粒度）
-    "quantity_mode": "fixed",  # fixed=固定 td_quantity；value=pv_slot × max_position_pct；fixed_amount=固定金额 td_fixed_amount
-    "td_quantity": 10,          # int ≥1 — quantity_mode=fixed 时的下单数量
-    "td_fixed_amount": 10.0,    # float 1-5000 — quantity_mode=fixed_amount 时的每笔建仓金额（U；CEX=USDT / DEX=USDC）
-    "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
-    # ── ④ 子钱包分批（批次=子钱包，真分账 v1.1，2026-08-10）─────────
-    "td_batches": 1,            # int 1-50 — 批次/子钱包数量；1=单仓模式（现状）
-    "exit_order": "fifo",      # fifo=先买先卖（默认）/ lifo=后买先卖
-    "take_profit_pct": 0.0,     # 止盈线（%）；0=关闭（纯 TD SELL + 止损）
-    "td_start_slot": 1,          # int 1-50 — BUY 扫描起点（完整循环 + 起点偏移）
-    "min_account_value": 0,    # float ≥0 — BUY 门槛：目标 slot 子钱包总资产低于该值则跳过（0=关闭）
     "min_position_value": 1.0, # float ≥0 — 对账导入阈值(USD)：链上持仓价值低于该值视为 dust 不导入（0=关闭）
+    # ── ③ TD 循环运行（全局）──────────────────────────────────────────
+    "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
     # ── ⑤ UI ───────────────────────────────────────────────────────────
     "td_ui_refresh_s": 10,    # int 3-300 — /config/td-table 实时监控 tab 自动刷新间隔（秒）
+    # ── ④ 多场景（S1 配置层，2026-08-20；high ↔ 扁平同步）──────────────
+    #  td_enabled / td_symbols / td_sleeptime / quantity_mode / td_quantity /
+    #  td_fixed_amount / td_batches / exit_order / take_profit_pct /
+    #  td_start_slot / min_account_value 移入 scenes（high 与扁平双向同步），
+    #  min_position_value 归入 ② 执行质量。
+    "scenes": DEFAULT_SCENES,
 }
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
@@ -134,28 +195,28 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "执行通道", "hint": "两大执行家族是完全不同的概念：dex=链上 DEX（OKX OnchainOS 子钱包，TEE 签名，默认）；cex=交易所（当前实例 Gate.io，子账号 API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到交易所时 TD 循环 K 线数据源联动切换为同所 Gate CEX 公共端点。未来多家 CEX/DEX 在此下拉分组内扩展",
     },
     "td_enabled": {
-        "group": "td", "type": "bool", "std": False,
+        "group": "scene", "type": "bool", "std": False,
         "label": "TD 自主运行", "hint": "开启后 TD 自主策略在 quant agent 进程内驻留 StrategyExecutor 主循环（标的/周期/数量见下）",
     },
     "td_symbols": {
-        "group": "td", "type": "list", "std": ["SOL"],
+        "group": "scene", "type": "list", "std": ["SOL"],
         "label": "TD 标的池", "hint": "多标的扫描：每轮遍历池子算 TD，谁 Setup 9 谁执行（同 bar 按池子顺序全部处理）。从 /config/tokens 登记代币选（SOL 登记后可选，稳定币不列入）",
     },
     "td_sleeptime": {
-        "group": "td", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",
+        "group": "scene", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",
         "label": "TD 周期", "hint": "主循环周期 = lumibot sleeptime 与 K 线粒度（1D 默认）",
     },
     "quantity_mode": {
-        "group": "batch", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
+        "group": "scene", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",
         "label": "数量模式", "hint": "fixed=固定 td_quantity（默认 10，回测语义不变）；value=按实时 slot 总资产 × 单仓上限；fixed_amount=每笔固定金额（td_fixed_amount）",
     },
     "td_quantity": {
-        "group": "batch", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
+        "group": "scene", "min": 1, "max": 100000, "step": 1, "std": 10, "integer": True,
         "show_if": {"quantity_mode": "fixed"},
         "label": "TD 固定数量", "hint": "quantity_mode=fixed 时的下单数量（默认 10）",
     },
     "td_fixed_amount": {
-        "group": "batch", "min": 1.0, "max": 5000.0, "step": 1.0, "std": 10.0,
+        "group": "scene", "min": 1.0, "max": 5000.0, "step": 1.0, "std": 10.0,
         "show_if": {"quantity_mode": "fixed_amount"},
         "label": "TD 固定金额", "hint": "quantity_mode=fixed_amount 时的每笔建仓金额（U：CEX=USDT / DEX=USDC）。固定金额模式跳过单仓上限（max_position_pct）校验（金额即用户显式仓位），但资金检查保留；CEX 通道需 ≥3U（Gate 最小单），DEX 无下限",
     },
@@ -165,33 +226,37 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {
-        "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
+        "group": "scene", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
         "label": "批次数量（子钱包）",
         "label_cex": "批次数量（子账号）",
         "hint": "1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射",
         "hint_cex": "1=单仓模式（现状）；>1 时每批绑定一个 Gate 子账号（slot↔gate_bot1-5），子账号下单用自身 API Key",
     },
     "exit_order": {
-        "group": "batch", "type": "enum", "enum": list(EXIT_ORDERS), "std": "fifo",
+        "group": "scene", "type": "enum", "enum": list(EXIT_ORDERS), "std": "fifo",
         "label": "平仓顺序", "hint": "TD SELL 信号/止损/止盈命中多批时按此顺序平仓：fifo=先买先卖（默认）/ lifo=后买先卖",
     },
     "take_profit_pct": {
-        "group": "batch", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
+        "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
         "label": "止盈线", "hint": "每批浮盈 ≥ 该值即平仓（0=关闭，纯 TD SELL + 止损；如 0.05 = 5%）",
     },
     "td_start_slot": {
-        "group": "batch", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
+        "group": "scene", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
         "label": "建仓起始批次", "hint": "BUY 从该 slot 开始扫描（完整循环 + 起点偏移；设 3 → 3→4→5→1→2；资金不足自动跳下一 slot）",
     },
     "min_account_value": {
-        "group": "batch", "min": 0, "max": 1000000, "step": 10, "std": 0,
+        "group": "scene", "min": 0, "max": 1000000, "step": 10, "std": 0,
         "label": "子账户最小资金(USD)", "hint": "BUY 时目标 slot 子钱包总资产低于该值则跳过该槽位（TD SLOT SKIP min_account_value），避免小资金碎仓；0=关闭。SELL/止损/止盈平仓不受限（平仓永远允许）",
     },
     "min_position_value": {
-        "group": "batch", "min": 0, "max": 1000000, "step": 1, "std": 1.0,
+        "group": "exec", "min": 0, "max": 1000000, "step": 1, "std": 1.0,
         "channels": "dex",
         "label": "对账导入阈值(USD)",
         "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。CEX 通道用 Gate min_quote 动态阈值（≈$3），不读此参数",
+    },
+    "sub_accounts": {
+        "group": "scene", "type": "list", "std": ["gate_bot1"],
+        "label": "子账号池", "hint": "本场景使用的 Gate 子账号（slot i ↔ 列表第 i 个；S3 调度分频起消费，S1 仅配置）",
     },
     # ── ⑤ UI ────────────────────────────────────────────────────────────
     "td_ui_refresh_s": {
@@ -203,8 +268,8 @@ PARAM_META: dict[str, dict[str, Any]] = {
 GROUP_TITLES = {
     "risk": "① 风险控制（WebUI 锁死 — LLM 不可改）",
     "exec": "② 执行通道与质量（WebUI 锁死 — LLM 不可改）",
-    "td": "③ TD 自主循环（lumibot 框架 — StrategyExecutor 主循环）",
-    "batch": "④ 仓位与分批",
+    "td": "③ TD 循环运行（全局）",
+    "scene": "④ 多场景（多时间框架）",
 }
 
 
@@ -260,21 +325,115 @@ def load_exec_params() -> dict[str, Any]:
     Missing / invalid file → defaults.  A key saved with a value that no
     longer validates is ignored (falls back to the default), so a WebUI
     range change can never poison execution.
+
+    2026-08-20 S1：旧文件无 scenes → 自动从扁平参数迁移生成（high=当前
+    扁平配置，mid/low=默认停用）；加载后 high 场景与扁平参数同步（场景
+    为未来主配置，S1 阶段 td_live 仍消费扁平——两者保持一致）。
     """
     merged = dict(DEFAULT_EXEC_PARAMS)
     raw = _read_raw()
     if raw is None:
-        return merged
+        raw = {}
     # 迁移：旧版 execution_channel 大类值（dex/cex）→ 实例名（okx_dex/gate），2026-08-17 方案 C
     if "execution_channel" in raw:
         raw["execution_channel"] = normalize_execution_channel(raw["execution_channel"])
     for key in merged:
+        if key == "scenes":
+            continue
         if key in raw and validate_exec_param(key, raw[key]) is None:
             merged[key] = raw[key]
     # 迁移：旧版单标的 td_symbol → td_symbols（标的池，2026-08-10）
     if "td_symbols" not in raw and raw.get("td_symbol"):
-        merged["td_symbols"] = [raw["td_symbol"]]
+        raw["td_symbols"] = [raw["td_symbol"]]
+    # S1：scenes 加载/迁移（2026-08-20）
+    merged["scenes"] = _load_scenes(raw)
+    # high 场景 → 扁平同步（td_live 消费扁平 = high 场景配置）
+    _sync_flat_from_high(merged)
     return merged
+
+
+def _load_scenes(raw: dict) -> dict[str, dict[str, Any]]:
+    """从原始文件加载 scenes：缺失时从扁平参数迁移生成。"""
+    raw_scenes = raw.get("scenes")
+    if not isinstance(raw_scenes, dict):
+        return _migrate_scenes_from_flat(raw)
+    scenes: dict[str, dict[str, Any]] = {}
+    for sk, sdef in DEFAULT_SCENES.items():
+        src = raw_scenes.get(sk)
+        scene = dict(sdef)
+        if isinstance(src, dict):
+            for fk, fv in src.items():
+                if fk == "sub_accounts":
+                    if (
+                        isinstance(fv, list) and fv
+                        and all(isinstance(x, str) and x.strip() for x in fv)
+                    ):
+                        scene["sub_accounts"] = [str(x).strip() for x in fv]
+                elif fk in SCENE_FIELD_MAP:
+                    if validate_exec_param(SCENE_FIELD_MAP[fk], fv) is None:
+                        scene[fk] = fv
+        scenes[sk] = scene
+    return scenes
+
+
+def _migrate_scenes_from_flat(raw: dict) -> dict[str, dict[str, Any]]:
+    """旧扁平 exec_params.json → scenes（S1 迁移）。
+
+    high = 当前扁平配置（td_live 继续消费扁平，high 与其同步）；
+    mid/low = 默认停用。子账号池按当前 td_batches 截取默认池。
+    """
+    scenes = {sk: dict(sdef) for sk, sdef in DEFAULT_SCENES.items()}
+    high = scenes["high"]
+    for fk, pk in SCENE_FIELD_MAP.items():
+        if pk in raw:
+            high[fk] = raw[pk]
+    n = int(high.get("batches", 4) or 1)
+    high["sub_accounts"] = list(DEFAULT_SUB_ACCOUNTS[:n]) or ["gate_bot1"]
+    scenes["high"] = high
+    return scenes
+
+
+def _sync_flat_from_high(merged: dict[str, Any]) -> None:
+    """high 场景 → 扁平参数同步（S1：td_live 仍消费扁平）。"""
+    high = merged.get("scenes", {}).get("high")
+    if not isinstance(high, dict):
+        return
+    for fk, pk in SCENE_FIELD_MAP.items():
+        if fk in high:
+            merged[pk] = high[fk]
+
+
+def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
+    """校验并应用请求体中的 scenes；返回错误 dict 或 None。
+
+    保存后 high 场景写回扁平参数（调用方再调 _sync_flat_from_high）。
+    """
+    src_scenes = params.get("scenes")
+    if not isinstance(src_scenes, dict):
+        return None  # 未提交 scenes → 保持现有
+    merged["scenes"] = {sk: dict(sdef) for sk, sdef in DEFAULT_SCENES.items()}
+    for sk in DEFAULT_SCENES:
+        src = src_scenes.get(sk)
+        if not isinstance(src, dict):
+            continue
+        scene = merged["scenes"][sk]
+        for fk in scene:
+            if fk == "sub_accounts":
+                v = src.get("sub_accounts")
+                if isinstance(v, list) and v and all(
+                    isinstance(x, str) and x.strip() for x in v
+                ):
+                    scene["sub_accounts"] = [str(x).strip() for x in v]
+                # 空/缺失 → 保持默认
+                continue
+            if fk not in src:
+                continue
+            err = validate_exec_param(SCENE_FIELD_MAP[fk], src[fk])
+            if err is not None:
+                label = SCENES[sk]["label"]
+                return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
+            scene[fk] = src[fk]
+    return None
 
 
 def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +443,9 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
     True}`` removes the file and returns defaults (WebUI 恢复默认 button).
     """
     merged = dict(DEFAULT_EXEC_PARAMS)
+    # 深拷贝 scenes：浅拷贝下 merged["scenes"] 仍指向全局 DEFAULT_SCENES，
+    # 旧式扁平调用（不带 scenes 键）就地写入会污染全局默认值（2026-08-20）。
+    merged["scenes"] = {sk: dict(sdef) for sk, sdef in DEFAULT_SCENES.items()}
     if not isinstance(params, dict):
         return {"ok": False, "error": "请求体必须为 JSON 对象"}
     if params.get("reset") is True:
@@ -294,16 +456,40 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
         except OSError as exc:
             return {"ok": False, "error": f"重置失败: {exc}"}
         return {"ok": True, "message": "已恢复默认执行参数", "params": dict(DEFAULT_EXEC_PARAMS)}
+    # 兼容：扁平场景字段（td_enabled/td_symbols/... 旧调用方直接传）→ scenes.high。
+    # 页面收集场景字段为 scenes.*（带前缀），此处仅兼容旧式扁平调用；
+    # 扁平值总是覆盖 scenes.high 对应字段（旧式扁平即 high 场景的旧表示）。
+    # 注意：不在 params["scenes"] 上就地写入（body 可能引用 DEFAULT_SCENES，
+    # 直接写会污染全局默认值）——收集到独立 patch，应用时写到 merged。
+    flat_scene_patch: dict[str, Any] = {}
+    for fk, pk in SCENE_FIELD_MAP.items():
+        if pk in params:
+            flat_scene_patch[fk] = params[pk]
     # 迁移：保存时旧版大类值自动归一化为实例名（WebUI 保存即迁移，2026-08-17 方案 C）
     if "execution_channel" in params:
         params["execution_channel"] = normalize_execution_channel(params["execution_channel"])
     for key in merged:
+        if key == "scenes":
+            continue
         if key in params:
             err = validate_exec_param(key, params[key])
             if err is not None:
                 label = PARAM_META.get(key, {}).get("label", key)
                 return {"ok": False, "error": f"{label}: {err}"}
             merged[key] = params[key]
+
+    # S1：scenes 应用（2026-08-20）——校验 + high 场景同步扁平
+    scene_err = _apply_scenes_from_params(params, merged)
+    if scene_err is not None:
+        return scene_err
+    # 扁平场景字段（旧式调用）覆盖 scenes.high（页面提交 scenes.* 时此 patch 为空）
+    for fk, v in flat_scene_patch.items():
+        err = validate_exec_param(SCENE_FIELD_MAP[fk], v)
+        if err is not None:
+            label = SCENES["high"]["label"]
+            return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
+        merged["scenes"]["high"][fk] = v
+    _sync_flat_from_high(merged)
 
     path = exec_params_path()
     try:
