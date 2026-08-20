@@ -702,7 +702,8 @@ class _TdLiveRunner:
                 else:
                     print(
                         f"[DIAG] td_live: batches restored ({symbol}, "
-                        f"{len(bm.slots)} slots, {channel})",
+                        f"{len(bm.slots)} slots, {channel}"
+                        + (f", scene={scene}" if scene else ""),
                         file=sys.stderr, flush=True,
                     )
                     return bm
