@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
 
 from lumibot.strategies.strategy import Strategy
 
@@ -26,6 +27,17 @@ from nanobot_quant.portfolio import PortfolioEngine
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.strategies.td_sequential import calculate
 from nanobot_quant.td_params import DEFAULT_TD_PARAMS
+
+
+_SLEEPTIME_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900,
+    "1H": 3600, "4H": 14400, "1D": 86400, "1W": 604800,
+}
+
+
+def _parse_sleeptime_seconds(value: str) -> int:
+    """S3a：场景周期字符串 → 秒（1m/5m/15m/1H/4H/1D/1W）。"""
+    return _SLEEPTIME_SECONDS.get(str(value).strip(), 60)
 
 
 def _order_error(order) -> str | None:
@@ -230,11 +242,39 @@ class TdSequentialStrategy(Strategy):
 
         标的池模式：按池子顺序（=优先级）逐标的评估，谁 Setup 9 谁执行；
         同 bar 多标的命中按顺序全部处理（资金天然隔离）。
+
+        S3a 场景调度（2026-08-20）：td_live 注入 ``_scene_runtimes`` 时按
+        场景到期调度（每场景独立 sleeptime/symbols/broker/批次台账，主循环
+        心跳=最小场景周期）；回测/纸交易（无场景运行时）保持旧逻辑。
         """
         # ── 链上补确认（2026-08-11）────────────────────────────────
         # 每轮迭代先处理 pending 卖出/买入的链上确认（SUCCESS 补台账、
         # ERROR/CANCELLED 记失败、PENDING 继续等），再评估新信号。
         self._check_pending_confirmations()
+
+        # ── S3a 场景调度（2026-08-20）──────────────────────────────
+        runtimes = getattr(self, "_scene_runtimes", None)
+        if runtimes:
+            now = datetime.now(timezone.utc)
+            self._batch_managers = {}
+            for name in sorted(runtimes.keys()):
+                rt = runtimes[name]
+                if not rt.get("enabled"):
+                    continue
+                last = rt.get("last_run")
+                if last is not None and (
+                    now - last
+                ).total_seconds() < _parse_sleeptime_seconds(
+                    rt.get("sleeptime") or "1m"
+                ):
+                    continue
+                rt["last_run"] = now
+                self._activate_scene(name, rt)
+                for sym in self.symbols:
+                    self.symbol = sym
+                    self.batch_manager = self.batch_managers.get(sym)
+                    self._evaluate_symbol()
+            return
 
         # ── 批次台账实时刷新（2026-08-10 修复）────────────────────────
         # td_live 在 Strategy 构造完成后才注入 batch_managers，而 lumibot
@@ -252,6 +292,57 @@ class TdSequentialStrategy(Strategy):
             self.symbol = sym
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
+
+    def _activate_scene(self, name: str, rt: dict) -> None:
+        """S3a（2026-08-20）：激活场景运行时。
+
+        td_live 为每个启用场景构造独立 broker（含独立数据源实例 →
+        KlineCache per-scene 天然隔离）与批次台账（场景 sub_accounts →
+        slot 映射），主循环（心跳=最小场景周期）按场景到期切换。回测/
+        纸交易不调用。
+
+        场景参数（sleeptime/symbols/数量模式/出场顺序/止盈/起扫槽位/最低
+        资产）覆盖 initialize 快照的全局参数；broker 同步替换 self.broker
+        与 executor.broker——lumibot v4.5.78 get_historical_prices/
+        get_position/submit_order 均动态读 self.broker（源码确认），executor
+        心跳循环读 executor.broker.should_continue() 亦动态，故切换安全。
+        """
+        p = rt.get("params") or {}
+        self.symbols = list(p.get("symbols") or [])
+        self.quantity_mode = str(p.get("quantity_mode") or "fixed")
+        self.fixed_amount = float(p.get("td_fixed_amount") or 10.0)
+        qty = p.get("td_quantity")
+        if qty is not None:
+            self.quantity = qty
+        self.sleeptime = str(p.get("sleeptime") or "1m")
+        self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
+            self.sleeptime, "day"
+        )
+        self._exit_order = str(p.get("exit_order") or "fifo")
+        self._take_profit_pct = float(p.get("take_profit_pct") or 0.0)
+        self._start_slot = int(p.get("td_start_slot") or 1)
+        self._min_account_value = float(p.get("min_account_value") or 0)
+        self.broker = rt.get("broker") or self.broker
+        self.batch_managers = rt.get("batch_managers") or {}
+        self._batch_managers = self.batch_managers
+        ex = getattr(self, "_executor", None)
+        if ex is not None:
+            try:
+                ex.broker = self.broker
+            except Exception:  # noqa: BLE001
+                pass
+        if not rt.get("_diag_shown"):
+            rt["_diag_shown"] = True
+            try:
+                broker_name = self.broker.__class__.__name__
+            except Exception:  # noqa: BLE001
+                broker_name = "?"
+            print(
+                f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
+                f"symbols={self.symbols} mode={self.quantity_mode} "
+                f"broker={broker_name}",
+                file=sys.stderr, flush=True,
+            )
 
     def _record(self, event: str, note: str = "", *, symbol=None, **extra) -> None:
         """更新实时状态 signal + 追加事件历史（仅 live 模式写文件）。
