@@ -28,11 +28,17 @@ agent process (measurement 2026-08-20).
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Callable
 
 import pandas as pd
 
 logger = logging.getLogger("nanobot_quant.data.kline_cache")
+
+
+def _diag(msg: str) -> None:
+    """TD 风格 stderr 诊断（gatekeeper 上下文 logger.info 被静默丢弃）。"""
+    print(f"[KLINE-CACHE] {msg}", file=sys.stderr, flush=True)
 
 # bar 粒度 → 周期秒数（缺口判定：新 bar ts 必须恰为尾 ts + 该周期）
 _BAR_SECONDS = {
@@ -105,14 +111,14 @@ class KlineCache:
         if df is None or df.empty:
             raise RuntimeError(
                 f"kline cache rebuild: no data for {symbol} (bar={bar})")
+        _diag(f"prefetch symbol={symbol} bar={bar} n={len(df)}")
         return _Entry(bar, length, df.sort_index())
 
     def _incremental(self, e: _Entry, symbol: str, bar: str) -> None:
         try:
             new = self._fetch(symbol, bar, 2)
         except Exception as exc:  # 增量失败 → 保留缓存，下一轮再试
-            logger.debug("kline incremental fetch failed for %s: %s",
-                         symbol, exc)
+            _diag(f"incr-fail symbol={symbol}: {exc} (cache kept)")
             return
         if new is None or new.empty:
             return
@@ -120,6 +126,7 @@ class KlineCache:
         period = pd.Timedelta(seconds=_BAR_SECONDS.get(bar, 60))
         tail_ts = e.df.index[-1]
         gap = False
+        appended = 0
         for ts, row in new.iterrows():
             diff = ts - tail_ts
             if diff < pd.Timedelta(0):
@@ -128,13 +135,17 @@ class KlineCache:
                 e.df.iloc[-1] = row          # 尾行覆盖（进行中 bar 值更新/定格）
             elif diff == period:
                 e.df = pd.concat([e.df, row.to_frame().T])  # 恰 +1 周期 → append
+                appended += 1
             else:
                 gap = True                   # 跳跃 → 缺口 → 全量重拉
                 break
         if gap:
+            _diag(f"gap symbol={symbol} tail={tail_ts} new={ts} → full refetch")
             rebuilt = self._rebuild(symbol, bar, e.length)
             e.bar, e.length, e.df = rebuilt.bar, rebuilt.length, rebuilt.df
         else:
+            if appended:
+                _diag(f"incr symbol={symbol} +{appended} cache={len(e.df)}")
             self._trim(e)
 
     def _trim(self, e: _Entry) -> None:
