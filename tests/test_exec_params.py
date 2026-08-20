@@ -13,6 +13,7 @@ from nanobot_quant.exec_params import (
     DEFAULT_SCENES,
     PARAM_META,
     SCENE_FIELD_MAP,
+    SCENE_THRESHOLD_FIELDS,
     load_exec_params,
     save_exec_params,
     validate_exec_param,
@@ -95,7 +96,9 @@ def test_meta_covers_all_defaults_and_three_groups():
     # 场景字段 group="scene"（batch 组已退役）；P1 loop 模式已随 B3 退役。
     flat_keys = set(DEFAULT_EXEC_PARAMS) - {"scenes"}
     scene_flat_keys = set(SCENE_FIELD_MAP.values())  # td_enabled/td_symbols/...
-    assert set(PARAM_META) == flat_keys | scene_flat_keys | {"sub_accounts"}
+    # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）也是 PARAM_META 键
+    assert set(PARAM_META) == flat_keys | scene_flat_keys | {"sub_accounts"} | set(
+        SCENE_THRESHOLD_FIELDS)
     groups = {m["group"] for m in PARAM_META.values()}
     assert groups == {"risk", "exec", "td", "scene"}
     # td_bars：固定窗口，范围 20-300（onchainos CLI 单次上限）
@@ -728,3 +731,108 @@ def test_save_flat_scene_patch_does_not_poison_globals(tmp_path):
     # 再次加载（模拟后续其他模块消费）仍只反映文件内容，不再被全局污染
     assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
 
+
+def test_scene_threshold_fields_roundtrip(tmp_path):
+    """S3b-2：场景级 TD 阈值字段（entry_setup/exit_setup/exit_countdown）。
+
+    缺省 None（回退全局 td_params）、数值保存往返、空串→None、
+    非法值拒绝、不进扁平 exec_params。
+    """
+    # 缺省 → None（回退全局）
+    loaded = load_exec_params()
+    assert loaded["scenes"]["high"]["entry_setup"] is None
+    assert loaded["scenes"]["mid"]["exit_setup"] is None
+    assert loaded["scenes"]["low"]["exit_countdown"] is None
+    # 保存数值 → 往返
+    res = save_exec_params({"scenes": {"high": {
+        "entry_setup": 6, "exit_setup": 7, "exit_countdown": 13}}})
+    assert res["ok"] is True
+    loaded2 = load_exec_params()
+    assert loaded2["scenes"]["high"]["entry_setup"] == 6
+    assert loaded2["scenes"]["high"]["exit_setup"] == 7
+    assert loaded2["scenes"]["high"]["exit_countdown"] == 13
+    assert loaded2["scenes"]["mid"]["entry_setup"] is None  # mid 未动
+    # 场景阈值不进扁平 exec_params（不回写全局键）
+    assert "entry_setup" not in loaded2
+    # 空串 → None（WebUI 留空 = 回退全局）
+    res = save_exec_params({"scenes": {"high": {"entry_setup": ""}}})
+    assert res["ok"] is True
+    assert load_exec_params()["scenes"]["high"]["entry_setup"] is None
+    # 非法值拒绝（错误含场景名 + 字段名 + 范围）
+    res = save_exec_params({"scenes": {"high": {"entry_setup": 0}}})
+    assert res["ok"] is False and "entry_setup" in res["error"] and "超出范围" in res["error"]
+    res = save_exec_params({"scenes": {"high": {"exit_setup": 21}}})
+    assert res["ok"] is False and "exit_setup" in res["error"] and "超出范围" in res["error"]
+
+
+def test_scene_thresholds_activate_strategy():
+    """S3b-2：_activate_scene 场景级阈值覆盖 _td_params（缺省保持全局）。"""
+    from nanobot_quant.strategies.td_sequential_strategy import (
+        TdSequentialStrategy,
+    )
+    st = TdSequentialStrategy.__new__(TdSequentialStrategy)
+    st._td_params = {"entry_setup": 9, "exit_setup": 9, "exit_countdown": 13}
+    st._scene_runtimes = {}
+    st.broker = None
+    st._active_scene = None
+    # 场景显式阈值 → 覆盖
+    st._activate_scene("high", {
+        "params": {
+            "entry_setup": 6, "exit_setup": 7, "exit_countdown": None,
+            "symbols": ["CRCLX"], "quantity_mode": "fixed_amount",
+            "td_fixed_amount": 4.0, "sleeptime": "1m",
+            "exit_order": "lifo", "take_profit_pct": 0.0,
+            "td_start_slot": 1, "min_account_value": 0,
+        },
+        "broker": None, "batch_managers": {},
+    })
+    assert st._td_params["entry_setup"] == 6
+    assert st._td_params["exit_setup"] == 7
+    assert st._td_params["exit_countdown"] == 13  # None 保持全局
+    # 缺省（None 全部）→ 保持全局不动
+    st._td_params = {"entry_setup": 9, "exit_setup": 9, "exit_countdown": 13}
+    st._activate_scene("mid", {
+        "params": {
+            "entry_setup": None, "exit_setup": None, "exit_countdown": None,
+            "symbols": ["SPYX"], "quantity_mode": "fixed_amount",
+            "td_fixed_amount": 4.0, "sleeptime": "5m",
+            "exit_order": "fifo", "take_profit_pct": 0.0,
+            "td_start_slot": 1, "min_account_value": 0,
+        },
+        "broker": None, "batch_managers": {},
+    })
+    assert st._td_params["entry_setup"] == 9
+    assert st._td_params["exit_setup"] == 9
+    assert st._td_params["exit_countdown"] == 13
+
+
+def test_scene_threshold_fields_render():
+    """S3b-2：场景卡片渲染三项（None → 空输入框 + placeholder 默认值）。"""
+    from nanobot_quant.exec_params_handlers import _scene_card_html
+    html = _scene_card_html(
+        "high", {
+            "entry_setup": None, "exit_setup": 7, "exit_countdown": None,
+            "symbols": ["SOL"], "sub_accounts": ["gate_bot1"],
+        },
+        None, "cex", ["gate_bot1", "gate_bot2"], 0,
+    )
+    assert 'name="scenes_high_entry_setup" value=""' in html
+    assert 'name="scenes_high_exit_setup" value="7"' in html
+    assert 'placeholder="13"' in html  # 留空提示全局默认
+
+
+def test_save_flat_scene_patch_does_not_poison_globals(tmp_path):
+    # 回归（2026-08-20）：旧式扁平调用（不带 scenes 键）曾就地写入
+    # merged["scenes"]（浅拷贝下指向全局 DEFAULT_SCENES），污染默认值后
+    # 所有后续 load_exec_params() 都读到 td_enabled=True，wallet 测试 409。
+    enabled_before = DEFAULT_SCENES["high"]["enabled"]
+    res = save_exec_params({"td_enabled": True, "max_position_pct": 0.30})
+    assert res["ok"] is True
+    # 全局默认值必须保持原样
+    assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
+    # 保存内容本身生效
+    loaded = load_exec_params()
+    assert loaded["td_enabled"] is True
+    assert loaded["max_position_pct"] == 0.30
+    # 再次加载（模拟后续其他模块消费）仍只反映文件内容，不再被全局污染
+    assert DEFAULT_SCENES["high"]["enabled"] == enabled_before

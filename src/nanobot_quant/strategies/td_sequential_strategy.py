@@ -327,6 +327,13 @@ class TdSequentialStrategy(Strategy):
         self._take_profit_pct = float(p.get("take_profit_pct") or 0.0)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
+        # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
+        # 缺省 None → 保留全局 td_params（td_live 构造 parameters 时已 merge），
+        # 非 None 覆盖 self._td_params（策略每 bar 读取处即此处覆盖生效）。
+        for key in ("entry_setup", "exit_setup", "exit_countdown"):
+            v = p.get(key)
+            if v is not None:
+                self._td_params[key] = int(v)
         self.broker = rt.get("broker") or self.broker
         self.batch_managers = rt.get("batch_managers") or {}
         self._batch_managers = self.batch_managers
