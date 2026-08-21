@@ -400,6 +400,7 @@ class TdSequentialStrategy(Strategy):
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
+                f"stop_loss={getattr(self._risk, 'stop_loss_pct', '?')} "
                 f"broker={broker_name}",
                 file=sys.stderr, flush=True,
             )
