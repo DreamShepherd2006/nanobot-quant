@@ -397,10 +397,11 @@ class TdSequentialStrategy(Strategy):
                 broker_name = self.broker.__class__.__name__
             except Exception:  # noqa: BLE001
                 broker_name = "?"
+            sl_diag = getattr(getattr(self, "_risk", None), "stop_loss_pct", "?")
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
-                f"stop_loss={getattr(self._risk, 'stop_loss_pct', '?')} "
+                f"stop_loss={sl_diag} "
                 f"broker={broker_name}",
                 file=sys.stderr, flush=True,
             )
