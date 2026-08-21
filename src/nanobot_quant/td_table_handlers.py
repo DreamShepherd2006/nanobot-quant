@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html as _html
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -664,7 +665,8 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     try:
         _ep = load_exec_params()
         _scenes_cfg = _ep.get("scenes") or {}
-    except Exception:  # noqa: BLE001
+    except Exception as _scexc:  # noqa: BLE001
+        print(f"[TD-PAGE] load_exec_params failed: {_scexc!r}", file=sys.stderr, flush=True)
         _scenes_cfg = {}
     _SCENE_META = {
         "high": ("📈 高频", "high"),
@@ -673,6 +675,9 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     }
     scene_order = [k for k in ("high", "mid", "low")
                    if _scenes_cfg.get(k, {}).get("enabled")]
+    print("[TD-PAGE] scenes enabled: " + ", ".join(
+        f"{k}={bool(_scenes_cfg.get(k, {}).get('enabled'))}" for k in ("high", "mid", "low")
+    ) + f" -> scene_order={scene_order}", file=sys.stderr, flush=True)
     sym_scenes = st.get("symbols", {})  # {scene: {symbol: {...}}}
     if not isinstance(sym_scenes, dict):
         sym_scenes = {}
