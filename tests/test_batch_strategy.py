@@ -938,3 +938,124 @@ def test_backtest_timestep_unchanged():
 
 
 # ── BUY：占用 slot ───────────────────────────────────────────────────
+
+
+# ── TD CEX Step 2：CEX pending 订单轮询确认（2026-08-21）─────────────
+
+
+class _FakeCexBroker:
+    """CEX pending 确认测试用 broker：_query_order 返回预设状态。"""
+
+    def __init__(self, status, filled, avg=0.0):
+        self.status, self.filled, self.avg = status, filled, avg
+        self.last = None
+
+    def _query_order(self, order_id, pair):
+        self.last = (order_id, pair)
+        return (self.status, self.filled, 0.0, self.avg)
+
+
+def _inject_cex_buy_pending(s, order_id="111", qty=0.0372, price=66.0):
+    s._pending_buys[1] = {
+        "cex": True, "order_id": order_id, "qty": qty, "price": price,
+        "symbol": "CRCLX", "reason": "setup_buy=9",
+    }
+
+
+def _inject_cex_sell_pending(s, order_id="222", qty=5.0, price=66.0):
+    s._pending_sells[1] = {
+        "cex": True, "order_id": order_id, "qty": qty, "price": price,
+        "symbol": "CRCLX", "exit_reason": "setup_sell=9",
+    }
+
+
+def test_cex_pending_buy_confirmed_opens(tmp_path):
+    """CEX BUY pending 查单 filled → open_lot 补台账（回填 avg_price）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    _inject_cex_buy_pending(s)
+    fb = _FakeCexBroker("filled", 0.0372, 66.5)
+    s._cex_confirm_broker = lambda slot_id: fb
+    s._check_pending_confirmations()
+    open_slots = bm.open_slots()
+    assert len(open_slots) == 1
+    assert open_slots[0]["slot"] == 1
+    assert open_slots[0]["lot"]["qty"] == 0.0372
+    assert open_slots[0]["lot"]["entry_price"] == 66.0  # 策略价优先
+    assert s._pending_buys == {}
+    assert fb.last == ("111", "CRCLX_USDT")
+
+
+def test_cex_pending_buy_zero_fill_releases(tmp_path):
+    """CEX BUY pending 查单 cancelled/ioc 零成交 → 不建仓 + 释放 slot。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    _inject_cex_buy_pending(s)
+    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("cancelled", 0.0)
+    s._check_pending_confirmations()
+    assert bm.open_slots() == []  # 零成交不建仓（防幽灵仓）
+    assert s._pending_buys == {}  # 清 pending → slot 回到 available
+
+
+def test_cex_pending_buy_still_open_waits(tmp_path):
+    """CEX BUY pending 查单仍 open → 继续等待（不建仓不释放）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    _inject_cex_buy_pending(s)
+    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("submitted", 0.0)
+    s._check_pending_confirmations()
+    assert bm.open_slots() == []
+    assert 1 in s._pending_buys  # 继续等
+
+
+def test_cex_pending_sell_confirmed_releases(tmp_path):
+    """CEX SELL pending 查单 filled → close_lot 释放 slot。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _inject_cex_sell_pending(s)
+    fb = _FakeCexBroker("filled", 5.0, 66.9)
+    s._cex_confirm_broker = lambda slot_id: fb
+    s._check_pending_confirmations()
+    assert bm.open_slots() == []  # 补确认后释放
+    assert s._pending_sells == {}
+    assert fb.last == ("222", "CRCLX_USDT")
+
+
+def test_cex_pending_sell_zero_fill_keeps_open(tmp_path):
+    """CEX SELL pending 查单 cancelled/ioc 零成交 → 台账保持 open（可重试卖）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _inject_cex_sell_pending(s)
+    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("cancelled", 0.0)
+    s._check_pending_confirmations()
+    assert len(bm.open_slots()) == 1  # 保持 open
+    assert s._pending_sells == {}  # 清 pending → 下轮可重试卖出
+
+
+def test_cex_pending_sell_still_open_waits(tmp_path):
+    """CEX SELL pending 查单仍 open → 继续等待（台账保持 open）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _inject_cex_sell_pending(s)
+    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("submitted", 0.0)
+    s._check_pending_confirmations()
+    assert len(bm.open_slots()) == 1
+    assert 1 in s._pending_sells  # 继续等
+
+
+def test_cex_pending_query_error_keeps_waiting(tmp_path):
+    """CEX 查单异常 → 保留 pending（fail-safe 不误判成交/失败）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
+    _inject_cex_buy_pending(s)
+
+    def _boom(slot_id):
+        raise RuntimeError("network down")
+
+    s._cex_confirm_broker = _boom
+    s._check_pending_confirmations()
+    assert bm.open_slots() == []
+    assert 1 in s._pending_buys  # 继续等
