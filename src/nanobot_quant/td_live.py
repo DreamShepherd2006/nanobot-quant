@@ -820,6 +820,14 @@ class _TdLiveRunner:
                 )
                 return self.status()
             self._executor = executor
+            # 新循环启动前复位停止标志（延迟停止方案：stop 时置位，
+            # 防主循环重建 scheduler 的孤儿 job 空跑；新循环必须清除）
+            try:
+                from nanobot_quant import td_live_state
+
+                td_live_state.stop_requested.clear()
+            except Exception:  # pragma: no cover
+                pass
             t = threading.Thread(target=self._run, daemon=True, name="td-live")
             self._thread = t
             t.start()
@@ -916,36 +924,72 @@ class _TdLiveRunner:
             executor = self._executor
             self._state["running"] = False
         if executor is not None:
-            self._stop_executor_safe(executor)
+            self._stop_executor_graceful(executor)
         print(
-            "[DIAG] td_live: StrategyExecutor stop requested",
+            "[DIAG] td_live: 停止已请求（当前轮自然结束后生效，页面不受影响）",
             file=sys.stderr, flush=True,
         )
         return self.status()
 
-    @staticmethod
-    def _stop_executor_safe(executor: Any) -> None:
-        """executor.stop() 带超时（独立线程 + join 15s）。
+    def _stop_executor_graceful(self, executor: Any) -> None:
+        """延迟停止（2026-08-21 方案，用户拍板）。
 
-        2026-08-21 空间卡死根因：lumibot executor.stop() →
-        gracefully_exit() → APScheduler shutdown(wait=True) 在 scheduler
-        job 卡于网络调用（如 Gate API 无响应）时无限等待。该路径若在
-        async handler（POST /config/exec）事件循环内同步执行，整个
-        gatekeeper（页面 + WebSocket）被堵死。此处放独立 daemon 线程并
-        join 15s 超时——超时则放弃等待（策略对象/线程留给进程回收），
-        调用方（WebUI 保存）立刻返回，绝不阻塞事件循环。
+        用户原则：不在业务进行中强行中断——业务轮可能正涉及订单处理，
+        强行中断风险大。停止 = 等当前轮业务自然结束后再停。
+
+        旧实现（_stop_executor_safe）调 executor.stop() → gracefully_exit
+        → APScheduler shutdown(wait=True) 在 job 卡于网络调用时无限等待，
+        曾致线程残留（thread_alive=True）与空间卡死。新实现：
+          ① 轮询策略 _iteration_active == False（当前轮跑完，90s 兜底）
+          ② 设 td_live_state.stop_requested + executor.stop_event
+             ——主循环 _should_continue_trading_loop 感知 stop_event →
+             break → 线程退出；stop_requested 供策略孤儿 job 守卫
+          ③ 清理 scheduler（remove_all_jobs + shutdown(wait=False) +
+             scheduler=None）——防主循环 break 前重建的 scheduler 在
+             线程退出后继续调度孤儿 job
+        不调 executor.stop()/gracefully_exit（避开 shutdown(wait=True)）。
         """
-        t = threading.Thread(
-            target=executor.stop, daemon=True, name="td-executor-stop"
-        )
-        t.start()
-        t.join(timeout=15.0)
-        if t.is_alive():
+        def _do() -> None:
+            from nanobot_quant import td_live_state
+
+            strategy = getattr(self, "_strategy", None)
+            # ① 等当前轮业务自然结束
+            deadline = time.monotonic() + 90.0
+            while time.monotonic() < deadline:
+                if strategy is None or not getattr(
+                    strategy, "_iteration_active", False
+                ):
+                    break
+                time.sleep(0.2)
+            # ② 停止信号（主循环 1s 内 break；策略孤儿 job 守卫）
+            try:
+                td_live_state.stop_requested.set()
+                executor.stop_event.set()
+            except Exception as exc:  # pragma: no cover
+                print(
+                    f"[DIAG] td_live: 停止信号设置异常: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+            # ③ 清理 scheduler（防孤儿 job；wait=False 秒回）
+            try:
+                sched = getattr(executor, "scheduler", None)
+                if sched is not None:
+                    sched.remove_all_jobs()
+                    sched.shutdown(wait=False)
+                executor.scheduler = None
+            except Exception as exc:  # pragma: no cover
+                print(
+                    f"[DIAG] td_live: scheduler 清理异常: {exc}",
+                    file=sys.stderr, flush=True,
+                )
             print(
-                "[DIAG] td_live: executor.stop() 超时 15s "
-                "（lumibot gracefully_exit 卡住）— 放弃等待",
+                "[DIAG] td_live: 优雅停止完成（当前轮已自然结束，线程将退出）",
                 file=sys.stderr, flush=True,
             )
+
+        threading.Thread(
+            target=_do, daemon=True, name="td-executor-graceful-stop"
+        ).start()
 
     def _wait_thread_exit(self, timeout: float = 10.0) -> bool:
         """等待旧循环线程退出（stop 后 lumibot 收尾可能 >0.3s）。

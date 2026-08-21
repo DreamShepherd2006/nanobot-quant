@@ -16,6 +16,7 @@ Usage::
 
 from __future__ import annotations
 
+import functools
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
@@ -238,6 +239,32 @@ class TdSequentialStrategy(Strategy):
             fn = calculate  # 原版（模块级 import）
         return fn(df, news_count=news_count, params=self._td_params)
 
+    def _track_iteration(fn):
+        """包裹 on_trading_iteration（2026-08-21 延迟停止方案）。
+
+        - 维护 ``self._iteration_active``：当前轮业务是否正在执行
+          （try/finally 保证异常也复位）——td_live.stop() 据此判断
+          「当前轮是否已自然结束」，结束后才执行停止。
+        - 开头检查 td_live_state.stop_requested：停止后主循环 break 前
+          lumibot 可能重建 scheduler，新 scheduler 的孤儿 job 会在
+          interval 后再次调 on_trading_iteration——置位后直接 return，
+          防止停止后空跑/误下单。
+        """
+        @functools.wraps(fn)
+        def wrapper(self, *a, **kw):
+            from nanobot_quant import td_live_state
+
+            if td_live_state.stop_requested.is_set():
+                return None
+            self._iteration_active = True
+            try:
+                return fn(self, *a, **kw)
+            finally:
+                self._iteration_active = False
+
+        return wrapper
+
+    @_track_iteration
     def on_trading_iteration(self):
         """Called for each bar (trading day) during the backtest.
 

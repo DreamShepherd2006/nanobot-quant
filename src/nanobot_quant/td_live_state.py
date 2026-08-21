@@ -29,6 +29,13 @@ LIVE_STATE: dict = {
 
 _lock = threading.Lock()
 
+#: 停止请求标志（2026-08-21 延迟停止方案）。td_live.stop() 设置；
+#: 策略 on_trading_iteration 开头检查（孤儿 job 防护——主循环 break 前
+#: lumibot 可能重建 scheduler，新 scheduler 的 job 会在 interval 后再次
+#: 调 on_trading_iteration，stop_requested 置位后直接 return 防止空跑/
+#: 误下单）。start() 启动新循环时 clear()。
+stop_requested = threading.Event()
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")

@@ -6,6 +6,7 @@ lumibot，测试容器没有），验证 sync_from_params 的启停/重启逻辑
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -17,10 +18,15 @@ class _FakeExecutor:
     def __init__(self):
         self.stopped = False
         self.running = False
+        # 2026-08-21 延迟停止：stop() 不再调 executor.stop()，改设
+        # stop_event + 清理 scheduler（run() 模拟主循环感知 stop_event
+        # 后 break）。
+        self.stop_event = threading.Event()
+        self.scheduler = None
 
     def run(self):
         self.running = True
-        while not self.stopped:
+        while not self.stopped and not self.stop_event.is_set():
             time.sleep(0.01)
         self.running = False
 
@@ -37,7 +43,7 @@ class _SlowStopExecutor(_FakeExecutor):
 
     def run(self):
         self.running = True
-        while not self.stopped:
+        while not self.stopped and not self.stop_event.is_set():
             time.sleep(0.01)
         time.sleep(self.quit_delay)  # 收尾耗时
         self.running = False
@@ -86,8 +92,8 @@ def test_enabled_idempotent(monkeypatch):
     runner.sync_from_params(_params(td_enabled=True))
     st = runner.sync_from_params(_params(td_enabled=True))
     assert st["running"] is True
-    # 未重复构造 executor（单例）——fake 的 stop 未被调用
-    assert fake.stopped is False
+    # 未重复构造 executor（单例）——延迟停止未触发（stop_event 未置位）
+    assert fake.stop_event.is_set() is False
 
 
 def test_param_change_restarts(monkeypatch):
@@ -98,7 +104,8 @@ def test_param_change_restarts(monkeypatch):
     st = runner.sync_from_params(_params(td_enabled=True, td_symbols=["CRCLX"]))
     assert st["running"] is True
     assert st["symbols"] == ["CRCLX"]
-    assert fake.stopped is True  # 旧循环已 stop
+    time.sleep(0.1)
+    assert fake.stop_event.is_set()  # 旧循环已收到停止信号
 
 
 def test_disable_stops_loop(monkeypatch):
@@ -108,7 +115,8 @@ def test_disable_stops_loop(monkeypatch):
     time.sleep(0.05)
     st = runner.sync_from_params(_params(td_enabled=False))
     assert st["running"] is False
-    assert fake.stopped is True
+    time.sleep(0.1)
+    assert fake.stop_event.is_set()  # 延迟停止已发停止信号
     time.sleep(0.05)
     assert fake.running is False
 
