@@ -836,3 +836,38 @@ def test_save_flat_scene_patch_does_not_poison_globals(tmp_path):
     assert loaded["max_position_pct"] == 0.30
     # 再次加载（模拟后续其他模块消费）仍只反映文件内容，不再被全局污染
     assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
+def test_scene_low_only_enabled_starts_td(tmp_path):
+    """2026-08-21 回归：只开 low（high/mid 停用）→ td_enabled=True。
+
+    此前 _sync_flat_from_high 把 td_enabled 绑定为 high.enabled，
+    只勾 low 时全局 TD 不启动（用户实测：td_enabled=False、running=False）。
+    """
+    res = save_exec_params({"scenes": {
+        "low": {"enabled": True, "sleeptime": "15m", "symbols": ["SOL"],
+                "batches": 1, "sub_accounts": ["gate_bot5"]}}})
+    assert res["ok"] is True
+    loaded = load_exec_params()
+    assert loaded["td_enabled"] is True          # 全局启动标志 = 任一场景启用
+    assert loaded["scenes"]["high"]["enabled"] is False  # high 保持停用
+    assert loaded["scenes"]["mid"]["enabled"] is False   # mid 保持停用
+    assert loaded["scenes"]["low"]["enabled"] is True    # 只有 low 启用
+
+
+def test_scene_all_disabled_stops_td(tmp_path):
+    """全部场景停用 → td_enabled=False（TD 停止）。"""
+    res = save_exec_params({"scenes": {"low": {"enabled": False}}})
+    assert res["ok"] is True
+    assert load_exec_params()["td_enabled"] is False
+
+
+def test_scene_mid_only_enabled_starts_td(tmp_path):
+    """只开 mid（high/low 停用）→ td_enabled=True（场景无关）。"""
+    res = save_exec_params({"scenes": {
+        "mid": {"enabled": True, "sleeptime": "5m", "symbols": ["SPYX"],
+                "batches": 2, "sub_accounts": ["gate_bot3", "gate_bot4"]}}})
+    assert res["ok"] is True
+    loaded = load_exec_params()
+    assert loaded["td_enabled"] is True
+    assert loaded["scenes"]["high"]["enabled"] is False
+    assert loaded["scenes"]["mid"]["enabled"] is True
+
