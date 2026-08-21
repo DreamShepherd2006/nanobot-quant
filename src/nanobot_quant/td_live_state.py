@@ -79,6 +79,12 @@ def set_loop(running: bool, next_iteration: str | None = None) -> None:
         LIVE_STATE["updated_at"] = _now_iso()
 
 
+def set_next_due(next_iteration: str | None) -> None:
+    """更新「下一轮」时间（策略场景调度每轮计算后调用，2026-08-21）。"""
+    with _lock:
+        LIVE_STATE["next_iteration"] = next_iteration
+
+
 def set_strategy(name: str) -> None:
     """记录运行中循环实际使用的策略变体（TD live 启动时调用）。
 

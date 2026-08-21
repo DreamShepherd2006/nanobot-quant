@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from lumibot.strategies.strategy import Strategy
 
@@ -262,11 +262,16 @@ class TdSequentialStrategy(Strategy):
         if runtimes:
             now = datetime.now(timezone.utc)
             self._batch_managers = {}
+            next_due = None
             for name in sorted(runtimes.keys()):
                 rt = runtimes[name]
                 if not rt.get("enabled"):
                     continue
                 last = rt.get("last_run")
+                due = (last + timedelta(seconds=_parse_sleeptime_seconds(
+                    rt.get("sleeptime") or "1m"))) if last is not None else now
+                if next_due is None or due < next_due:
+                    next_due = due
                 if last is not None and (
                     now - last
                 ).total_seconds() < _parse_sleeptime_seconds(
@@ -282,6 +287,12 @@ class TdSequentialStrategy(Strategy):
                     self.symbol = sym
                     self.batch_manager = self.batch_managers.get(sym)
                     self._evaluate_symbol()
+            try:
+                from nanobot_quant import td_live_state
+                td_live_state.set_next_due(
+                    next_due.strftime("%Y-%m-%d %H:%M:%S UTC") if next_due else None)
+            except Exception:  # noqa: BLE001
+                pass
             return
 
         # ── 批次台账实时刷新（2026-08-10 修复）────────────────────────
@@ -575,6 +586,18 @@ class TdSequentialStrategy(Strategy):
 
         # ── 实时状态共享（td-table「实时监控」tab，2026-08-11）──
         # 无条件更新内存（同进程零成本）；信号动作由 _record 更新 signal。
+        _last_ts = df.index[-1] if len(df) else None
+        if _last_ts is not None:
+            try:
+                if getattr(_last_ts, "tzinfo", None) is not None:
+                    _last_ts = _last_ts.tz_convert("UTC")
+                else:
+                    _last_ts = _last_ts.tz_localize("UTC")
+                _time_s = _last_ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:  # noqa: BLE001
+                _time_s = str(df.index[-1])
+        else:
+            _time_s = ""
         self._last_signal = {
             "setup_buy": setup_buy,
             "setup_sell": setup_sell,
@@ -582,7 +605,7 @@ class TdSequentialStrategy(Strategy):
             "cd_sell": cd_sell,
             "score": score,
             "price": price,
-            "time": str(df.index[-1]) if len(df) else "",
+            "time": _time_s,
         }
         try:
             from nanobot_quant import td_live_state

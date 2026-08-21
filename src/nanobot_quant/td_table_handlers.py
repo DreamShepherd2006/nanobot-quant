@@ -856,13 +856,13 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     )
 
     html = (
+        '<div id="live-wrap">'
         '<div class="status">'
         f'<span>循环：<b>{run_txt}</b></span>'
         f'<span>下一轮：{nxt}</span>'
         f'<span>更新时间：{upd}</span>'
         f'<span class="muted">自动刷新 {_live_refresh_s()}s · 颜色：橙=临近信号 · 绿=达到/超过阈值</span>'
         '</div>'
-        '<div id="live-wrap">'
         f'{blocks}'
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
