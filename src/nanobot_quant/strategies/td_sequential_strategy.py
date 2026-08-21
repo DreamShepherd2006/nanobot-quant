@@ -1115,7 +1115,8 @@ class TdSequentialStrategy(Strategy):
         for slot_id in list(self._pending_sells):
             info = self._pending_sells[slot_id]
             if info.get("cex"):
-                continue  # CEX pending 确认在 Step 2（2026-08-17）——台账保持 open
+                self._confirm_cex_sell(slot_id, info)
+                continue
             aid = info.get("account_id", "")
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
@@ -1217,7 +1218,8 @@ class TdSequentialStrategy(Strategy):
         for slot_id in list(self._pending_buys):
             info = self._pending_buys[slot_id]
             if info.get("cex"):
-                continue  # CEX pending 确认在 Step 2（2026-08-17）——不 open_lot（fail-safe）
+                self._confirm_cex_buy(slot_id, info)
+                continue
             aid = info.get("account_id", "")
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
@@ -1324,6 +1326,149 @@ class TdSequentialStrategy(Strategy):
                         self._wallet_switch(home)
                     except Exception as exc:  # noqa: BLE001
                         self.logger.warning(f"TD RESTORE ERR | {exc}")
+
+    # ── TD CEX Step 2：CEX pending 订单轮询确认（2026-08-21）────────
+    # Gate 市价单异步结算：下单只回 order id，需轮询查单（约 0.5s×10 内
+    # 结算）。此前对 CEX pending 直接 continue（fail-safe 不 open_lot），
+    # 已成交的 slot 永不建仓/释放。此处分 BUY/SELL 两个确认路径：
+    #   filled → BUY: open_lot 补台账（回填 avg_price）；
+    #           SELL: close_lot 释放 slot。
+    #   cancelled/ioc 零成交 → BUY: 记 FAIL 释放 slot；
+    #                         SELL: 记 FAIL，台账保持 open（下轮可重试卖）。
+    #   open/submitted → 继续等；查询异常 → 保留 pending（fail-safe）。
+
+    def _cex_confirm_broker(self, slot_id: int) -> Any:
+        """CEX pending 确认用的子账号 broker（缓存缺失时按 slot 重建）。"""
+        broker = self._cex_brokers.get(slot_id)
+        if broker is None:
+            try:
+                broker = self._cex_slot_broker({"slot": slot_id, "account_id": ""})
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    f"TD CEX CONFIRM ERR | slot={slot_id} 重建 broker 失败 {exc}"
+                )
+                return None
+        return broker
+
+    def _confirm_cex_sell(self, slot_id: int, info: dict) -> None:
+        """CEX 卖单确认：filled→close_lot；终态零成交→EXIT_FAIL 台账保持 open。"""
+        symbol = info.get("symbol", self.symbol)
+        order_id = str(info.get("order_id") or "")
+        if not order_id:
+            return
+        try:
+            broker = self._cex_confirm_broker(slot_id)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD PENDING CHECK ERR | slot={slot_id} symbol={symbol} CEX {exc}"
+            )
+            return
+        if broker is None:
+            return
+        try:
+            from nanobot_quant.gate_credentials import gate_pair
+            pair = gate_pair(symbol, self.parameters.get("tokens_json") or [])
+            status, filled, left, avg = broker._query_order(order_id, pair)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD PENDING CHECK ERR | slot={slot_id} symbol={symbol} CEX {exc}"
+            )
+            return
+        if status == "filled" and filled > 0:
+            bm = self._batch_managers.get(symbol) or self.batch_manager
+            bm.close_lot(slot_id)
+            bm.save()
+            self.logger.info(
+                f"TD BATCH EXIT (CEX CONFIRM) | symbol={symbol} slot={slot_id} "
+                f"qty={info.get('qty', 0):.6g} avg={avg}"
+            )
+            self._record(
+                "EXIT",
+                f"slot={slot_id} CEX 确认平仓 qty={info.get('qty', 0):.6g}",
+                symbol=symbol, slot=slot_id, qty=info.get("qty", 0),
+                price=info.get("price", 0),
+                actual_price=avg or None,
+                direction="sell", status="ok",
+            )
+            del self._pending_sells[slot_id]
+        elif status in ("cancelled", "failed"):
+            self.logger.warning(
+                f"TD BATCH EXIT FAIL | symbol={symbol} slot={slot_id} CEX 确认 {status} 零成交"
+            )
+            self._record(
+                "EXIT_FAIL",
+                f"slot={slot_id} CEX 确认 {status} 零成交",
+                symbol=symbol, slot=slot_id, qty=info.get("qty", 0),
+                price=info.get("price", 0),
+                direction="sell", status="fail",
+            )
+            del self._pending_sells[slot_id]
+        else:
+            self.logger.info(
+                f"TD PENDING CHECK | slot={slot_id} symbol={symbol} CEX {status} "
+                f"filled={filled:.6g}"
+            )
+
+    def _confirm_cex_buy(self, slot_id: int, info: dict) -> None:
+        """CEX 买单确认：filled→open_lot 补台账；终态零成交→BUY_FAIL 释放 slot。"""
+        symbol = info.get("symbol", self.symbol)
+        order_id = str(info.get("order_id") or "")
+        if not order_id:
+            return
+        try:
+            broker = self._cex_confirm_broker(slot_id)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD PENDING CHECK ERR | slot={slot_id} symbol={symbol} CEX {exc}"
+            )
+            return
+        if broker is None:
+            return
+        try:
+            from nanobot_quant.gate_credentials import gate_pair
+            pair = gate_pair(symbol, self.parameters.get("tokens_json") or [])
+            status, filled, left, avg = broker._query_order(order_id, pair)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD PENDING CHECK ERR | slot={slot_id} symbol={symbol} CEX {exc}"
+            )
+            return
+        if status == "filled" and filled > 0:
+            qty = float(info.get("qty") or filled)
+            bm = self._batch_managers.get(symbol) or self.batch_manager
+            bm.open_lot(slot=slot_id, qty=qty,
+                        entry_price=float(info.get("price") or avg or 0))
+            bm.save()
+            self.logger.info(
+                f"TD BATCH LONG (CEX CONFIRM) | symbol={symbol} slot={slot_id} "
+                f"qty={qty:.6g} price={info.get('price', 0):.2f} avg={avg}"
+            )
+            self._record(
+                "LONG",
+                f"slot={slot_id} CEX 确认建仓 qty={qty:.6g}",
+                symbol=symbol, slot=slot_id, qty=qty,
+                price=info.get("price", 0),
+                actual_price=avg or None,
+                direction="buy", status="ok",
+            )
+            del self._pending_buys[slot_id]
+        elif status in ("cancelled", "failed"):
+            self.logger.warning(
+                f"TD BATCH BUY FAIL | symbol={symbol} slot={slot_id} CEX 确认 {status} 零成交"
+            )
+            self._record(
+                "BUY_FAIL",
+                f"slot={slot_id} CEX 确认 {status} 零成交",
+                symbol=symbol, slot=slot_id, qty=info.get("qty", 0),
+                price=info.get("price", 0),
+                direction="buy", status="fail",
+            )
+            del self._pending_buys[slot_id]
+        else:
+            self.logger.info(
+                f"TD PENDING CHECK | slot={slot_id} symbol={symbol} CEX {status} "
+                f"filled={filled:.6g}"
+            )
 
     # ── 真分账 v1.1：子钱包 switch / 资金检查 / 还原 ────────────────
 
