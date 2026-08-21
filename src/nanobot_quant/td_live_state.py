@@ -46,10 +46,17 @@ def events_path() -> Path:
     return Path.home() / ".td_live_events.jsonl"
 
 
-def update_symbol(symbol: str, data: dict) -> None:
-    """每轮更新某标的状态（TD 策略 _evaluate_symbol 计算后调用）。"""
+def update_symbol(symbol: str, data: dict, scene: str = "") -> None:
+    """每轮更新某标的状态（TD 策略 _evaluate_symbol 计算后调用）。
+
+    2026-08-21（页面场景化 B1）：LIVE_STATE['symbols'] 按场景嵌套
+    {scene: {symbol: {...}}}——多场景同标的互不覆盖；scene 缺省
+    （非场景模式/回测/旧调用方）归入 "default"。
+    """
+    key = scene or "default"
     with _lock:
-        LIVE_STATE["symbols"][symbol] = {
+        syms = LIVE_STATE["symbols"].setdefault(key, {})
+        syms[symbol] = {
             "setup_buy": data.get("setup_buy", 0) or 0,
             "setup_sell": data.get("setup_sell", 0) or 0,
             "cd_buy": data.get("cd_buy", 0) or 0,
@@ -61,7 +68,7 @@ def update_symbol(symbol: str, data: dict) -> None:
             "time": data.get("time", ""),
             "updated_at": _now_iso(),
         }
-        LIVE_STATE["updated_at"] = LIVE_STATE["symbols"][symbol]["updated_at"]
+        LIVE_STATE["updated_at"] = syms[symbol]["updated_at"]
 
 
 def set_loop(running: bool, next_iteration: str | None = None) -> None:
@@ -70,6 +77,12 @@ def set_loop(running: bool, next_iteration: str | None = None) -> None:
         LIVE_STATE["running"] = bool(running)
         LIVE_STATE["next_iteration"] = next_iteration
         LIVE_STATE["updated_at"] = _now_iso()
+
+
+def set_next_due(next_iteration: str | None) -> None:
+    """更新「下一轮」时间（策略场景调度每轮计算后调用，2026-08-21）。"""
+    with _lock:
+        LIVE_STATE["next_iteration"] = next_iteration
 
 
 def set_strategy(name: str) -> None:

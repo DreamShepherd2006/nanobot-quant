@@ -23,12 +23,27 @@ def test_update_symbol_and_get_state():
     st = td_live_state.get_state()
     assert st["running"] is True
     assert st["next_iteration"] == "01:31:00"
-    s = st["symbols"]["CRCLX"]
+    # B1（2026-08-21）：symbols 按场景嵌套，scene 缺省归入 default
+    s = st["symbols"]["default"]["CRCLX"]
     assert s["setup_buy"] == 3
     assert s["setup_sell"] == 7
     assert s["cd_sell"] == 13
     assert s["signal"] == "HOLD"  # 无动作时默认
     assert s["updated_at"]
+
+
+def test_update_symbol_scene_isolation():
+    """B1：同一标的不同场景互不覆盖（页面三场景分区的数据基础）。"""
+    td_live_state.update_symbol("SOL", {"setup_buy": 2, "price": 89.1}, scene="low")
+    td_live_state.update_symbol("SOL", {"setup_buy": 9, "price": 89.4}, scene="high")
+    st = td_live_state.get_state()
+    assert st["symbols"]["low"]["SOL"]["setup_buy"] == 2
+    assert st["symbols"]["high"]["SOL"]["setup_buy"] == 9
+    # 未指定场景 → default，与 high/low 互不干扰（get_state 为快照，需重取）
+    td_live_state.update_symbol("SOL", {"setup_buy": 5})
+    st = td_live_state.get_state()
+    assert st["symbols"]["default"]["SOL"]["setup_buy"] == 5
+    assert st["symbols"]["high"]["SOL"]["setup_buy"] == 9
 
 
 def test_append_and_load_events(tmp_path: Path):
@@ -81,8 +96,8 @@ def test_record_not_written_when_not_live(tmp_path: Path):
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
     s._record("LONG", "slot=1 qty=0.1")
     assert not ev_file.exists()  # live_mode=False → 不写文件
-    # 但内存状态已更新（按策略自身 symbol 键）
-    assert td_live_state.get_state()["symbols"][s.symbol]["signal"] == "LONG"
+    # 但内存状态已更新（按策略自身 symbol 键，scene 缺省归入 default）
+    assert td_live_state.get_state()["symbols"]["default"][s.symbol]["signal"] == "LONG"
 
 
 def test_record_written_when_live(tmp_path: Path):
