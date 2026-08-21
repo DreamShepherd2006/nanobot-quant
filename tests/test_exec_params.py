@@ -871,3 +871,54 @@ def test_scene_mid_only_enabled_starts_td(tmp_path):
     assert loaded["scenes"]["high"]["enabled"] is False
     assert loaded["scenes"]["mid"]["enabled"] is True
 
+
+
+def test_scene_stop_loss_defaults_and_sync(tmp_path):
+    """A1：stop_loss_pct 场景化——默认值（high=10%/mid=8%/low=10%）+
+    high→扁平同步（execute_signal 直调兼容）。"""
+    loaded = load_exec_params()
+    assert loaded["scenes"]["high"]["stop_loss_pct"] == 0.10
+    assert loaded["scenes"]["mid"]["stop_loss_pct"] == 0.08
+    assert loaded["scenes"]["low"]["stop_loss_pct"] == 0.10
+    # 保存 high 场景止损 → 扁平 stop_loss_pct 同步（pipeline 直调读扁平）
+    res = save_exec_params({"scenes": {"high": {"stop_loss_pct": 0.15}}})
+    assert res["ok"] is True
+    loaded = load_exec_params()
+    assert loaded["scenes"]["high"]["stop_loss_pct"] == 0.15
+    assert loaded["stop_loss_pct"] == 0.15
+    # 其他场景独立
+    assert loaded["scenes"]["mid"]["stop_loss_pct"] == 0.08
+
+
+def test_scene_stop_loss_activates_risk():
+    """A1：_activate_scene 将场景止损写入 RiskEngine（批次 check_exit 消费）。"""
+    from types import SimpleNamespace
+
+    from nanobot_quant.strategies.td_sequential_strategy import (
+        TdSequentialStrategy,
+    )
+
+    st = TdSequentialStrategy.__new__(TdSequentialStrategy)
+    st._td_params = {}
+    st._scene_runtimes = {}
+    st.broker = None
+    st._active_scene = None
+    st._risk = SimpleNamespace(stop_loss_pct=0.10)
+    st._activate_scene("high", {
+        "params": {"stop_loss_pct": 0.15, "symbols": ["SOL"],
+                   "quantity_mode": "fixed", "td_fixed_amount": 4.0,
+                   "sleeptime": "1m", "exit_order": "fifo",
+                   "take_profit_pct": 0.0, "td_start_slot": 1,
+                   "min_account_value": 0},
+        "broker": None, "batch_managers": {},
+    })
+    assert st._risk.stop_loss_pct == 0.15
+    # 场景缺省 stop_loss_pct → 保持上次值不变
+    st._activate_scene("mid", {
+        "params": {"symbols": ["SPYX"], "quantity_mode": "fixed",
+                   "td_fixed_amount": 4.0, "sleeptime": "5m",
+                   "exit_order": "fifo", "take_profit_pct": 0.0,
+                   "td_start_slot": 1, "min_account_value": 0},
+        "broker": None, "batch_managers": {},
+    })
+    assert st._risk.stop_loss_pct == 0.15

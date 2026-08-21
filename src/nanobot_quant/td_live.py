@@ -128,6 +128,9 @@ class _TdLiveRunner:
                     "batches": int(params.get("td_batches", 1) or 1),
                     "sub_accounts": [],
                     "exit_order": str(params.get("exit_order", "fifo")),
+                    "stop_loss_pct": float(
+                        params.get("stop_loss_pct", 0.10) or 0.10
+                    ),
                     "take_profit_pct": float(
                         params.get("take_profit_pct", 0.0) or 0.0
                     ),

@@ -59,6 +59,7 @@ SCENE_FIELD_MAP: dict[str, str] = {
     "td_fixed_amount": "td_fixed_amount",
     "batches": "td_batches",
     "exit_order": "exit_order",
+    "stop_loss_pct": "stop_loss_pct",
     "take_profit_pct": "take_profit_pct",
     "td_start_slot": "td_start_slot",
     "min_account_value": "min_account_value",
@@ -75,7 +76,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
     "entry_setup", "exit_setup", "exit_countdown",
-    "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
+    "exit_order", "stop_loss_pct", "take_profit_pct",
+    "td_start_slot", "min_account_value",
 )
 
 #: 默认 Gate 子账号池（S1 配置层默认值；S3 消费时按 gate.json 实际列表）。
@@ -91,7 +93,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
-        "exit_order": "fifo", "take_profit_pct": 0.0,
+        "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.0,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "mid": {
@@ -100,7 +102,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
-        "exit_order": "fifo", "take_profit_pct": 0.0,
+        "exit_order": "fifo", "stop_loss_pct": 0.08, "take_profit_pct": 0.0,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "low": {
@@ -109,7 +111,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
-        "exit_order": "fifo", "take_profit_pct": 0.0,
+        "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.0,
         "td_start_slot": 1, "min_account_value": 0,
     },
 }
@@ -120,6 +122,8 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ① Risk control ───────────────────────────────────────────────
     "max_position_pct": 0.20,   # float (0,1] — single-order value ≤ pv × pct
     "max_drawdown_pct": 0.15,   # float (0,1] — account drawdown threshold
+    # 扁平 stop_loss_pct 保留：execute_signal/pipeline RiskEngine 直调默认
+    # （TD live 批次止损用 scenes.*.stop_loss_pct；保存时 high 值同步回此键）
     "stop_loss_pct": 0.10,      # float (0,1] — per-position stop-loss
     # ── ② Execution quality ──────────────────────────────────────────
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
@@ -179,8 +183,8 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "回撤阈值", "hint": "组合净值从峰值回撤超限触发风控（回测/纸交易生效；实盘待持仓上下文）",
     },
     "stop_loss_pct": {
-        "group": "risk", "min": 0.01, "max": 1.0, "step": 0.05, "std": 0.10,
-        "label": "止损阈值", "hint": "持仓从入场价跌超限强制平仓（回测/纸交易生效；实盘待持仓上下文）",
+        "group": "scene", "min": 0.01, "max": 1.0, "step": 0.05, "std": 0.10,
+        "label": "止损阈值", "hint": "该场景每批浮亏 ≥ 阈值强制平仓（实盘生效，逐批独立；execute_signal 直调用 high 值）",
     },
     "slippage": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.01,
