@@ -14,6 +14,7 @@ and the save endpoint both enforce ``is_commander``.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import os
 
@@ -436,6 +437,95 @@ def _token_meta_map(
     return meta
 
 
+def _run_batch_sync(params: dict) -> list[str]:
+    """保存后的批次（子钱包/子账号）初始化——线程池执行。
+
+    2026-08-21 空间卡死修复：批次同步可能触发子钱包创建（DEX 通道
+    onchainos CLI 网络调用），必须在线程池执行，绝不阻塞 async handler
+    事件循环。返回批次消息列表供 async 侧打印日志。
+    """
+    msgs: list[str] = []
+    try:
+        from nanobot_quant.batches import ensure_batches
+
+        _channel = params.get("execution_channel", "okx_dex")
+        _scenes = params.get("scenes") or {}
+        for _name, _sc in _scenes.items():
+            if not _sc.get("enabled") or int(_sc.get("batches", 1) or 1) <= 1:
+                continue
+            for _sym in _sc.get("symbols") or []:
+                _b, _msg = ensure_batches(
+                    int(_sc.get("batches", 1) or 1),
+                    _sym,
+                    _channel,
+                    scene=_name,
+                )
+                msgs.append(f"{_sym}[{_name}]: {_msg}")
+        if not _scenes:
+            for _sym in params.get("td_symbols") or ["SOL"]:
+                _b, _msg = ensure_batches(
+                    int(params.get("td_batches", 1) or 1),
+                    _sym,
+                    _channel,
+                )
+                msgs.append(f"{_sym}: {_msg}")
+    except Exception as exc:  # noqa: BLE001
+        msgs.append(f"⚠️ 批次同步失败: {exc}")
+    return msgs
+
+
+# 后台 TD 启停任务的引用集合（防 asyncio task 被 GC 回收）
+_pending_td_tasks: set = set()
+
+
+def _schedule_td_sync(params: dict, gatekeeper) -> str:
+    """后台执行 TD 循环启停；POST 立即返回，绝不阻塞事件循环。
+
+    2026-08-21 空间卡死根因：sync_from_params → stop() →
+    lumibot executor.stop() / 等旧循环线程退出（_wait_thread_exit）在
+    TD 正在处理业务（当前轮卡于 Gate 网络）时可能阻塞 10s~60s+。若在
+    async handler 事件循环内同步执行，整个 gatekeeper（页面 + WebSocket）
+    被堵死。此处 fire-and-forget 到线程池，完成/失败均打日志。
+    返回给用户的提示文案（空字符串 = 无需提示）。
+    """
+    notice = ""
+    if not params.get("td_enabled"):
+        try:
+            from nanobot_quant.td_live import get_runner
+
+            st = get_runner().status()
+            if st.get("running") or st.get("thread_alive"):
+                notice = (
+                    "TD 停止已在后台执行（等待当前轮结束，最多 15s 超时；"
+                    "期间页面/聊天不受影响，最终状态见 TD 状态卡片）"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _worker() -> None:
+        def _run() -> None:
+            try:
+                from nanobot_quant.td_live import sync_from_params
+
+                st = sync_from_params(params)
+                gatekeeper._log(
+                    f"🔄 TD live 同步(后台): running={st.get('running')} "
+                    f"thread_alive={st.get('thread_alive')}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                gatekeeper._log(f"⚠️ TD live 同步失败(后台): {exc}")
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception as exc:  # noqa: BLE001
+            gatekeeper._log(f"⚠️ TD live 同步线程异常(后台): {exc}")
+
+    task = asyncio.create_task(_worker())
+    _pending_td_tasks.add(task)
+    task.add_done_callback(_pending_td_tasks.discard)
+    return notice
+
+
 async def _body(request: Request) -> dict | None:
     try:
         data = await request.json()
@@ -524,50 +614,16 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": result.get("error", "保存失败")},
                                 status_code=400)
         _persist_token_meta(data)
-        # 批次（子钱包/子账号）初始化：按场景建/复用独立台账
-        #（S3b 2026-08-20：batches.{channel}.{scene}.{symbol}.json，
-        # 同标的跨场景互不复用）；无 scenes 时回退旧扁平 td_* 路径。
-        try:
-            from nanobot_quant.batches import ensure_batches
-
-            _channel = result["params"].get("execution_channel", "okx_dex")
-            _scenes = result["params"].get("scenes") or {}
-            _msgs = []
-            for _name, _sc in _scenes.items():
-                if not _sc.get("enabled") or int(_sc.get("batches", 1) or 1) <= 1:
-                    continue
-                _syms = _sc.get("symbols") or []
-                for _sym in _syms:
-                    _b, _msg = ensure_batches(
-                        int(_sc.get("batches", 1) or 1),
-                        _sym,
-                        _channel,
-                        scene=_name,
-                    )
-                    _msgs.append(f"{_sym}[{_name}]: {_msg}")
-            if not _scenes:
-                _symbols = result["params"].get("td_symbols") or ["SOL"]
-                for _sym in _symbols:
-                    _b, _msg = ensure_batches(
-                        int(result["params"].get("td_batches", 1) or 1),
-                        _sym,
-                        _channel,
-                    )
-                    _msgs.append(f"{_sym}: {_msg}")
-            gatekeeper._log(f"🧩 批次同步: {'; '.join(_msgs)}")
-        except Exception as exc:
-            gatekeeper._log(f"⚠️ 批次同步失败: {exc}")
-        # TD 自主循环按新参数同步启停（td_enabled 开关 + 参数热更新）
-        try:
-            from nanobot_quant.td_live import sync_from_params
-
-            td_status = sync_from_params(result["params"])
-            gatekeeper._log(
-                f"🔄 TD live 同步: running={td_status.get('running')} "
-                f"thread_alive={td_status.get('thread_alive')}"
-            )
-        except Exception as exc:
-            gatekeeper._log(f"⚠️ TD live 同步失败: {exc}")
+        # 批次同步（线程池等待，快）——绝不阻塞事件循环
+        _batch_msgs = await asyncio.to_thread(_run_batch_sync, result["params"])
+        gatekeeper._log(f"🧩 批次同步: {'; '.join(_batch_msgs)}")
+        # TD 循环启停（可能等待当前轮结束/超时）→ 后台执行，POST 立即返回
+        #（2026-08-21 空间卡死修复：sync_from_params 在 TD 处理业务时
+        # 可能阻塞 10s~60s+，绝不允许跑在 async handler 事件循环里）。
+        td_notice = _schedule_td_sync(result["params"], gatekeeper)
+        message = "执行参数已保存并即时生效"
+        if td_notice:
+            message += f"；{td_notice}"
         gatekeeper._log(
             f"🛡️ 执行参数已更新: "
             f"position={result['params'].get('max_position_pct')} "
@@ -584,7 +640,7 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"exit_order={result['params'].get('exit_order')} "
             f"take_profit={result['params'].get('take_profit_pct')}"
         )
-        return JSONResponse({"ok": True, "message": "执行参数已保存并即时生效",
+        return JSONResponse({"ok": True, "message": message,
                              "params": result.get("params")})
 
     app.add_route("/config/exec", _page, methods=["GET"])

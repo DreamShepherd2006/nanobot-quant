@@ -285,3 +285,21 @@ def _isolate_exec_params(tmp_path, monkeypatch):
     from nanobot_quant import exec_params as _ep
 
     monkeypatch.setattr(_ep, "exec_params_path", lambda: tmp_path / "exec_params.json")
+    from nanobot_quant import exec_params as _ep
+
+    monkeypatch.setattr(_ep, "exec_params_path", lambda: tmp_path / "exec_params.json")
+
+
+@pytest.fixture(autouse=True)
+def _reset_td_stop_requested():
+    """测试隔离 stop_requested（2026-08-21 延迟停止方案）。
+
+    stop_requested 是 td_live_state 模块级 Event：runner.stop() 测试会
+    置位（延迟停止后台线程），若不清除会污染后续 test_td_sequential_strategy
+    的 on_trading_iteration 测试（装饰器守卫直接 return 导致断言失败）。
+    每个测试结束后复位。
+    """
+    from nanobot_quant import td_live_state
+
+    yield
+    td_live_state.stop_requested.clear()
