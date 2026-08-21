@@ -65,7 +65,8 @@
 <div class="note">
   <strong>控制面设计</strong>：<code>portfolio_value</code> / <code>quantity</code> 属调用级参数（每次交易声明），保留在 MCP；
   此处系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
-  <code>max_drawdown_pct</code> / <code>stop_loss_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）；
+  <code>stop_loss_pct</code> 实盘生效（场景级，每批浮亏 ≥ 阈值强制平仓）；
+  <code>max_drawdown_pct</code> 回测/纸交易生效（实盘待持仓上下文接入）；
   <strong>③ TD 自主运行</strong>：<code>td_enabled</code> 为 P2 B3 StrategyExecutor 主循环的 WebUI 开关，
   开启后在 quant agent 进程内驻留 TD 自主策略（标的/周期/数量模式见下）。
   P1 loop 模式已退役（execute_signal 仅同步直调）。

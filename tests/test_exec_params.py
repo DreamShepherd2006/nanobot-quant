@@ -922,3 +922,17 @@ def test_scene_stop_loss_activates_risk():
         "broker": None, "batch_managers": {},
     })
     assert st._risk.stop_loss_pct == 0.15
+
+
+def test_scene_field_std_override():
+    """A1 收尾：场景字段「默认」标注显示场景默认值（mid.stop_loss_pct=0.08），
+    而非全局 PARAM_META.std（0.10）；阈值字段 None 保持全局 std。"""
+    from nanobot_quant.exec_params import DEFAULT_SCENES
+    from nanobot_quant.exec_params_handlers import _scene_card_html
+
+    html = _scene_card_html(
+        "mid", DEFAULT_SCENES["mid"], None, "cex",
+        ["gate_bot1", "gate_bot2"], 2,
+    )
+    assert "默认 0.08 · 范围 0.01–1.0" in html   # 场景默认值（非全局 0.10）
+    assert "默认 9 · 范围 1–20" in html          # 阈值字段 None → 全局 std
