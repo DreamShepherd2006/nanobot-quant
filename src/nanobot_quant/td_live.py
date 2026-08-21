@@ -30,6 +30,14 @@ import threading
 import time
 from typing import Any
 
+# 2026-08-21：TD live 在 gatekeeper 进程内构造 lumibot 对象（Strategy/
+# StrategyExecutor）。lumibot import 时会注册 telemetry 线程（每 ~5min 向
+# stdout 打健康快照 JSON）并刷“Bot is running”等 INFO 日志——必须在此
+# 进程的首次 lumibot import 之前关闭遥测（与 signal_mcp_server.py 同款
+# 开关；若已 import 过则 setdefault 不生效，故放在模块顶部）。
+os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
+os.environ.setdefault("BACKTESTING_QUIET_LOGS", "true")
+
 _lock = threading.Lock()
 _runner: "_TdLiveRunner | None" = None
 
@@ -901,18 +909,41 @@ class _TdLiveRunner:
             )
 
     def stop(self) -> dict[str, Any]:
+        executor = None
         with _lock:
-            if self._executor is not None:
-                try:
-                    self._executor.stop()  # stop_event.set()
-                except Exception as exc:  # pragma: no cover
-                    self._state["last_error"] = str(exc)
+            executor = self._executor
             self._state["running"] = False
+        if executor is not None:
+            self._stop_executor_safe(executor)
+        print(
+            "[DIAG] td_live: StrategyExecutor stop requested",
+            file=sys.stderr, flush=True,
+        )
+        return self.status()
+
+    @staticmethod
+    def _stop_executor_safe(executor: Any) -> None:
+        """executor.stop() 带超时（独立线程 + join 15s）。
+
+        2026-08-21 空间卡死根因：lumibot executor.stop() →
+        gracefully_exit() → APScheduler shutdown(wait=True) 在 scheduler
+        job 卡于网络调用（如 Gate API 无响应）时无限等待。该路径若在
+        async handler（POST /config/exec）事件循环内同步执行，整个
+        gatekeeper（页面 + WebSocket）被堵死。此处放独立 daemon 线程并
+        join 15s 超时——超时则放弃等待（策略对象/线程留给进程回收），
+        调用方（WebUI 保存）立刻返回，绝不阻塞事件循环。
+        """
+        t = threading.Thread(
+            target=executor.stop, daemon=True, name="td-executor-stop"
+        )
+        t.start()
+        t.join(timeout=15.0)
+        if t.is_alive():
             print(
-                "[DIAG] td_live: StrategyExecutor stop requested",
+                "[DIAG] td_live: executor.stop() 超时 15s "
+                "（lumibot gracefully_exit 卡住）— 放弃等待",
                 file=sys.stderr, flush=True,
             )
-            return self.status()
 
     def _wait_thread_exit(self, timeout: float = 10.0) -> bool:
         """等待旧循环线程退出（stop 后 lumibot 收尾可能 >0.3s）。

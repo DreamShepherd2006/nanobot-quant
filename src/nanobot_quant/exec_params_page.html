@@ -270,7 +270,7 @@
     });
     const data = await resp.json();
     if (data.ok) {
-      show('✅ 执行参数已保存并即时生效', true);
+      show('✅ ' + (data.message || '执行参数已保存并即时生效'), true);
     } else {
       show('❌ ' + (data.error || '保存失败'), false);
     }
