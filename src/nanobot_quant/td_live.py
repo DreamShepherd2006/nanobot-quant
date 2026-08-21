@@ -33,9 +33,11 @@ from typing import Any
 # 2026-08-21：TD live 在 gatekeeper 进程内构造 lumibot 对象（Strategy/
 # StrategyExecutor）。lumibot import 时会注册 telemetry 线程（每 ~5min 向
 # stdout 打健康快照 JSON）并刷“Bot is running”等 INFO 日志——必须在此
-# 进程的首次 lumibot import 之前关闭遥测（与 signal_mcp_server.py 同款
-# 开关；若已 import 过则 setdefault 不生效，故放在模块顶部）。
-os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
+# 进程的首次 lumibot import 之前关闭遥测。
+# setdefault 在进程 env 已有 LUMIBOT_TELEMETRY 值时失效（HF Space 实测
+# 05:52 仍有 LUMIBOT_TELEMETRY 行），改为强制赋值：TD 循环场景遥测只有
+# stdout 噪音，无价值。
+os.environ[“LUMIBOT_TELEMETRY”] = “0”
 os.environ.setdefault("BACKTESTING_QUIET_LOGS", "true")
 
 _lock = threading.Lock()
