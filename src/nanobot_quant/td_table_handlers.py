@@ -597,6 +597,7 @@ def _trade_rows(events: list[dict], tq: dict | None = None) -> list[dict]:
     sym = (tq.get("tq_sym") or "").strip().upper()
     qdir = (tq.get("tq_dir") or "").strip()
     qst = (tq.get("tq_st") or "").strip()
+    qsc = (tq.get("tq_scene") or "").strip()
     rows: list[dict] = []
     for e in events:
         ev = str(e.get("event", ""))
@@ -609,6 +610,8 @@ def _trade_rows(events: list[dict], tq: dict | None = None) -> list[dict]:
         if qst and status != qst:
             continue
         if sym and str(e.get("symbol", "")).upper() != sym:
+            continue
+        if qsc and str(e.get("scene") or "") != qsc:
             continue
         rows.append({**e, "direction": direction, "status": status})
     rows.reverse()  # 最新在前
@@ -654,37 +657,91 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     upd = _esc(str(st.get("updated_at") or "—"))
     nxt = _esc(str(st.get("next_iteration") or "—"))
 
-    rows = ""
-    for sym, d in sorted(st.get("symbols", {}).items()):
-        sb = d.get("setup_buy", 0)
-        ss = d.get("setup_sell", 0)
-        cdb = d.get("cd_buy", 0)
-        cds = d.get("cd_sell", 0)
-        score = d.get("score", 0)
-        price = d.get("price", 0)
-        signal = _esc(str(d.get("signal", "HOLD")))
-        note = _esc(str(d.get("note", "")))
-        if note:
-            note = f'<span class="muted"> · {note}</span>'
-        sig_cls = {
-            "LONG": "sig buy", "EXIT": "sig sell", "BUY_FAIL": "sig sell",
-            "EXIT_FAIL": "sig sell", "SKIP": "sig hold",
-            "EXIT_SKIP": "sig hold", "EXIT_SHRINK": "sig sell",
-        }.get(signal, "sig hold")
-        rows += (
-            f'<tr><td><b>{_esc(sym)}</b></td>'
-            f'<td>{_live_cell(sb, entry_setup)}</td>'
-            f'<td>{_live_cell(ss, exit_setup)}</td>'
-            f'<td>{_live_cell(cdb, 13)}</td>'
-            f'<td>{_live_cell(cds, exit_cd)}</td>'
-            f'<td class="num">{float(score or 0):.1f}</td>'
-            f'<td class="num">{float(price or 0):.4f}</td>'
-            f'<td class="sig {sig_cls}">{signal}</td>'
-            f'<td class="time">{_esc(str(d.get("time", "")))}</td>'
-            f'<td>{note}</td></tr>'
+    # ── 场景分区（B3，2026-08-21 方案 B：三场景并列）──
+    # LIVE_STATE['symbols'] 现为 {scene: {symbol: {...}}}；scenes 配置来自
+    # exec_params（enabled 场景按 high/mid/low 固定顺序）。阈值 per-scene：
+    # 场景字段 entry_setup/exit_setup/exit_countdown 优先，None 回退全局 td_params。
+    try:
+        _ep = load_exec_params()
+        _scenes_cfg = _ep.get("scenes") or {}
+    except Exception:  # noqa: BLE001
+        _scenes_cfg = {}
+    _SCENE_META = {
+        "high": ("📈 高频", "high"),
+        "mid": ("📊 中频", "mid"),
+        "low": ("🐢 低频", "low"),
+    }
+    scene_order = [k for k in ("high", "mid", "low")
+                   if _scenes_cfg.get(k, {}).get("enabled")]
+    sym_scenes = st.get("symbols", {})  # {scene: {symbol: {...}}}
+    if not isinstance(sym_scenes, dict):
+        sym_scenes = {}
+    # 兼容：无启用场景（旧扁平配置/加载失败）→ 单视图（default 键）
+    if not scene_order:
+        scene_order = ["default"]
+        _scenes_cfg = {}
+
+    def _scene_thr(scene_cfg: dict):
+        es = scene_cfg.get("entry_setup")
+        xs = scene_cfg.get("exit_setup")
+        xc = scene_cfg.get("exit_countdown")
+        return (int(es) if es is not None else int(entry_setup),
+                int(xs) if xs is not None else int(exit_setup),
+                int(xc) if xc is not None else int(exit_cd))
+
+    blocks = ""
+    for sc in scene_order:
+        label, _tag = _SCENE_META.get(sc, (f"🪪 {sc}", sc))
+        sc_cfg = _scenes_cfg.get(sc, {})
+        es, xs, xc = _scene_thr(sc_cfg)
+        syms = sym_scenes.get(sc, {}) or {}
+        st_txt = "🟢 运行中" if (st.get("running") and syms) else "⏹ 无数据"
+        sleep_txt = _esc(str(sc_cfg.get("sleeptime") or "—"))
+        upd_txt = _esc(str(max((d.get("updated_at") or "" for d in syms.values()), default="—")))
+        rows = ""
+        for sym, d in sorted(syms.items()):
+            sb = d.get("setup_buy", 0)
+            ss = d.get("setup_sell", 0)
+            cdb = d.get("cd_buy", 0)
+            cds = d.get("cd_sell", 0)
+            score = d.get("score", 0)
+            price = d.get("price", 0)
+            signal = _esc(str(d.get("signal", "HOLD")))
+            note = _esc(str(d.get("note", "")))
+            if note:
+                note = f'<span class="muted"> · {note}</span>'
+            sig_cls = {
+                "LONG": "sig buy", "EXIT": "sig sell", "BUY_FAIL": "sig sell",
+                "EXIT_FAIL": "sig sell", "SKIP": "sig hold",
+                "EXIT_SKIP": "sig hold", "EXIT_SHRINK": "sig sell",
+            }.get(signal, "sig hold")
+            rows += (
+                f'<tr><td><b>{_esc(sym)}</b></td>'
+                f'<td>{_live_cell(sb, es)}</td>'
+                f'<td>{_live_cell(ss, xs)}</td>'
+                f'<td>{_live_cell(cdb, 13)}</td>'
+                f'<td>{_live_cell(cds, xc)}</td>'
+                f'<td class="num">{float(score or 0):.1f}</td>'
+                f'<td class="num">{float(price or 0):.4f}</td>'
+                f'<td class="sig {sig_cls}">{signal}</td>'
+                f'<td class="time">{_esc(str(d.get("time", "")))}</td>'
+                f'<td>{note}</td></tr>'
+            )
+        if not rows:
+            rows = ('<tr><td colspan="10" class="muted" style="text-align:left">'
+                    '暂无数据——该场景 TD 循环未运行或尚未产生第一轮结果</td></tr>')
+        blocks += (
+            f'<div class="scene-block" style="margin:14px 0 4px">'
+            f'<h4 style="margin:0 0 6px">{label} <span class="muted">{sc}</span>'
+            f' · 周期 {sleep_txt} · {len(syms)} 标的 · {st_txt}'
+            f' · 数据更新 {upd_txt}</h4>'
+            '<table>'
+            '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
+            '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
+            f'{rows}</table></div>'
         )
-    if not rows:
-        rows = '<tr><td colspan="10" class="muted" style="text-align:left">暂无数据——TD live 循环未运行或尚未产生第一轮结果</td></tr>'
+    if not blocks:
+        blocks = '<div class="muted" style="padding:8px 0">暂无场景数据</div>'
 
     # ── 📜 信号历史（最近 N 条，最新在上；支持 sq_n/sq_sym/sq_ev 过滤）──
     try:
@@ -693,9 +750,11 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         sq_n = 20
     sq_sym = (tq.get("sq_sym") or "").strip().upper()
     sq_ev = (tq.get("sq_ev") or "").strip()
+    sq_scene = (tq.get("sq_scene") or "").strip()
     events_sig = [e for e in events
                   if (not sq_sym or str(e.get("symbol", "")).upper() == sq_sym)
-                  and (not sq_ev or str(e.get("event", "")) == sq_ev)]
+                  and (not sq_ev or str(e.get("event", "")) == sq_ev)
+                  and (not sq_scene or str(e.get("scene") or "") == sq_scene)]
     events_sig = events_sig[::-1][:sq_n]
     ev_rows = ""
     for e in events_sig:
@@ -759,12 +818,15 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     tq_st_opts = [("", "全部状态"), ("ok", "✅ 成功"), ("pending", "⏳ 待确认"),
                   ("fail", "❌ 失败"), ("skip", "⏭ 跳过"), ("shrink", "↩️ 缩量")]
     tq_n_opts = [("20", "20 条"), ("50", "50 条"), ("100", "100 条")]
+    scene_opts = [("", "全部场景")] + [
+        (sc, _SCENE_META.get(sc, (sc, sc))[0]) for sc in ("high", "mid", "low")]
     trade_form = (
         '<form class="inline" id="trade-form" onsubmit="return applyTQ()">'
-        '<label>标的</label><input name="tq_sym" value="%s" size="6" placeholder="全部">'
+        '<label>场景</label>%s<label>标的</label><input name="tq_sym" value="%s" size="6" placeholder="全部">'
         '<label>方向</label>%s<label>状态</label>%s<label>条数</label>%s'
         '<button>查询</button></form>'
-        % (_esc(tq.get("tq_sym", "") or ""),
+        % (tq_sel("tq_scene", scene_opts, tq.get("tq_scene", "") or ""),
+           _esc(tq.get("tq_sym", "") or ""),
            tq_sel("tq_dir", tq_dir_opts, tq.get("tq_dir", "") or ""),
            tq_sel("tq_st", tq_st_opts, tq.get("tq_st", "") or ""),
            tq_sel("tq_n", tq_n_opts, tq.get("tq_n", "") or "20"))
@@ -780,10 +842,11 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     sq_n_opts = [("20", "20 条"), ("50", "50 条"), ("100", "100 条")]
     sig_form = (
         '<form class="inline" id="sig-form" onsubmit="return applySQ()">'
-        '<label>标的</label><input name="sq_sym" value="%s" size="6" placeholder="全部">'
+        '<label>场景</label>%s<label>标的</label><input name="sq_sym" value="%s" size="6" placeholder="全部">'
         '<label>事件</label>%s<label>条数</label>%s'
         '<button>查询</button></form>'
-        % (_esc(sq_sym), sq_sel("sq_ev", sq_ev_opts, sq_ev),
+        % (sq_sel("sq_scene", scene_opts, sq_scene),
+           _esc(sq_sym), sq_sel("sq_ev", sq_ev_opts, sq_ev),
            sq_sel("sq_n", sq_n_opts, str(sq_n)))
     )
 
@@ -795,11 +858,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         f'<span class="muted">自动刷新 {_live_refresh_s()}s · 颜色：橙=临近信号 · 绿=达到/超过阈值</span>'
         '</div>'
         '<div id="live-wrap">'
-        '<table>'
-        '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
-        '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
-        f'{rows}'
-        '</table>'
+        f'{blocks}'
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
         '<table>'
@@ -844,7 +903,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '  window.applyTQ = function(){'
             '    var f = document.getElementById("trade-form");'
             '    if (f){'
-            '      ["tq_sym", "tq_dir", "tq_st", "tq_n"].forEach(function(k){'
+            '      ["tq_scene", "tq_sym", "tq_dir", "tq_st", "tq_n"].forEach(function(k){'
             '        if (f.elements[k] && f.elements[k].value) window.TQ[k] = f.elements[k].value;'
             '        else if (f.elements[k]) delete window.TQ[k];'
             '      });'
@@ -859,7 +918,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '  window.applySQ = function(){'
             '    var f = document.getElementById("sig-form");'
             '    if (f){'
-            '      ["sq_sym", "sq_ev", "sq_n"].forEach(function(k){'
+            '      ["sq_scene", "sq_sym", "sq_ev", "sq_n"].forEach(function(k){'
             '        if (f.elements[k] && f.elements[k].value) window.TQ[k] = f.elements[k].value;'
             '        else if (f.elements[k]) delete window.TQ[k];'
             '      });'

@@ -270,3 +270,18 @@ def _isolate_batches_path(tmp_path, monkeypatch):
         return tmp_path / fname
 
     monkeypatch.setattr(_batches, "batches_path", fake_batches_path)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_exec_params(tmp_path, monkeypatch):
+    """隔离 exec_params.json 候选路径（2026-08-21 页面场景化）。
+
+    exec_params_path() 探测 /data、/mnt/workspace 真实持久卷——测试环境
+    （Nightly 容器存在 /data）会读到真实 exec_params.json（如
+    execution_channel=gate），导致 td-table 页面测试默认源解析为真实
+    Gate 数据源、走网络调用，与 mock（仅覆盖 onchainos）不符而失败。
+    隔离后 load_exec_params() 读不到文件 → 返回默认（okx_dex、无 scenes）。
+    """
+    from nanobot_quant import exec_params as _ep
+
+    monkeypatch.setattr(_ep, "exec_params_path", lambda: tmp_path / "exec_params.json")

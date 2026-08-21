@@ -354,3 +354,77 @@ def test_tx_cell_link_and_placeholder():
     # 链归一化："solana" 与 "sol" 都能匹配 solscan
     assert "solscan.io" in _tx_cell(tx, "solana")
     assert "solscan.io" in _tx_cell(tx, "sol")
+
+
+def test_render_live_scene_blocks(monkeypatch, tmp_path: Path):
+    """B3（2026-08-21 方案 B）：实时监控 tab 三场景分区并列。
+
+    - 每个启用场景一个独立信号表区块（标题含场景名/周期/标的数/状态）
+    - 同标的不同场景数据互不串（LIVE_STATE 嵌套键）
+    - per-scene 阈值高亮（high entry=6 时 setup_buy=6 为绿、=5 为橙）
+    - 交易记录/信号历史表单含场景过滤下拉（tq_scene/sq_scene）
+    """
+    from nanobot_quant import exec_params as _ep
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    # 覆盖 autouse 路径隔离：直接注入带 scenes 的配置。
+    # 注意：td_table_handlers 在模块级 `from ... import load_exec_params` 绑定
+    # 了原函数，monkeypatch 必须替换 td_table_handlers 模块内的名字。
+    scenes = {
+        "high": {"enabled": True, "sleeptime": "1m",
+                 "entry_setup": 6, "exit_setup": 6, "exit_countdown": 13},
+        "mid": {"enabled": True, "sleeptime": "5m",
+                 "entry_setup": 9, "exit_setup": 6, "exit_countdown": 13},
+        "low": {"enabled": False, "sleeptime": "1D",
+                 "entry_setup": 9, "exit_setup": 6, "exit_countdown": 13},
+    }
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "gate", "scenes": scenes})
+
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.update_symbol("SOL", {"setup_buy": 9, "price": 89.4, "time": "11:00",
+                                "signal": "LONG"}, scene="high")
+    td_live_state.update_symbol("SOL", {"setup_buy": 2, "price": 89.1, "time": "11:00"},
+                                scene="mid")
+    td_live_state.set_loop(True, next_iteration="11:01:00")
+
+    html = _render_live(with_script=False, tq={})
+    # 启用场景区块（high/mid）出现，停用场景（low）不出现
+    # （注意：过滤下拉含 low 选项属预期，区块标题格式为「🐢 低频 <span …low」）
+    assert "📈 高频" in html and "high" in html
+    assert "📊 中频" in html and "mid" in html
+    assert "🐢 低频 <span" not in html
+    # 同标的两场景数据各归其区（两行 SOL，setup 分别 9 和 2）
+    assert html.count("<b>SOL</b>") == 2
+    # per-scene 阈值高亮：high 场景 entry=6 → setup_buy=9 绿（>=6）；
+    # mid 场景 entry=9 → setup_buy=2 普通文本（无高亮）；信号列各归其位
+    assert 'color:#1b7f3d">9</b>' in html  # high 行 setup_buy 绿
+    assert "sig buy" in html  # high 行信号 LONG
+    assert "sig hold" in html  # mid 行信号 HOLD
+    # 场景过滤下拉
+    assert 'name="tq_scene"' in html and 'name="sq_scene"' in html
+    assert "全部场景" in html
+
+
+def test_trade_rows_scene_filter():
+    """交易记录按场景过滤（B2：事件带 scene 字段，旧事件无 scene 归「全部」）。"""
+    from nanobot_quant.td_table_handlers import _trade_rows
+
+    events = [
+        {"symbol": "SOL", "event": "LONG", "scene": "high",
+         "slot": 2, "qty": 0.04, "direction": "buy", "status": "ok"},
+        {"symbol": "SPYX", "event": "LONG", "scene": "mid",
+         "slot": 2, "qty": 0.005, "direction": "buy", "status": "ok"},
+        {"symbol": "SPCX", "event": "LONG",  # 旧事件（无 scene 字段）
+         "slot": 1, "qty": 0.02, "direction": "buy", "status": "ok"},
+    ]
+    all_rows = _trade_rows(events, {})
+    assert len(all_rows) == 3
+    high = _trade_rows(events, {"tq_scene": "high"})
+    assert [r["symbol"] for r in high] == ["SOL"]
+    mid = _trade_rows(events, {"tq_scene": "mid"})
+    assert [r["symbol"] for r in mid] == ["SPYX"]
+    # 旧事件（无 scene）在指定场景过滤下不可见，只在「全部」可见
+    assert _trade_rows(events, {"tq_scene": "low"}) == []

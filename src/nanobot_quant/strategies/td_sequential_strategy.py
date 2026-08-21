@@ -219,6 +219,9 @@ class TdSequentialStrategy(Strategy):
             k: self.parameters.get(k, v)
             for k, v in DEFAULT_TD_PARAMS.items()
         }
+        # 当前所属场景（页面场景化 B1，2026-08-21）：_activate_scene 设置；
+        # 非场景模式/回测保持空串，事件归入 default 场景。
+        self._current_scene = ""
 
     def _calc(self, df, news_count: int = 0) -> dict:
         """按策略变体分发 calculate（原版 / 同花顺九转 / 富途 NINE）。
@@ -311,7 +314,11 @@ class TdSequentialStrategy(Strategy):
         与 executor.broker——lumibot v4.5.78 get_historical_prices/
         get_position/submit_order 均动态读 self.broker（源码确认），executor
         心跳循环读 executor.broker.should_continue() 亦动态，故切换安全。
+
+        2026-08-21（B1）：记录当前场景名，供 _record/_evaluate_symbol
+        写 LIVE_STATE 与事件时标记来源场景。
         """
+        self._current_scene = name
         p = rt.get("params") or {}
         self.symbols = list(p.get("symbols") or [])
         self.quantity_mode = str(p.get("quantity_mode") or "fixed")
@@ -377,10 +384,11 @@ class TdSequentialStrategy(Strategy):
             sym = symbol or self.symbol
             td_live_state.update_symbol(sym, {
                 **sig, "signal": event, "note": note,
-            })
+            }, scene=getattr(self, "_current_scene", "") or "")
             if self.parameters.get("live_mode"):
                 td_live_state.append_event({
                     "symbol": sym, "event": event, "note": note,
+                    "scene": getattr(self, "_current_scene", "") or "",
                     "price": sig.get("price", 0),
                     "score": sig.get("score", 0),
                     "setup_buy": sig.get("setup_buy", 0),
@@ -580,7 +588,7 @@ class TdSequentialStrategy(Strategy):
             from nanobot_quant import td_live_state
             td_live_state.update_symbol(self.symbol, {
                 **self._last_signal, "signal": "HOLD",
-            })
+            }, scene=getattr(self, "_current_scene", "") or "")
         except Exception:  # noqa: BLE001
             pass
 
