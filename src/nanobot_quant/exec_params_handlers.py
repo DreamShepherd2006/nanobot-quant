@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
 from .exec_params import (
+    DEFAULT_SCENES,
     DEFAULT_SUB_ACCOUNTS,
     GROUP_TITLES,
     PARAM_META,
@@ -90,11 +91,16 @@ def _field_html(
     family: str = "dex",
     prefix: str = "",
     field_name: str | None = None,
+    std_override: object | None = None,
 ) -> str:
     meta = PARAM_META[key]
     label = meta.get("label", key)
     hint = meta.get("hint", "")
     std = meta.get("std", "")
+    # S3b-2 场景字段「默认」标注：传场景默认值时优先显示（如
+    # mid.stop_loss_pct=0.08 ≠ 全局 std=0.10），None 保持全局 std。
+    if std_override is not None:
+        std = std_override
     vtype = meta.get("type", "float")
     channels = meta.get("channels", "both")
     # 2026-08-20（S1）：场景字段 id/name 用场景字段名（field_name=场景字段名，
@@ -272,17 +278,21 @@ def _scene_card_html(
     字段 id/name 用场景字段名（field_name=fk），meta 查表用扁平键。
     """
     sdef = SCENES[scene_key]
+    scene_def = DEFAULT_SCENES.get(scene_key, {})
     prefix = f"scenes_{scene_key}_"
     opts = options or {}
     fields = []
     for fk in SCENE_FIELD_ORDER:
         pk = SCENE_FIELD_MAP.get(fk, fk)  # sub_accounts 无扁平键 → 自身
+        # std_override=场景默认值（如 mid.stop_loss_pct=0.08）——「默认」
+        # 标注显示场景默认而非全局 PARAM_META.std（2026-08-21）。
         if fk == "sub_accounts":
             fields.append(_field_html(pk, scene.get(fk), gate_accounts, family,
                                       prefix, field_name=fk))
         else:
             fields.append(_field_html(pk, scene.get(fk), opts.get(pk), family,
-                                      prefix, field_name=fk))
+                                      prefix, field_name=fk,
+                                      std_override=scene_def.get(fk)))
     badge = "🟢 启用" if scene.get("enabled") else "⚪ 停用"
     return (
         f'<div class="card scene-card" data-scene="{scene_key}">'

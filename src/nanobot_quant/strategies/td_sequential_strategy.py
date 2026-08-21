@@ -369,6 +369,9 @@ class TdSequentialStrategy(Strategy):
             self.sleeptime, "day"
         )
         self._exit_order = str(p.get("exit_order") or "fifo")
+        sl = p.get("stop_loss_pct")
+        if sl is not None and getattr(self, "_risk", None) is not None:
+            self._risk.stop_loss_pct = float(sl)
         self._take_profit_pct = float(p.get("take_profit_pct") or 0.0)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
@@ -394,9 +397,11 @@ class TdSequentialStrategy(Strategy):
                 broker_name = self.broker.__class__.__name__
             except Exception:  # noqa: BLE001
                 broker_name = "?"
+            sl_diag = getattr(getattr(self, "_risk", None), "stop_loss_pct", "?")
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
+                f"stop_loss={sl_diag} "
                 f"broker={broker_name}",
                 file=sys.stderr, flush=True,
             )
