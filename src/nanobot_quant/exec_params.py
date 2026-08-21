@@ -422,11 +422,24 @@ def _migrate_scenes_from_flat(raw: dict) -> dict[str, dict[str, Any]]:
 
 
 def _sync_flat_from_high(merged: dict[str, Any]) -> None:
-    """high 场景 → 扁平参数同步（S1：td_live 仍消费扁平）。"""
-    high = merged.get("scenes", {}).get("high")
+    """场景 → 扁平参数同步（S1：td_live 仍消费扁平）。
+
+    td_enabled = 任一场景启用（2026-08-21 修复：此前绑定 high.enabled，
+    导致只开 low/mid 时 TD 不启动）。其余字段仍从 high 同步（旧式扁平即
+    high 场景的旧表示，execute_signal 直调兼容）。
+    """
+    scenes = merged.get("scenes")
+    if not isinstance(scenes, dict):
+        return
+    merged["td_enabled"] = any(
+        isinstance(s, dict) and bool(s.get("enabled")) for s in scenes.values()
+    )
+    high = scenes.get("high")
     if not isinstance(high, dict):
         return
     for fk, pk in SCENE_FIELD_MAP.items():
+        if fk == "enabled":
+            continue  # td_enabled 已按 any(scenes.*.enabled) 计算
         if fk in high:
             merged[pk] = high[fk]
 
