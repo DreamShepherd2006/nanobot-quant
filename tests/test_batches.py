@@ -173,6 +173,34 @@ def test_stop_loss_independent(bm):
     assert "stop_loss" in hits[0]["_exit_reason"]
 
 
+def test_stop_loss_net_of_fee(bm):
+    """净值口径：毛亏 9.9%（未到 10%）但扣 0.2% 双边成本后净亏 10.1% → 触发止损。"""
+    bm.open_lot(qty=1, entry_price=100.0, entry_time="t1")
+    hits = bm.check_exit(price=90.1, stop_loss_pct=0.10, fee_rate=0.001)
+    assert len(hits) == 1
+    assert "stop_loss" in hits[0]["_exit_reason"]
+    # fee_rate=0（不计成本）时同一价格毛口径 -9.9% 不触发
+    assert bm.check_exit(price=90.1, stop_loss_pct=0.10, fee_rate=0.0) == []
+
+
+def test_stop_loss_zero_disabled(bm):
+    """stop_loss_pct=0 → 止损规则关闭（0=关闭语义）。"""
+    bm.open_lot(qty=1, entry_price=100.0, entry_time="t1")
+    hits = bm.check_exit(price=50.0, stop_loss_pct=0.0, fee_rate=0.001)
+    assert hits == []
+
+
+def test_take_profit_net_of_fee(bm):
+    """止盈净值口径：毛盈 5.1%（看似到 5%）但扣成本后净 4.9% → 不触发；毛 5.3% → 触发。"""
+    bm.open_lot(qty=1, entry_price=100.0, entry_time="t1")
+    assert bm.check_exit(price=105.1, stop_loss_pct=0.10,
+                         take_profit_pct=0.05, fee_rate=0.001) == []
+    hits = bm.check_exit(price=105.3, stop_loss_pct=0.10,
+                         take_profit_pct=0.05, fee_rate=0.001)
+    assert len(hits) == 1
+    assert "take_profit" in hits[0]["_exit_reason"]
+
+
 def test_take_profit_disabled_by_default(bm):
     bm.open_lot(qty=1, entry_price=100.0, entry_time="t1")
     hits = bm.check_exit(price=105.0, stop_loss_pct=0.10, take_profit_pct=0.0)

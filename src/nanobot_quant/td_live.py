@@ -134,6 +134,7 @@ class _TdLiveRunner:
                     "take_profit_pct": float(
                         params.get("take_profit_pct", 0.0) or 0.0
                     ),
+                    "fee_rate": float(params.get("fee_rate", 0.001) or 0.0),
                     "td_start_slot": int(params.get("td_start_slot", 1) or 1),
                     "min_account_value": float(
                         params.get("min_account_value", 0) or 0
@@ -183,6 +184,7 @@ class _TdLiveRunner:
                 "take_profit_pct": 0.0,
                 "td_start_slot": 1,
                 "min_account_value": 0,
+                "fee_rate": float(params.get("fee_rate", 0.001) or 0.0),
                 "min_history": int(params.get("td_bars", 120) or 120),
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
