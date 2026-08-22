@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html as _html
 import json
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -630,6 +631,25 @@ def _fmt_qty(q) -> str:
     return f"{v:.6g}"
 
 
+def _slot_map_txt(sub_accounts) -> str:
+    """场景 slot↔子账号映射文本：slot 1-2 (gate_bot1-2)。
+
+    连续 gate_botN 缩写区间；非连续/非 gate_botN 列出全名；空返回空串。
+    """
+    if not sub_accounts:
+        return ""
+    n = len(sub_accounts)
+    if n == 1:
+        return f"slot 1 ({sub_accounts[0]})"
+    nums = []
+    for a in sub_accounts:
+        m = re.match(r"^gate_bot(\d+)$", str(a))
+        nums.append(int(m.group(1)) if m else None)
+    if all(x is not None for x in nums) and nums == list(range(nums[0], nums[0] + n)):
+        return f"slot 1-{n} (gate_bot{nums[0]}-{nums[-1]})"
+    return f"slot 1-{n} ({', '.join(str(a) for a in sub_accounts)})"
+
+
 def _render_live(with_script: bool = True, tq: dict | None = None,
                  entry_setup=None, exit_setup=None, exit_cd=None) -> str:
     """「实时监控」tab：TD live 每轮状态 + 最近信号事件。
@@ -702,6 +722,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         syms = sym_scenes.get(sc, {}) or {}
         st_txt = "🟢 运行中" if (st.get("running") and syms) else "⏹ 无数据"
         sleep_txt = _esc(str(sc_cfg.get("sleeptime") or "—"))
+        slot_txt = _slot_map_txt(sc_cfg.get("sub_accounts") or [])
         upd_txt = _esc(str(max((d.get("updated_at") or "" for d in syms.values()), default="—")))
         rows = ""
         for sym, d in sorted(syms.items()):
@@ -738,7 +759,8 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         blocks += (
             f'<div class="scene-block" style="margin:14px 0 4px">'
             f'<h4 style="margin:0 0 6px">{label} <span class="muted">{sc}</span>'
-            f' · 周期 {sleep_txt} · {len(syms)} 标的 · {st_txt}'
+            f' · 周期 {sleep_txt} · {len(syms)} 标的'
+            f'{" · " + _esc(slot_txt) if slot_txt else ""} · {st_txt}'
             f' · 数据更新 {upd_txt}</h4>'
             '<table>'
             '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
@@ -772,6 +794,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             ev_cls = ' style="color:#b3261e"'
         ev_rows += (
             f'<tr><td class="time">{_esc(str(e.get("ts", "")))}</td>'
+            f'<td>{_esc(str(e.get("scene") or "—"))}</td>'
             f'<td><b>{_esc(str(e.get("symbol", "")))}</b></td>'
             f'<td{ev_cls}><b>{_esc(str(e.get("event", "")))}</b></td>'
             f'<td class="num">{float(e.get("price", 0) or 0):.4f}</td>'
@@ -779,7 +802,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f'<td>{_esc(str(e.get("note", "")))}</td></tr>'
         )
     if not ev_rows:
-        ev_rows = '<tr><td colspan="6" class="muted" style="text-align:left">暂无信号事件</td></tr>'
+        ev_rows = '<tr><td colspan="7" class="muted" style="text-align:left">暂无信号事件</td></tr>'
 
     # ── 📊 交易记录（2026-08-11 方案 B）──
     trade_rows = _trade_rows(events, tq)
@@ -801,6 +824,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         tr_rows += (
             f'<tr><td>{tx_cell}</td>'
             f'<td class="time">{_esc(str(e.get("ts", "")))}</td>'
+            f'<td>{_esc(str(e.get("scene") or "—"))}</td>'
             f'<td><b>{_esc(str(e.get("symbol", "")))}</b></td>'
             f'<td>{dir_txt}</td>'
             f'<td class="num">{_fmt_qty(e.get("qty"))}</td>'
@@ -812,7 +836,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f'<td class="note">{_esc(str(e.get("note", "")))}</td></tr>'
         )
     if not tr_rows:
-        tr_rows = ('<tr><td colspan="11" class="muted" style="text-align:left">'
+        tr_rows = ('<tr><td colspan="12" class="muted" style="text-align:left">'
                    '暂无交易记录（买卖信号出现后显示）</td></tr>')
 
     tq = tq or {}
@@ -867,13 +891,13 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
         '<table>'
-        '<tr><th>tx_hash</th><th>时间</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr>'
+        '<tr><th>tx_hash</th><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr>'
         f'{tr_rows}'
         '</table>'
         f'<h4 style="margin:18px 0 8px">📜 信号历史（最近 {sq_n} 条）</h4>'
         f'{sig_form}'
         '<table>'
-        '<tr><th>时间</th><th>标的</th><th>事件</th><th>价格</th><th>Score</th><th>备注</th></tr>'
+        '<tr><th>时间</th><th>场景</th><th>标的</th><th>事件</th><th>价格</th><th>Score</th><th>备注</th></tr>'
         f'{ev_rows}'
         '</table>'
         '</div>'
