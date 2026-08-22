@@ -413,6 +413,75 @@ def test_render_live_scene_blocks(monkeypatch, tmp_path: Path):
     assert "slot 1 (gate_bot3)" in html
 
 
+def test_render_live_positions_block(monkeypatch, tmp_path: Path):
+    """运行中：场景卡片持仓小节渲染 LIVE_STATE positions（ticker 实时价）。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    scenes = {
+        "high": {"enabled": True, "sleeptime": "1m",
+                 "sub_accounts": ["gate_bot1", "gate_bot2"]},
+        "mid": {"enabled": False, "sleeptime": "15m"},
+        "low": {"enabled": False, "sleeptime": "1H"},
+    }
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "gate", "scenes": scenes})
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.update_symbol("CRCLX", {"setup_buy": 3, "price": 88.6, "time": "13:13"},
+                                scene="high")
+    td_live_state.set_loop(True, next_iteration="13:14:00")
+    td_live_state.set_positions("high", {"CRCLX": [{
+        "symbol": "CRCLX", "slot": 2, "qty": 0.045,
+        "entry_price": 87.99, "price": 88.65, "pnl_pct": 0.0075,
+    }]})
+
+    html = _render_live(with_script=False, tq={})
+    assert "持仓（open 批次）" in html
+    assert "<th>标的</th><th>slot</th><th>数量</th><th>成本价</th><th>现价</th><th>浮盈%</th>" in html
+    assert "+0.75%" in html          # 0.0075 → +0.75%
+    assert ">88.65<" in html         # ticker 现价
+    assert ">87.99<" in html         # 成本价
+
+
+def test_render_live_positions_snapshot(monkeypatch, tmp_path: Path):
+    """TD 未运行：持仓小节回退台账离线快照（可见历史持仓，无实时价）。"""
+    import json
+
+    from nanobot_quant import batches as _batches
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    scenes = {
+        "high": {"enabled": True, "sleeptime": "1m",
+                 "symbols": ["CRCLX", "SOL"],
+                 "sub_accounts": ["gate_bot1", "gate_bot2"]},
+        "mid": {"enabled": False, "sleeptime": "15m"},
+        "low": {"enabled": False, "sleeptime": "1H"},
+    }
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "gate", "scenes": scenes})
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.set_loop(False, next_iteration=None)
+    # 构造台账离线快照（high 场景 gate 通道 SOL open 批次）
+    p = _batches.batches_path("SOL", "gate", "high")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "symbol": "SOL", "channel": "gate", "scene": "high",
+        "slots": [{"slot": 1, "account_id": "gate_bot1",
+                    "lot": {"qty": 0.0457, "entry_price": 87.42,
+                             "entry_time": "2026-08-20 17:11:20"}},
+                   {"slot": 2, "account_id": "gate_bot2", "lot": None}],
+    }))
+
+    html = _render_live(with_script=False, tq={})
+    assert "持仓（open 批次）" in html
+    assert ">SOL<" in html and ">1<" in html          # 标的 + slot
+    assert ">87.42<" in html                          # 成本价可见
+    assert ">—<" in html                              # 无实时价/浮盈
+
+
 def test_slot_map_txt():
     """slot↔子账号映射文本（2026-08-22）。"""
     from nanobot_quant.td_table_handlers import _slot_map_txt

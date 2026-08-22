@@ -424,6 +424,77 @@ def test_cycle_gate_open_position_on_start_blocks():
     assert s._cycle_state["AAPL"]["bought"] is True
 
 
+def test_write_positions_state(monkeypatch):
+    """持仓摘要写入 LIVE_STATE（2026-08-22 实时监控持仓小节）。
+
+    - open 批次按标的分组写入（场景→标的→行）
+    - 价格口径 = ticker（_cex_price_of），浮盈按 ticker 价算
+    - 无 open 批次的标的不取价、不写入
+    """
+    from types import SimpleNamespace
+
+    from nanobot_quant import td_live_state
+    from nanobot_quant.batches import BatchManager
+
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy()
+    s._current_scene = "high"
+    bm = BatchManager("CRCLX", ["acc-1", "acc-2"], path="/tmp/test-pos.json")
+    bm.open_lot(qty=0.045, entry_price=87.99, slot=2)
+    s.batch_managers = {"CRCLX": bm, "SOL": SimpleNamespace(slots=[])}
+    s._batch_managers = None
+    s._cex_price_of = lambda sym: 88.65
+    s._write_positions_state()
+
+    rows = td_live_state.LIVE_STATE["positions"]["high"]["CRCLX"]
+    assert len(rows) == 1
+    assert rows[0]["slot"] == 2
+    assert rows[0]["qty"] == 0.045
+    assert rows[0]["price"] == 88.65
+    assert abs(rows[0]["pnl_pct"] - (88.65 - 87.99) / 87.99) < 1e-9
+    # 无 open 批次的标的（SOL）不写入
+    assert "SOL" not in td_live_state.LIVE_STATE["positions"]["high"]
+
+
+def test_write_positions_state_price_failure_fallback(monkeypatch):
+    """ticker 取价失败 → price/pnl 置 None（显示 —），不阻塞。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.batches import BatchManager
+
+    # 隔离 LIVE_STATE，避免污染其他测试（2026-08-22 组合跑暴露）
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy()
+    s._current_scene = "mid"
+    bm = BatchManager("SOL", ["acc-1"], path="/tmp/test-pos2.json")
+    bm.open_lot(qty=0.0457, entry_price=87.42, slot=1)
+    s.batch_managers = {"SOL": bm}
+    s._batch_managers = None
+
+    def boom_price(sym):
+        raise RuntimeError("ticker down")
+
+    s._cex_price_of = boom_price
+    s._write_positions_state()
+
+    rows = td_live_state.LIVE_STATE["positions"]["mid"]["SOL"]
+    assert rows[0]["price"] is None
+    assert rows[0]["pnl_pct"] is None
+    # AAPL 触发建仓 → bought=True
+    s._evaluate_symbol()
+    assert s._cycle_state["AAPL"]["bought"] is True
+    # MSFT 从未评估过 → 首次评估视为新标的（bought=False）
+    s.symbol = "MSFT"
+    s._evaluate_symbol()
+    assert s._cycle_state["MSFT"]["bought"] is True
+    assert s._cycle_state["MSFT"]["prev_setup"] >= 9
+    # AAPL 状态未被 MSFT 评估污染
+    assert s._cycle_state["AAPL"]["bought"] is True
 def test_cycle_gate_per_symbol_independent():
     """每币独立：不同 symbol 各自周期状态，互不影响。"""
     s = _make_strategy()

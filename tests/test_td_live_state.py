@@ -10,8 +10,24 @@ from nanobot_quant import td_live_state
 @pytest.fixture(autouse=True)
 def _fresh_state():
     td_live_state.LIVE_STATE["symbols"] = {}
+    td_live_state.LIVE_STATE["positions"] = {}
     td_live_state.LIVE_STATE["running"] = False
     yield
+
+
+def test_set_positions_and_get_state():
+    """持仓快照写入/读取（2026-08-22 实时监控持仓小节数据源）。"""
+    td_live_state.set_positions("high", {
+        "CRCLX": [{
+            "symbol": "CRCLX", "slot": 2, "qty": 0.045,
+            "entry_price": 87.99, "price": 88.65, "pnl_pct": 0.0075,
+        }],
+    })
+    st = td_live_state.get_state()
+    rows = st["positions"]["high"]["CRCLX"]
+    assert rows[0]["slot"] == 2
+    assert rows[0]["pnl_pct"] == 0.0075
+    assert rows[0]["price"] == 88.65
 
 
 def test_update_symbol_and_get_state():

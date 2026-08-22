@@ -316,6 +316,7 @@ class TdSequentialStrategy(Strategy):
                     self.symbol = sym
                     self.batch_manager = self.batch_managers.get(sym)
                     self._evaluate_symbol()
+                self._write_positions_state()
             try:
                 from nanobot_quant import td_live_state
                 td_live_state.set_next_due(
@@ -340,6 +341,55 @@ class TdSequentialStrategy(Strategy):
             self.symbol = sym
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
+        self._write_positions_state()
+
+    def _write_positions_state(self) -> None:
+        """把全部标的 open 批次摘要写入 LIVE_STATE（实时监控持仓小节）。
+
+        2026-08-22 拍板：位置=场景卡片内小节；粒度=批次级（每 open 批
+        一行，slot 区分）；价格口径=ticker 实时价（_cex_price_of：gate_cex
+        优先、okx_cex 兜底；仅对含 open 批次的标的取价，无持仓不取价）；
+        止损/止盈仍用 TD bar 收盘价（signal.price）不受影响。TD 未运行时
+        页面回退读台账离线快照（无实时价）。展示层异常不阻塞主循环。
+        """
+        try:
+            from nanobot_quant import td_live_state
+
+            bms = getattr(self, "batch_managers", None) or getattr(
+                self, "_batch_managers", None
+            ) or {}
+            by_sym: dict[str, list[dict]] = {}
+            for sym, bm in (bms or {}).items():
+                open_lots = [s for s in bm.slots if s.get("lot") is not None]
+                if not open_lots:
+                    continue  # 无 open 批次不取价
+                price = 0.0
+                try:
+                    price = self._cex_price_of(sym)
+                except Exception:  # noqa: BLE001
+                    price = 0.0
+                rows = []
+                for s in open_lots:
+                    lot = s["lot"]
+                    entry = float(lot.get("entry_price") or 0)
+                    pnl = None
+                    if price > 0 and entry > 0:
+                        pnl = (price - entry) / entry
+                    rows.append({
+                        "symbol": sym,
+                        "slot": s["slot"],
+                        "account_id": s.get("account_id"),
+                        "qty": lot.get("qty"),
+                        "entry_price": entry,
+                        "entry_time": lot.get("entry_time"),
+                        "price": price or None,
+                        "pnl_pct": pnl,
+                    })
+                by_sym[sym] = rows
+            td_live_state.set_positions(self._current_scene or "default", by_sym)
+        except Exception:  # noqa: BLE001
+            # 展示层：失败不阻塞策略主循环
+            pass
 
     def _activate_scene(self, name: str, rt: dict) -> None:
         """S3a（2026-08-20）：激活场景运行时。

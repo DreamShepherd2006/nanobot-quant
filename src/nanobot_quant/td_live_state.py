@@ -103,6 +103,18 @@ def set_strategy(name: str) -> None:
         LIVE_STATE["updated_at"] = _now_iso()
 
 
+def set_positions(scene: str, by_symbol: dict) -> None:
+    """写入持仓快照（场景→标的→open 批次列表；实时监控持仓小节展示）。
+
+    2026-08-22 拍板：策略每轮把批次摘要写入 LIVE_STATE（展示用）；
+    TD 未运行时页面回退读台账离线快照（无实时价）。
+    价格口径 = ticker 实时价（策略侧 _cex_price_of 取 Gate/OKX CEX）。
+    """
+    with _lock:
+        LIVE_STATE.setdefault("positions", {})[scene or "default"] = by_symbol
+        LIVE_STATE["updated_at"] = _now_iso()
+
+
 def get_state() -> dict:
     """供 td-table「实时监控」tab 读取（同进程，无 IO）。"""
     with _lock:
@@ -112,6 +124,7 @@ def get_state() -> dict:
             "strategy_variant": LIVE_STATE.get("strategy_variant"),
             "updated_at": LIVE_STATE["updated_at"],
             "symbols": dict(LIVE_STATE["symbols"]),
+            "positions": dict(LIVE_STATE.get("positions", {})),
         }
 
 
