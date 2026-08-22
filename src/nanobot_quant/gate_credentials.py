@@ -222,22 +222,19 @@ def fetch_spot_balances(api_key: str, api_secret: str) -> dict[str, dict]:
 def load_slot_map(credentials: Optional[dict] = None) -> dict[str, str]:
     """Return slot → sub-account-name mapping (persisted in gate.json slot_map).
 
-    Defaults to 1..5 → gate_bot1..5 when the field is absent, so existing
-    deployments without slot_map keep working. Values are validated against
-    the configured sub-accounts; unknown names are dropped.
+    When the field is absent, defaults to the configured sub-accounts in stored
+    order (1..N) so existing deployments without slot_map keep working. When
+    present, entries referencing unconfigured sub-accounts are dropped (the
+    normalizer rebuilds a complete map on next save).
     """
     creds = credentials if credentials is not None else (load_gate_credentials() or {})
     if not creds:
         return {}
     slot_map = creds.get("slot_map") or {}
-    subs = set((creds.get("sub_accounts") or {}).keys())
-    out: dict[str, str] = {}
-    for i in range(1, 6):
-        configured = slot_map.get(str(i))
-        if configured and subs and configured not in subs:
-            configured = None  # slot references an unconfigured sub → fall back to default
-        out[str(i)] = configured or f"gate_bot{i}"
-    return out
+    subs = creds.get("sub_accounts") or {}
+    if slot_map:
+        return {str(k): v for k, v in slot_map.items() if v in subs}
+    return {str(i): name for i, name in enumerate(subs.keys(), start=1)}
 
 
 def sub_account_transfer(

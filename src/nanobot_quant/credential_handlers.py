@@ -74,7 +74,8 @@ def _render_detail_form(spec: CredentialSpec) -> str:
 
     parts: list[str] = []
     cur_group: str | None = None
-    for f in spec.fields:
+    fields = spec.fields_for(current) if spec.fields_for is not None else spec.fields
+    for f in fields:
         # Group changes open/close card sections. Fields without a group are
         # rendered flat (backwards compatible with simple specs like OKX).
         if f.group != cur_group:
@@ -122,11 +123,14 @@ def _render_detail_form(spec: CredentialSpec) -> str:
     if spec.docs_url:
         docs_block = f'<div class="note">📖 还没有凭证？<a href="{html_escape(spec.docs_url)}" target="_blank" rel="noopener">点击此处获取 API Key</a></div>'
 
+    extra_html = spec.form_extra(current) if spec.form_extra is not None else ""
+
     html = _DETAIL_HTML
     html = html.replace("{display}", html_escape(spec.display))
     html = html.replace("{description}", html_escape(spec.description))
     html = html.replace("{docs_block}", docs_block)
     html = html.replace("{fields_html}", "\n".join(parts))
+    html = html.replace("{extra_html}", extra_html)
     html = html.replace("CRED_NAME_PLACEHOLDER", json.dumps(spec.name))
     return html
 

@@ -21,6 +21,7 @@ from nanobot_quant.gate_handlers import (
     gate_transfer,
     gate_transfer_confirm,
     register_gate_routes,
+    sync_subaccounts,
 )
 from nanobot_quant.gate_spec import GATE_SPEC
 
@@ -38,11 +39,12 @@ CREDS = {
 
 FLAT_FORM = {
     "api_key": "k", "api_secret": "s", "uid": "15119093",
-    "sub_gate_bot1_uid": "59175220",
-    "sub_gate_bot2_uid": "59175258",
-    "sub_gate_bot3_uid": "59175298",
-    "sub_gate_bot4_uid": "59175332",
-    "sub_gate_bot5_uid": "59175360",
+    "max_sub_accounts": "10",
+    "sub_0_name": "gate_bot1", "sub_0_uid": "59175220",
+    "sub_1_name": "gate_bot2", "sub_1_uid": "59175258",
+    "sub_2_name": "gate_bot3", "sub_2_uid": "59175298",
+    "sub_3_name": "gate_bot4", "sub_3_uid": "59175332",
+    "sub_4_name": "gate_bot5", "sub_4_uid": "59175360",
 }
 
 
@@ -62,13 +64,16 @@ class TestGateSpec:
 
     def test_normalize_drops_empty_subs(self):
         form = dict(FLAT_FORM)
-        form["sub_gate_bot1_uid"] = ""
+        form["sub_0_name"] = ""
+        form["sub_0_uid"] = ""
+        form["sub_0_api_key"] = ""
+        form["sub_0_api_secret"] = ""
         out = GATE_SPEC.normalize(form)
         assert "gate_bot1" not in out["sub_accounts"]
         assert len(out["sub_accounts"]) == 4
 
     def test_normalize_keeps_slot_map(self):
-        # slot_map always covers all five slots, even if a sub is missing
+        # slot_map covers all configured subs (dynamic, not fixed at 5)
         out = GATE_SPEC.normalize(dict(FLAT_FORM))
         assert sorted(out["slot_map"]) == ["1", "2", "3", "4", "5"]
 
@@ -80,7 +85,7 @@ class TestGateSpec:
 
     def test_denormalize_empty(self):
         assert GATE_SPEC.denormalize(None)["api_key"] == ""
-        assert GATE_SPEC.denormalize({})["sub_gate_bot1_uid"] == ""
+        assert GATE_SPEC.denormalize({})["max_sub_accounts"] == "10"
 
     def test_normalize_keeps_stored_main_keys(self, monkeypatch):
         # Form only edits UIDs after initial setup — main key/secret must survive.
@@ -108,8 +113,8 @@ class TestGateSpec:
                 "gate_bot1": {"uid": "59175220", "api_key": "k1", "api_secret": "s1"}}},
         )
         form = dict(FLAT_FORM)
-        form["sub_gate_bot1_api_key"] = ""
-        form["sub_gate_bot1_api_secret"] = ""
+        form["sub_0_api_key"] = ""
+        form["sub_0_api_secret"] = ""
         out = GATE_SPEC.normalize(form)
         assert out["sub_accounts"]["gate_bot1"]["api_key"] == "k1"
         assert out["sub_accounts"]["gate_bot1"]["api_secret"] == "s1"
@@ -118,9 +123,10 @@ class TestGateSpec:
         # uid/key/secret 全空 → 该子账号行删除
         monkeypatch.setattr("nanobot_quant.gate_spec.read_credential", lambda name: None)
         form = dict(FLAT_FORM)
-        form["sub_gate_bot3_uid"] = ""
-        form["sub_gate_bot3_api_key"] = ""
-        form["sub_gate_bot3_api_secret"] = ""
+        form["sub_2_name"] = ""
+        form["sub_2_uid"] = ""
+        form["sub_2_api_key"] = ""
+        form["sub_2_api_secret"] = ""
         out = GATE_SPEC.normalize(form)
         assert "gate_bot3" not in out["sub_accounts"]
 
@@ -141,7 +147,10 @@ class TestSlotMap:
         creds["sub_accounts"] = {"gate_bot1": CREDS["sub_accounts"]["gate_bot1"]}
         creds["slot_map"] = {**CREDS["slot_map"], "3": "ghost_bot"}
         out = load_slot_map(creds)
-        assert out["3"] == "gate_bot3"  # default applied since ghost_bot not configured
+        # explicit slot_map entries referencing unconfigured subs are dropped
+        # (normalizer rebuilds a complete map on next save)
+        assert "3" not in out
+        assert out["1"] == "gate_bot1"
 
     def test_missing_creds(self):
         assert load_slot_map({}) == {}
@@ -411,3 +420,158 @@ class TestGateHandlers:
         resp = asyncio.run(confirm(_FakeRequest(user=_commander(), body={"tx_id": tx_id})))
         assert resp.status_code == 502
         assert "划转失败" in resp.body.decode()
+
+
+class TestGateSpecDynamic:
+    """2026-08-22: dynamic sub-account rows + rename migration + limit."""
+
+    def test_normalize_adds_new_row_and_slot(self):
+        form = dict(FLAT_FORM)
+        form["sub_5_name"] = "gate_bot6"
+        form["sub_5_uid"] = "59175388"
+        out = GATE_SPEC.normalize(form)
+        assert out["sub_accounts"]["gate_bot6"]["uid"] == "59175388"
+        assert out["slot_map"]["6"] == "gate_bot6"
+        assert len(out["sub_accounts"]) == 6
+
+    def test_normalize_rename_migrates_slot_map_and_scene_pool(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            "nanobot_quant.gate_spec.read_credential",
+            lambda name: {
+                "main": {"api_key": "k"},
+                "slot_map": {"1": "gate_bot1", "2": "gate_bot2"},
+                "sub_accounts": {
+                    "gate_bot1": {"uid": "59175220", "api_key": "k1"},
+                    "gate_bot2": {"uid": "59175258"},
+                },
+            },
+        )
+        ep_path = tmp_path / "exec_params.json"
+        ep_path.write_text(json.dumps({"scenes": {"high": {"sub_accounts": ["gate_bot1", "gate_bot2"]}}}))
+        monkeypatch.setattr("nanobot_quant.exec_params.exec_params_path", lambda: ep_path)
+        form = {
+            "api_key": "k",
+            "sub_0_name": "gate_bot6", "sub_0_uid": "59175220",
+            "sub_1_name": "gate_bot2", "sub_1_uid": "59175258",
+        }
+        out = GATE_SPEC.normalize(form)
+        assert "gate_bot6" in out["sub_accounts"]
+        assert "gate_bot1" not in out["sub_accounts"]
+        assert out["slot_map"] == {"1": "gate_bot6", "2": "gate_bot2"}
+        params = json.loads(ep_path.read_text())
+        assert params["scenes"]["high"]["sub_accounts"] == ["gate_bot6", "gate_bot2"]
+
+    def test_normalize_uid_match_keeps_old_name_when_name_blank(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.gate_spec.read_credential",
+            lambda name: {"sub_accounts": {"gate_bot1": {"uid": "59175220", "api_key": "k1"}}},
+        )
+        form = {"sub_0_uid": "59175220", "sub_0_api_key": ""}  # name 留空
+        out = GATE_SPEC.normalize(form)
+        assert out["sub_accounts"]["gate_bot1"]["api_key"] == "k1"
+
+    def test_normalize_new_uid_without_name_auto_names(self):
+        form = {"sub_0_uid": "59175388", "sub_0_api_key": "x"}
+        out = GATE_SPEC.normalize(form)
+        assert out["sub_accounts"]["gate_bot1"]["uid"] == "59175388"
+
+    def test_normalize_duplicate_name_raises(self):
+        form = {"sub_0_name": "dup", "sub_0_uid": "1", "sub_1_name": "dup", "sub_1_uid": "2"}
+        with pytest.raises(ValueError):
+            GATE_SPEC.normalize(form)
+
+    def test_normalize_max_subs_parsing(self, monkeypatch):
+        monkeypatch.setattr("nanobot_quant.gate_spec.read_credential", lambda name: None)
+        assert GATE_SPEC.normalize({"max_sub_accounts": "0"})["max_sub_accounts"] == 10
+        assert GATE_SPEC.normalize({"max_sub_accounts": "abc"})["max_sub_accounts"] == 10
+        assert GATE_SPEC.normalize({"max_sub_accounts": "20"})["max_sub_accounts"] == 20
+
+    def test_fields_for_only_configured_rows(self):
+        flat = {"max_sub_accounts": "10", "sub_0_name": "gate_bot1", "sub_0_uid": "59175220"}
+        names = [f.name for f in GATE_SPEC.fields_for(flat)]
+        assert "sub_0_name" in names
+        assert "sub_1_name" not in names
+
+    def test_form_extra_contains_toolbar(self):
+        html = GATE_SPEC.form_extra({"max_sub_accounts": "10"})
+        assert "syncSubs" in html
+        assert "从 Gate 同步子账号" in html
+
+
+class TestSyncSubaccounts:
+    def test_sync_returns_added(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.gate_handlers.load_gate_credentials",
+            lambda: {
+                "main": {"api_key": "k", "api_secret": "s"},
+                "sub_accounts": {"gate_bot1": {"uid": "59175220"}},
+            },
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.gate_sdk.sub_account_balances",
+            lambda *a, **k: [{"uid": "59175220"}, {"uid": "59175360"}, {"uid": "59175388"}],
+        )
+        resp = asyncio.run(sync_subaccounts(_FakeRequest()))
+        assert resp.status_code == 200
+        data = json.loads(resp.body.decode())
+        assert data["ok"] is True
+        assert data["added"] == [
+            {"name": "gate_bot2", "uid": "59175360"},
+            {"name": "gate_bot3", "uid": "59175388"},
+        ]
+        assert data["total"] == 3
+
+    def test_sync_no_new(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.gate_handlers.load_gate_credentials",
+            lambda: {"main": {"api_key": "k", "api_secret": "s"},
+                     "sub_accounts": {"gate_bot1": {"uid": "59175220"}}},
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.gate_sdk.sub_account_balances", lambda *a, **k: [{"uid": "59175220"}]
+        )
+        resp = asyncio.run(sync_subaccounts(_FakeRequest()))
+        assert json.loads(resp.body.decode())["added"] == []
+
+    def test_sync_missing_main_key(self, monkeypatch):
+        monkeypatch.setattr("nanobot_quant.gate_handlers.load_gate_credentials", lambda: {"main": {}})
+        resp = asyncio.run(sync_subaccounts(_FakeRequest()))
+        assert resp.status_code == 400
+        assert "主账号" in resp.body.decode()
+
+    def test_sync_exceeds_limit(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.gate_handlers.load_gate_credentials",
+            lambda: {
+                "main": {"api_key": "k", "api_secret": "s"},
+                "max_sub_accounts": 5,
+                "sub_accounts": {f"gate_bot{i}": {"uid": f"59{i}"} for i in range(1, 6)},
+            },
+        )
+        monkeypatch.setattr(
+            "nanobot_quant.gate_sdk.sub_account_balances",
+            lambda *a, **k: [{"uid": f"59{i}"} for i in range(1, 6)] + [{"uid": "599999"}],
+        )
+        resp = asyncio.run(sync_subaccounts(_FakeRequest()))
+        assert resp.status_code == 400
+        assert "上限" in resp.body.decode()
+
+    def test_sync_api_error(self, monkeypatch):
+        monkeypatch.setattr(
+            "nanobot_quant.gate_handlers.load_gate_credentials",
+            lambda: {"main": {"api_key": "k", "api_secret": "s"}, "sub_accounts": {}},
+        )
+
+        def boom(*a, **k):
+            raise RuntimeError("401")
+
+        monkeypatch.setattr("nanobot_quant.gate_sdk.sub_account_balances", boom)
+        resp = asyncio.run(sync_subaccounts(_FakeRequest()))
+        assert resp.status_code == 502
+        assert "查询失败" in resp.body.decode()
+
+    def test_register_includes_sync(self):
+        app = _FakeApp()
+        register_gate_routes(app, _FakeGatekeeper())
+        paths = [r[0] for r in app.routes]
+        assert "/config/gate/sync-subaccounts" in paths
