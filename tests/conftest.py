@@ -345,3 +345,18 @@ def _reset_td_stop_requested():
 
     yield
     td_live_state.stop_requested.clear()
+
+@pytest.fixture(autouse=True)
+def _isolate_price_cache():
+    """测试隔离 CexBroker 价格缓存（2026-08-22 类级共享）。
+
+    价格缓存是类属性（同轮三场景 broker 共享），测试之间会互相污染——
+    前一个测试缓存的价（TTL 15s 未过）会让后一个测试的取价调用命中缓存、
+    calls 断言失败。每个测试前后清空。
+    """
+    from nanobot_quant.brokers.cex_broker import CexBroker
+
+    CexBroker._price_cache.clear()
+    yield
+    CexBroker._price_cache.clear()
+
