@@ -337,6 +337,52 @@ class TestSubmitOrder:
         assert calls == []  # gate + okx 都不查
         clear_blacklist()
 
+    def test_price_of_cache_second_call_no_network(self, monkeypatch):
+        """短 TTL 缓存：同轮内对同一币重复取价只发一次网络请求。"""
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, 67.2 if name == "gate_cex" else None, calls))
+        b = _broker()
+        assert b._price_of("CRCLX") == 67.2
+        assert b._price_of("CRCLX") == 67.2   # 缓存命中
+        assert b._price_of("CRCLX") == 67.2
+        assert calls == ["gate_cex"]          # 只查了一次
+
+    def test_price_of_cache_expires_after_ttl(self, monkeypatch):
+        """TTL 过期后重新查询（覆盖过期路径，不 mock 全局 time）。"""
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, 67.2 if name == "gate_cex" else None, calls))
+        b = _broker()
+        b._PRICE_CACHE_TTL = -1.0  # 强制立即过期
+        assert b._price_of("CRCLX") == 67.2
+        assert b._price_of("CRCLX") == 67.2
+        assert calls == ["gate_cex", "gate_cex"]  # 每次重新查询
+
+    def test_price_of_cache_per_symbol(self, monkeypatch):
+        """缓存按 symbol 区分——不同币互不污染（子账号多持仓币各取各的价）。"""
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, 67.2 if name == "gate_cex" else None, calls))
+        b = _broker()
+        assert b._price_of("CRCLX") == 67.2
+        assert b._price_of("RENDER") == 67.2
+        assert b._price_of("CRCLX") == 67.2   # CRCLX 缓存命中
+        assert calls == ["gate_cex", "gate_cex"]  # RENDER 是新币，重新查
+
+    def test_price_of_zero_not_cached(self, monkeypatch):
+        """0 价不写缓存——临时失败不会污染；黑名单仍由黑名单机制覆盖。"""
+        from nanobot_quant.gate_cex_data import clear_blacklist, blacklist_reason
+        clear_blacklist()
+        calls = []
+        monkeypatch.setattr(mod, "get_data_source", lambda name: _FakePriceSource(
+            name, None, calls))
+        b = _broker()
+        assert b._price_of("VSC") == 0.0
+        assert b._price_cache.get("VSC") is None  # 0 不入缓存
+        assert blacklist_reason("VSC")            # 但进了黑名单（永久短路）
+        clear_blacklist()
+
     def test_meta_unavailable_fail_closed(self, monkeypatch):
         # pair meta fetch fails → fail-closed: refuse to place blind order
         CexBroker._pair_meta_cache.clear()  # isolate from earlier tests

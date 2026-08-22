@@ -105,6 +105,7 @@ class CexBroker(Broker):
                 f" (gate.json main or sub_account={sub_account!r})"
             )
         self._tracked: dict[str, dict] = {}  # order_id → meta
+        self._price_cache: dict[str, tuple[float, float]] = {}  # symbol → (ts, price)
 
     # ═══════════════════════════════════════════════════════════
     #  Helpers
@@ -170,8 +171,34 @@ class CexBroker(Broker):
             return "filled" if filled > 0 else "failed", filled, left, avg
         return "submitted", filled, left, avg
 
+    _PRICE_CACHE_TTL = 5.0
+
     def _price_of(self, symbol: str) -> float:
-        """Current price for order sizing.
+        """Current price for order sizing（短 TTL 缓存）。
+
+        同一轮迭代内对同一币会重复触发估值取价——每个标的的 TD 计算后
+        ``_get_balances_at_broker`` / ``_pull_positions`` 各跑一遍（子账号持仓
+        估值），多标的池 = 同一币每轮查 N 次 Gate。加 5s TTL 缓存让一轮内
+        同一币只查一次：价格在 1m 心跳内几乎不变，缓存不影响任何语义
+        （估值/持仓判断/止损）。0/fail-closed 不缓存（黑名单机制已覆盖，
+        且临时失败不应被缓存成永久 0）。
+        """
+        from nanobot_quant.gate_cex_data import blacklist_reason
+
+        reason = blacklist_reason(symbol)
+        if reason:
+            return 0.0  # 黑名单内——静默 fail-closed（首次原因已打印）
+        now = time.time()
+        cached = self._price_cache.get(symbol)
+        if cached and now - cached[0] < self._PRICE_CACHE_TTL:
+            return cached[1]
+        px = self._price_of_uncached(symbol)
+        if px > 0:
+            self._price_cache[symbol] = (now, px)
+        return px
+
+    def _price_of_uncached(self, symbol: str) -> float:
+        """(原 _price_of 主体) Current price for order sizing.
 
         Gate ticker first (same-exchange, closest to fill), OKX CEX as
         fallback — both via the data-source registry (gate_cex / okx_cex);
