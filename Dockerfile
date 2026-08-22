@@ -73,7 +73,7 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=133]" && pip install --break-system-packages \
+RUN echo "[bust=134]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherd2006/nanobot-quant.git@2f4bfc2 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
     && echo "✅ nanobot-quant @2f4bfc2 (upstream main — PR #197 取价轮级缓存, bust=133) + vibe-trading @v0.1.12"
