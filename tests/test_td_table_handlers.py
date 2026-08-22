@@ -549,3 +549,65 @@ def test_trade_rows_scene_filter():
     assert [r["symbol"] for r in mid] == ["SPYX"]
     # 旧事件（无 scene）在指定场景过滤下不可见，只在「全部」可见
     assert _trade_rows(events, {"tq_scene": "low"}) == []
+
+
+def test_render_live_funds_block(monkeypatch, tmp_path: Path):
+    """运行中：场景卡片资金小表渲染 LIVE_STATE funds（USDT 可用 + 总资产）。
+
+    - 全部 slot 展示（含空仓 available）
+    - 未运行不渲染（无资金快照，避免过时数据）
+    """
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    scenes = {
+        "high": {"enabled": True, "sleeptime": "1m",
+                 "sub_accounts": ["gate_bot1", "gate_bot2"]},
+        "mid": {"enabled": False, "sleeptime": "15m"},
+        "low": {"enabled": False, "sleeptime": "1H"},
+    }
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "gate", "scenes": scenes})
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.set_loop(True, next_iteration="13:14:00")
+    td_live_state.set_account_funds("high", [
+        {"slot": 1, "account": "gate_bot1", "uid": "59175220",
+         "usdt_available": 3.98, "total_asset": 4.02},
+        {"slot": 2, "account": "gate_bot2", "uid": "59175258",
+         "usdt_available": 0.1, "total_asset": 4.05},
+    ])
+
+    html = _render_live(with_script=False, tq={})
+    assert "💰 子账号资金" in html
+    assert "<th>slot</th><th>子账号</th><th>USDT 可用</th><th>总资产</th>" in html
+    assert ">gate_bot1<" in html
+    assert ">3.98<" in html
+    assert ">4.02<" in html
+    assert ">gate_bot2<" in html
+    assert ">0.1<" in html
+
+
+def test_render_live_funds_block_not_running(monkeypatch, tmp_path: Path):
+    """TD 未运行：不渲染资金小表（无快照，避免过时数据）。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    scenes = {
+        "high": {"enabled": True, "sleeptime": "1m",
+                 "sub_accounts": ["gate_bot1", "gate_bot2"]},
+        "mid": {"enabled": False, "sleeptime": "15m"},
+        "low": {"enabled": False, "sleeptime": "1H"},
+    }
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "gate", "scenes": scenes})
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.set_loop(False, next_iteration=None)
+    td_live_state.set_account_funds("high", [
+        {"slot": 1, "account": "gate_bot1", "usdt_available": 3.98,
+         "total_asset": 4.02},
+    ])
+
+    html = _render_live(with_script=False, tq={})
+    assert "💰 子账号资金" not in html

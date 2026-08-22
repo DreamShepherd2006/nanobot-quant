@@ -387,9 +387,75 @@ class TdSequentialStrategy(Strategy):
                     })
                 by_sym[sym] = rows
             td_live_state.set_positions(self._current_scene or "default", by_sym)
+            self._write_account_funds()
         except Exception:  # noqa: BLE001
             # 展示层：失败不阻塞策略主循环
             pass
+
+    def _write_account_funds(self) -> None:
+        """子账号资金写入 LIVE_STATE（实时监控资金小表）。
+
+        2026-08-22 拍板：持仓小节下方显示全部 slot 资金——USDT 可用 +
+        总资产（USDT 计，含持仓币×ticker 价）。仅 CEX（gate）通道实现：
+        主 key 批量拉子账号余额（fetch_all_balances，每轮 1 次调用），按
+        场景 sub_accounts 取本场景 slot 对应子账号；DEX 子钱包资金展示
+        待补（docs/quant-system.md 记录）。展示层异常不阻塞主循环。
+        """
+        try:
+            from nanobot_quant import td_live_state
+            from nanobot_quant.exec_params import load_exec_params
+            from nanobot_quant.gate_credentials import (
+                fetch_all_balances,
+                load_gate_credentials,
+            )
+
+            if self.parameters.get("channel_family") != "cex":
+                return  # DEX 通道资金展示待补
+            ep = load_exec_params() or {}
+            sc_cfg = (ep.get("scenes") or {}).get(self._current_scene or "default") or {}
+            accts = sc_cfg.get("sub_accounts") or []
+            if not accts:
+                return
+            creds = load_gate_credentials()
+            if not creds:
+                return
+            balances = fetch_all_balances(creds)
+            sub_by_uid: dict = {}
+            rows = balances.get("sub_accounts") or []
+            if isinstance(rows, list):
+                for r in rows:
+                    if isinstance(r, dict) and r.get("uid"):
+                        sub_by_uid[str(r["uid"])] = r.get("balances") or {}
+            subs_cfg = creds.get("sub_accounts") or {}
+            funds: list[dict] = []
+            for i, acct in enumerate(accts, start=1):
+                uid = str((subs_cfg.get(acct) or {}).get("uid") or "")
+                bal = sub_by_uid.get(uid, {})
+                usdt = float((bal.get("USDT") or {}).get("available") or 0)
+                total = 0.0
+                for cur, v in bal.items():
+                    amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
+                    if amt <= 0:
+                        continue
+                    if cur == "USDT":
+                        total += amt
+                    else:
+                        try:
+                            px = float(self._cex_price_of(cur) or 0)
+                        except Exception:  # noqa: BLE001
+                            px = 0.0
+                        if px > 0:
+                            total += amt * px
+                funds.append({
+                    "slot": i,
+                    "account": acct,
+                    "uid": uid,
+                    "usdt_available": round(usdt, 6),
+                    "total_asset": round(total, 6),
+                })
+            td_live_state.set_account_funds(self._current_scene or "default", funds)
+        except Exception:  # noqa: BLE001
+            pass  # 展示层：失败不阻塞策略主循环
 
     def _activate_scene(self, name: str, rt: dict) -> None:
         """S3a（2026-08-20）：激活场景运行时。

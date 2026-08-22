@@ -744,6 +744,47 @@ def _scene_positions_block(sc: str, running: bool) -> str:
     )
 
 
+def _scene_funds_block(sc: str, running: bool) -> str:
+    """场景卡片资金小表（2026-08-22 拍板：持仓小节下方，slot→子账号
+    USDT 可用 + 总资产）。
+
+    仅运行中展示——策略每轮写入 LIVE_STATE funds（CEX 通道主 key 批量
+    拉，见 _write_account_funds）；未运行无资金快照，不渲染（避免显示
+    过时数据）。DEX 子钱包资金展示待补（docs/quant-system.md 记录）。
+    """
+    if not running:
+        return ""
+    funds: list[dict] = []
+    try:
+        from nanobot_quant import td_live_state
+        st_f = (td_live_state.get_state().get("funds") or {}).get(sc)
+        if st_f:
+            funds = list(st_f)
+    except Exception:  # noqa: BLE001
+        funds = []
+    if not funds:
+        return ""
+    rows = ""
+    for f in funds:
+        usdt = f.get("usdt_available")
+        total = f.get("total_asset")
+        usdt_txt = f"{float(usdt):.4g}" if usdt is not None else "—"
+        total_txt = f"{float(total):.4g}" if total is not None else "—"
+        rows += (
+            f'<tr><td>{_esc(str(f.get("slot", "")))}</td>'
+            f'<td>{_esc(str(f.get("account", "")))}</td>'
+            f'<td class="num">{usdt_txt}</td>'
+            f'<td class="num">{total_txt}</td></tr>'
+        )
+    return (
+        '<div style="margin:8px 0 2px"><span class="muted">💰 子账号资金</span>'
+        '<span class="muted" style="float:right">USDT 可用 · 总资产（含持仓，USDT 计）</span></div>'
+        '<table style="margin-top:2px">'
+        '<tr><th>slot</th><th>子账号</th><th>USDT 可用</th><th>总资产</th></tr>'
+        + rows + "</table>"
+    )
+
+
 def _render_live(with_script: bool = True, tq: dict | None = None,
                  entry_setup=None, exit_setup=None, exit_cd=None) -> str:
     """「实时监控」tab：TD live 每轮状态 + 最近信号事件。
@@ -860,7 +901,8 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
             '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
             f'{rows}</table>'
-            f'{_scene_positions_block(sc, bool(st.get("running")))}</div>'
+            f'{_scene_positions_block(sc, bool(st.get("running")))}'
+            f'{_scene_funds_block(sc, bool(st.get("running")))}</div>'
         )
     if not blocks:
         blocks = '<div class="muted" style="padding:8px 0">暂无场景数据</div>'

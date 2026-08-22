@@ -115,6 +115,18 @@ def set_positions(scene: str, by_symbol: dict) -> None:
         LIVE_STATE["updated_at"] = _now_iso()
 
 
+def set_account_funds(scene: str, funds: list) -> None:
+    """写入子账号资金快照（场景→slot→子账号 USDT 可用/总资产）。
+
+    2026-08-22 拍板：实时监控场景卡片持仓小节下方显示资金小表——
+    全部 slot（含 available 空仓）→ 子账号 → USDT 可用 + 总资产（USDT 计）。
+    仅 CEX（gate）通道实现；DEX 子钱包资金展示待补（docs/quant-system.md）。
+    """
+    with _lock:
+        LIVE_STATE.setdefault("funds", {})[scene or "default"] = funds
+        LIVE_STATE["updated_at"] = _now_iso()
+
+
 def get_state() -> dict:
     """供 td-table「实时监控」tab 读取（同进程，无 IO）。"""
     with _lock:
@@ -125,6 +137,7 @@ def get_state() -> dict:
             "updated_at": LIVE_STATE["updated_at"],
             "symbols": dict(LIVE_STATE["symbols"]),
             "positions": dict(LIVE_STATE.get("positions", {})),
+            "funds": dict(LIVE_STATE.get("funds", {})),
         }
 
 

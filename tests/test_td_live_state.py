@@ -30,6 +30,23 @@ def test_set_positions_and_get_state():
     assert rows[0]["price"] == 88.65
 
 
+def test_set_account_funds_and_get_state():
+    """子账号资金快照写入/读取（2026-08-22 实时监控资金小表数据源）。"""
+    td_live_state.set_account_funds("high", [
+        {"slot": 1, "account": "gate_bot1", "uid": "59175220",
+         "usdt_available": 3.98, "total_asset": 4.02},
+        {"slot": 2, "account": "gate_bot2", "uid": "59175258",
+         "usdt_available": 0.1, "total_asset": 4.05},
+    ])
+    st = td_live_state.get_state()
+    funds = st["funds"]["high"]
+    assert len(funds) == 2
+    assert funds[0]["slot"] == 1
+    assert funds[0]["account"] == "gate_bot1"
+    assert funds[0]["usdt_available"] == 3.98
+    assert funds[1]["total_asset"] == 4.05
+
+
 def test_update_symbol_and_get_state():
     td_live_state.update_symbol("CRCLX", {
         "setup_buy": 3, "setup_sell": 7, "cd_sell": 13,
