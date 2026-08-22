@@ -373,9 +373,11 @@ def test_render_live_scene_blocks(monkeypatch, tmp_path: Path):
     # 了原函数，monkeypatch 必须替换 td_table_handlers 模块内的名字。
     scenes = {
         "high": {"enabled": True, "sleeptime": "1m",
-                 "entry_setup": 6, "exit_setup": 6, "exit_countdown": 13},
+                 "entry_setup": 6, "exit_setup": 6, "exit_countdown": 13,
+                 "sub_accounts": ["gate_bot1", "gate_bot2"]},
         "mid": {"enabled": True, "sleeptime": "5m",
-                 "entry_setup": 9, "exit_setup": 6, "exit_countdown": 13},
+                 "entry_setup": 9, "exit_setup": 6, "exit_countdown": 13,
+                 "sub_accounts": ["gate_bot3"]},
         "low": {"enabled": False, "sleeptime": "1D",
                  "entry_setup": 9, "exit_setup": 6, "exit_countdown": 13},
     }
@@ -406,6 +408,56 @@ def test_render_live_scene_blocks(monkeypatch, tmp_path: Path):
     # 场景过滤下拉
     assert 'name="tq_scene"' in html and 'name="sq_scene"' in html
     assert "全部场景" in html
+    # 场景卡片标题含 slot↔子账号映射（2026-08-22 方案 A）
+    assert "slot 1-2 (gate_bot1-2)" in html
+    assert "slot 1 (gate_bot3)" in html
+
+
+def test_slot_map_txt():
+    """slot↔子账号映射文本（2026-08-22）。"""
+    from nanobot_quant.td_table_handlers import _slot_map_txt
+
+    assert _slot_map_txt(["gate_bot1", "gate_bot2"]) == "slot 1-2 (gate_bot1-2)"
+    assert _slot_map_txt(["gate_bot1", "gate_bot2", "gate_bot3"]) == "slot 1-3 (gate_bot1-3)"
+    assert _slot_map_txt(["gate_bot1", "gate_bot3"]) == "slot 1-2 (gate_bot1, gate_bot3)"
+    assert _slot_map_txt(["gate_bot3"]) == "slot 1 (gate_bot3)"
+    assert _slot_map_txt([]) == ""
+    assert _slot_map_txt(["my_bot", "other"]) == "slot 1-2 (my_bot, other)"
+
+
+def test_render_live_scene_columns(monkeypatch, tmp_path: Path):
+    """信号历史/交易记录场景列（2026-08-22）。
+
+    - 表头含「场景」列（交易记录与信号历史均位于时间列后）
+    - 事件行显示 scene 值；旧事件（无 scene）显示 —
+    """
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.append_event({
+        "symbol": "CRCLX", "event": "LONG", "scene": "high",
+        "note": "slot=2 qty=0.045 price=87.99", "slot": 2, "qty": 0.045,
+        "price": 87.99, "direction": "buy", "status": "ok", "chain": "solana",
+    })
+    td_live_state.append_event({
+        "symbol": "SOL", "event": "SKIP", "scene": "mid",
+        "note": "无可用资金 slot", "price": 93.99, "score": 26.9,
+    })
+    td_live_state.append_event({
+        "symbol": "RENDER", "event": "EXIT", "note": "slot=3 旧事件",
+        "slot": 3, "qty": 3.07, "price": 1.33, "direction": "sell",
+        "status": "ok", "chain": "solana",
+    })
+    html = _render_live(with_script=False, tq={})
+    # 表头含场景列（时间后）
+    assert "<th>时间</th><th>场景</th>" in html            # 信号历史
+    assert "<th>tx_hash</th><th>时间</th><th>场景</th>" in html  # 交易记录
+    # 信号历史行场景值
+    assert ">high<" in html and ">mid<" in html
+    # 交易记录：LONG(high) 场景值 + 旧事件 EXIT 显示 —
+    assert ">—<" in html
 
 
 def test_trade_rows_scene_filter():
