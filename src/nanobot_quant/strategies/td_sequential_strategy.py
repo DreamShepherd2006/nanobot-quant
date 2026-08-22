@@ -215,7 +215,10 @@ class TdSequentialStrategy(Strategy):
         self._pending_sells: dict[int, dict] = {}
         self._pending_buys: dict[int, dict] = {}
         # ── CEX 通道（Step 1，2026-08-17）：slot → 子账号 CexBroker 缓存 ──
-        self._cex_brokers: dict[int, Any] = {}
+        # key = "{slot_no}:{account}"（2026-08-23：含 account，场景化后同一
+        # slot_no 在不同场景池指向不同子账号，如 high slot1=gate_bot1 vs
+        # mid slot1=gate_bot3，复用会串池）。
+        self._cex_brokers: dict[str, Any] = {}
 
         # TD algorithm params (subset of the strategy parameters dict)
         self._td_params = {
@@ -1461,18 +1464,23 @@ class TdSequentialStrategy(Strategy):
     #                         SELL: 记 FAIL，台账保持 open（下轮可重试卖）。
     #   open/submitted → 继续等；查询异常 → 保留 pending（fail-safe）。
 
-    def _cex_confirm_broker(self, slot_id: int) -> Any:
-        """CEX pending 确认用的子账号 broker（缓存缺失时按 slot 重建）。"""
-        broker = self._cex_brokers.get(slot_id)
-        if broker is None:
-            try:
-                broker = self._cex_slot_broker({"slot": slot_id, "account_id": ""})
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning(
-                    f"TD CEX CONFIRM ERR | slot={slot_id} 重建 broker 失败 {exc}"
-                )
-                return None
-        return broker
+    def _cex_confirm_broker(self, slot_id: int, info: dict | None = None) -> Any:
+        """CEX pending 确认用的子账号 broker（缓存缺失时按 slot 重建）。
+
+        2026-08-23：pending 记录带 account_id（下单时写入的场景池子账号），
+        确认必须用它重建 broker——旧记录无 account_id 时回退全局 slot_map
+        （_cex_slot_broker 内部 fallback），兼容无 account 字段的历史记录。
+        """
+        info = info or {}
+        try:
+            return self._cex_slot_broker(
+                {"slot": slot_id, "account_id": str(info.get("account_id") or "")}
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                f"TD CEX CONFIRM ERR | slot={slot_id} 重建 broker 失败 {exc}"
+            )
+            return None
 
     def _confirm_cex_sell(self, slot_id: int, info: dict) -> None:
         """CEX 卖单确认：filled→close_lot；终态零成交→EXIT_FAIL 台账保持 open。"""
@@ -1481,7 +1489,7 @@ class TdSequentialStrategy(Strategy):
         if not order_id:
             return
         try:
-            broker = self._cex_confirm_broker(slot_id)
+            broker = self._cex_confirm_broker(slot_id, info)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
                 f"TD PENDING CHECK ERR | slot={slot_id} symbol={symbol} CEX {exc}"
@@ -1540,7 +1548,7 @@ class TdSequentialStrategy(Strategy):
         if not order_id:
             return
         try:
-            broker = self._cex_confirm_broker(slot_id)
+            broker = self._cex_confirm_broker(slot_id, info)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
                 f"TD PENDING CHECK ERR | slot={slot_id} symbol={symbol} CEX {exc}"
@@ -1826,19 +1834,32 @@ class TdSequentialStrategy(Strategy):
         return self.parameters.get("channel_family") == "cex"
 
     def _cex_slot_broker(self, slot: dict) -> Any:
-        """slot → 子账号 CexBroker（子账号 key 签名；缓存，避免每轮重建）。"""
+        """slot → 子账号 CexBroker（子账号 key 签名；缓存，避免每轮重建）。
+
+        S3 场景化（2026-08-20）后 slot.account_id 是场景 sub_accounts 池
+        （如 mid 场景 slot1=gate_bot3），必须优先使用；全局 slot_map 是
+        DEX 时代 1..N 默认映射，与场景池错位时会把资金检查/下单指向
+        错误子账号（2026-08-23 修复：mid 场景 RENDER 资金检查 slot1 曾
+        查 gate_bot1 余额 0.0001 → 误报「无可用资金 slot」，而场景池
+        gate_bot3 实际有 4.862 USDT）。缓存 key 含 account——同 slot_no
+        跨场景不复用错 broker。
+        """
         slot_no = int(slot["slot"])
-        broker = self._cex_brokers.get(slot_no)
+        account = str(slot.get("account_id") or "")
+        key = f"{slot_no}:{account}" if account else str(slot_no)
+        broker = self._cex_brokers.get(key)
         if broker is None:
             from nanobot_quant.brokers.cex_broker import CexBroker
             from nanobot_quant.gate_credentials import load_slot_map
-            name = load_slot_map().get(str(slot_no)) or f"gate_bot{slot_no}"
+            name = account or (
+                load_slot_map().get(str(slot_no)) or f"gate_bot{slot_no}"
+            )
             broker = CexBroker(
                 tokens_json=self.parameters.get("tokens_json") or [],
                 slippage=str(self.parameters.get("slippage", "0.01")),
                 sub_account=name,
             )
-            self._cex_brokers[slot_no] = broker
+            self._cex_brokers[key] = broker
         return broker
 
     def _cex_slot_balances(self, slot: dict) -> dict:
