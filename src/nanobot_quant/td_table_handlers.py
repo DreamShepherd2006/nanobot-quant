@@ -650,6 +650,141 @@ def _slot_map_txt(sub_accounts) -> str:
     return f"slot 1-{n} ({', '.join(str(a) for a in sub_accounts)})"
 
 
+def _pos_row(lot: dict) -> str:
+    """持仓小节单行（标的/slot/数量/成本价/现价/浮盈%）。"""
+    pnl = lot.get("pnl_pct")
+    pnl_txt = f"{pnl * 100:+.2f}%" if pnl is not None else "—"
+    price = lot.get("price")
+    price_txt = f"{float(price):.4g}" if price else "—"
+    entry = lot.get("entry_price")
+    entry_txt = f"{float(entry):.4g}" if entry else "—"
+    return (
+        f'<tr><td><b>{_esc(str(lot.get("symbol", "")))}</b></td>'
+        f'<td>{_esc(str(lot.get("slot", "")))}</td>'
+        f'<td class="num">{_esc(str(lot.get("qty", "")))}</td>'
+        f'<td class="num">{entry_txt}</td>'
+        f'<td class="num">{price_txt}</td>'
+        f'<td class="num">{pnl_txt}</td></tr>'
+    )
+
+
+def _load_batch_snapshot(sc: str) -> list[dict]:
+    """TD 未运行时读台账离线快照（2026-08-22 拍板：可见历史持仓，无实时价）。
+
+    遍历场景池标的的 batches.{channel}.{scene}.{symbol}.json，提取 open
+    批次（slot/account/qty/entry_price/entry_time）；price/pnl 置 None
+    （页面显示 —）。
+    """
+    try:
+        from nanobot_quant.batches import BatchManager
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict] = []
+    try:
+        _ep = load_exec_params() or {}
+        channel = str(_ep.get("execution_channel") or "okx_dex")
+        sc_cfg = (_ep.get("scenes") or {}).get(sc)
+    except Exception:  # noqa: BLE001
+        return []
+    if not sc_cfg:
+        return []
+    for sym in (sc_cfg.get("symbols") or []):
+        try:
+            bm = BatchManager.load(symbol=sym, channel=channel, scene=sc)
+        except Exception:  # noqa: BLE001
+            bm = None
+        if bm is None:
+            continue
+        for s in bm.slots:
+            lot = s.get("lot")
+            if lot is None:
+                continue
+            out.append({
+                "symbol": sym,
+                "slot": s["slot"],
+                "account_id": s.get("account_id"),
+                "qty": lot.get("qty"),
+                "entry_price": lot.get("entry_price"),
+                "entry_time": lot.get("entry_time"),
+                "price": None,
+                "pnl_pct": None,
+            })
+    return out
+
+
+def _scene_positions_block(sc: str, running: bool) -> str:
+    """场景卡片持仓小节（2026-08-22 方案 A：场景卡片内）。
+
+    运行中：优先用 LIVE_STATE positions（策略每轮写，ticker 实时价）；
+    TD 未运行/该场景无 live 数据：回退读台账离线快照（无实时价）。
+    无 open 批次时不渲染小节。
+    """
+    try:
+        from nanobot_quant import td_live_state
+        st_pos = td_live_state.get_state().get("positions") or {}
+        live_pos = st_pos.get(sc) or {}
+    except Exception:  # noqa: BLE001
+        live_pos = {}
+    rows = []
+    if running and live_pos:
+        for _sym, lots in sorted(live_pos.items()):
+            for lot in lots or []:
+                rows.append(_pos_row(lot))
+    else:
+        for lot in _load_batch_snapshot(sc):
+            rows.append(_pos_row(lot))
+    if not rows:
+        return ""
+    return (
+        '<div style="margin:8px 0 2px"><span class="muted">持仓（open 批次）</span>'
+        '<span class="muted" style="float:right">运行中=实时价 · 未运行=台账快照（无现价）</span></div>'
+        '<table style="margin-top:2px">'
+        '<tr><th>标的</th><th>slot</th><th>数量</th><th>成本价</th><th>现价</th><th>浮盈%</th></tr>'
+        + "".join(rows) + "</table>"
+    )
+
+
+def _scene_funds_block(sc: str, running: bool) -> str:
+    """场景卡片资金小表（2026-08-22 拍板：持仓小节下方，slot→子账号
+    USDT 可用 + 总资产）。
+
+    仅运行中展示——策略每轮写入 LIVE_STATE funds（CEX 通道主 key 批量
+    拉，见 _write_account_funds）；未运行无资金快照，不渲染（避免显示
+    过时数据）。DEX 子钱包资金展示待补（docs/quant-system.md 记录）。
+    """
+    if not running:
+        return ""
+    funds: list[dict] = []
+    try:
+        from nanobot_quant import td_live_state
+        st_f = (td_live_state.get_state().get("funds") or {}).get(sc)
+        if st_f:
+            funds = list(st_f)
+    except Exception:  # noqa: BLE001
+        funds = []
+    if not funds:
+        return ""
+    rows = ""
+    for f in funds:
+        usdt = f.get("usdt_available")
+        total = f.get("total_asset")
+        usdt_txt = f"{float(usdt):.4g}" if usdt is not None else "—"
+        total_txt = f"{float(total):.4g}" if total is not None else "—"
+        rows += (
+            f'<tr><td>{_esc(str(f.get("slot", "")))}</td>'
+            f'<td>{_esc(str(f.get("account", "")))}</td>'
+            f'<td class="num">{usdt_txt}</td>'
+            f'<td class="num">{total_txt}</td></tr>'
+        )
+    return (
+        '<div style="margin:8px 0 2px"><span class="muted">💰 子账号资金</span>'
+        '<span class="muted" style="float:right">USDT 可用 · 总资产（含持仓，USDT 计）</span></div>'
+        '<table style="margin-top:2px">'
+        '<tr><th>slot</th><th>子账号</th><th>USDT 可用</th><th>总资产</th></tr>'
+        + rows + "</table>"
+    )
+
+
 def _render_live(with_script: bool = True, tq: dict | None = None,
                  entry_setup=None, exit_setup=None, exit_cd=None) -> str:
     """「实时监控」tab：TD live 每轮状态 + 最近信号事件。
@@ -765,7 +900,9 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '<table>'
             '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
             '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
-            f'{rows}</table></div>'
+            f'{rows}</table>'
+            f'{_scene_positions_block(sc, bool(st.get("running")))}'
+            f'{_scene_funds_block(sc, bool(st.get("running")))}</div>'
         )
     if not blocks:
         blocks = '<div class="muted" style="padding:8px 0">暂无场景数据</div>'

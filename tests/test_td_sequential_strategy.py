@@ -424,6 +424,77 @@ def test_cycle_gate_open_position_on_start_blocks():
     assert s._cycle_state["AAPL"]["bought"] is True
 
 
+def test_write_positions_state(monkeypatch):
+    """持仓摘要写入 LIVE_STATE（2026-08-22 实时监控持仓小节）。
+
+    - open 批次按标的分组写入（场景→标的→行）
+    - 价格口径 = ticker（_cex_price_of），浮盈按 ticker 价算
+    - 无 open 批次的标的不取价、不写入
+    """
+    from types import SimpleNamespace
+
+    from nanobot_quant import td_live_state
+    from nanobot_quant.batches import BatchManager
+
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy()
+    s._current_scene = "high"
+    bm = BatchManager("CRCLX", ["acc-1", "acc-2"], path="/tmp/test-pos.json")
+    bm.open_lot(qty=0.045, entry_price=87.99, slot=2)
+    s.batch_managers = {"CRCLX": bm, "SOL": SimpleNamespace(slots=[])}
+    s._batch_managers = None
+    s._cex_price_of = lambda sym: 88.65
+    s._write_positions_state()
+
+    rows = td_live_state.LIVE_STATE["positions"]["high"]["CRCLX"]
+    assert len(rows) == 1
+    assert rows[0]["slot"] == 2
+    assert rows[0]["qty"] == 0.045
+    assert rows[0]["price"] == 88.65
+    assert abs(rows[0]["pnl_pct"] - (88.65 - 87.99) / 87.99) < 1e-9
+    # 无 open 批次的标的（SOL）不写入
+    assert "SOL" not in td_live_state.LIVE_STATE["positions"]["high"]
+
+
+def test_write_positions_state_price_failure_fallback(monkeypatch):
+    """ticker 取价失败 → price/pnl 置 None（显示 —），不阻塞。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.batches import BatchManager
+
+    # 隔离 LIVE_STATE，避免污染其他测试（2026-08-22 组合跑暴露）
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy()
+    s._current_scene = "mid"
+    bm = BatchManager("SOL", ["acc-1"], path="/tmp/test-pos2.json")
+    bm.open_lot(qty=0.0457, entry_price=87.42, slot=1)
+    s.batch_managers = {"SOL": bm}
+    s._batch_managers = None
+
+    def boom_price(sym):
+        raise RuntimeError("ticker down")
+
+    s._cex_price_of = boom_price
+    s._write_positions_state()
+
+    rows = td_live_state.LIVE_STATE["positions"]["mid"]["SOL"]
+    assert rows[0]["price"] is None
+    assert rows[0]["pnl_pct"] is None
+    # AAPL 触发建仓 → bought=True
+    s._evaluate_symbol()
+    assert s._cycle_state["AAPL"]["bought"] is True
+    # MSFT 从未评估过 → 首次评估视为新标的（bought=False）
+    s.symbol = "MSFT"
+    s._evaluate_symbol()
+    assert s._cycle_state["MSFT"]["bought"] is True
+    assert s._cycle_state["MSFT"]["prev_setup"] >= 9
+    # AAPL 状态未被 MSFT 评估污染
+    assert s._cycle_state["AAPL"]["bought"] is True
 def test_cycle_gate_per_symbol_independent():
     """每币独立：不同 symbol 各自周期状态，互不影响。"""
     s = _make_strategy()
@@ -438,3 +509,112 @@ def test_cycle_gate_per_symbol_independent():
     assert s._cycle_state["MSFT"]["prev_setup"] >= 9
     # AAPL 状态未被 MSFT 评估污染
     assert s._cycle_state["AAPL"]["bought"] is True
+
+def test_write_account_funds_cex(monkeypatch):
+    """CEX 通道写入子账号资金（2026-08-22 资金小表数据源）。
+
+    - channel_family=cex 时按场景 sub_accounts 取 slot→子账号
+    - USDT 可用 = available；总资产 = Σ(available+locked)×ticker 价
+    - DEX 通道不写（待补）
+    """
+    from nanobot_quant import td_live_state
+
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy(channel_family="cex")
+    s._current_scene = "high"
+    monkeypatch.setattr(
+        "nanobot_quant.exec_params.load_exec_params",
+        lambda: {"scenes": {"high": {"sub_accounts": ["gate_bot1", "gate_bot2"]}}},
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.load_gate_credentials",
+        lambda: {
+            "sub_accounts": {
+                "gate_bot1": {"uid": "59175220"},
+                "gate_bot2": {"uid": "59175258"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.fetch_all_balances",
+        lambda creds: {
+            "main": {},
+            "sub_accounts": [
+                {"uid": "59175220", "balances": {
+                    "USDT": {"available": 3.98, "locked": 0.0},
+                    "CRCLX": {"available": 0.5, "locked": 0.0},
+                }},
+                {"uid": "59175258", "balances": {
+                    "USDT": {"available": 0.1, "locked": 0.0},
+                    "RENDER": {"available": 2.0, "locked": 1.0},
+                }},
+            ],
+        },
+    )
+    s._cex_price_of = lambda cur: {"CRCLX": 88.0, "RENDER": 1.45}.get(cur, 0.0)
+    s._write_account_funds()
+
+    funds = td_live_state.LIVE_STATE["funds"]["high"]
+    assert len(funds) == 2
+    f1 = funds[0]
+    assert f1["slot"] == 1 and f1["account"] == "gate_bot1"
+    assert f1["usdt_available"] == 3.98
+    assert abs(f1["total_asset"] - (3.98 + 0.5 * 88.0)) < 1e-6
+    f2 = funds[1]
+    assert f2["usdt_available"] == 0.1
+    # RENDER 2.0 available + 1.0 locked = 3.0 × 1.45
+    assert abs(f2["total_asset"] - (0.1 + 3.0 * 1.45)) < 1e-6
+
+
+def test_write_account_funds_dex_skipped(monkeypatch):
+    """DEX 通道不写资金（待补，docs/quant-system.md 记录）。"""
+    from nanobot_quant import td_live_state
+
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy(channel_family="dex")
+    s._current_scene = "high"
+    monkeypatch.setattr(
+        "nanobot_quant.exec_params.load_exec_params",
+        lambda: {"scenes": {"high": {"sub_accounts": ["gate_bot1"]}}},
+    )
+    s._write_account_funds()
+    assert "funds" not in td_live_state.LIVE_STATE or "high" not in (
+        td_live_state.LIVE_STATE.get("funds") or {}
+    )
+
+
+def test_write_account_funds_uid_missing(monkeypatch):
+    """子账号缺 UID 映射 → 资金行 usdt/total 为 0（fail-safe，不崩）。"""
+    from nanobot_quant import td_live_state
+
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy(channel_family="cex")
+    s._current_scene = "high"
+    monkeypatch.setattr(
+        "nanobot_quant.exec_params.load_exec_params",
+        lambda: {"scenes": {"high": {"sub_accounts": ["gate_bot1", "gate_bot2"]}}},
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.load_gate_credentials",
+        lambda: {"sub_accounts": {"gate_bot1": {"uid": "59175220"}}},
+    )  # gate_bot2 无 uid 映射
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.fetch_all_balances",
+        lambda creds: {"main": {}, "sub_accounts": [
+            {"uid": "59175220", "balances": {"USDT": {"available": 3.98, "locked": 0.0}}},
+        ]},
+    )
+    s._cex_price_of = lambda cur: 0.0
+    s._write_account_funds()
+    funds = td_live_state.LIVE_STATE["funds"]["high"]
+    assert funds[0]["usdt_available"] == 3.98
+    assert funds[1]["usdt_available"] == 0.0  # uid 缺失 → 0（不崩）

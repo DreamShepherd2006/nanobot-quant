@@ -316,6 +316,7 @@ class TdSequentialStrategy(Strategy):
                     self.symbol = sym
                     self.batch_manager = self.batch_managers.get(sym)
                     self._evaluate_symbol()
+                self._write_positions_state()
             try:
                 from nanobot_quant import td_live_state
                 td_live_state.set_next_due(
@@ -340,6 +341,121 @@ class TdSequentialStrategy(Strategy):
             self.symbol = sym
             self.batch_manager = self._batch_managers.get(sym)
             self._evaluate_symbol()
+        self._write_positions_state()
+
+    def _write_positions_state(self) -> None:
+        """把全部标的 open 批次摘要写入 LIVE_STATE（实时监控持仓小节）。
+
+        2026-08-22 拍板：位置=场景卡片内小节；粒度=批次级（每 open 批
+        一行，slot 区分）；价格口径=ticker 实时价（_cex_price_of：gate_cex
+        优先、okx_cex 兜底；仅对含 open 批次的标的取价，无持仓不取价）；
+        止损/止盈仍用 TD bar 收盘价（signal.price）不受影响。TD 未运行时
+        页面回退读台账离线快照（无实时价）。展示层异常不阻塞主循环。
+        """
+        try:
+            from nanobot_quant import td_live_state
+
+            bms = getattr(self, "batch_managers", None) or getattr(
+                self, "_batch_managers", None
+            ) or {}
+            by_sym: dict[str, list[dict]] = {}
+            for sym, bm in (bms or {}).items():
+                open_lots = [s for s in bm.slots if s.get("lot") is not None]
+                if not open_lots:
+                    continue  # 无 open 批次不取价
+                price = 0.0
+                try:
+                    price = self._cex_price_of(sym)
+                except Exception:  # noqa: BLE001
+                    price = 0.0
+                rows = []
+                for s in open_lots:
+                    lot = s["lot"]
+                    entry = float(lot.get("entry_price") or 0)
+                    pnl = None
+                    if price > 0 and entry > 0:
+                        pnl = (price - entry) / entry
+                    rows.append({
+                        "symbol": sym,
+                        "slot": s["slot"],
+                        "account_id": s.get("account_id"),
+                        "qty": lot.get("qty"),
+                        "entry_price": entry,
+                        "entry_time": lot.get("entry_time"),
+                        "price": price or None,
+                        "pnl_pct": pnl,
+                    })
+                by_sym[sym] = rows
+            td_live_state.set_positions(self._current_scene or "default", by_sym)
+            self._write_account_funds()
+        except Exception:  # noqa: BLE001
+            # 展示层：失败不阻塞策略主循环
+            pass
+
+    def _write_account_funds(self) -> None:
+        """子账号资金写入 LIVE_STATE（实时监控资金小表）。
+
+        2026-08-22 拍板：持仓小节下方显示全部 slot 资金——USDT 可用 +
+        总资产（USDT 计，含持仓币×ticker 价）。仅 CEX（gate）通道实现：
+        主 key 批量拉子账号余额（fetch_all_balances，每轮 1 次调用），按
+        场景 sub_accounts 取本场景 slot 对应子账号；DEX 子钱包资金展示
+        待补（docs/quant-system.md 记录）。展示层异常不阻塞主循环。
+        """
+        try:
+            from nanobot_quant import td_live_state
+            from nanobot_quant.exec_params import load_exec_params
+            from nanobot_quant.gate_credentials import (
+                fetch_all_balances,
+                load_gate_credentials,
+            )
+
+            if self.parameters.get("channel_family") != "cex":
+                return  # DEX 通道资金展示待补
+            ep = load_exec_params() or {}
+            sc_cfg = (ep.get("scenes") or {}).get(self._current_scene or "default") or {}
+            accts = sc_cfg.get("sub_accounts") or []
+            if not accts:
+                return
+            creds = load_gate_credentials()
+            if not creds:
+                return
+            balances = fetch_all_balances(creds)
+            sub_by_uid: dict = {}
+            rows = balances.get("sub_accounts") or []
+            if isinstance(rows, list):
+                for r in rows:
+                    if isinstance(r, dict) and r.get("uid"):
+                        sub_by_uid[str(r["uid"])] = r.get("balances") or {}
+            subs_cfg = creds.get("sub_accounts") or {}
+            funds: list[dict] = []
+            for i, acct in enumerate(accts, start=1):
+                uid = str((subs_cfg.get(acct) or {}).get("uid") or "")
+                bal = sub_by_uid.get(uid, {})
+                usdt = float((bal.get("USDT") or {}).get("available") or 0)
+                total = 0.0
+                for cur, v in bal.items():
+                    amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
+                    if amt <= 0:
+                        continue
+                    if cur == "USDT":
+                        total += amt
+                    else:
+                        try:
+                            px = float(self._cex_price_of(cur) or 0)
+                        except Exception:  # noqa: BLE001
+                            px = 0.0
+                        if px > 0:
+                            total += amt * px
+                funds.append({
+                    "slot": i,
+                    "account": acct,
+                    "uid": uid,
+                    "usdt_available": round(usdt, 6),
+                    "total_asset": round(total, 6),
+                })
+            td_live_state.set_account_funds(self._current_scene or "default", funds)
+        except Exception:  # noqa: BLE001
+            pass  # 展示层：失败不阻塞策略主循环
 
     def _activate_scene(self, name: str, rt: dict) -> None:
         """S3a（2026-08-20）：激活场景运行时。
