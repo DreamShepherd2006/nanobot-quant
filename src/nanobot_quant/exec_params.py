@@ -93,7 +93,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
-        "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.0,
+        "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "mid": {
@@ -102,7 +102,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
-        "exit_order": "fifo", "stop_loss_pct": 0.08, "take_profit_pct": 0.0,
+        "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "low": {
@@ -111,7 +111,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
-        "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.0,
+        "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
         "td_start_slot": 1, "min_account_value": 0,
     },
 }
@@ -124,8 +124,10 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "max_drawdown_pct": 0.15,   # float (0,1] — account drawdown threshold
     # 扁平 stop_loss_pct 保留：execute_signal/pipeline RiskEngine 直调默认
     # （TD live 批次止损用 scenes.*.stop_loss_pct；保存时 high 值同步回此键）
-    "stop_loss_pct": 0.10,      # float (0,1] — per-position stop-loss
+    "stop_loss_pct": 0.10,      # float [0,1] — per-position stop-loss (0=disabled)
     # ── ② Execution quality ──────────────────────────────────────────
+    "fee_rate": 0.001,         # float [0,0.01] — 单边交易成本（Gate taker 0.1%）；
+                                # 止损/止盈按净值触发：pnl_net = pnl_gross − 2×fee_rate
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     "execution_channel": "okx_dex", # enum — 实例名（okx_dex=OKX DEX 链上 / gate=Gate.io 交易所）；旧值 dex/cex 自动迁移
@@ -183,8 +185,12 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "回撤阈值", "hint": "组合净值从峰值回撤超限触发风控（回测/纸交易生效；实盘待持仓上下文）",
     },
     "stop_loss_pct": {
-        "group": "scene", "min": 0.01, "max": 1.0, "step": 0.05, "std": 0.10,
-        "label": "止损阈值", "hint": "该场景每批浮亏 ≥ 阈值强制平仓（实盘生效，逐批独立；execute_signal 直调用 high 值）",
+        "group": "scene", "min": 0.0, "max": 1.0, "step": 0.05, "std": 0.10,
+        "label": "止损阈值", "hint": "该场景每批净浮亏（已扣双边交易成本 fee_rate）≥ 阈值强制平仓（实盘生效，逐批独立；0=关闭；execute_signal 直调用 high 值）",
+    },
+    "fee_rate": {
+        "group": "exec", "min": 0.0, "max": 0.01, "step": 0.001, "std": 0.001,
+        "label": "交易成本(费率)", "hint": "单边交易成本（Gate taker 0.1%=0.001）。止损/止盈按净值触发：净盈亏 = 毛盈亏 − 2×费率（双边）；0=不计成本",
     },
     "slippage": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.01,
@@ -252,7 +258,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
-        "label": "止盈线", "hint": "每批浮盈 ≥ 该值即平仓（0=关闭，纯 TD SELL + 止损；如 0.05 = 5%）",
+        "label": "止盈线", "hint": "每批净浮盈（已扣双边交易成本 fee_rate）≥ 该值即平仓（0=关闭，纯 TD SELL + 止损；如 0.05 = 净 5% 落袋）",
     },
     "td_start_slot": {
         "group": "scene", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,

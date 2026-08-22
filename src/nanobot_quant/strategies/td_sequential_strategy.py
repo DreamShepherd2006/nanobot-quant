@@ -199,6 +199,8 @@ class TdSequentialStrategy(Strategy):
         self._take_profit_pct = float(
             self.parameters.get("take_profit_pct", 0.0) or 0.0
         )
+        # 单边交易成本（Gate taker 0.1%）：止损/止盈净值口径
+        self._fee_rate = float(self.parameters.get("fee_rate", 0.001) or 0.0)
         # ── 真分账 v1.1（2026-08-10）：BUY 起点 + 默认账户还原 ──
         # td_start_slot：BUY 扫描起点（完整循环 + 起点偏移，设 3 → 3→4→5→1→2）
         # _home_account：交易后还原目标 = wallets.json 默认账户（懒解析缓存）
@@ -906,6 +908,7 @@ class TdSequentialStrategy(Strategy):
             stop_loss_pct=self._risk.stop_loss_pct,
             take_profit_pct=self._take_profit_pct,
             order=self._exit_order,
+            fee_rate=getattr(self, "_fee_rate", 0.001),
         )
         for s in hits:
             self._sell_lot(s, price, signal, s.pop("_exit_reason", "exit"))

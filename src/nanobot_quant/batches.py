@@ -363,12 +363,17 @@ class BatchManager:
         stop_loss_pct: float = 0.10,
         take_profit_pct: float = 0.0,
         order: str = "fifo",
+        fee_rate: float = 0.001,
     ) -> list[dict[str, Any]]:
         """逐批检查退出条件，返回**按 exit_order 排序**的待平仓 slot 列表。
 
-        - 浮亏 ≥ stop_loss_pct → 止损命中
-        - take_profit_pct > 0 且浮盈 ≥ take_profit_pct → 止盈命中
+        - 净浮亏（已扣双边交易成本）≥ stop_loss_pct → 止损命中（0=关闭）
+        - take_profit_pct > 0 且净浮盈 ≥ take_profit_pct → 止盈命中
         每批独立（各自 entry_price 对比同一当前价）。
+
+        净值口径（2026-08-22）：``pnl_net = pnl_gross − 2×fee_rate``——
+        买入扣 0.1% 手续费（所得币减少）、卖出扣 0.1%（所得 U 减少），
+        一进一出约 0.2% 成本。阈值是真实目标（净口径），非纸面目标。
         """
         hits: list[dict[str, Any]] = []
         for s in self.open_slots():
@@ -376,11 +381,12 @@ class BatchManager:
             if lot is None or lot["entry_price"] <= 0:
                 continue
             pnl = (price - lot["entry_price"]) / lot["entry_price"]
+            pnl_net = pnl - 2 * float(fee_rate or 0.0)
             reason = None
-            if pnl <= -stop_loss_pct:
-                reason = f"stop_loss: pnl={pnl:.2%}"
-            elif take_profit_pct > 0 and pnl >= take_profit_pct:
-                reason = f"take_profit: pnl={pnl:.2%}"
+            if stop_loss_pct > 0 and pnl_net <= -stop_loss_pct:
+                reason = f"stop_loss: pnl_net={pnl_net:.2%}"
+            elif take_profit_pct > 0 and pnl_net >= take_profit_pct:
+                reason = f"take_profit: pnl_net={pnl_net:.2%}"
             if reason:
                 s["_exit_reason"] = reason
                 hits.append(s)

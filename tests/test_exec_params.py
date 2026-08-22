@@ -874,12 +874,12 @@ def test_scene_mid_only_enabled_starts_td(tmp_path):
 
 
 def test_scene_stop_loss_defaults_and_sync(tmp_path):
-    """A1：stop_loss_pct 场景化——默认值（high=10%/mid=8%/low=10%）+
+    """A1：stop_loss_pct 场景化——默认值（high=5%/mid=10%/low=15%）+
     high→扁平同步（execute_signal 直调兼容）。"""
     loaded = load_exec_params()
-    assert loaded["scenes"]["high"]["stop_loss_pct"] == 0.10
-    assert loaded["scenes"]["mid"]["stop_loss_pct"] == 0.08
-    assert loaded["scenes"]["low"]["stop_loss_pct"] == 0.10
+    assert loaded["scenes"]["high"]["stop_loss_pct"] == 0.05
+    assert loaded["scenes"]["mid"]["stop_loss_pct"] == 0.10
+    assert loaded["scenes"]["low"]["stop_loss_pct"] == 0.15
     # 保存 high 场景止损 → 扁平 stop_loss_pct 同步（pipeline 直调读扁平）
     res = save_exec_params({"scenes": {"high": {"stop_loss_pct": 0.15}}})
     assert res["ok"] is True
@@ -887,7 +887,7 @@ def test_scene_stop_loss_defaults_and_sync(tmp_path):
     assert loaded["scenes"]["high"]["stop_loss_pct"] == 0.15
     assert loaded["stop_loss_pct"] == 0.15
     # 其他场景独立
-    assert loaded["scenes"]["mid"]["stop_loss_pct"] == 0.08
+    assert loaded["scenes"]["mid"]["stop_loss_pct"] == 0.10
 
 
 def test_scene_stop_loss_activates_risk():
@@ -934,5 +934,5 @@ def test_scene_field_std_override():
         "mid", DEFAULT_SCENES["mid"], None, "cex",
         ["gate_bot1", "gate_bot2"], 2,
     )
-    assert "默认 0.08 · 范围 0.01–1.0" in html   # 场景默认值（非全局 0.10）
+    assert "默认 0.1 · 范围 0.0–1.0" in html   # 场景默认值
     assert "默认 9 · 范围 1–20" in html          # 阈值字段 None → 全局 std
