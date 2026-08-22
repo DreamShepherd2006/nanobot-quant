@@ -317,7 +317,7 @@ function subRowHTML(name, uid) {{
       '<div class="form-group"><label>UID</label><input type="text" name="sub_' + i + '_uid" value="' + (uid || '') + '" placeholder="子账号 UID"></div>' +
       '<div class="form-group"><label>API Key</label><input type="text" name="sub_' + i + '_api_key" value="" placeholder="P3 分批下单签名用，可留空"></div>' +
       '<div class="form-group"><label>API Secret</label><input type="text" name="sub_' + i + '_api_secret" value=""></div>' +
-      '<div style="text-align:right"><button type="button" class="btn-danger" style="padding:4px 12px;font-size:.82em" onclick='this.closest(".cred-group").remove()'>✖ 删除该行</button></div>' +
+      '<div style="text-align:right"><button type="button" class="btn-danger" style="padding:4px 12px;font-size:.82em" data-remove>✖ 删除该行</button></div>' +
     '</div></div>';
 }}
 function addSubRow(name, uid) {{
@@ -341,6 +341,11 @@ async function syncSubs() {{
     el.innerHTML = '<div class="err">❌ 同步请求失败: ' + e + '</div>';
   }}
 }}
+// 事件委托：删除动态子账号行（避免内联 onclick 转义问题）
+document.addEventListener('click', function(ev) {{
+  const btn = ev.target.closest('button[data-remove]');
+  if (btn) btn.closest('.cred-group').remove();
+}});
 </script>
 """
 
