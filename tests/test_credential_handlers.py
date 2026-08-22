@@ -45,7 +45,8 @@ class TestCredentialSave:
             "api_key": "",
             "api_secret": "",
             "uid": "15119093",
-            "sub_gate_bot1_uid": "59175220",
+            "sub_0_name": "gate_bot1",
+            "sub_0_uid": "59175220",
         }
         resp = asyncio.run(credential_save(_FakeRequest("gate", body)))
         assert resp.status_code == 200
@@ -87,22 +88,21 @@ class TestCredentialSave:
 class TestRenderGroups:
     """FieldSpec.group — gate form renders per-account card sections."""
 
-    def test_gate_renders_six_groups(self, monkeypatch):
+    def test_gate_renders_main_group_only_when_empty(self, monkeypatch):
         import nanobot_quant.credential_handlers as ch
         from nanobot_quant.credential_registry import discover
 
         monkeypatch.setattr(ch, "read_credential", lambda name: None)
         spec = discover()["gate"]
         html = ch._render_detail_form(spec)
-        # 主账号 + gate_bot1..5 = 6 张分组卡片
-        assert html.count('<div class="cred-group">') == 6
-        assert '🤖 gate_bot1' in html and '🤖 gate_bot5' in html
+        # 无配置时仅渲染主账号组；子账号行动态渲染（工具栏按钮添加/同步）
+        assert html.count('<div class="cred-group">') == 1
+        assert "从 Gate 同步子账号" in html
+        assert "syncSubs" in html
         assert '🏛️ 主账号' in html
-        # 每个子账号组包含 uid/api_key/api_secret 三个字段
-        for name in ("gate_bot1", "gate_bot5"):
-            assert f'id="sub_{name}_uid"' in html
-            assert f'id="sub_{name}_api_key"' in html
-            assert f'id="sub_{name}_api_secret"' in html
+        # 空配置不渲染子账号行（动态行靠按钮添加/同步）
+        assert 'id="sub_0_name"' not in html
+        assert 'id="sub_0_uid"' not in html
         # 主账号字段也在
         assert 'id="api_key"' in html and 'id="uid"' in html
 

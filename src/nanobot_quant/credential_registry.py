@@ -87,6 +87,13 @@ class CredentialSpec:
     # credential_save before write. Inverse is denormalize (stored → form).
     normalize: Optional[Callable[[dict], dict]] = field(default=None, repr=False)
     denormalize: Optional[Callable[[dict], dict]] = field(default=None, repr=False)
+    # Optional dynamic field builder: fields_for(current_flat) -> list[FieldSpec]
+    # used instead of ``fields`` when the form shape depends on stored data
+    # (e.g. gate sub-account rows grow with synced accounts).
+    fields_for: Optional[Callable[[dict], list]] = field(default=None, repr=False)
+    # Optional extra HTML injected into the edit form between the fields and the
+    # save buttons (e.g. gate sub-account sync toolbar + JS).
+    form_extra: Optional[Callable[[dict], str]] = field(default=None, repr=False)
 
 
 # ── Registry ─────────────────────────────────────────────────────

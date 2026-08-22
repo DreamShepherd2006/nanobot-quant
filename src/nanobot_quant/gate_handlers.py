@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -203,6 +204,66 @@ async def gate_transfer_confirm(request: Request) -> JSONResponse:
     )
 
 
+async def sync_subaccounts(request: Request) -> JSONResponse:
+    """POST /config/gate/sync-subaccounts — discover sub-account UIDs from Gate.
+
+    Queries ``/wallet/sub_account_balances`` with the main key (needs the
+    '子账号' permission) and returns newly discovered sub-accounts with default
+    names assigned — WITHOUT writing gate.json. The WebUI credential form is
+    filled with the returned rows and the user confirms via save (decision
+    2026-08-22: sync fills the form only, save persists).
+    """
+    creds = load_gate_credentials()
+    if not creds:
+        return JSONResponse(
+            {"ok": False, "error": "gate.json 未配置（/config/credentials/gate 录入）"}
+        )
+    main = creds.get("main") or {}
+    if not main.get("api_key") or not main.get("api_secret"):
+        return JSONResponse(
+            {"ok": False, "error": "主账号 API Key/Secret 未配置（先录入主账号）"},
+            status_code=400,
+        )
+
+    from .gate_sdk import sub_account_balances as _list_sub_accounts
+
+    try:
+        rows = _list_sub_accounts(main["api_key"], main["api_secret"])
+    except Exception as exc:  # noqa: BLE001 — surface Gate API errors
+        return JSONResponse(
+            {"ok": False, "error": f"查询失败（主 key 需开启「子账号」权限）: {exc}"},
+            status_code=502,
+        )
+
+    uids = [str(r.get("uid") or "") for r in rows or [] if r.get("uid")]
+    subs = creds.get("sub_accounts") or {}
+    existing_uids = {str(s.get("uid")) for s in subs.values() if s.get("uid")}
+    max_subs = int(creds.get("max_sub_accounts") or 10)
+    new_uids = [u for u in uids if u not in existing_uids]
+    if len(existing_uids) + len(new_uids) > max_subs:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"子账号数将超过上限 {max_subs}（可先在表单修改「子账号上限」）",
+            },
+            status_code=400,
+        )
+
+    used_nums: set[int] = set()
+    for name in subs:
+        m = re.search(r"(\d+)$", name)
+        if m:
+            used_nums.add(int(m.group(1)))
+    added: list[dict] = []
+    for uid in new_uids:
+        n = 1
+        while n in used_nums:
+            n += 1
+        used_nums.add(n)
+        added.append({"name": f"gate_bot{n}", "uid": uid})
+    return JSONResponse({"ok": True, "added": added, "total": len(uids)})
+
+
 # ── Route registration helper (closure pattern, mirrors wallet_handlers) ──
 
 
@@ -267,7 +328,15 @@ def register_gate_routes(app, gatekeeper) -> None:
             )
         return await gate_transfer_confirm(request)
 
+    async def _sync_guarded(request: Request):
+        user = request.session.get("user") if request.session else None
+        denied = _guard(user)
+        if denied:
+            return JSONResponse({"ok": False, "error": denied[1]}, status_code=denied[0])
+        return await sync_subaccounts(request)
+
     app.get("/config/gate")(_gate_page_guarded)
     app.get("/config/gate/data")(_data_guarded)
     app.post("/config/gate/transfer")(_transfer_guarded)
     app.post("/config/gate/transfer/confirm")(_confirm_guarded)
+    app.post("/config/gate/sync-subaccounts")(_sync_guarded)

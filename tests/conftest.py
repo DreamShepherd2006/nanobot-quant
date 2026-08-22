@@ -112,6 +112,48 @@ except ImportError:
     sys.modules.setdefault("lumibot.strategies.strategy", _strategy_mod)
     sys.modules.setdefault("lumibot.brokers", _brokers)
     sys.modules.setdefault("lumibot.entities", _entities)
+
+    # gate-api SDK stub (not installed in the test container) — gate_sdk.py
+    # imports these names at module level; individual SDK methods are mocked
+    # per-test via monkeypatch on nanobot_quant.gate_sdk. The stub mirrors the
+    # real SDK surface used by the wrapper (model kwargs + ApiException fields)
+    # so test_gate_sdk.py can build fake models/errors.
+    _gate_api = types.ModuleType("gate_api")
+
+    class _ApiClient:
+        pass
+
+    class _Configuration:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class _ApiException(Exception):
+        def __init__(self, status=None, reason=None, body=None):
+            super().__init__(f"{status} {reason or ''}".strip())
+            self.status = status
+            self.reason = reason
+            self.body = body
+
+    class _Model:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+        def to_dict(self):
+            # mirror official SDK model serialization: skip None fields
+            return {k: v for k, v in self.__dict__.items() if v is not None}
+
+    _gate_api.ApiClient = _ApiClient
+    _gate_api.ApiException = _ApiException
+    _gate_api.Configuration = _Configuration
+    _gate_api.Order = _Model
+    _gate_api.SpotApi = _Model
+    _gate_api.SubAccountBalance = _Model
+    _gate_api.SubAccountTransfer = _Model
+    _gate_api.WalletApi = _Model
+    _gate_api.CurrencyPair = _Model
+    sys.modules.setdefault("gate_api", _gate_api)
     sys.modules.setdefault("lumibot.data_sources", _data_sources)
     sys.modules.setdefault("lumibot.backtesting", _backtesting)
 
