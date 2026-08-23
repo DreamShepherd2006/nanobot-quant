@@ -7,6 +7,14 @@ longer than the 30s MCP tool hard timeout for any non-trivial range
 is persisted to ``{data_root}/legion/backtests/<run_id>.json`` and fetched
 with ``get_backtest_result``.  Same contract as ``run_research_chain`` /
 ``get_chain_result``.
+
+Two engines:
+- ``backtest_runner`` (default, zero behaviour change): legacy lumibot
+  StrategyExecutor backtest on a single symbol/range.
+- ``driver`` (Step 3 replay driver): scene-based replay on Gate CEX
+  history, reusing the live strategy decision code (BacktestBroker for
+  simulated fills).  Result carries scene/symbols/fills_detail/net_values/
+  ROI — the WebUI /config/backtest page consumes this engine.
 """
 
 from __future__ import annotations
@@ -15,7 +23,6 @@ import json
 import os
 import sys
 import threading
-import time
 from datetime import datetime
 from uuid import uuid4
 
@@ -43,21 +50,15 @@ def _backtest_log(run_id: str, payload: dict) -> None:
     )
 
 
-def _auto_backtest(
-    run_id: str,
-    symbol: str,
-    start: str,
-    end: str,
-    quantity: int,
-    source: str,
-) -> None:
-    """Background thread: run the full backtest and persist the outcome.
+def _run_guarded(run_id: str, prep, run) -> None:
+    """Background thread: guard MCP stdio, run the backtest, persist outcome.
 
     Guards the MCP stdio channel exactly like the sync path used to:
     1) env toggles BEFORE any lumibot import (constants read at import
        time) — kill the \\r progress bar and silence INFO logs;
     2) clear stdout-bound handlers on the lumibot logger tree (sub-loggers
-       register their own StreamHandler at import time);
+       register their own StreamHandler at import time) — ``prep`` imports
+       the lumibot-dependent modules first, then silence runs;
     3) redirect the runner's own print() progress lines (CLI-facing) to
        stderr; the result is persisted as a value, never via stdout.
     """
@@ -76,20 +77,12 @@ def _auto_backtest(
         # StreamHandler — pre-register a stderr console handler so the banner
         # reuses it and never touches stdout. Then silence the tree.
         _redirect_lumibot_console_to_stderr()
-
-        from nanobot_quant.backtest_runner import run as _backtest_run
-
+        prep()
         _silence_lumibot_loggers()
 
         sys.stdout = sys.stderr
         try:
-            result = _backtest_run(
-                symbol=symbol,
-                start=start,
-                end=end,
-                quantity=quantity,
-                source=source,
-            )
+            result = run()
             _backtest_log(run_id, {"status": "done", "run_id": run_id, "result": result})
         except Exception as exc:  # noqa: BLE001
             _backtest_log(run_id, {"status": "error", "run_id": run_id, "error": str(exc)})
@@ -99,38 +92,138 @@ def _auto_backtest(
         sys.stdout = _saved_stdout
 
 
-def run_backtest(
+def _auto_backtest(
+    run_id: str,
     symbol: str,
     start: str,
     end: str,
+    quantity: int,
+    source: str,
+) -> None:
+    """Legacy engine (backtest_runner): single-symbol range backtest."""
+
+    def _prep() -> None:
+        # Import the lumibot-dependent module inside the guard so its
+        # import-time stdout handlers are silenced afterwards.
+        from nanobot_quant.backtest_runner import run as _backtest_run  # noqa: F401
+
+    def _run():
+        from nanobot_quant.backtest_runner import run as _backtest_run
+
+        return _backtest_run(
+            symbol=symbol,
+            start=start,
+            end=end,
+            quantity=quantity,
+            source=source,
+        )
+
+    _run_guarded(run_id, prep=_prep, run=_run)
+
+
+def _auto_backtest_driver(
+    run_id: str,
+    scene: str,
+    symbols: list[str] | None,
+    start: str | None,
+    end: str | None,
+    initial_quote: float,
+    batches: int | None,
+    slippage: float | None,
+) -> None:
+    """New engine (backtest.driver): scene-based replay on Gate CEX history.
+
+    Reuses the live strategy decision code (same StrategyExecutor scene
+    construction, BacktestBroker for simulated fills).  Same run_id +
+    poll contract as the legacy engine.
+    """
+    from datetime import datetime
+
+    def _prep() -> None:
+        from nanobot_quant.backtest.driver import BacktestDriver  # noqa: F401
+
+    def _parse_ts(value: str | None):
+        if not value:
+            return None
+        return datetime.fromisoformat(value)
+
+    def _run():
+        from nanobot_quant.backtest.driver import BacktestDriver
+
+        d = BacktestDriver(
+            scene=scene,
+            symbols=symbols,
+            start_ts=_parse_ts(start),
+            end_ts=_parse_ts(end),
+            initial_quote=initial_quote,
+            batches=batches,
+            slippage=slippage,
+        )
+        return d.run()
+
+    _run_guarded(run_id, prep=_prep, run=_run)
+
+
+def run_backtest(
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
     quantity: int = 10,
     source: str = "onchainos",
+    engine: str = "backtest_runner",
+    scene: str = "mid",
+    symbols: list[str] | None = None,
+    initial_quote: float = 100.0,
+    batches: int | None = None,
+    slippage: float | None = None,
 ) -> dict:
-    """Start a full backtest on a token symbol in the background.
+    """Start a full backtest in the background (run_id + poll contract).
 
     Args:
-        symbol: Token symbol, e.g. "SOL/USDC" or "CRCLX/USDC"
+        symbol: Token symbol, e.g. "SOL/USDC" or "CRCLX/USDC" (legacy engine)
         start: Start date, e.g. "2026-01-01"
         end: End date, e.g. "2026-07-05"
-        quantity: Trade quantity (default 10)
-        source: Data source registry name: "onchainos", "okx_cex", "yfinance"
-                (alias "yahoo"), or "gate_cex" (not implemented for
-                backtest — returns a clear error, fail-closed).
+        quantity: Trade quantity (legacy engine, default 10)
+        source: Data source registry name for the legacy engine:
+                "onchainos", "okx_cex", "yfinance" (alias "yahoo"), or
+                "gate_cex" (not implemented — returns a clear error).
+        engine: "backtest_runner" (legacy lumibot engine, default — zero
+                behaviour change) or "driver" (Step 3 replay driver:
+                scene-based, Gate CEX history, same decision code as live).
+        scene: Scene name (high/mid/low) — engine="driver" only.
+        symbols: Override the scene symbol pool — engine="driver" only.
+        initial_quote: Per-slot simulated starting USDT — engine="driver".
+        batches: Override scene batch count — engine="driver" only.
+        slippage: Override global slippage — engine="driver" only.
 
     Returns:
         dict with status=started and run_id. The backtest runs in a
         background thread (a real run exceeds the 30s MCP tool timeout);
-        poll ``get_backtest_result(run_id)`` for the metrics.
+        poll ``get_backtest_result(run_id)`` for the outcome.
     """
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
-    threading.Thread(
-        target=_auto_backtest,
-        args=(run_id, symbol, start, end, quantity, source),
-        daemon=True,
-    ).start()
+    if engine == "driver":
+        syms = list(symbols) if symbols else ([symbol] if symbol else None)
+        threading.Thread(
+            target=_auto_backtest_driver,
+            args=(run_id, scene, syms, start, end, initial_quote, batches, slippage),
+            daemon=True,
+        ).start()
+    else:
+        if not symbol:
+            return {
+                "error": "engine='backtest_runner' requires symbol",
+                "hint": "Pass symbol (e.g. 'SOL/USDC'), or use engine='driver' with scene.",
+            }
+        threading.Thread(
+            target=_auto_backtest,
+            args=(run_id, symbol, start, end, quantity, source),
+            daemon=True,
+        ).start()
     return {
         "status": "started",
         "run_id": run_id,
+        "engine": engine,
         "message": (
             "Backtest started in background. Poll get_backtest_result("
             f"run_id=\"{run_id}\") for the outcome — a non-trivial range "

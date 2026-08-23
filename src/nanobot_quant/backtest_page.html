@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📈 回测 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:960px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:6px; }
+  .subtitle { color:#888; font-size:.88em; margin-bottom:16px; }
+  .card { background:#fff; border-radius:8px; padding:18px 16px; margin-bottom:14px; border:1px solid #e0e0e0; }
+  .card h3 { font-size:1em; margin-bottom:10px; color:#444; }
+  .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 0; border-top:1px solid #f0f0f0; }
+  .field:first-of-type { border-top:none; }
+  .f-label { width:180px; font-weight:600; font-size:.9em; }
+  .f-hint { color:#aaa; font-size:.78em; flex:1; min-width:160px; }
+  input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
+  input[type=date] { padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; }
+  select { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
+  .chk-group { display:flex; flex-wrap:wrap; gap:10px; margin:4px 0; }
+  .chk-group label { display:inline-flex; align-items:center; gap:5px; font-size:.9em; }
+  .actions { margin:16px 0 4px; display:flex; gap:10px; align-items:center; }
+  button { padding:8px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
+  .btn-primary { background:#1565c0; color:#fff; }
+  .btn-primary:hover { background:#0d47a1; }
+  .btn-primary:disabled { background:#90caf9; cursor:not-allowed; }
+  .btn-outline { background:#fff; color:#1565c0; border:1px solid #1565c0; }
+  .btn-outline:hover { background:#e3f2fd; }
+  .banner { border-radius:6px; padding:10px 14px; margin:10px 0; font-size:.88em; }
+  .banner.msg { display:none; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; }
+  .banner.msg.show { display:block; }
+  .banner.msg.err { background:#fce4ec; border-color:#ef9a9a; color:#c62828; }
+  .banner.msg.ok { background:#e8f5e9; border-color:#a5d6a7; color:#2e7d32; }
+  table { width:100%; border-collapse:collapse; font-size:.86em; margin-top:8px; }
+  th, td { padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; }
+  th { background:#fafafa; color:#555; font-weight:600; }
+  th:first-child, td:first-child { text-align:left; }
+  .roi-pos { color:#2e7d32; font-weight:700; }
+  .roi-neg { color:#c62828; font-weight:700; }
+  .run-row { display:flex; align-items:center; gap:10px; padding:6px 0; border-top:1px solid #f5f5f5; font-size:.88em; }
+  .run-row:first-of-type { border-top:none; }
+  .run-id { font-family:monospace; color:#1565c0; cursor:pointer; }
+  .run-id:hover { text-decoration:underline; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:.78em; }
+  .tag.done { background:#e8f5e9; color:#2e7d32; }
+  .tag.error { background:#fce4ec; color:#c62828; }
+  .tag.running { background:#fff3e0; color:#e65100; }
+  .tag.unknown { background:#eee; color:#777; }
+  .empty { color:#aaa; font-size:.86em; padding:8px 0; }
+  .kpis { display:flex; gap:14px; flex-wrap:wrap; margin:8px 0; }
+  .kpi { background:#f8fafc; border:1px solid #e0e7ef; border-radius:6px; padding:8px 14px; min-width:120px; }
+  .kpi .v { font-size:1.25em; font-weight:700; }
+  .kpi .k { font-size:.76em; color:#888; margin-top:2px; }
+  code { background:#eef; padding:1px 5px; border-radius:3px; font-size:.85em; }
+</style>
+</head>
+<body>
+<h1>📈 回测</h1>
+<p class="subtitle">场景回放引擎（与实盘同一策略决策代码）：Gate CEX 历史 K 线 + 模拟撮合（手续费/滑点/分批）。结果持久化到 legion/backtests/，可回看。</p>
+
+<div class="card">
+  <h3>参数</h3>
+  <div class="field">
+    <span class="f-label">场景</span>
+    <select id="scene"></select>
+    <span class="f-hint">high=1m 短线 · mid=15m/1H 波段 · low=1D 趋势；未启用场景需先到 /config/exec 启用</span>
+  </div>
+  <div class="field">
+    <span class="f-label">标的（多选）</span>
+    <div class="chk-group" id="symbols"></div>
+    <span class="f-hint">候选 = tokens.json 登记代币（USDC/USDT/USDG 已排除）；不选默认该场景标的池</span>
+  </div>
+  <div class="field">
+    <span class="f-label">区间</span>
+    <input type="date" id="start"> <span style="color:#aaa">→</span> <input type="date" id="end">
+    <span class="f-hint">留空 = 拉满可用历史（1m ≈ 6.9 天 / 15m ≈ 104 天 / 1D 从上线起）</span>
+  </div>
+  <div class="field">
+    <span class="f-label">初始资金（每 slot）</span>
+    <input type="number" id="initial_quote" value="100" min="1" step="1">
+    <span class="f-hint">纯模拟资金，仅回测进程内记账，不碰实盘子账号</span>
+  </div>
+  <div class="field">
+    <span class="f-label">批次（slot 数）</span>
+    <input type="number" id="batches" value="" min="1" max="50" step="1">
+    <span class="f-hint">留空 = 该场景配置的批次数量</span>
+  </div>
+  <div class="field">
+    <span class="f-label">滑点</span>
+    <input type="number" id="slippage" value="" min="0" max="0.05" step="0.001">
+    <span class="f-hint">留空 = 全局滑点（exec_params）；0 = 按 bar 收盘价成交</span>
+  </div>
+  <div class="actions">
+    <button class="btn-primary" id="run-btn" onclick="startBacktest()">▶ 启动回测</button>
+    <span class="f-hint">长区间（数百根 bar）需要几十秒，启动后自动轮询结果</span>
+  </div>
+  <div class="banner msg" id="msg"></div>
+</div>
+
+<div class="card">
+  <h3>结果</h3>
+  <div id="result"><div class="empty">尚未运行回测。填参数后点「启动回测」，或在下方历史记录中点一个 run_id 回看。</div></div>
+</div>
+
+<div class="card">
+  <h3>历史记录</h3>
+  <div id="runs"><div class="empty">加载中…</div></div>
+</div>
+
+<script>
+const SCENES = __SCENES__;
+const SYMBOLS = __SYMBOLS__;
+
+function $(id) { return document.getElementById(id); }
+
+function fmtTs(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+function fmtN(v, dp) {
+  if (v === null || v === undefined || isNaN(v)) return "—";
+  return Number(v).toFixed(dp === undefined ? 4 : dp);
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// ── 场景/标的表单 ───────────────────────────────────────────────────────
+function initForm() {
+  const sel = $("scene");
+  sel.innerHTML = "";
+  for (const [name, cfg] of Object.entries(SCENES)) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    const st = cfg.sleeptime || "—";
+    const en = cfg.enabled ? "✅ 启用" : "⏸ 停用";
+    opt.textContent = `${name} (${st} · ${en})`;
+    sel.appendChild(opt);
+  }
+  const symBox = $("symbols");
+  symBox.innerHTML = "";
+  if (!SYMBOLS.length) {
+    symBox.innerHTML = '<span class="empty">tokens.json 无登记代币（/config/tokens 登记后可选）</span>';
+  }
+  SYMBOLS.forEach(s => {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = s;
+    label.appendChild(cb); label.appendChild(document.createTextNode(" " + s));
+    symBox.appendChild(label);
+  });
+  // 默认勾选当前场景池标的
+  const first = Object.keys(SCENES)[0];
+  if (first) {
+    const pool = SCENES[first].symbols || [];
+    document.querySelectorAll("#symbols input").forEach(cb => { cb.checked = pool.includes(cb.value); });
+    if (SCENES[first].batches) $("batches").value = SCENES[first].batches;
+  }
+  // 切换场景时同步默认勾选/批次
+  sel.addEventListener("change", () => {
+    const cfg = SCENES[sel.value] || {};
+    const pool = cfg.symbols || [];
+    document.querySelectorAll("#symbols input").forEach(cb => { cb.checked = pool.includes(cb.value); });
+    if (cfg.batches) $("batches").value = cfg.batches;
+  });
+}
+
+function selectedSymbols() {
+  return Array.from(document.querySelectorAll("#symbols input:checked")).map(cb => cb.value);
+}
+
+// ── 启动 + 轮询 ─────────────────────────────────────────────────────────
+function setMsg(text, kind) {
+  const m = $("msg");
+  m.textContent = text || "";
+  m.className = "banner msg show" + (kind ? " " + kind : "");
+  if (!text) m.className = "banner msg";
+}
+
+async function startBacktest() {
+  const symbols = selectedSymbols();
+  if (!symbols.length) { setMsg("至少选择一个标的", "err"); return; }
+  const body = {
+    scene: $("scene").value,
+    symbols,
+    start: $("start").value || null,
+    end: $("end").value || null,
+    initial_quote: parseFloat($("initial_quote").value) || 100,
+    batches: $("batches").value ? parseInt($("batches").value, 10) : null,
+    slippage: $("slippage").value ? parseFloat($("slippage").value) : null,
+  };
+  const btn = $("run-btn");
+  btn.disabled = true;
+  setMsg("启动中…");
+  try {
+    const r = await fetch("/config/backtest/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) { throw new Error(data.error || "启动失败"); }
+    setMsg(`已启动 run_id=${data.run_id}，等待结果…`);
+    pollResult(data.run_id, 0);
+  } catch (e) {
+    setMsg("启动失败：" + e.message, "err");
+    btn.disabled = false;
+  }
+}
+
+function pollResult(runId, tries) {
+  setTimeout(async () => {
+    try {
+      const r = await fetch(`/config/backtest/result?run_id=${encodeURIComponent(runId)}`);
+      const data = await r.json();
+      if (data.status === "done") { renderResult(data.result, runId); setMsg(`✅ run_id=${runId} 完成`); }
+      else if (data.status === "error") { renderError(data.error, runId); setMsg(`❌ run_id=${runId} 失败`, "err"); }
+      else if (tries < 600) { pollResult(runId, tries + 1); }
+      else { setMsg("等待超时，请到历史记录刷新", "err"); }
+    } catch (e) {
+      setMsg("轮询失败：" + e.message, "err");
+    } finally {
+      $("run-btn").disabled = false;
+      loadRuns();
+    }
+  }, 3000);
+}
+
+// ── 结果渲染 ────────────────────────────────────────────────────────────
+function renderResult(res, runId) {
+  const box = $("result");
+  if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
+  // 旧引擎（backtest_runner metrics 格式）结果缺 driver 字段 → 原始 JSON 展示
+  if (res.final_net === undefined && res.net_values === undefined) {
+    box.innerHTML =
+      '<div style="font-size:.86em;color:#888;margin-bottom:6px;">旧引擎结果（backtest_runner 格式，仅展示）</div>' +
+      `<pre style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px;font-size:.8em;overflow:auto;max-height:360px;">${escapeHtml(JSON.stringify(res, null, 2))}</pre>`;
+    return;
+  }
+  const roi = res.roi;
+  const roiCls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
+  const fills = res.fills_detail || [];
+  const rows = fills.map(f =>
+    `<tr><td>${fmtTs(f.ts)}</td><td>${f.slot}</td><td>${f.symbol || "—"}</td>` +
+    `<td>${f.side === "buy" ? "🟢 买" : "🔴 卖"}</td><td>${fmtN(f.quantity, 6)}</td><td>${fmtN(f.avg_price, 4)}</td></tr>`
+  ).join("");
+  box.innerHTML = `
+    <div class="kpis">
+      <div class="kpi"><div class="v">${fmtN(res.initial_total, 2)} USDT</div><div class="k">初始资金（${res.batches} slot × ${fmtN(res.initial_quote, 2)}）</div></div>
+      <div class="kpi"><div class="v">${fmtN(res.final_net, 2)} USDT</div><div class="k">期末净值</div></div>
+      <div class="kpi"><div class="v ${roiCls}">${roi === null || roi === undefined ? "—" : (roi * 100).toFixed(2) + "%"}</div><div class="k">ROI</div></div>
+      <div class="kpi"><div class="v">${res.fills || 0}</div><div class="k">成交笔数</div></div>
+      <div class="kpi"><div class="v">${res.bars || 0}</div><div class="k">K 线根数</div></div>
+    </div>
+    <div style="font-size:.84em;color:#888;margin:4px 0 10px;">
+      场景 <code>${res.scene}</code> · 标的 <code>${(res.symbols || []).join(", ")}</code> ·
+      周期 <code>${res.timestep}</code> · ${fmtTs(res.start_ts)} → ${fmtTs(res.end_ts)}
+    </div>
+    <h3 style="font-size:.95em;margin:8px 0 2px;">成交明细</h3>
+    ${rows ? `<table><thead><tr><th>时间</th><th>slot</th><th>标的</th><th>方向</th><th>数量</th><th>成交价</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>'}
+  `;
+}
+
+function renderError(err, runId) {
+  $("result").innerHTML = `<div class="banner msg err show">❌ run_id=${runId} 失败：${err}</div>`;
+}
+
+// ── 历史记录 ────────────────────────────────────────────────────────────
+async function loadRuns() {
+  try {
+    const r = await fetch("/config/backtest/runs");
+    const data = await r.json();
+    if (!r.ok || !data.ok) { $("runs").innerHTML = '<div class="empty">加载失败</div>'; return; }
+    const runs = data.runs || [];
+    if (!runs.length) { $("runs").innerHTML = '<div class="empty">暂无历史回测</div>'; return; }
+    $("runs").innerHTML = runs.map(ru => `
+      <div class="run-row">
+        <span class="run-id" onclick="loadRun('${ru.run_id}')">${ru.run_id}</span>
+        <span class="tag ${ru.status}">${ru.status}</span>
+        <span style="color:#999;font-size:.82em">${fmtTs(new Date(ru.ts * 1000).toISOString())}</span>
+      </div>`).join("");
+  } catch (e) {
+    $("runs").innerHTML = '<div class="empty">加载失败：' + e.message + "</div>";
+  }
+}
+
+async function loadRun(runId) {
+  try {
+    const r = await fetch(`/config/backtest/result?run_id=${encodeURIComponent(runId)}`);
+    const data = await r.json();
+    if (data.status === "done") { renderResult(data.result, runId); setMsg(""); }
+    else if (data.status === "error") { renderError(data.error, runId); setMsg(""); }
+    else { setMsg(`run_id=${runId} 仍在运行或已丢失`, "err"); }
+  } catch (e) {
+    setMsg("读取失败：" + e.message, "err");
+  }
+}
+
+initForm();
+loadRuns();
+</script>
+</body>
+</html>

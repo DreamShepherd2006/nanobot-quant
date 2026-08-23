@@ -133,6 +133,21 @@ class BacktestBroker(Broker):
     #  Order Execution
     # ═══════════════════════════════════════════════════════════
 
+    def submit_order(self, order) -> Any:
+        """Submit entry-point (mirrors lumibot ``Broker.submit_order``).
+
+        Synchronous fill via ``_submit_order``; exceptions are captured into
+        ``order.set_error(...)`` + ``status="error"`` (fail-closed) so the
+        strategy's post-submit checks (order.error / is_filled) behave exactly
+        like the live CexBroker path.
+        """
+        try:
+            order = self._submit_order(order)
+        except Exception as exc:  # noqa: BLE001
+            order.set_error(str(exc))
+            order.status = "error"
+        return order
+
     def _submit_order(self, order) -> Any:
         """Simulate an immediate market fill on the current bar close.
 

@@ -98,9 +98,14 @@ def _request(pair: str, interval: str, limit: int,
                 label = body.get("label") or body.get("message") or label
             except (ValueError, OSError):
                 pass
-            # 历史深度上限（如 1m 最多最近 ~10000 根）是参数限制而非交易对问题——
-            # 不黑名单，由调用方（翻页拉全量）捕获后截断（2026-08-23 Step 2）。
-            if "too long ago" in str(label).lower():
+            label_l = str(label).lower()
+            # 历史深度上限/参数边界（如 1m 最多最近 ~10000 根，Gate 返回
+            # label=INVALID_PARAM_VALUE / "Maximum ... points ago"）是参数限制
+            # 而非交易对问题——不黑名单，由调用方（翻页拉全量）捕获后截断；
+            # 只有真正的「无交易对/已下架」（INVALID_CURRENCY_PAIR 等）才黑名单。
+            if ("too long ago" in label_l or "maximum" in label_l
+                    or "points ago" in label_l
+                    or label_l == "invalid_param_value"):
                 raise
             mark_blacklisted(sym, f"Gate 无此交易对/已下架 ({label})")
         raise

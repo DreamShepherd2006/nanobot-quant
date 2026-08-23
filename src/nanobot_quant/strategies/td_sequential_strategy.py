@@ -1844,6 +1844,11 @@ class TdSequentialStrategy(Strategy):
         gate_bot3 实际有 4.862 USDT）。缓存 key 含 account——同 slot_no
         跨场景不复用错 broker。
         """
+        # 回测驱动注入（方案 B Step 3）：per-slot BacktestBroker（内存账本，
+        # 零网络）。实盘默认 None → 走下方真实 CexBroker 路径，零影响。
+        factory = getattr(self, "_slot_broker_factory", None)
+        if factory is not None:
+            return factory(slot)
         slot_no = int(slot["slot"])
         account = str(slot.get("account_id") or "")
         key = f"{slot_no}:{account}" if account else str(slot_no)
@@ -1917,6 +1922,14 @@ class TdSequentialStrategy(Strategy):
 
     def _cex_price_of(self, currency: str) -> float:
         """Gate 计价（子账号持仓估值用）：gate_cex 优先，okx_cex 兜底。"""
+        # 回测驱动注入（方案 B Step 3）：历史重放价格源（当前 bar 收盘价），
+        # 零网络。实盘默认 None → 走下方真实 ticker 路径，零影响。
+        override = getattr(self, "_price_source_override", None)
+        if override is not None:
+            try:
+                return float(override(currency))
+            except Exception:  # noqa: BLE001
+                return 0.0
         try:
             from nanobot_quant.data_sources import get_data_source
             px = get_data_source("gate_cex").get_price(currency)

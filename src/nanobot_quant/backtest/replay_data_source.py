@@ -19,15 +19,32 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import pandas as pd
 
 from nanobot_quant.gate_cex_data import fetch_gate_kline_range_paged
+
+
+def _to_ts(value) -> Optional[int]:
+    """回测区间时间戳归一化：None / unix 秒 / datetime / 'YYYY-MM-DD…' → int 秒。"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+    if isinstance(value, str):
+        dt = datetime.strptime(value.strip(), "%Y-%m-%d")
+        return int(dt.replace(tzinfo=timezone.utc).timestamp())
+    raise TypeError(f"无法解析回测时间戳: {value!r}")
 from nanobot_quant.gate_credentials import gate_pair
 
 _BAR_MAP = {
+    # lumibot 风格键（td_live 场景 timestep）
     "minute": "1m",
     "5min": "5m",
     "15min": "15m",
@@ -36,6 +53,19 @@ _BAR_MAP = {
     "4hour": "4H",
     "day": "1D",
     "week": "1W",
+    # Gate 风格键（driver._timestep_for 输出）——两种风格都必须命中
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1H",
+    "1H": "1H",
+    "4h": "4H",
+    "4H": "4H",
+    "1d": "1D",
+    "1D": "1D",
+    "1w": "1W",
+    "1W": "1W",
 }
 
 _DEFAULT_BAR = "1D"
@@ -73,8 +103,8 @@ class ReplayDataSource:
         self._timestep = str(timestep)
         self._bar = _BAR_MAP.get(str(timestep or "").lower().removeprefix("bar:"),
                                  _DEFAULT_BAR)
-        self._start_ts = int(start_ts) if start_ts else None
-        self._end_ts = int(end_ts) if end_ts else None
+        self._start_ts = _to_ts(start_ts)
+        self._end_ts = _to_ts(end_ts)
         self._length = max(1, int(length))
         self._tokens_json = tokens_json or []
         self._fetcher = fetcher or self._default_fetch
@@ -153,6 +183,20 @@ class ReplayDataSource:
 
     def get_last_price(self, asset, quote=None, exchange=None):
         return self.price_of(asset.symbol)
+
+    def get_datetime(self, adjust_for_delay: bool = True):
+        """当前重放时间（lumibot Broker/Strategy 契约，tz-aware UTC）。
+
+        lumibot v4.5.78 以 ``get_datetime(adjust_for_delay=True)`` 调用；
+        回测是离线重放，无数据延迟概念，忽略该参数。Broker.__init__ 会用
+        返回值的 tzinfo 初始化时区；回放中返回当前游标，未定位/未拉数时
+        回退最后 bar 时间或当前 UTC。
+        """
+        if self._current_ts is not None:
+            return self._current_ts
+        if self._bar_times:
+            return self._bar_times[-1]
+        return datetime.now(timezone.utc)
 
     def get_timestamp(self):
         return time.time()
