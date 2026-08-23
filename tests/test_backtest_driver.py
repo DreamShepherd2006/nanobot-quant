@@ -368,5 +368,10 @@ def test_get_datetime_contract():
         fetcher=lambda pair, s, e, bar: None,
     )
     assert src.get_datetime().tzinfo is not None  # 未拉数 → 当前 UTC
+    # lumibot v4.5.78 以带 adjust_for_delay 关键字调用
+    assert src.get_datetime(adjust_for_delay=True).tzinfo is not None
     src.seek(datetime(2026, 8, 22, tzinfo=timezone.utc))
     assert src.get_datetime() == datetime(2026, 8, 22, tzinfo=timezone.utc)
+    assert src.get_datetime(adjust_for_delay=False) == datetime(
+        2026, 8, 22, tzinfo=timezone.utc
+    )

@@ -184,11 +184,13 @@ class ReplayDataSource:
     def get_last_price(self, asset, quote=None, exchange=None):
         return self.price_of(asset.symbol)
 
-    def get_datetime(self):
+    def get_datetime(self, adjust_for_delay: bool = True):
         """当前重放时间（lumibot Broker/Strategy 契约，tz-aware UTC）。
 
-        Broker.__init__ 会用它的 tzinfo 初始化时区；回放中返回当前游标，
-        未定位/未拉数时回退最后 bar 时间或当前 UTC。
+        lumibot v4.5.78 以 ``get_datetime(adjust_for_delay=True)`` 调用；
+        回测是离线重放，无数据延迟概念，忽略该参数。Broker.__init__ 会用
+        返回值的 tzinfo 初始化时区；回放中返回当前游标，未定位/未拉数时
+        回退最后 bar 时间或当前 UTC。
         """
         if self._current_ts is not None:
             return self._current_ts
