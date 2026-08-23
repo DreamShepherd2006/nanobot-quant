@@ -44,6 +44,7 @@ def _to_ts(value) -> Optional[int]:
 from nanobot_quant.gate_credentials import gate_pair
 
 _BAR_MAP = {
+    # lumibot 风格键（td_live 场景 timestep）
     "minute": "1m",
     "5min": "5m",
     "15min": "15m",
@@ -52,6 +53,19 @@ _BAR_MAP = {
     "4hour": "4H",
     "day": "1D",
     "week": "1W",
+    # Gate 风格键（driver._timestep_for 输出）——两种风格都必须命中
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1H",
+    "1H": "1H",
+    "4h": "4H",
+    "4H": "4H",
+    "1d": "1D",
+    "1D": "1D",
+    "1w": "1W",
+    "1W": "1W",
 }
 
 _DEFAULT_BAR = "1D"

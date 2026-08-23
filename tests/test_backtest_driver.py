@@ -261,3 +261,39 @@ def test_replay_data_source_accepts_datetime():
     )
     assert src._start_ts == _to_ts(datetime(2026, 8, 22))
     assert src._end_ts == _to_ts(datetime(2026, 8, 23))
+
+# ── bar 映射（回归：driver 传 Gate 风格 "15m" 曾落到默认 "1D"） ──
+
+
+# ── bar 映射（回归：driver 传 Gate 风格 "15m" 曾落到默认 "1D"） ──
+
+def test_bar_map_accepts_both_styles():
+    from nanobot_quant.backtest.replay_data_source import ReplayDataSource, _BAR_MAP
+
+    # driver._timestep_for 输出（Gate 风格）
+    assert _BAR_MAP["15m"] == "15m"
+    assert _BAR_MAP["1m"] == "1m"
+    assert _BAR_MAP["1H"] == "1H"
+    assert _BAR_MAP["1D"] == "1D"
+    # lumibot 风格（td_live 场景 timestep）
+    assert _BAR_MAP["15min"] == "15m"
+    assert _BAR_MAP["hour"] == "1H"
+    assert _BAR_MAP["day"] == "1D"
+
+    src = ReplayDataSource(symbols=["SOL"], timestep="15m", length=120)
+    assert src._bar == "15m"
+
+
+def test_replay_data_source_accepts_datetime():
+    from nanobot_quant.backtest.replay_data_source import ReplayDataSource, _to_ts
+
+    src = ReplayDataSource(
+        symbols=["SOL"],
+        timestep="1m",
+        start_ts=datetime(2026, 8, 22),
+        end_ts=datetime(2026, 8, 23),
+        length=120,
+        fetcher=lambda pair, s, e, bar: None,
+    )
+    assert src._start_ts == _to_ts(datetime(2026, 8, 22))
+    assert src._end_ts == _to_ts(datetime(2026, 8, 23))

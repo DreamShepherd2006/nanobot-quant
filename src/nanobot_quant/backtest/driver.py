@@ -267,10 +267,13 @@ class BacktestDriver:
         bar_times = self.data_source.bar_times
         start_idx = self.data_source.start_idx
         if len(bar_times) <= start_idx:
+            need = self.min_history
             raise RuntimeError(
                 f"历史数据不足回测窗口: bars={len(bar_times)} < "
-                f"min_history={self.min_history}（数据源: {self.timestep}，"
-                f"区间 {self.start_ts} → {self.end_ts}）"
+                f"min_history={need}（数据源: {self.timestep}，"
+                f"区间 {self.start_ts} → {self.end_ts}；"
+                f"该粒度至少需要 {need} 根 K 线（如 15m 需 ≥{need * 15 // 60}h / "
+                f"1m 需 ≥{need}m / 1D 需 ≥{need} 天），请扩大区间后重试）"
             )
 
         # 构造回测组件
