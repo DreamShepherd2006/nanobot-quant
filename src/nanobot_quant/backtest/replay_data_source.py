@@ -184,6 +184,18 @@ class ReplayDataSource:
     def get_last_price(self, asset, quote=None, exchange=None):
         return self.price_of(asset.symbol)
 
+    def get_datetime(self):
+        """当前重放时间（lumibot Broker/Strategy 契约，tz-aware UTC）。
+
+        Broker.__init__ 会用它的 tzinfo 初始化时区；回放中返回当前游标，
+        未定位/未拉数时回退最后 bar 时间或当前 UTC。
+        """
+        if self._current_ts is not None:
+            return self._current_ts
+        if self._bar_times:
+            return self._bar_times[-1]
+        return datetime.now(timezone.utc)
+
     def get_timestamp(self):
         return time.time()
 

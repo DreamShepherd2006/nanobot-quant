@@ -297,3 +297,76 @@ def test_replay_data_source_accepts_datetime():
     )
     assert src._start_ts == _to_ts(datetime(2026, 8, 22))
     assert src._end_ts == _to_ts(datetime(2026, 8, 23))
+
+# ── 黑名单误伤（回归：1m 深度上限 400 曾把 CRCLX 标成「无交易对」） ──
+
+def test_request_depth_limit_does_not_blacklist(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    from nanobot_quant import gate_cex_data as g
+
+    class FakeResp:
+        def read(self):
+            return b'{"label":"INVALID_PARAM_VALUE"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def fake_open(req, timeout=20):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {}, FakeResp()
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_open)
+    g.clear_blacklist()
+    with pytest.raises(urllib.error.HTTPError):
+        g._request("CRCLX_USDT", "1m", 100)
+    assert g.blacklist_reason("CRCLX") is None
+
+
+def test_request_missing_pair_blacklists(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    from nanobot_quant import gate_cex_data as g
+
+    class FakeResp:
+        def read(self):
+            return b'{"label":"INVALID_CURRENCY_PAIR"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def fake_open(req, timeout=20):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {}, FakeResp()
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_open)
+    g.clear_blacklist()
+    with pytest.raises(urllib.error.HTTPError):
+        g._request("MU_USDT", "1m", 100)
+    assert g.blacklist_reason("MU") is not None
+
+
+def test_get_datetime_contract():
+    from datetime import datetime, timezone
+
+    from nanobot_quant.backtest.replay_data_source import ReplayDataSource
+
+    src = ReplayDataSource(
+        symbols=["SOL"],
+        timestep="15m",
+        length=120,
+        fetcher=lambda pair, s, e, bar: None,
+    )
+    assert src.get_datetime().tzinfo is not None  # 未拉数 → 当前 UTC
+    src.seek(datetime(2026, 8, 22, tzinfo=timezone.utc))
+    assert src.get_datetime() == datetime(2026, 8, 22, tzinfo=timezone.utc)
