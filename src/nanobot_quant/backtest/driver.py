@@ -310,16 +310,36 @@ class BacktestDriver:
 
         # 逐 bar 重放
         net_values: list[dict[str, Any]] = []
+        fills_detail: list[dict[str, Any]] = []
         for i, ts in enumerate(bar_times):
             if i < start_idx:
                 continue
             self.data_source.seek(ts)
             # 场景激活（参数/broker/台账就位）→ 逐标的评估（TD 信号 + 下单）
             strategy._activate_scene(self.scene_name, rt)
+            # 本轮 bar 新增成交（_tracked 累计，取增量关联到当前 bar 时间）
+            tracked_before = {
+                oid: b for b in slot_brokers.values() for oid in b._tracked
+            }
             for sym in self.symbols:
                 strategy.symbol = sym
                 strategy.batch_manager = batch_managers.get(sym)
                 strategy._evaluate_symbol()
+            for slot_no, b in sorted(slot_brokers.items()):
+                for oid, meta in b._tracked.items():
+                    if oid in tracked_before:
+                        continue
+                    fills_detail.append(
+                        {
+                            "ts": ts.isoformat(),
+                            "slot": slot_no,
+                            "symbol": meta.get("symbol"),
+                            "pair": meta.get("pair"),
+                            "side": meta.get("side"),
+                            "quantity": meta.get("quantity"),
+                            "avg_price": meta.get("avg_price"),
+                        }
+                    )
             # 净值快照（mark-to-market，各 slot 独立账本）
             total = 0.0
             for b in slot_brokers.values():
@@ -341,6 +361,10 @@ class BacktestDriver:
                 "ledger": str(bm.path),
             }
 
+        final_net = net_values[-1]["net"] if net_values else 0.0
+        initial_total = self.initial_quote * self.batches
+        roi = (final_net / initial_total - 1.0) if initial_total > 0 else 0.0
+
         result = {
             "scene": self.scene_name,
             "symbols": self.symbols,
@@ -351,15 +375,19 @@ class BacktestDriver:
             ),
             "end_ts": bar_times[-1].isoformat() if bar_times else None,
             "initial_quote": self.initial_quote,
+            "initial_total": round(initial_total, 6),
+            "final_net": round(final_net, 6),
+            "roi": round(roi, 6),
             "batches": self.batches,
             "fills": fills,
+            "fills_detail": fills_detail,
             "net_values": net_values,
             "slots": slots_summary,
             "ledger_dir": str(self.ledger_dir),
         }
         print(
             f"[BACKTEST] 完成 scene={self.scene_name} bars={len(net_values)} "
-            f"fills={fills} 期末净值={net_values[-1]['net'] if net_values else 0}",
+            f"fills={fills} 期末净值={final_net:.4f} ROI={roi * 100:.2f}%",
             file=sys.stderr, flush=True,
         )
         return result

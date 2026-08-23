@@ -101,3 +101,68 @@ def test_lumibot_banner_goes_to_stderr(capsys):
     captured = capsys.readouterr()
     assert "LumiBot v4.5.78" not in captured.out
     assert "LumiBot v4.5.78" in captured.err
+    captured = capsys.readouterr()
+    assert "====" not in captured.out
+    assert "SOL/USDC" not in captured.out
+
+
+# ── engine 分派（driver vs backtest_runner） ─────────────────────────
+
+def test_run_backtest_engine_driver_dispatch(monkeypatch):
+    """engine='driver' → _auto_backtest_driver 线程参数正确（run_id 契约）。"""
+    import nanobot_quant.tools.tools_backtest as tb
+
+    captured = {}
+
+    class _FakeThread:
+        def __init__(self, target, args, daemon=True):
+            captured["target"] = target
+            captured["args"] = args
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(tb.threading, "Thread", _FakeThread)
+
+    result = tb.run_backtest(
+        engine="driver", scene="high", symbols=["SOL", "RENDER"],
+        start="2026-08-01", end="2026-08-15", initial_quote=50.0,
+        batches=3, slippage=0.0,
+    )
+
+    assert result["status"] == "started"
+    assert result["engine"] == "driver"
+    assert captured["started"]
+    args = captured["args"]
+    assert args[1] == "high"               # scene
+    assert args[2] == ["SOL", "RENDER"]    # symbols
+    assert args[3] == "2026-08-01"
+    assert args[4] == "2026-08-15"
+    assert args[5] == 50.0                 # initial_quote
+    assert args[6] == 3                    # batches
+    assert args[7] == 0.0                  # slippage
+
+
+def test_run_backtest_driver_symbol_fallback(monkeypatch):
+    """driver 引擎传旧参数 symbol → 折叠为单标的 symbols。"""
+    import nanobot_quant.tools.tools_backtest as tb
+
+    captured = {}
+
+    class _FakeThread:
+        def __init__(self, target, args, daemon=True):
+            captured["args"] = args
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(tb.threading, "Thread", _FakeThread)
+
+    tb.run_backtest(engine="driver", symbol="CRCLX", start="2026-08-01")
+    assert captured["args"][2] == ["CRCLX"]
+
+
+def test_run_backtest_legacy_requires_symbol():
+    """旧引擎缺 symbol → 明确错误（fail-closed，不起线程）。"""
+    result = run_backtest(engine="backtest_runner")
+    assert "error" in result

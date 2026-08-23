@@ -212,3 +212,25 @@ def test_insufficient_history_fail_closed(tmp_path):
     )
     with pytest.raises(RuntimeError, match="历史数据不足"):
         driver.run()
+
+
+# ── 结构化结果（WebUI 回测页消费） ────────────────────────────────
+
+def test_driver_result_roi_and_fills_detail(tmp_path):
+    """结构化结果：initial_total / final_net / roi / fills_detail。"""
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+
+    assert out["initial_total"] == pytest.approx(200.0)
+    assert out["final_net"] == pytest.approx(out["net_values"][-1]["net"])
+    assert out["roi"] == pytest.approx(out["final_net"] / out["initial_total"] - 1.0, abs=1e-5)
+    assert isinstance(out["fills_detail"], list)
+    assert len(out["fills_detail"]) == out["fills"]
+    for f in out["fills_detail"]:
+        assert {"ts", "slot", "symbol", "side", "quantity", "avg_price"} <= set(f)
+        assert f["side"] in ("buy", "sell")
