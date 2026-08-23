@@ -92,13 +92,16 @@ def _request(pair: str, interval: str, limit: int,
             return json.loads(r.read().decode() or "[]")
     except urllib.error.HTTPError as e:
         if e.code == 400:
-            # Gate 无此交易对（如 MU_USDT）——永久性错误，进黑名单停止查询
             label = "HTTP 400"
             try:
                 body = json.loads(e.read().decode() or "{}")
                 label = body.get("label") or body.get("message") or label
             except (ValueError, OSError):
                 pass
+            # 历史深度上限（如 1m 最多最近 ~10000 根）是参数限制而非交易对问题——
+            # 不黑名单，由调用方（翻页拉全量）捕获后截断（2026-08-23 Step 2）。
+            if "too long ago" in str(label).lower():
+                raise
             mark_blacklisted(sym, f"Gate 无此交易对/已下架 ({label})")
         raise
 
@@ -149,6 +152,56 @@ def fetch_gate_kline_range(pair: str, start_ts: int, end_ts: int,
     """Closed candles in [start_ts, end_ts] (unix seconds) for a Gate pair."""
     rows = _request(pair, _map_bar(bar), 1000, from_ts=start_ts, to_ts=end_ts)
     return rows_to_df(rows)
+
+
+_INTERVAL_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800,
+}
+
+
+def fetch_gate_kline_range_paged(pair: str, start_ts: int, end_ts: int,
+                                 bar: str = "1D") -> pd.DataFrame:
+    """Page backwards through history to fetch all closed candles in
+    [start_ts, end_ts] (unix seconds) for a Gate pair.
+
+    每批最多 1000 根；服务端升序返回 ``to`` 之前的最近 limit 根，翻页用
+    ``to = 上一批最早一根 − interval`` 继续向前（2026-08-23 实测确认无缝衔接）。
+
+    深度限制：1m 粒度服务端只允许最近 ~10000 根（"Maximum 10000 points
+    ago"，实测第 10 批触发）——触发时截断保留已拉批次，不报错；调用方
+    从返回 DataFrame 的 index 起点即可知实际深度。其他 400（无交易对/已下架）
+    由 ``_request`` 黑名单逻辑处理（"too long ago" 不再误入黑名单）。
+    """
+    interval = _map_bar(bar)
+    step = _INTERVAL_SECONDS.get(interval, 86400)
+    page_to = int(end_ts)
+    batches: list = []
+    guard = 0
+    while page_to > int(start_ts) and guard < 500:
+        guard += 1
+        try:
+            rows = _request(pair, interval, 1000, to_ts=page_to)
+        except urllib.error.HTTPError as e:
+            # 深度上限 400（已由 _request 判别为非黑名单原因）——截断停止
+            if e.code == 400:
+                break
+            raise
+        if not rows:
+            break
+        batches.append(rows)
+        oldest = int(rows[0][0])
+        if oldest <= int(start_ts):
+            break
+        page_to = oldest - step
+    if not batches:
+        return pd.DataFrame(columns=_COLUMNS)
+    frames = [rows_to_df(b) for b in batches]
+    df = pd.concat(frames)
+    df = df[~df.index.duplicated(keep="first")].sort_index()
+    start_dt = datetime.fromtimestamp(int(start_ts), tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(int(end_ts), tz=timezone.utc)
+    return df[(df.index >= start_dt) & (df.index <= end_dt)]
 
 
 def fetch_gate_ticker(pair: str) -> Optional[dict]:

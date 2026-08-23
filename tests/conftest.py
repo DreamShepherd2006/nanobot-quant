@@ -77,9 +77,47 @@ except ImportError:
             self.symbol = getattr(asset, "symbol", "")
             self.quote = quote
 
+    class _Order:
+        # 镜像 lumibot v4.5.78 entities.Order 的必用成员：
+        # set_filled 只设 event 不更新 status（backtest/cex broker 手动同步 status="fill"）、
+        # custom_params 默认 None（写入前需先置 dict）、identifier 默认 None。
+        def __init__(self, strategy=None, identifier=None, asset=None, quantity=0,
+                     side="buy", status="new", limit_price=None, stop_price=None,
+                     custom_params=None, error=None):
+            self.strategy = strategy
+            self.identifier = identifier
+            self.asset = asset
+            self.quantity = quantity
+            self.side = side
+            self.status = status
+            self.limit_price = limit_price
+            self.stop_price = stop_price
+            self.custom_params = custom_params
+            self.error = error
+            self.filled = False
+            self._event = None
+
+        def set_filled(self):
+            self._event = "fill"
+            self.filled = True
+
+        def set_error(self, msg):
+            self._event = "error"
+            self.error = msg
+
+        def set_canceled(self):
+            self._event = "cancel"
+
+        def set_identifier(self, oid):
+            self.identifier = oid
+
+        def is_filled(self):
+            return self.filled is True or self.status == "fill"
+
     _entities.Asset = _Asset
     _entities.Position = _Position
     _entities.Bars = _Bars
+    _entities.Order = _Order
 
     # onchainos_data_source imports lumibot.data_sources.DataSource
     _data_sources = types.ModuleType("lumibot.data_sources")
