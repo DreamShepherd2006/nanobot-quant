@@ -124,6 +124,9 @@ function fmtN(v, dp) {
   if (v === null || v === undefined || isNaN(v)) return "—";
   return Number(v).toFixed(dp === undefined ? 4 : dp);
 }
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 // ── 场景/标的表单 ───────────────────────────────────────────────────────
 function initForm() {
@@ -230,6 +233,13 @@ function pollResult(runId, tries) {
 function renderResult(res, runId) {
   const box = $("result");
   if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
+  // 旧引擎（backtest_runner metrics 格式）结果缺 driver 字段 → 原始 JSON 展示
+  if (res.final_net === undefined && res.net_values === undefined) {
+    box.innerHTML =
+      '<div style="font-size:.86em;color:#888;margin-bottom:6px;">旧引擎结果（backtest_runner 格式，仅展示）</div>' +
+      `<pre style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px;font-size:.8em;overflow:auto;max-height:360px;">${escapeHtml(JSON.stringify(res, null, 2))}</pre>`;
+    return;
+  }
   const roi = res.roi;
   const roiCls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
   const fills = res.fills_detail || [];

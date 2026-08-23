@@ -40,9 +40,9 @@ def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
     return None, True
 
 
-def _body(request: Request) -> dict | None:
+async def _body(request: Request) -> dict | None:
     try:
-        data = request.json()
+        data = await request.json()
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -146,11 +146,18 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 {"ok": False, "error": err},
                 status_code=403 if "Commander" in err else 401,
             )
-        data = _body(request)
+        data = await _body(request)
         if data is None:
+            gatekeeper._log("[BACKTEST-PAGE] start 请求体无效（非 JSON）")
             return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
         scene = data.get("scene") or "mid"
         symbols = data.get("symbols") or []
+        gatekeeper._log(
+            f"[BACKTEST-PAGE] 启动请求 scene={scene} symbols={symbols} "
+            f"range={data.get('start') or '拉满'}→{data.get('end') or '现在'} "
+            f"initial_quote={data.get('initial_quote')} batches={data.get('batches')} "
+            f"slippage={data.get('slippage')}"
+        )
         if not symbols:
             return JSONResponse({"ok": False, "error": "至少选择一个标的"}, status_code=400)
         try:
@@ -167,10 +174,12 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 slippage=float(data["slippage"]) if data.get("slippage") else None,
             )
         except Exception as exc:  # noqa: BLE001
+            gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")
             return JSONResponse(
                 {"ok": False, "error": f"启动回测失败: {exc}"}, status_code=400
             )
         if resp.get("error"):
+            gatekeeper._log(f"[BACKTEST-PAGE] run_backtest 拒绝: {resp['error']}")
             return JSONResponse({"ok": False, "error": resp["error"]}, status_code=400)
         gatekeeper._log(
             f"📈 回测启动 scene={scene} symbols={symbols} run_id={resp['run_id']}"
