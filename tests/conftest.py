@@ -8,6 +8,7 @@ enough for static parameter assertions; engine/params/handler tests do
 not touch lumibot at all.
 """
 
+import logging
 import sys
 import types
 
@@ -27,6 +28,49 @@ except ImportError:
 
         def __init__(self, *args, **kwargs):
             self.parameters = dict(self.parameters)
+            self.portfolio_value = float(kwargs.get("initial_cash", 0.0))
+            self.cash = self.portfolio_value
+            self.logger = logging.getLogger("lumibot-stub")
+            # td_live/backtest driver 构造传 broker=... → 保存供
+            # get_historical_prices 委托 broker.data_source。
+            broker = kwargs.get("broker")
+            if broker is not None:
+                self.broker = broker
+
+        def get_historical_prices(self, asset, length, timestep="", **kwargs):
+            # 镜像 lumibot v4.5.78：Strategy.get_historical_prices 先归一化
+            # str symbol → Asset，再委托 broker.data_source（回测驱动 Step 3
+            # 依赖此链路；策略实盘传 self.symbol 字符串）。
+            ds = getattr(getattr(self, "broker", None), "data_source", None)
+            if ds is None:
+                raise RuntimeError("Strategy.get_historical_prices: no broker.data_source")
+            if isinstance(asset, str):
+                from lumibot.entities import Asset
+
+                asset = Asset(asset, "crypto")
+            return ds.get_historical_prices(asset, length, timestep=timestep, **kwargs)
+
+        def create_order(self, asset, quantity, side, **kwargs):
+            from lumibot.entities import Asset, Order
+
+            # 镜像 lumibot v4.5.78：create_order 接受 str symbol 或 Asset。
+            if isinstance(asset, str):
+                asset = Asset(asset, "crypto")
+            return Order(
+                strategy=self, asset=asset, quantity=quantity, side=side, **kwargs
+            )
+
+        def get_position(self, symbol):
+            # 镜像 lumibot v4.5.78：从 broker 当前持仓查询（回测驱动
+            # BacktestBroker._positions 为内存账本；str stub 归一化）。
+            positions = getattr(getattr(self, "broker", None), "_positions", None)
+            if isinstance(positions, dict) and symbol in positions:
+                from lumibot.entities import Asset, Position
+
+                pos = Position(self, Asset(symbol, "crypto"), positions[symbol])
+                pos.current_price = 0.0
+                return pos
+            return None
 
     _strategy_mod.Strategy = _Strategy
     _strategies.strategy = _strategy_mod
@@ -38,7 +82,10 @@ except ImportError:
 
     class _Broker:
         def __init__(self, *args, **kwargs):
-            pass
+            # 镜像 lumibot v4.5.78：Broker 保存 data_source（策略
+            # get_historical_prices 委托 broker.data_source，回测驱动依赖）。
+            self.data_source = kwargs.get("data_source")
+            self.name = kwargs.get("name", "stub")
 
     _brokers.Broker = _Broker
 
