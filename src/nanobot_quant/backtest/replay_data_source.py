@@ -19,12 +19,28 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import pandas as pd
 
 from nanobot_quant.gate_cex_data import fetch_gate_kline_range_paged
+
+
+def _to_ts(value) -> Optional[int]:
+    """回测区间时间戳归一化：None / unix 秒 / datetime / 'YYYY-MM-DD…' → int 秒。"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+    if isinstance(value, str):
+        dt = datetime.strptime(value.strip(), "%Y-%m-%d")
+        return int(dt.replace(tzinfo=timezone.utc).timestamp())
+    raise TypeError(f"无法解析回测时间戳: {value!r}")
 from nanobot_quant.gate_credentials import gate_pair
 
 _BAR_MAP = {
@@ -73,8 +89,8 @@ class ReplayDataSource:
         self._timestep = str(timestep)
         self._bar = _BAR_MAP.get(str(timestep or "").lower().removeprefix("bar:"),
                                  _DEFAULT_BAR)
-        self._start_ts = int(start_ts) if start_ts else None
-        self._end_ts = int(end_ts) if end_ts else None
+        self._start_ts = _to_ts(start_ts)
+        self._end_ts = _to_ts(end_ts)
         self._length = max(1, int(length))
         self._tokens_json = tokens_json or []
         self._fetcher = fetcher or self._default_fetch

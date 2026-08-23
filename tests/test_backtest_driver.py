@@ -234,3 +234,30 @@ def test_driver_result_roi_and_fills_detail(tmp_path):
     for f in out["fills_detail"]:
         assert {"ts", "slot", "symbol", "side", "quantity", "avg_price"} <= set(f)
         assert f["side"] in ("buy", "sell")
+
+# ── 时间戳归一化（回归：datetime 对象传 ReplayDataSource 报 int() 错） ──
+
+def test_to_ts_normalizes_datetime():
+    from nanobot_quant.backtest.replay_data_source import _to_ts
+
+    dt = datetime(2026, 8, 22, 0, 0, 0)
+    assert _to_ts(dt) == int(dt.replace(tzinfo=timezone.utc).timestamp())
+    assert _to_ts(None) is None
+    assert _to_ts(1780000000) == 1780000000
+    assert _to_ts("2026-08-22") == _to_ts(datetime(2026, 8, 22))
+    assert _to_ts(3.5) == 3
+
+
+def test_replay_data_source_accepts_datetime():
+    from nanobot_quant.backtest.replay_data_source import ReplayDataSource, _to_ts
+
+    src = ReplayDataSource(
+        symbols=["SOL"],
+        timestep="1m",
+        start_ts=datetime(2026, 8, 22),
+        end_ts=datetime(2026, 8, 23),
+        length=120,
+        fetcher=lambda pair, s, e, bar: None,
+    )
+    assert src._start_ts == _to_ts(datetime(2026, 8, 22))
+    assert src._end_ts == _to_ts(datetime(2026, 8, 23))
