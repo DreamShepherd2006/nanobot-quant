@@ -975,7 +975,7 @@ def test_cex_pending_buy_confirmed_opens(tmp_path):
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
     _inject_cex_buy_pending(s)
     fb = _FakeCexBroker("filled", 0.0372, 66.5)
-    s._cex_confirm_broker = lambda slot_id: fb
+    s._cex_confirm_broker = lambda slot_id, info=None: fb
     s._check_pending_confirmations()
     open_slots = bm.open_slots()
     assert len(open_slots) == 1
@@ -991,7 +991,7 @@ def test_cex_pending_buy_zero_fill_releases(tmp_path):
     bm = _make_bm(tmp_path)
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
     _inject_cex_buy_pending(s)
-    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("cancelled", 0.0)
+    s._cex_confirm_broker = lambda slot_id, info=None: _FakeCexBroker("cancelled", 0.0)
     s._check_pending_confirmations()
     assert bm.open_slots() == []  # 零成交不建仓（防幽灵仓）
     assert s._pending_buys == {}  # 清 pending → slot 回到 available
@@ -1002,7 +1002,7 @@ def test_cex_pending_buy_still_open_waits(tmp_path):
     bm = _make_bm(tmp_path)
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
     _inject_cex_buy_pending(s)
-    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("submitted", 0.0)
+    s._cex_confirm_broker = lambda slot_id, info=None: _FakeCexBroker("submitted", 0.0)
     s._check_pending_confirmations()
     assert bm.open_slots() == []
     assert 1 in s._pending_buys  # 继续等
@@ -1015,7 +1015,7 @@ def test_cex_pending_sell_confirmed_releases(tmp_path):
     s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
     _inject_cex_sell_pending(s)
     fb = _FakeCexBroker("filled", 5.0, 66.9)
-    s._cex_confirm_broker = lambda slot_id: fb
+    s._cex_confirm_broker = lambda slot_id, info=None: fb
     s._check_pending_confirmations()
     assert bm.open_slots() == []  # 补确认后释放
     assert s._pending_sells == {}
@@ -1028,7 +1028,7 @@ def test_cex_pending_sell_zero_fill_keeps_open(tmp_path):
     bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
     s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
     _inject_cex_sell_pending(s)
-    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("cancelled", 0.0)
+    s._cex_confirm_broker = lambda slot_id, info=None: _FakeCexBroker("cancelled", 0.0)
     s._check_pending_confirmations()
     assert len(bm.open_slots()) == 1  # 保持 open
     assert s._pending_sells == {}  # 清 pending → 下轮可重试卖出
@@ -1040,7 +1040,7 @@ def test_cex_pending_sell_still_open_waits(tmp_path):
     bm.open_lot(qty=5.0, entry_price=66.0, entry_time="t1")
     s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
     _inject_cex_sell_pending(s)
-    s._cex_confirm_broker = lambda slot_id: _FakeCexBroker("submitted", 0.0)
+    s._cex_confirm_broker = lambda slot_id, info=None: _FakeCexBroker("submitted", 0.0)
     s._check_pending_confirmations()
     assert len(bm.open_slots()) == 1
     assert 1 in s._pending_sells  # 继续等

@@ -582,3 +582,73 @@ def test_scene_timestep_exact_granularity():
     assert _BAR_MAP["15min"] == "15m"
     assert _BAR_MAP["hour"] == "1H"
     assert _BAR_MAP["day"] == "1D"
+
+
+# ── S3 场景池 slot→子账号解析（2026-08-23 回归）──────────────────
+
+class _FakeCexBroker:
+    """记录 sub_account 的 fake，替代 CexBroker（不触网络/不触 gate.json）。"""
+
+    def __init__(self, tokens_json=None, slippage="0.01", sub_account=None):
+        self.sub_account = sub_account
+
+
+def test_cex_slot_broker_prefers_slot_account_id(tmp_path, monkeypatch):
+    """S3 场景化：slot.account_id（场景 sub_accounts 池）优先于全局 slot_map。
+
+    回归（2026-08-23）：mid 场景 RENDER BUY 资金检查 slot1 曾按全局
+    slot_map 解析成 gate_bot1（余额 0.0001 < 4）→「无可用资金 slot」，
+    而场景池 gate_bot3 实际有 4.862 USDT——页面资金表（主 key 批量）
+    与策略检查（子账号 key）数据源不同导致用户看到「有资金却买不了」。
+    """
+    import nanobot_quant.brokers.cex_broker as cex_broker_mod
+
+    monkeypatch.setattr(cex_broker_mod, "CexBroker", _FakeCexBroker)
+    # 全局 slot_map 默认 1..N（DEX 时代默认，无 slot_map 字段时如此）
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.load_slot_map",
+        lambda creds=None: {"1": "gate_bot1", "2": "gate_bot2"},
+    )
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot3", "gate_bot4"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex")
+    s._cex_brokers = {}
+
+    # mid 场景 slot1 台账 account_id=gate_bot3（场景池）——必须优先
+    broker = s._cex_slot_broker({"slot": 1, "account_id": "gate_bot3"})
+    assert broker.sub_account == "gate_bot3"
+
+    # 无 account_id 时回退全局 slot_map（兼容旧台账/确认路径）
+    broker_fb = s._cex_slot_broker({"slot": 1, "account_id": ""})
+    assert broker_fb.sub_account == "gate_bot1"
+
+    # 缓存按 (slot_no, account) 区分——同 slot_no 不同子账号不复用错 broker
+    broker_a = s._cex_slot_broker({"slot": 2, "account_id": "gate_bot4"})
+    broker_b = s._cex_slot_broker({"slot": 2, "account_id": "gate_bot2"})
+    assert broker_a.sub_account == "gate_bot4"
+    assert broker_b.sub_account == "gate_bot2"
+    assert broker_a is not broker_b
+
+
+def test_cex_confirm_broker_uses_pending_account_id(tmp_path, monkeypatch):
+    """pending 确认：用 pending 记录的 account_id 重建 broker（场景池）。
+
+    2026-08-23：确认路径此前传空 account_id → 全局 slot_map → 查错
+    子账号（如 gate_bot4 的 pending 用 gate_bot2 的 broker 查单）。
+    """
+    import nanobot_quant.brokers.cex_broker as cex_broker_mod
+
+    monkeypatch.setattr(cex_broker_mod, "CexBroker", _FakeCexBroker)
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.load_slot_map",
+        lambda creds=None: {"1": "gate_bot1", "2": "gate_bot2"},
+    )
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot3", "gate_bot4"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex")
+    s._cex_brokers = {}
+
+    broker = s._cex_confirm_broker(1, {"account_id": "gate_bot3"})
+    assert broker.sub_account == "gate_bot3"
+
+    # 旧记录无 account_id → 回退全局 slot_map（不崩）
+    broker_legacy = s._cex_confirm_broker(1, {})
+    assert broker_legacy.sub_account == "gate_bot1"
