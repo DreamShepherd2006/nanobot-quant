@@ -149,7 +149,10 @@ def _auto_backtest_driver(
 
     def _run():
         from nanobot_quant.backtest.driver import BacktestDriver
+        from nanobot_quant.onchainos_cli import backtests_dir
 
+        # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
+        # {status: running, progress}，返回后 _backtest_log 覆写 done/error
         d = BacktestDriver(
             scene=scene,
             symbols=symbols,
@@ -158,6 +161,7 @@ def _auto_backtest_driver(
             initial_quote=initial_quote,
             batches=batches,
             slippage=slippage,
+            progress_path=backtests_dir() / f"{run_id}.json",
         )
         return d.run()
 
