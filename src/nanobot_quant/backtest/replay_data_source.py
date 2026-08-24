@@ -53,22 +53,41 @@ _BAR_MAP = {
     "4hour": "4H",
     "day": "1D",
     "week": "1W",
-    # Gate 风格键（driver._timestep_for 输出）——两种风格都必须命中
-    "1m": "1m",
-    "5m": "5m",
-    "15m": "15m",
-    "30m": "30m",
-    "1h": "1H",
-    "1H": "1H",
-    "4h": "4H",
-    "4H": "4H",
-    "1d": "1D",
-    "1D": "1D",
-    "1w": "1W",
-    "1W": "1W",
 }
 
 _DEFAULT_BAR = "1D"
+
+
+def _bar_map() -> dict:
+    """完整周期映射：lumibot 风格键 + gate_cex spec 声明周期（原样/小写）。
+
+    2026-08-24 方案 C：Gate 粒度从注册表声明（16 个周期），调用处
+    ``.lower().removeprefix("bar:")`` 会把 "1H" 归一成 "1h"，故大小写键都放。
+    """
+    from nanobot_quant.data_sources import get_data_source
+
+    m = dict(_BAR_MAP)
+    for p in get_data_source("gate_cex").bars:
+        m.setdefault(p, p)
+        m.setdefault(p.lower(), p)
+    return m
+
+
+def _resolve_bar(timestep: str) -> str:
+    """timestep（lumibot 名 / 统一周期名 / bar: 前缀）→ 回测 bar 名。
+
+    Fail-closed：传了但查不到映射的周期抛 ValueError，不静默回退日线
+    （空 timestep 用默认 1D，语义=未指定）。
+    """
+    key = str(timestep or "").lower().removeprefix("bar:")
+    if not key:
+        return _DEFAULT_BAR
+    m = _bar_map()
+    if key not in m:
+        raise ValueError(
+            f"不支持的回测周期: {timestep!r}（支持: {sorted(set(m))}）"
+        )
+    return m[key]
 
 
 class ReplayDataSource:
@@ -101,8 +120,7 @@ class ReplayDataSource:
     ):
         self._symbols = list(symbols)
         self._timestep = str(timestep)
-        self._bar = _BAR_MAP.get(str(timestep or "").lower().removeprefix("bar:"),
-                                 _DEFAULT_BAR)
+        self._bar = _resolve_bar(timestep)
         self._start_ts = _to_ts(start_ts)
         self._end_ts = _to_ts(end_ts)
         self._length = max(1, int(length))

@@ -51,9 +51,24 @@ def test_bar_map():
     assert _map_bar("1D") == "1d"
     assert _map_bar("1H") == "1h"
     assert _map_bar("4H") == "4h"
-    assert _map_bar("1W") == "7d"
+    assert _map_bar("1W") == "1w"      # spec 语义：1W = 自然周线（不再用 7d）
+    assert _map_bar("7D") == "7d"      # 7D = 7 天，独立粒度
     assert _map_bar("5m") == "5m"
-    assert _map_bar("bogus") == "1d"
+    # 新周期（2026-08-24 方案 C：16 个周期全支持）
+    assert _map_bar("3m") == "3m"
+    assert _map_bar("2H") == "2h"
+    assert _map_bar("6H") == "6h"
+    assert _map_bar("8H") == "8h"
+    assert _map_bar("12H") == "12h"
+    assert _map_bar("3D") == "3d"
+    assert _map_bar("30D") == "30d"
+    # fail-closed：不支持的周期抛 KeyError，不静默回退日线
+    with pytest.raises(KeyError):
+        _map_bar("bogus")
+    with pytest.raises(KeyError):
+        _map_bar("2m")   # 非交易所粒度
+    with pytest.raises(KeyError):
+        _map_bar("1s")   # 秒级未纳入（用户拍板）
 
 
 def test_fetch_gate_kline_live(monkeypatch):

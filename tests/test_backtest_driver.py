@@ -268,20 +268,79 @@ def test_replay_data_source_accepts_datetime():
 # ── bar 映射（回归：driver 传 Gate 风格 "15m" 曾落到默认 "1D"） ──
 
 def test_bar_map_accepts_both_styles():
-    from nanobot_quant.backtest.replay_data_source import ReplayDataSource, _BAR_MAP
+    from nanobot_quant.backtest.replay_data_source import (
+        ReplayDataSource,
+        _BAR_MAP,
+        _bar_map,
+        _resolve_bar,
+    )
 
-    # driver._timestep_for 输出（Gate 风格）
-    assert _BAR_MAP["15m"] == "15m"
-    assert _BAR_MAP["1m"] == "1m"
-    assert _BAR_MAP["1H"] == "1H"
-    assert _BAR_MAP["1D"] == "1D"
-    # lumibot 风格（td_live 场景 timestep）
+    # driver._timestep_for 输出（Gate 风格统一周期名，经 _bar_map() 合并 spec 声明）
+    m = _bar_map()
+    assert m["15m"] == "15m"
+    assert m["1m"] == "1m"
+    assert m["1H"] == "1H"
+    assert m["1D"] == "1D"
+    # lumibot 风格（td_live 场景 timestep，模块级 _BAR_MAP 保留）
     assert _BAR_MAP["15min"] == "15m"
     assert _BAR_MAP["hour"] == "1H"
     assert _BAR_MAP["day"] == "1D"
 
     src = ReplayDataSource(symbols=["SOL"], timestep="15m", length=120)
     assert src._bar == "15m"
+
+
+def test_driver_timestep_for_new_periods():
+    """2026-08-24 方案 C：driver 支持 16 个周期（含新周期），fail-closed。"""
+    from nanobot_quant.backtest.driver import _timestep_for
+
+    assert _timestep_for("1m") == "1m"
+    assert _timestep_for("15m") == "15m"
+    assert _timestep_for("1H") == "1H"
+    assert _timestep_for("4H") == "4H"
+    assert _timestep_for("1D") == "1D"
+    # 新周期
+    assert _timestep_for("3m") == "3m"
+    assert _timestep_for("2H") == "2H"
+    assert _timestep_for("6H") == "6H"
+    assert _timestep_for("8H") == "8H"
+    assert _timestep_for("12H") == "12H"
+    assert _timestep_for("3D") == "3D"
+    assert _timestep_for("7D") == "7D"
+    assert _timestep_for("30D") == "30D"
+    assert _timestep_for("1W") == "1W"
+    # fail-closed
+    with pytest.raises(ValueError, match="2m"):
+        _timestep_for("2m")
+    with pytest.raises(ValueError, match="1s"):
+        _timestep_for("1s")
+
+
+def test_bar_map_new_periods():
+    """2026-08-24 方案 C：16 个周期全支持（含新周期），fail-closed。"""
+    from nanobot_quant.backtest.replay_data_source import _resolve_bar
+
+    # 新周期 Gate 风格（统一名 / 小写归一）
+    assert _resolve_bar("2H") == "2H"
+    assert _resolve_bar("2h") == "2H"   # .lower() 归一
+    assert _resolve_bar("6H") == "6H"
+    assert _resolve_bar("8H") == "8H"
+    assert _resolve_bar("12H") == "12H"
+    assert _resolve_bar("3m") == "3m"
+    assert _resolve_bar("3D") == "3D"
+    assert _resolve_bar("3d") == "3D"
+    assert _resolve_bar("7D") == "7D"
+    assert _resolve_bar("30D") == "30D"
+    assert _resolve_bar("1W") == "1W"
+    # bar: 前缀直拉
+    assert _resolve_bar("bar:2H") == "2H"
+    # fail-closed：未知周期抛 ValueError，不静默回退日线
+    with pytest.raises(ValueError, match="2m"):
+        _resolve_bar("2m")
+    with pytest.raises(ValueError, match="bogus"):
+        _resolve_bar("bogus")
+    # 空 timestep = 未指定，用默认 1D
+    assert _resolve_bar(None) == "1D"
 
 
 def test_replay_data_source_accepts_datetime():

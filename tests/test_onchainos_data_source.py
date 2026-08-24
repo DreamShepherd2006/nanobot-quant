@@ -104,8 +104,19 @@ class TestMapTimestep:
     def test_maps_to_okx_bar(self, timestep, bar):
         assert OnchainOSDataSource._map_timestep(timestep) == bar
 
-    def test_unknown_falls_back_to_day(self):
-        assert OnchainOSDataSource._map_timestep("decade") == "1D"
+    def test_unified_name_passes_through(self):
+        # 统一周期名直达（bar: 直拉场景），不走 lumibot 桥接
+        assert OnchainOSDataSource._map_timestep("5m") == "5m"
+        assert OnchainOSDataSource._map_timestep("1H") == "1H"
+        assert OnchainOSDataSource._map_timestep("1D") == "1D"
+
+    def test_unknown_fails_closed(self):
+        # fail-closed（2026-08-24 方案 C）：不支持的周期抛 KeyError，不静默回退日线
+        with pytest.raises(KeyError, match="decade"):
+            OnchainOSDataSource._map_timestep("decade")
+        # OKX DEX 不支持 30m（51000 Parameter bar error）——原实现静默拉日线，现报错
+        with pytest.raises(KeyError, match="30min"):
+            OnchainOSDataSource._map_timestep("30min")
 
 
 class TestGetHistoricalPrices:

@@ -58,13 +58,6 @@ DEFAULT_INITIAL_QUOTE = 100.0   # 每 slot 初始资金（USDT，纯模拟）
 DEFAULT_MIN_QUOTE = 3.0         # 对齐 Gate min_quote $3（服务端实时下发，回测固定默认）
 DEFAULT_FEE_RATE = 0.001        # Gate taker 单边 0.1%（全局扁平 fee_rate 覆盖）
 
-#: 支持回测的时间粒度（ReplayDataSource._BAR_MAP 子集；同 Gate kline 粒度）
-_BAR_MAP = {
-    "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
-    "1H": "1H", "4H": "4H", "1D": "1D", "1W": "1W",
-}
-
-
 def _parse_ts(value: Optional[str]) -> Optional[datetime]:
     """'YYYY-MM-DD[ HH:MM[:SS]]' → UTC naive datetime（历史 K 线为 UTC）。"""
     if not value:
@@ -81,11 +74,20 @@ def _parse_ts(value: Optional[str]) -> Optional[datetime]:
 
 
 def _timestep_for(sleeptime: str) -> str:
-    """场景 sleeptime → K 线粒度（映射必须精确，2026-08-20 修正）。"""
-    s = str(sleeptime).lower()
-    if s in _BAR_MAP:
-        return _BAR_MAP[s]
-    raise ValueError(f"不支持的场景周期: {sleeptime!r}（支持: {', '.join(_BAR_MAP)}）")
+    """场景 sleeptime（统一周期名）→ 回测 K 线粒度。
+
+    2026-08-24 方案 C：粒度由 gate_cex spec 声明（16 个周期），不再各自
+    硬编码映射表。不支持的周期抛 ValueError（fail-closed，不静默回退）。
+    """
+    s = str(sleeptime)
+    from nanobot_quant.data_sources import get_data_source
+
+    spec = get_data_source("gate_cex")
+    if s not in spec.bars:
+        raise ValueError(
+            f"不支持的场景周期: {sleeptime!r}（支持: {', '.join(spec.bars)}）"
+        )
+    return s
 
 
 class BacktestDriver:

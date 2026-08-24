@@ -99,12 +99,15 @@ class OnchainOSDataSource(DataSource):
 
     @staticmethod
     def _map_timestep(timestep: str) -> str:
-        """Map Lumibot timestep to onchainos bar format.
+        """Lumibot timestep / 统一周期名 → OKX DEX bar 格式（从 spec 读）。
 
         OKX DEX `market kline` accepts 1m/5m/15m/1H/4H/1D/1W only
-        ("1Min" triggers 51000 Parameter bar error).
+        ("1Min" triggers 51000 Parameter bar error；30m 亦不支持)。
+        Fail-closed：不支持的周期（如 30m）抛 KeyError，不静默回退日线
+        （2026-08-24 方案 C：粒度由 onchainos spec 声明）。
         """
-        return {
+        # lumibot 名 → 统一名；统一名直达（bar: 直拉场景）
+        unified = {
             "minute": "1m",
             "5min": "5m",
             "15min": "15m",
@@ -112,4 +115,7 @@ class OnchainOSDataSource(DataSource):
             "4hour": "4H",
             "day": "1D",
             "week": "1W",
-        }.get(timestep.lower(), "1D")
+        }.get(str(timestep).lower(), str(timestep))
+        from nanobot_quant.data_sources import get_data_source
+
+        return get_data_source("onchainos").interval_for(unified)
