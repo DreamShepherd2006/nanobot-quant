@@ -57,17 +57,18 @@ def _symbol_of(pair: str) -> str:
     """Gate pair（如 CRCLX_USDT）→ base symbol（CRCLX）。"""
     return str(pair).split("_")[0].upper()
 
-# td-table / lumibot bar names -> Gate interval
-_BAR_MAP = {
-    "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
-    "1H": "1h", "4H": "4h", "1D": "1d", "1W": "7d",
-}
-
 _COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
 
 def _map_bar(bar) -> str:
-    return _BAR_MAP.get(str(bar), "1d")
+    """统一周期名 → Gate interval（从 gate_cex spec 读，fail-closed）。
+
+    2026-08-24 方案 C：周期由数据源注册表声明（DataSourceSpec.interval_map），
+    不再各自硬编码映射表。不支持的周期抛 KeyError，不静默回退到日线。
+    """
+    from nanobot_quant.data_sources import get_data_source
+
+    return get_data_source("gate_cex").interval_for(str(bar))
 
 
 def _request(pair: str, interval: str, limit: int,
@@ -159,12 +160,6 @@ def fetch_gate_kline_range(pair: str, start_ts: int, end_ts: int,
     return rows_to_df(rows)
 
 
-_INTERVAL_SECONDS = {
-    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800,
-}
-
-
 def fetch_gate_kline_range_paged(pair: str, start_ts: int, end_ts: int,
                                  bar: str = "1D") -> pd.DataFrame:
     """Page backwards through history to fetch all closed candles in
@@ -179,7 +174,11 @@ def fetch_gate_kline_range_paged(pair: str, start_ts: int, end_ts: int,
     由 ``_request`` 黑名单逻辑处理（"too long ago" 不再误入黑名单）。
     """
     interval = _map_bar(bar)
-    step = _INTERVAL_SECONDS.get(interval, 86400)
+    # 统一周期名 → 秒（单一事实源 = periods.INTERVAL_SECONDS，2026-08-24 方案 C；
+    # 之前本地表缺新周期会静默落到 86400 导致翻页大缺口）
+    from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+    step = INTERVAL_SECONDS[str(bar)]
     page_to = int(end_ts)
     batches: list = []
     guard = 0
