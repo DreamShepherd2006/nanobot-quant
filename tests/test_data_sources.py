@@ -14,6 +14,11 @@ from nanobot_quant.data_sources import (
     list_data_sources,
     research_sources,
 )
+from nanobot_quant.data_sources.periods import (
+    DISPLAY_NAMES,
+    INTERVAL_SECONDS,
+    PERIODS,
+)
 
 
 # ── 注册表形状 ────────────────────────────────────────────────────────
@@ -59,6 +64,80 @@ def test_unknown_channel_fail_closed():
 def test_unknown_source_raises():
     with pytest.raises(KeyError):
         get_data_source("nope")
+
+
+# ── 周期声明（方案 C，2026-08-24）────────────────────────────────────
+
+
+def test_all_spec_bars_are_unified_periods():
+    """每个 spec 声明的周期都必须是统一周期名（PERIODS 子集）。"""
+    for name in list_data_sources():
+        spec = get_data_source(name)
+        assert set(spec.bars) <= set(PERIODS), f"{name}: bars 含非统一周期"
+
+
+def test_interval_map_covers_bars():
+    """每个 spec 的 interval_map 必须覆盖其声明的全部 bars。"""
+    for name in list_data_sources():
+        spec = get_data_source(name)
+        for bar in spec.bars:
+            assert bar in spec.interval_map, f"{name}: {bar} 缺 interval_map"
+
+
+def test_gate_spec_declares_16_periods():
+    """Gate API 实测 18 个 interval，去秒级后 16 个全声明（用户拍板）。"""
+    spec = get_data_source("gate_cex")
+    assert spec.bars == (
+        "1m", "3m", "5m", "15m", "30m",
+        "1H", "2H", "4H", "6H", "8H", "12H",
+        "1D", "3D", "1W", "7D", "30D",
+    )
+
+
+def test_gate_interval_map_matches_api():
+    """Gate 大小写映射与实测 API interval 一致（4H→4h 等）。"""
+    spec = get_data_source("gate_cex")
+    assert spec.interval_for("1H") == "1h"
+    assert spec.interval_for("4H") == "4h"
+    assert spec.interval_for("1W") == "1w"
+    assert spec.interval_for("7D") == "7d"
+    assert spec.interval_for("30D") == "30d"
+    assert spec.interval_for("3m") == "3m"
+
+
+def test_interval_for_default_identity():
+    """未显式传 interval_map 的源默认同名映射（OKX DEX 4H→4H）。"""
+    spec = get_data_source("onchainos")
+    assert spec.interval_for("4H") == "4H"
+    assert spec.interval_for("1m") == "1m"
+    # onchainos 无 30m（51000 Parameter bar error 实测），fail-closed
+    with pytest.raises(KeyError):
+        spec.interval_for("30m")
+
+
+def test_interval_for_fail_closed():
+    """不在 spec.bars 内的周期抛 KeyError，不静默回退。"""
+    spec = get_data_source("gate_cex")
+    with pytest.raises(KeyError, match="1s"):
+        spec.interval_for("1s")  # 秒级未纳入（用户拍板）
+    with pytest.raises(KeyError, match="2m"):
+        spec.interval_for("2m")  # 非交易所粒度
+
+
+def test_interval_seconds_covers_all_periods():
+    """调度秒数表覆盖全部统一周期。"""
+    assert set(INTERVAL_SECONDS) == set(PERIODS)
+    assert INTERVAL_SECONDS["1m"] == 60
+    assert INTERVAL_SECONDS["1H"] == 3600
+    assert INTERVAL_SECONDS["1D"] == 86400
+    assert INTERVAL_SECONDS["30D"] == 2592000  # 日历月近似 30 天
+
+
+def test_display_names_covers_all_periods():
+    """UI 显示名覆盖全部统一周期。"""
+    assert set(DISPLAY_NAMES) == set(PERIODS)
+    assert DISPLAY_NAMES["1W"] == "1周"
+    assert DISPLAY_NAMES["7D"] == "7天"
 
 
 # ── 统一契约 ──────────────────────────────────────────────────────────
