@@ -227,6 +227,8 @@ def test_driver_result_roi_and_fills_detail(tmp_path):
     out = driver.run()
 
     assert out["initial_total"] == pytest.approx(200.0)
+    assert out["fetched_bars"] == 100
+    assert out["bars"] == out["fetched_bars"] - (driver.min_history - 1)
     assert out["final_net"] == pytest.approx(out["net_values"][-1]["net"])
     assert out["roi"] == pytest.approx(out["final_net"] / out["initial_total"] - 1.0, abs=1e-5)
     assert isinstance(out["fills_detail"], list)

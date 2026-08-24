@@ -439,6 +439,7 @@ class BacktestDriver:
             "symbols": self.symbols,
             "timestep": self.timestep,
             "bars": len(net_values),
+            "fetched_bars": len(bar_times) if bar_times else 0,
             "start_ts": (
                 bar_times[start_idx].isoformat() if len(bar_times) > start_idx else None
             ),
