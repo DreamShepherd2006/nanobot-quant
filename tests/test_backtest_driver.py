@@ -235,6 +235,44 @@ def test_driver_result_roi_and_fills_detail(tmp_path):
         assert {"ts", "slot", "symbol", "side", "quantity", "avg_price"} <= set(f)
         assert f["side"] in ("buy", "sell")
 
+
+def _two_cycles_closes() -> list[float]:
+    """40 根平盘 → 下跌 15（setup 9 → BUY slot1）→ 平盘 10（setup 重置）→
+    下跌 15（setup 9 → BUY slot2）→ 平盘 10 → 下跌 15（两 slot 均 open → SKIP）。
+
+    整体单调下行（每段从上一平台价继续下探），避免衔接处 close 跳升
+    触发 setup_sell≥9 误出 SELL 或触发 SL/TP 价格出场。"""
+    flat = [100.0] * 40
+    d1 = [100.0 - i * 0.5 for i in range(1, 16)]  # 99.5 → 92.5
+    r1 = [92.5] * 10
+    d2 = [92.0 - i * 0.5 for i in range(1, 16)]  # 91.5 → 84.5
+    r2 = [84.5] * 10
+    d3 = [84.0 - i * 0.5 for i in range(1, 16)]  # 83.5 → 76.5
+    return flat + d1 + r1 + d2 + r2 + d3 + [76.5] * 15
+
+
+def test_driver_multi_slot_fills_detail(tmp_path):
+    """回归：跨 slot oid 冲突（两 broker 各自从 bt0 起）不再丢 fills_detail。"""
+    params = _params()
+    # 关闭价格出场（SL/TP），只保留 TD 信号驱动，保证两个信号周期各成交 1 笔
+    params["scenes"]["mid"].update({"stop_loss_pct": 0.0, "take_profit_pct": 0.0})
+    driver = BacktestDriver(
+        scene="mid",
+        params=params,
+        fetcher=_FakeFetcher(_two_cycles_closes()),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+
+    # 两个独立信号周期 → 两个 slot 各成交 1 笔
+    assert out["fills"] == 2, out["fills_detail"]
+    assert len(out["fills_detail"]) == out["fills"], out["fills_detail"]
+    assert [f["side"] for f in out["fills_detail"]] == ["buy", "buy"]
+    assert {f["slot"] for f in out["fills_detail"]} == {1, 2}
+    # 每笔 detail 都带完整字段
+    for f in out["fills_detail"]:
+        assert {"ts", "slot", "symbol", "side", "quantity", "avg_price"} <= set(f)
+
 # ── 时间戳归一化（回归：datetime 对象传 ReplayDataSource 报 int() 错） ──
 
 def test_to_ts_normalizes_datetime():
