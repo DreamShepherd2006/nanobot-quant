@@ -13,7 +13,7 @@ import pandas as pd
 
 from nanobot_quant.gate_cex_data import (
     fetch_gate_kline,
-    fetch_gate_kline_range,
+    fetch_gate_kline_range_paged,
     fetch_gate_order_book,
     fetch_gate_ticker,
 )
