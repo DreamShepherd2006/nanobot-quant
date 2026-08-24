@@ -105,6 +105,7 @@ class BacktestDriver:
         slippage: Optional[float] = None,
         fetcher: Optional[Callable] = None,
         ledger_dir: Optional[Path | str] = None,
+        progress_path: Optional[Path | str] = None,
     ) -> None:
         # 1. 参数：默认复用 exec_params 当前配置（场景参数默认复用、可临时覆盖，
         #    覆盖不影响实盘——2026-08-23 拍板）
@@ -161,6 +162,11 @@ class BacktestDriver:
 
         # 7. 台账目录：独立临时目录（干净重放，不回写实盘批次文件）
         self.ledger_dir = Path(ledger_dir) if ledger_dir else None
+
+        # 8. 进度文件：运行期间写入 {status:running, progress:{...}}，
+        #    完成后由调用方（tools_backtest worker）覆写为完整结果。
+        #    仅 WebUI/MCP 轮询展示用——写失败静默、绝不阻塞回测。
+        self.progress_path = Path(progress_path) if progress_path else None
 
     # ── 构造 ──────────────────────────────────────────────────────────
 
@@ -262,8 +268,48 @@ class BacktestDriver:
 
     # ── 驱动 ──────────────────────────────────────────────────────────
 
+    def _write_progress(
+        self,
+        stage: str,
+        bars_done: int | None,
+        bars_total: int | None,
+        ts: str | None,
+        fills: int,
+    ) -> None:
+        """运行中进度写入（WebUI/MCP 轮询展示用，失败静默不阻塞回测）。
+
+        progress_path 与结果文件同路径（<run_id>.json）：运行期间写
+        ``{status: running, progress: {...}}``，完成后由调用方
+        （tools_backtest._backtest_log）覆写为 done/error 完整结果。
+        """
+        if not self.progress_path:
+            return
+        pct = (
+            round(bars_done / bars_total * 100, 1)
+            if bars_total and bars_done is not None
+            else None
+        )
+        payload = {
+            "status": "running",
+            "progress": {
+                "stage": stage,
+                "bars_done": bars_done,
+                "bars_total": bars_total,
+                "pct": pct,
+                "ts": ts,
+                "fills": fills,
+            },
+        }
+        try:
+            self.progress_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            pass  # 进度是 UX 信息，写失败不影响回测本身
+
     def run(self) -> dict[str, Any]:
         """预取全量历史 → 逐 bar 重放 → 返回净值曲线与决策摘要。"""
+        self._write_progress("prefetch", 0, None, None, 0)
         # 预取（网络只发生在此处：Gate 公开 K 线，免 key）
         self.data_source.prefetch()
         bar_times = self.data_source.bar_times
@@ -314,6 +360,8 @@ class BacktestDriver:
         strategy._scene_runtimes = {self.scene_name: rt}
 
         # 逐 bar 重放
+        total_bars = len(bar_times) - start_idx
+        self._write_progress("replay", 0, total_bars, None, 0)
         net_values: list[dict[str, Any]] = []
         fills_detail: list[dict[str, Any]] = []
         for i, ts in enumerate(bar_times):
@@ -350,6 +398,18 @@ class BacktestDriver:
             for b in slot_brokers.values():
                 total += b.snapshot()["total"]
             net_values.append({"ts": ts.isoformat(), "net": round(total, 6)})
+
+            # 进度（每 bar 写一次：平滑推进；几百次小 I/O 开销可忽略）
+            fills_now = sum(
+                len(b._tracked) for b in slot_brokers.values()
+            )
+            self._write_progress(
+                "replay",
+                i - start_idx + 1,
+                total_bars,
+                ts.isoformat(),
+                fills_now,
+            )
 
         # 成交记录（_tracked 是累计列表，结束时统计一次）
         fills = sum(len(b._tracked) for b in slot_brokers.values())
