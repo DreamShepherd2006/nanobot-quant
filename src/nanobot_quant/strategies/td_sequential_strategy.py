@@ -27,18 +27,13 @@ from nanobot_quant.order_tracker import OrderTracker
 from nanobot_quant.portfolio import PortfolioEngine
 from nanobot_quant.risk import RiskEngine
 from nanobot_quant.strategies.td_sequential import calculate
+from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
 from nanobot_quant.td_params import DEFAULT_TD_PARAMS
 
 
-_SLEEPTIME_SECONDS = {
-    "1m": 60, "5m": 300, "15m": 900,
-    "1H": 3600, "4H": 14400, "1D": 86400, "1W": 604800,
-}
-
-
 def _parse_sleeptime_seconds(value: str) -> int:
-    """S3a：场景周期字符串 → 秒（1m/5m/15m/1H/4H/1D/1W）。"""
-    return _SLEEPTIME_SECONDS.get(str(value).strip(), 60)
+    """场景周期字符串 → 秒（16 周期全量，2026-08-24 方案 C）。"""
+    return INTERVAL_SECONDS.get(str(value).strip(), 60)
 
 
 def _order_error(order) -> str | None:
@@ -81,10 +76,16 @@ class TdSequentialStrategy(Strategy):
 
     #: sleeptime → get_historical_prices timestep（精确粒度，S3a 多场景：
     #   mid=5m/15m 必须传 5min/15min 而非笼统 minute，否则数据源
-    #   _BAR_MAP 把粒度丢失成 1m——K 线窗口与场景周期不匹配）
+    #   _BAR_MAP 把粒度丢失成 1m——K 线窗口与场景周期不匹配）。
+    #   旧 8 周期保持 lumibot 风格（minute/5min/…，回测兼容）；新周期
+    #   （3m/2H/6H/8H/12H/3D/7D/30D）lumibot 无对应解析器，直通统一
+    #   周期名，live 走 ``bar:`` 前缀直拉、回测 replay 动态映射（方案 C）。
     _TIMESTEP_BY_SLEEPTIME = {
         "1m": "minute", "5m": "5min", "15m": "15min", "30m": "30min",
         "1H": "hour", "4H": "4hour", "1D": "day", "1W": "week",
+        # 新周期：统一周期名直通（lumibot 风格无对应解析）
+        "3m": "3m", "2H": "2H", "6H": "6H", "8H": "8H",
+        "12H": "12H", "3D": "3D", "7D": "7D", "30D": "30D",
     }
 
     # ── lifecycle hooks ───────────────────────────────────────────

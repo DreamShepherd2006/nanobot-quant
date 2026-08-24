@@ -24,6 +24,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from nanobot_quant.data_sources.periods import lumibot_bar_map
 from nanobot_quant.gate_cex_data import fetch_gate_kline_range_paged
 
 
@@ -64,12 +65,8 @@ def _bar_map() -> dict:
     2026-08-24 方案 C：Gate 粒度从注册表声明（16 个周期），调用处
     ``.lower().removeprefix("bar:")`` 会把 "1H" 归一成 "1h"，故大小写键都放。
     """
-    from nanobot_quant.data_sources import get_data_source
-
     m = dict(_BAR_MAP)
-    for p in get_data_source("gate_cex").bars:
-        m.setdefault(p, p)
-        m.setdefault(p.lower(), p)
+    m.update(lumibot_bar_map("gate_cex"))
     return m
 
 

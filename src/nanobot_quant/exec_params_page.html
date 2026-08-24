@@ -134,6 +134,22 @@
         if (h) h.textContent = '1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射';
       }
     });
+    // 2026-08-24（Step 4）：TD 周期下拉按执行通道即时重建选项
+    // （data-periods-dex/cex 由服务端注入两组完整周期，旧值在新列表则保留，
+    // 否则回退该通道默认——不刷新页面、不丢其它已填值）。
+    document.querySelectorAll('select[data-periods-dex]').forEach(function (sel) {
+      const lists = {
+        dex: JSON.parse(sel.dataset.periodsDex || '[]'),
+        cex: JSON.parse(sel.dataset.periodsCex || '[]'),
+      };
+      const list = lists[fam] || lists.dex;
+      const cur = sel.value;
+      const keep = list.indexOf(cur) >= 0 ? cur : (list[0] || cur);
+      sel.innerHTML = list.map(function (p) {
+        return '<option value="' + p + '">' + p + '</option>';
+      }).join('');
+      if (keep) sel.value = keep;
+    });
     applyShowIf(); // 切通道后按模式刷新显隐（2026-08-20）
   }
   window.applyChannel = applyChannel;
