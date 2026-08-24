@@ -13,7 +13,7 @@ import pandas as pd
 
 from nanobot_quant.gate_cex_data import (
     fetch_gate_kline,
-    fetch_gate_kline_range,
+    fetch_gate_kline_range_paged,
     fetch_gate_order_book,
     fetch_gate_ticker,
 )
@@ -26,8 +26,11 @@ def fetch_kline(symbol, bar="1D", limit=120,
     """Gate CEX candles for ``symbol`` (pair via ``gate_pair``)."""
     pair = gate_pair(symbol, load_tokens_json())
     if start and end:
-        return fetch_gate_kline_range(pair, int(start.timestamp()),
-                                      int(end.timestamp()), bar=bar)
+        # 分页向后翻，遇历史深度上限（如 1m ≈ 最近 10000 根 ≈ 6.9 天）
+        # 截断保留已拉批次、不报 400——td-table 分析页选超深区间时
+        # 返回实际可用数据而非 HTTP Error 400（2026-08-25 修复）。
+        return fetch_gate_kline_range_paged(pair, int(start.timestamp()),
+                                            int(end.timestamp()), bar=bar)
     return fetch_gate_kline(pair, bar=bar, limit=limit)
 
 
