@@ -161,6 +161,31 @@ class TestIncremental:
             assert len(out) == 120
         assert len(cache._entries["SOL"].df) == n  # 未增长
 
+    def test_3m_period_incremental_no_gap(self):
+        """3m 周期（Step 4 新增）：bar 间隔 180s，增量 +1 不得误判 gap。
+
+        回归：旧 _BAR_SECONDS 缺 3m → fallback 60s → diff=180s≠60s 判 gap
+        → 每轮全量重拉（2026-08-24 HF Space 实测，S2 增量失效）。
+        """
+        src = _FakeFetch(_df(130, period_s=180))
+        cache = KlineCache(src)
+        cache.get("SOL", "3m", 120)
+        src.grow(1, period_s=180)
+        before = len(src.calls)
+        out = cache.get("SOL", "3m", 120)
+        assert len(out) == 120
+        # 增量路径：仅 limit=2 拉取（非全量 120）
+        assert all(c[2] == 2 for c in src.calls[before:])
+        pd.testing.assert_frame_equal(out, src.df.iloc[-120:])
+
+    def test_unknown_period_raises_keyerror(self):
+        """未知周期（不在注册表）→ 增量路径显式 KeyError，不静默回退 60s。"""
+        src = _FakeFetch(_df(130))
+        cache = KlineCache(src)
+        cache.get("SOL", "7Q", 120)  # 重建成功（fake fetch 不校验 bar）
+        with pytest.raises(KeyError):
+            cache.get("SOL", "7Q", 120)  # 第二次同 bar → 增量路径 → KeyError
+
     def test_gap_triggers_full_refetch(self):
         """新 bar ts 跳跃 > 1 周期 → 缺口 → 全量重拉重建。"""
         src = _FakeFetch(_df(130))

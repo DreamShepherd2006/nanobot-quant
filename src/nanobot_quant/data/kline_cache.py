@@ -51,17 +51,12 @@ def _now_for(tail_ts: pd.Timestamp) -> pd.Timestamp:
         now = now.tz_localize(None)
     return now
 
-# bar 粒度 → 周期秒数（缺口判定：新 bar ts 必须恰为尾 ts + 该周期）
-_BAR_SECONDS = {
-    "1m": 60,
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
-    "1H": 3600,
-    "4H": 14400,
-    "1D": 86400,
-    "1W": 604800,
-}
+# bar 粒度 → 周期秒数：统一注册表（方案 C，16 周期全量，含 3m/2H/6H/8H/12H/3D/7D/30D）。
+# 缺口判定：新 bar ts 必须恰为尾 ts + 该周期。
+# 2026-08-24 回归：旧硬编码表缺 3m → fallback 60s → 3m bar 间隔 180s 被
+# 误判 gap → 每轮全量重拉（S2 增量失效）。缺失键显式 KeyError（fail-closed，
+# 不静默回退 60s——静默 fallback 正是该 bug 的温床）。
+from nanobot_quant.data_sources.periods import INTERVAL_SECONDS as _PERIOD_SECONDS
 
 
 class _Entry:
@@ -126,6 +121,11 @@ class KlineCache:
         return _Entry(bar, length, df.sort_index())
 
     def _incremental(self, e: _Entry, symbol: str, bar: str) -> None:
+        tail_ts = e.df.index[-1]
+        now = _now_for(tail_ts)
+        # 未知周期显式 KeyError（fail-closed），放在 try 外避免被吞成
+        # incr-fail 无限重试——旧 fallback 60s 曾致 3m 每轮 gap 全量重拉。
+        period = pd.Timedelta(seconds=_PERIOD_SECONDS[bar])
         try:
             # 自适应增量窗口：调用方可能跳过若干周期才访问一次（S3a 多场景
             # 调度：mid=5m 每 5 轮才访问 1m 缓存，期间产生多根新 bar）。
@@ -133,9 +133,6 @@ class KlineCache:
             # 全量重拉（120 倍退化）。按距缓存尾的时间差估算需要拉多少根：
             #   need = elapsed_bars + 2  （+2 = 1 根进行中容差 + 1 根余量）
             # elapsed 为 0（同周期内重复访问）时退化为固定 limit=2。
-            tail_ts = e.df.index[-1]
-            now = _now_for(tail_ts)
-            period = pd.Timedelta(seconds=_BAR_SECONDS.get(bar, 60))
             elapsed = max(0, int((now - tail_ts) / period))
             need = min(max(elapsed + 2, 2), 1000)
             new = self._fetch(symbol, bar, need)
