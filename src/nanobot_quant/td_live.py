@@ -186,6 +186,11 @@ class _TdLiveRunner:
                 "min_account_value": 0,
                 "fee_rate": float(params.get("fee_rate", 0.001) or 0.0),
                 "min_history": int(params.get("td_bars", 120) or 120),
+                # K 线并发拉取线程数（1=串行；2026-08-24 并发优化，标的池大时
+                # 提速，Gate 公共端点限流 200 次/10s/端点余量 >100 倍）
+                "kline_concurrency": min(
+                    max(int(params.get("kline_concurrency", 4) or 1), 1), 20
+                ),
                 "tokens_json": tokens,
                 "live_mode": True,  # 2026-08-11：TD live 模式写信号事件文件
                 "strategy_variant": strategy_name,

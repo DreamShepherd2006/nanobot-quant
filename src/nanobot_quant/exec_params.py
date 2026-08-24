@@ -136,6 +136,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "min_position_value": 1.0, # float ≥0 — 对账导入阈值(USD)：链上持仓价值低于该值视为 dust 不导入（0=关闭）
     # ── ③ TD 循环运行（全局）──────────────────────────────────────────
     "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
+    "kline_concurrency": 4,     # int 1-20 — TD 每轮并发拉取各标的 K 线的线程数（1=串行；标的池大时加大提速）
     # ── ⑤ UI ───────────────────────────────────────────────────────────
     "td_ui_refresh_s": 10,    # int 3-300 — /config/td-table 实时监控 tab 自动刷新间隔（秒）
     # ── ④ 多场景（S1 配置层，2026-08-20；high ↔ 扁平同步）──────────────
@@ -250,6 +251,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "td_bars": {
         "group": "td", "min": 20, "max": 300, "step": 1, "std": 120, "integer": True,
         "label": "K 线窗口", "hint": "TD 每轮拉取最近 N 根 K 线（固定窗口，不累积增长；300 = onchainos CLI 单次上限）。与分析页 K 线数设一致可完全对照",
+    },
+    "kline_concurrency": {
+        "group": "td", "min": 1, "max": 20, "step": 1, "std": 4, "integer": True,
+        "label": "K 线并发拉取", "hint": "TD 每轮并发拉取各标的 K 线的线程数（1=串行）。串行 12 标的 ≈30s+/轮，并发 4 ≈10s；标的池大时加大提速。Gate 公共端点限流 200 次/10s/端点（IP），并发数 ≤ 池子大小即可",
     },
     # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {

@@ -316,10 +316,14 @@ class TdSequentialStrategy(Strategy):
                     continue
                 rt["last_run"] = now
                 self._activate_scene(name, rt)
+                # K 线并发预取（2026-08-24）：只并发拉取 K 线（每标的
+                # HTTP ~1.5-2s），TD 计算/下单/台账仍在主线程串行——
+                # wallet switch 是全局状态，并发切换会互相踩。
+                prefetched = self._prefetch_all_bars()
                 for sym in self.symbols:
                     self.symbol = sym
                     self.batch_manager = self.batch_managers.get(sym)
-                    self._evaluate_symbol()
+                    self._evaluate_symbol(prefetched.get(sym))
                 self._write_positions_state()
             try:
                 from nanobot_quant import td_live_state
@@ -613,62 +617,136 @@ class TdSequentialStrategy(Strategy):
             pass
         return tx_hash if not is_placeholder_tx_hash(tx_hash) else ""
 
-    def _evaluate_symbol(self) -> None:
-        """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。"""
-        # ── 1. Fetch historical data ──
-        # 数据源契约：Gate CEX（drops_in_progress_bars=True）在 rows_to_df 已过滤
-        # 进行中 bar；OnchainOS（DEX，无该参数默认 False）返回含进行中 bar——
-        # 只有后者需多拉 1 根并丢弃（2026-08-17 A 修复第二部分：gate_cex 曾
-        # 121→源过滤→120→策略再丢→119 < min_history 永久 SKIP，双重丢弃）。
-        # 契约由 td_live 从 broker.data_source 读取并注入 parameters（lumibot
-        # Strategy 基类不保存 data_source，策略无法自取）。
-        _drops_in_progress = bool(self.parameters.get("drops_in_progress_bars", False))
-        drop_in_progress = self._is_live_broker and not _drops_in_progress
+    def _prefetch_all_bars(self) -> dict:
+        """并发预取全部标的 K 线（仅拉取并发，评估保持串行）。
 
-        fetch_len = self._min_history
-        if drop_in_progress:
-            # live 数据源（OKX DEX kline）会返回进行中的最后一根 bar——
-            # TD 是收盘价状态机，未完成 bar 的 close 会导致 setup 虚增/虚减
-            # （单根 setup=9 被进行中 bar 重置挤掉而错过，2026-08-11 00:23
-            # SOL 买9 未生效根因）。多拉 1 根供丢弃，信号基于最近已收盘
-            # bar——与 TD 理论（bar 收盘时判定）及回测口径一致。
-            fetch_len += 1
+        TD 循环每轮最耗时环节是交易所 K 线 HTTP 往返（每标的 ~1.5-2s，
+        串行 12 标的 ≈ 30s+）。并发数由 exec_params ``kline_concurrency``
+        控制（1=串行，默认 4；Gate 公共端点限流 200 次/10s/端点，余量
+        >100 倍，标的池再大也需按池子大小收敛）。
+
+        线程安全边界：只并发 ``get_historical_prices``（KlineCache 有锁、
+        data_source 无共享可变状态）；worker 不触碰 self.symbol /
+        batch_manager（这些由主线程在评估循环里设置）。
+
+        返回 {symbol: (bars, fetch_len, drop_in_progress, exc)}；失败标的
+        bars=None 并携带异常对象（黑名单/网络错误），评估循环统一处理。
+        workers<=1 或单标的时返回 {}（走旧串行路径，零开销）。
+        """
+        workers = int(self.parameters.get("kline_concurrency") or 1)
+        if workers <= 1 or len(self.symbols) <= 1:
+            return {}
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        out: dict = {}
+        with ThreadPoolExecutor(max_workers=min(workers, len(self.symbols))) as pool:
+            fut_map = {
+                pool.submit(self._fetch_bars_worker, sym): sym
+                for sym in self.symbols
+            }
+            for fut in as_completed(fut_map):
+                out[fut_map[fut]] = fut.result()
+        return out
+
+    def _fetch_bars_worker(self, sym: str) -> tuple:
+        """单标的 K 线拉取（线程池 worker）。异常不外抛，包装进返回值。"""
+        _drops = bool(self.parameters.get("drops_in_progress_bars", False))
+        drop_in_progress = self._is_live_broker and not _drops
+        fetch_len = self._min_history + (1 if drop_in_progress else 0)
+        timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
         try:
-            # live 直拉场景粒度：bar: 前缀让 lumibot 无法解析（_parse_timestep
-            # 返回 None → 原样透传），数据源 removeprefix 后直拉原生 bar（如
-            # 5m）——绕开 lumibot multi-timeframe 转换（length×multiplier 根
-            # 1m + 自己 resample），live 与回测完全同源（2026-08-20 定稿）。
-            # 回测（broker=None）保持标准 timestep（PandasDataBacktesting 只
-            # 认 lumibot 标准名）。
-            timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
             bars = self.get_historical_prices(
-                self.symbol,
-                length=fetch_len,
-                timestep=timestep,
+                sym, length=fetch_len, timestep=timestep
             )
-        except Exception as e:
-            # 黑名单标的（Gate 无交易对/已下架，如 MU/VSC）静默跳过——
-            # 首次失败已打印原因，不再每轮刷屏；重启 TD 循环重新探测
+            return (bars, fetch_len, drop_in_progress, None)
+        except Exception as e:  # noqa: BLE001
+            return (None, fetch_len, drop_in_progress, e)
+
+    def _evaluate_symbol(self, prefetched: tuple | None = None) -> None:
+        """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。
+
+        prefetched=(bars, fetch_len, drop_in_progress, exc)：并发预取路径
+        传入，跳过拉取；None 时内部拉取（串行/回测路径）。
+        """
+        if prefetched is not None:
+            bars, fetch_len, drop_in_progress, exc = prefetched
+            if bars is None:
+                # 黑名单标的（Gate 无交易对/已下架，如 MU/VSC）静默跳过——
+                # 首次失败已打印原因，不再每轮刷屏；重启 TD 循环重新探测
+                try:
+                    from nanobot_quant.gate_cex_data import blacklist_reason
+                    if blacklist_reason(self.symbol):
+                        return
+                except ImportError:  # pragma: no cover
+                    pass
+                print(
+                    f"[TD] DATA ERROR | symbol={self.symbol} "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+                return
+            if bars.df.empty:
+                print(
+                    f"[TD] DATA EMPTY | symbol={self.symbol} bars is None or empty",
+                    file=sys.stderr, flush=True,
+                )
+                return
+            df = bars.df.copy()
+        else:
+            # ── 1. Fetch historical data ──
+            # 数据源契约：Gate CEX（drops_in_progress_bars=True）在 rows_to_df 已过滤
+            # 进行中 bar；OnchainOS（DEX，无该参数默认 False）返回含进行中 bar——
+            # 只有后者需多拉 1 根并丢弃（2026-08-17 A 修复第二部分：gate_cex 曾
+            # 121→源过滤→120→策略再丢→119 < min_history 永久 SKIP，双重丢弃）。
+            # 契约由 td_live 从 broker.data_source 读取并注入 parameters（lumibot
+            # Strategy 基类不保存 data_source，策略无法自取）。
+            _drops_in_progress = bool(self.parameters.get("drops_in_progress_bars", False))
+            drop_in_progress = self._is_live_broker and not _drops_in_progress
+
+            fetch_len = self._min_history
+            if drop_in_progress:
+                # live 数据源（OKX DEX kline）会返回进行中的最后一根 bar——
+                # TD 是收盘价状态机，未完成 bar 的 close 会导致 setup 虚增/虚减
+                # （单根 setup=9 被进行中 bar 重置挤掉而错过，2026-08-11 00:23
+                # SOL 买9 未生效根因）。多拉 1 根供丢弃，信号基于最近已收盘
+                # bar——与 TD 理论（bar 收盘时判定）及回测口径一致。
+                fetch_len += 1
             try:
-                from nanobot_quant.gate_cex_data import blacklist_reason
-                if blacklist_reason(self.symbol):
-                    return
-            except ImportError:  # pragma: no cover
-                pass
-            print(
-                f"[TD] DATA ERROR | symbol={self.symbol} {type(e).__name__}: {e}",
-                file=sys.stderr, flush=True,
-            )
-            return
+                # live 直拉场景粒度：bar: 前缀让 lumibot 无法解析（_parse_timestep
+                # 返回 None → 原样透传），数据源 removeprefix 后直拉原生 bar（如
+                # 5m）——绕开 lumibot multi-timeframe 转换（length×multiplier 根
+                # 1m + 自己 resample），live 与回测完全同源（2026-08-20 定稿）。
+                # 回测（broker=None）保持标准 timestep（PandasDataBacktesting 只
+                # 认 lumibot 标准名）。
+                timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
+                bars = self.get_historical_prices(
+                    self.symbol,
+                    length=fetch_len,
+                    timestep=timestep,
+                )
+            except Exception as e:
+                # 黑名单标的（Gate 无交易对/已下架，如 MU/VSC）静默跳过——
+                # 首次失败已打印原因，不再每轮刷屏；重启 TD 循环重新探测
+                try:
+                    from nanobot_quant.gate_cex_data import blacklist_reason
+                    if blacklist_reason(self.symbol):
+                        return
+                except ImportError:  # pragma: no cover
+                    pass
+                print(
+                    f"[TD] DATA ERROR | symbol={self.symbol} {type(e).__name__}: {e}",
+                    file=sys.stderr, flush=True,
+                )
+                return
 
-        if bars is None or bars.df.empty:
-            print(
-                f"[TD] DATA EMPTY | symbol={self.symbol} bars is None or empty",
-                file=sys.stderr, flush=True,
-            )
-            return
+            if bars is None or bars.df.empty:
+                print(
+                    f"[TD] DATA EMPTY | symbol={self.symbol} bars is None or empty",
+                    file=sys.stderr, flush=True,
+                )
+                return
 
-        df = bars.df.copy()
+            df = bars.df.copy()
         print(
             f"[TD] BARS | symbol={self.symbol} requested={fetch_len} "
             f"got={len(df)} drop_in_progress={drop_in_progress}",
