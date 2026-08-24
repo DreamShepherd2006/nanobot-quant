@@ -371,8 +371,12 @@ class BacktestDriver:
             # 场景激活（参数/broker/台账就位）→ 逐标的评估（TD 信号 + 下单）
             strategy._activate_scene(self.scene_name, rt)
             # 本轮 bar 新增成交（_tracked 累计，取增量关联到当前 bar 时间）
+            # 键用 (slot, oid)：每个 BacktestBroker 实例的 _order_seq 都从 0 起，
+            # 跨 slot 的 oid（bt0/bt1/…）会重复——仅用 oid 会把后一笔误判为已处理
             tracked_before = {
-                oid: b for b in slot_brokers.values() for oid in b._tracked
+                (slot_no, oid): b
+                for slot_no, b in slot_brokers.items()
+                for oid in b._tracked
             }
             for sym in self.symbols:
                 strategy.symbol = sym
@@ -380,7 +384,7 @@ class BacktestDriver:
                 strategy._evaluate_symbol()
             for slot_no, b in sorted(slot_brokers.items()):
                 for oid, meta in b._tracked.items():
-                    if oid in tracked_before:
+                    if (slot_no, oid) in tracked_before:
                         continue
                     fills_detail.append(
                         {
