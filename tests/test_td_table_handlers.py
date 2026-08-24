@@ -611,3 +611,114 @@ def test_render_live_funds_block_not_running(monkeypatch, tmp_path: Path):
 
     html = _render_live(with_script=False, tq={})
     assert "💰 子账号资金" not in html
+
+
+# ── 周期下拉动态化（Step 3）────────────────────────────────────────────
+
+
+def test_bars_for_source_follows_registry():
+    """周期列表按数据源注册表 spec.bars 动态生成。"""
+    import nanobot_quant.td_table_handlers as mod
+
+    # Gate CEX：16 周期（含新周期 30m/2H/6H/8H/12H/3D/7D/30D）
+    assert len(mod._bars_for_source("cex")) == 16
+    assert "30m" in mod._bars_for_source("cex")
+    assert "3m" in mod._bars_for_source("cex")
+    assert "7D" in mod._bars_for_source("cex")
+    assert "30D" in mod._bars_for_source("cex")
+    # OnchainOS / OKX CEX：7 周期（无 30m）
+    assert "30m" not in mod._bars_for_source("onchainos")
+    assert "4H" in mod._bars_for_source("onchainos")
+    assert mod._bars_for_source("okx_cex") == mod._bars_for_source("onchainos")
+    # 股票（东财）：6 周期（无 4H）
+    assert len(mod._bars_for_source("stock")) == 6
+    assert "4H" not in mod._bars_for_source("stock")
+    # 未知 source 回退 fallback（与旧硬编码一致的 7 周期）
+    assert len(mod._bars_for_source("bogus")) == 7
+    assert "4H" in mod._bars_for_source("bogus")
+
+
+def test_form_renders_gate_16_periods(monkeypatch):
+    """cex 源表单渲染 16 个周期选项（含 30m/3D/7D/30D）。"""
+    import nanobot_quant.td_table_handlers as mod
+
+    closes = list(range(100, 105)) + list(range(100, 91, -1))
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+
+    class _FakeGate:
+        bars = ("1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H",
+                "6H", "8H", "12H", "1D", "3D", "1W", "7D", "30D")
+
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            return df
+
+    monkeypatch.setattr(mod, "get_data_source",
+                        lambda name: _FakeGate() if name == "gate_cex"
+                        else mod.get_data_source(name))
+    monkeypatch.setattr(mod, "_resolve_for_table",
+                        lambda ticker: {"ok": True, "chain": "solana",
+                                       "address": "So11111111111111111111111111111111111111112"})
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    body = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "SOL",
+                                      "bar": "30m", "limit": "60",
+                                      "source": "cex"})).body.decode()
+    # 30m 合法且被选中
+    assert 'value="30m" selected' in body
+    assert 'value="3D"' in body
+    assert 'value="7D"' in body
+    assert 'value="30D"' in body
+
+
+def test_bar_validation_follows_source(monkeypatch):
+    """非法周期按源回退：onchainos 下 30m → 1D；cex 下 30m 保留。"""
+    import nanobot_quant.td_table_handlers as mod
+
+    closes = list(range(100, 105)) + list(range(100, 91, -1))
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+
+    class _FakeSource:
+        def __init__(self, bars):
+            self.bars = bars
+
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            return df
+
+    gate = _FakeSource(("1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H",
+                        "6H", "8H", "12H", "1D", "3D", "1W", "7D", "30D"))
+    onchain = _FakeSource(("1m", "5m", "15m", "1H", "4H", "1D", "1W"))
+    monkeypatch.setattr(
+        mod, "get_data_source",
+        lambda name: gate if name == "gate_cex"
+        else onchain if name == "onchainos"
+        else mod.get_data_source(name))
+    monkeypatch.setattr(mod, "_resolve_for_table",
+                        lambda ticker: {"ok": True, "chain": "solana",
+                                       "address": "So11111111111111111111111111111111111111112"})
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: "td_sequential")
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    # cex 源：30m 合法 → 保留选中
+    body = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "SOL", "bar": "30m",
+                                      "limit": "60", "source": "cex"})).body.decode()
+    assert 'value="30m" selected' in body
+    # onchainos 源：30m 非法 → 回退 1D（选中 1D，且表单无 30m 选项）
+    body = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "SOL", "bar": "30m",
+                                      "limit": "60", "source": "onchainos"})).body.decode()
+    assert 'value="1D" selected' in body
+    assert 'value="30m"' not in body

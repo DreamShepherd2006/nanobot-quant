@@ -41,8 +41,10 @@ from nanobot_quant.td_params import load_td_params
 
 _TEMPLATE_PATH = Path(__file__).with_name("td_table_page.html")
 _TZ = "Asia/Shanghai"
-_BARS = ["1m", "5m", "15m", "1H", "4H", "1D", "1W"]
 _DEFAULT_TICKER = "SOL"
+_DEFAULT_BAR = "1D"
+# spec.bars 缺失/异常时的回退周期（兼容旧调用方，与 onchainos 一致）
+_FALLBACK_BARS = ("1m", "5m", "15m", "1H", "4H", "1D", "1W")
 _DEFAULT_LIMIT = 60
 _DEFAULT_HISTORY_DAYS = 90
 
@@ -72,6 +74,22 @@ def _default_source() -> str:
     except (KeyError, OSError, ValueError):
         pass
     return "onchainos"
+
+
+def _bars_for_source(source: str) -> tuple:
+    """该数据源支持的周期列表（注册表 DataSourceSpec.bars，动态）。
+
+    页面 source 值（onchainos/cex/okx_cex/stock）→ 注册表源名
+    （onchainos/gate_cex/okx_cex/eastmoney），spec 缺失或 bars 为空时
+    回退 ``_FALLBACK_BARS``（与旧硬编码一致）。
+    """
+    ds_name = _PAGE_SOURCE_TO_SOURCE.get(source, "onchainos")
+    try:
+        spec = get_data_source(ds_name)
+        bars = getattr(spec, "bars", None)
+    except (KeyError, OSError, ValueError):
+        bars = None
+    return tuple(bars) if bars else _FALLBACK_BARS
 
 
 # ── 数据获取 ──────────────────────────────────────────────────────────
@@ -401,7 +419,7 @@ def _query_int(q: dict, key: str, default: int, lo: int, hi: int) -> int:
 def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, source: str = "onchainos") -> str:
     bar_opts = "".join(
         f'<option value="{b}"{" selected" if b == bar else ""}>{b}</option>'
-        for b in _BARS
+        for b in _bars_for_source(source)
     )
     source_opts = (
         '<label>数据源</label><select name="source">'
@@ -454,13 +472,14 @@ def td_table_page(request: Request) -> HTMLResponse:
     q = dict(request.query_params)
     tab = q.get("tab", "snapshot")
     ticker = (q.get("ticker") or _DEFAULT_TICKER).strip().upper()
-    bar = q.get("bar") or "1D"
-    if bar not in _BARS:
-        bar = "1D"
-    limit = _query_int(q, "limit", _DEFAULT_LIMIT, 20, 300)
+    # 先解析 source，周期按该数据源支持的 spec.bars 校验（非法回退 1D）
     source = q.get("source") or _default_source()
     if source not in _SOURCES:
         source = _default_source()
+    bar = q.get("bar") or _DEFAULT_BAR
+    if bar not in _bars_for_source(source):
+        bar = _DEFAULT_BAR
+    limit = _query_int(q, "limit", _DEFAULT_LIMIT, 20, 300)
     today = datetime.now()
     end = (q.get("end") or today.strftime("%Y-%m-%d")).strip()
     start = (q.get("start") or (today - timedelta(days=_DEFAULT_HISTORY_DAYS)).strftime("%Y-%m-%d")).strip()
