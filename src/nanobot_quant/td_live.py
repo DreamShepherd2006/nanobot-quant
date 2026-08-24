@@ -1075,19 +1075,12 @@ def _scenes_fingerprint(params: dict[str, Any]) -> str:
     return json.dumps(scenes, sort_keys=True, ensure_ascii=False, default=str)
 
 
-_SLEEPTIME_SECONDS = {
-    "1m": 60, "5m": 300, "15m": 900,
-    "1H": 3600, "4H": 14400, "1D": 86400, "1W": 604800,
-}
-
-
+# 场景周期 → 秒：统一走 data_sources.periods.INTERVAL_SECONDS（16 周期全量，
+# 方案 C），本地不再维护重复映射（保持函数名供调用方兼容）。
 def _parse_sleeptime_seconds(value: str) -> int:
-    """场景周期字符串 → 秒（1m/5m/15m/1H/4H/1D/1W）。
+    from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
 
-    S3a 起 td_live 自行定义（不从策略模块导入，避免测试 fake 模块拦截
-    _build_executor 延迟 import 时缺属性）。
-    """
-    return _SLEEPTIME_SECONDS.get(str(value).strip(), 60)
+    return INTERVAL_SECONDS.get(str(value).strip(), 60)
 
 
 def get_runner() -> _TdLiveRunner:

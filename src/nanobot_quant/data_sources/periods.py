@@ -31,3 +31,28 @@ DISPLAY_NAMES: dict[str, str] = {
     "8H": "8小时", "12H": "12小时",
     "1D": "1日", "3D": "3日", "1W": "1周", "7D": "7天", "30D": "30天（约1月）",
 }
+
+
+def lumibot_bar_map(spec_name: str = "gate_cex") -> dict:
+    """数据源 timestep → 统一周期名 的完整解析映射。
+
+    lumibot 风格键（minute/5min/hour/day…）为回测/旧调用兼容；注册表
+    spec.bars（16 周期）原样/小写双键覆盖新周期（3m/2H/6H/8H/12H/
+    3D/7D/30D），调用处 ``.lower().removeprefix("bar:")`` 会把 "1H" 归一
+    成 "1h"，故大小写键都放。ReplayDataSource / CexDataSource 共用，
+    新增交易所周期只需改 spec.bars 声明，无需再改硬编码（方案 C）。
+    """
+    m = {
+        "minute": "1m", "5min": "5m", "15min": "15m", "30min": "30m",
+        "hour": "1H", "4hour": "4H", "day": "1D", "week": "1W",
+    }
+    try:
+        from nanobot_quant.data_sources import get_data_source
+
+        bars = getattr(get_data_source(spec_name), "bars", None) or ()
+    except Exception:  # 注册表未就绪时仅 lumibot 风格键可用
+        bars = ()
+    for p in bars:
+        m.setdefault(p, p)
+        m.setdefault(p.lower(), p)
+    return m

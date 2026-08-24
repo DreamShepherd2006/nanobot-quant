@@ -166,7 +166,7 @@ def test_validation_accepts_in_range(key, good):
         ("td_symbols", []),
         ("td_symbols", ["  "]),
         ("td_symbols", [123]),
-        ("td_sleeptime", "4H"),
+        ("td_sleeptime", "2m"),  # 2m 不在 16 周期注册表内（2026-08-24）
         ("td_sleeptime", "1D "),
         ("td_sleeptime", "1"),
         ("quantity_mode", "fixedx"),
@@ -936,3 +936,36 @@ def test_scene_field_std_override():
     )
     assert "默认 0.1 · 范围 0.0–1.0" in html   # 场景默认值
     assert "默认 9 · 范围 1–20" in html          # 阈值字段 None → 全局 std
+
+
+def test_page_renders_td_periods_by_channel(monkeypatch, tmp_path):
+    """TD 周期下拉按执行通道数据源过滤（Step 4）：
+    dex=OnchainOS 7 项无 30m；cex=Gate 16 项含 30m；两组完整周期注入 data-*。"""
+    from nanobot_quant.exec_params_handlers import _periods_for_family
+
+    assert "30m" not in _periods_for_family("dex")
+    assert "30m" in _periods_for_family("cex")
+    assert len(_periods_for_family("cex")) == 16
+
+    monkeypatch.setattr(
+        "nanobot_quant.exec_params_handlers.load_token_symbols",
+        lambda: ["SOL", "CRCLX"],
+    )
+    app = _FakeApp()
+    register_exec_params_routes(app, _FakeGatekeeper())
+    page = next(fn for p, fn, m in app.routes if p == "/config/exec" and "GET" in m)
+
+    # 默认通道（okx_dex → family=dex）：7 项，无 30m
+    html = asyncio.run(page(_FakeRequest(session_user="commander"))).body.decode()
+    assert 'id="scenes_high_sleeptime"' in html
+    assert 'value="1D"' in html
+    assert 'value="30m"' not in html
+    assert 'data-periods-dex=' in html
+    assert 'data-periods-cex=' in html
+
+    # 切到 cex（保存 execution_channel=gate 后）：16 项含 30m
+    save_exec_params(dict(DEFAULT_EXEC_PARAMS, execution_channel="gate"))
+    html = asyncio.run(page(_FakeRequest(session_user="commander"))).body.decode()
+    assert 'value="30m"' in html
+    assert 'value="2H"' in html
+    assert 'value="3D"' in html

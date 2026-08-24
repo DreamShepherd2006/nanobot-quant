@@ -35,6 +35,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from nanobot_quant.data_sources.periods import DISPLAY_NAMES, PERIODS
+
 # ── Schema / defaults ────────────────────────────────────────────────────
 
 #: 多场景（多时间框架）定义（2026-08-20 S1，第二十二章）。
@@ -145,7 +147,10 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
 }
 
 #: Valid TD main-loop cadences (lumibot sleeptime strings).
-TD_SLEEPTIMES: tuple[str, ...] = ("1m", "5m", "15m", "1H", "1D", "1W")
+#: 2026-08-24 方案 C：全量 16 周期（与数据源注册表 spec.bars 对齐，UI 按执行
+#: 通道过滤——cex=Gate 16 项 / dex=OnchainOS 7 项）。
+TD_SLEEPTIMES: tuple[str, ...] = tuple(PERIODS)
+TD_SLEEPTIME_LABELS: dict[str, str] = dict(DISPLAY_NAMES)
 
 #: Valid position-sizing modes for the TD autonomous strategy.
 #:  fixed = 固定数量（td_quantity 个币）；value = pv_slot × max_position_pct（百分比仓位）；
@@ -223,8 +228,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "TD 标的池", "hint": "多标的扫描：每轮遍历池子算 TD，谁 Setup 9 谁执行（同 bar 按池子顺序全部处理）。从 /config/tokens 登记代币选（SOL 登记后可选，稳定币不列入）",
     },
     "td_sleeptime": {
-        "group": "scene", "type": "enum", "enum": list(TD_SLEEPTIMES), "std": "1D",
-        "label": "TD 周期", "hint": "主循环周期 = lumibot sleeptime 与 K 线粒度（1D 默认）",
+        "group": "scene", "type": "enum", "enum": list(TD_SLEEPTIMES),
+        "enum_labels": TD_SLEEPTIME_LABELS, "std": "1D",
+        "period_field": True,
+        "label": "TD 周期", "hint": "主循环周期 = lumibot sleeptime 与 K 线粒度（1D 默认；切换执行通道后下拉按该所支持周期过滤）",
     },
     "quantity_mode": {
         "group": "scene", "type": "enum", "enum": list(QUANTITY_MODES), "std": "fixed",

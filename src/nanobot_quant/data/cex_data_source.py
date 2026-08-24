@@ -13,19 +13,13 @@ from lumibot.data_sources import DataSource
 
 from nanobot_quant.data.kline_cache import KlineCache
 from nanobot_quant.data_sources import get_data_source
+from nanobot_quant.data_sources.periods import lumibot_bar_map
 
 logger = logging.getLogger("nanobot_quant.data.cex")
 
-_BAR_MAP = {
-    "minute": "1m",
-    "5min": "5m",
-    "15min": "15m",
-    "30min": "30m",
-    "hour": "1H",
-    "4hour": "4H",
-    "day": "1D",
-    "week": "1W",
-}
+# 动态映射：lumibot 风格键 + gate_cex spec 声明周期（16 项，大小写双键），
+# 新周期（3m/2H/6H/8H/12H/3D/7D/30D）随 spec.bars 自动覆盖（2026-08-24 方案 C）。
+_BAR_MAP = lumibot_bar_map("gate_cex")
 
 _DEFAULT_BAR = "1D"
 

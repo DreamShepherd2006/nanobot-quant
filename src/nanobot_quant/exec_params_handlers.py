@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import os
 
 from starlette.requests import Request
@@ -84,6 +85,21 @@ def _showif_attr(key: str, prefix: str = "", fname: str | None = None) -> str:
     return f' data-show-if="{prefix}{k}={v}"'
 
 
+_PERIOD_SPECS = {"cex": "gate_cex", "dex": "onchainos"}
+
+
+def _periods_for_family(family: str) -> list:
+    """该执行通道数据源支持的周期列表（注册表 spec.bars）。"""
+    from nanobot_quant.data_sources import get_data_source
+
+    name = _PERIOD_SPECS.get(family, "onchainos")
+    try:
+        bars = get_data_source(name).bars or ()
+    except Exception:
+        bars = ()
+    return list(bars) or list(TD_SLEEPTIMES)
+
+
 def _field_html(
     key: str,
     value: object,
@@ -132,6 +148,18 @@ def _field_html(
         choices = meta["enum"]
         labels = meta.get("enum_labels") or {}
         groups = meta.get("enum_groups")
+        # 2026-08-24（Step 4）：TD 周期按执行通道数据源过滤选项
+        # （cex=Gate 16 项 / dex=OnchainOS 7 项），并注入两组完整周期
+        # 供前端 JS 切通道时即时重建下拉（不刷新页面、不丢已填值）。
+        period_attrs = ""
+        if meta.get("period_field"):
+            dex = _periods_for_family("dex")
+            cex = _periods_for_family("cex")
+            choices = cex if family == "cex" else dex
+            period_attrs = (
+                f' data-periods-dex=\'{json.dumps(dex)}\''
+                f' data-periods-cex=\'{json.dumps(cex)}\''
+            )
 
         def _opt(c: str) -> str:
             sel = "selected" if str(value) == c else ""
@@ -152,7 +180,7 @@ def _field_html(
             opts = "".join(_opt(c) for c in choices)
         return (
             f'<div class="field" data-channel="{channels}"{showif}{scene_mark}><label class="f-label" for="{fid}">{label}</label>'
-            f'<select id="{fid}" name="{fid}">{opts}</select>'
+            f'<select id="{fid}" name="{fid}"{period_attrs}>{opts}</select>'
             f'<span class="f-std">默认 {std}</span>'
             f'<span class="f-hint">{hint}</span></div>'
         )
