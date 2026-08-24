@@ -260,7 +260,7 @@ function renderResult(res, runId) {
       <div class="kpi"><div class="v">${fmtN(res.final_net, 2)} USDT</div><div class="k">期末净值</div></div>
       <div class="kpi"><div class="v ${roiCls}">${roi === null || roi === undefined ? "—" : (roi * 100).toFixed(2) + "%"}</div><div class="k">ROI</div></div>
       <div class="kpi"><div class="v">${res.fills || 0}</div><div class="k">成交笔数</div></div>
-      <div class="kpi"><div class="v">${res.bars || 0}</div><div class="k">K 线根数</div></div>
+      <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
     </div>
     <div style="font-size:.84em;color:#888;margin:4px 0 10px;">
       场景 <code>${res.scene}</code> · 标的 <code>${(res.symbols || []).join(", ")}</code> ·
