@@ -40,16 +40,34 @@ class DataSourceSpec:
         order_book: Optional[Callable] = None,
         ticker: Optional[Callable] = None,
         bars: tuple = (),
+        interval_map: Optional[dict] = None,
     ) -> None:
         self.name = name
         self.display = display
         self.kind = kind          # "executable" | "research"
         self.exchange = exchange  # "gate" | "okx" | None
-        self.bars = tuple(bars)   # supported bar sizes (empty = any)
+        self.bars = tuple(bars)   # supported unified period names (empty = any)
+        # 统一周期名 → 该所 API interval 字符串（缺省 = 同名映射）
+        self.interval_map = dict(interval_map) if interval_map else {
+            p: p for p in self.bars
+        }
         self._fetch_kline = fetch_kline
         self._get_price = get_price
         self._order_book = order_book
         self._ticker = ticker
+
+    # ── 周期映射 ──────────────────────────────────────────────────────
+    def interval_for(self, bar: str) -> str:
+        """统一周期名 → 该所 API interval 字符串。
+
+        Fail-closed：不在 ``bars`` 内的周期直接 KeyError（上层在 UI 下拉
+        就用 spec.bars 过滤，传错即 bug，不静默回退到默认粒度）。
+        """
+        if bar not in self.interval_map:
+            raise KeyError(
+                f"{self.name}: 不支持的周期 {bar!r}（支持: {list(self.bars)}）"
+            )
+        return self.interval_map[bar]
 
     # ── 统一契约 ──────────────────────────────────────────────────────
     def fetch_kline(self, symbol, bar="1D", limit=120,

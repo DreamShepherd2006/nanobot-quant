@@ -28,7 +28,16 @@ register(DataSourceSpec(
     get_price=gate_cex.get_price,
     order_book=gate_cex.order_book,
     ticker=gate_cex.ticker,
-    bars=("1m", "5m", "15m", "30m", "1H", "4H", "1D", "1W"),
+    bars=("1m", "3m", "5m", "15m", "30m",
+          "1H", "2H", "4H", "6H", "8H", "12H",
+          "1D", "3D", "1W", "7D", "30D"),
+    # Gate API 实测 18 个 interval（2026-08-24），秒级 1s/10s 对 TD 无意义不纳入
+    interval_map={
+        "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1H": "1h", "2H": "2h", "4H": "4h", "6H": "6h",
+        "8H": "8h", "12H": "12h",
+        "1D": "1d", "3D": "3d", "1W": "1w", "7D": "7d", "30D": "30d",
+    },
 ))
 register(DataSourceSpec(
     name="onchainos",
