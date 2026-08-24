@@ -4,7 +4,7 @@
 - 与实盘 CexBroker 语义对齐：slot 级资金、手续费从所得币扣（买扣 base、
   卖扣 quote）、min_quote 金额 fail-closed、成交后 ``set_filled()`` +
   ``status="fill"``（lumibot v4.5.78 set_filled 不更新 status）
-- 撮合确定性：按当前 bar 收盘价成交（± slippage），无网络、无真实资金
+- 撮合确定性：按当前 bar 收盘价成交（± slippage%），无网络、无真实资金
 - 每 slot 一个实例（对应实盘每 slot 一个 CexBroker），账本独立 = slot 级
   资金隔离；初始资金是纯模拟参数（默认 100U/slot），不碰真实子账号
 
@@ -12,7 +12,9 @@ Parameters:
     initial_quote: 每 slot 初始 quote 资金（USDT），默认 100.0（纯模拟，
         10–10000 可配）。收益率分母 = Σ slot initial_quote。
     fee_rate: 交易成本（Gate taker），默认 0.001（0.1%），每笔必扣。
-    slippage: 成交价偏差（默认 0.0）：买 ×(1+slippage)、卖 ×(1−slippage)。
+    slippage: 成交价偏差百分比（1 = 1%，默认 0.0）：买 ×(1+slippage/100)、
+        卖 ×(1−slippage/100)。与 CexBroker/exec_params 语义一致（2026-08-24
+        修正：此前误当小数乘，0.1 被当成 10%，导致回测买入成本虚高）。
     min_quote_amount: 最小订单金额（默认 3.0，Gate 服务端规则），0=禁用。
     price_source: callable(symbol) → 当前 bar 收盘价（回测数据源游标）。
     tokens_json: tokens.json 条目（symbol/gate_symbol 映射，pair 用）。
@@ -46,10 +48,10 @@ class BacktestBroker(Broker):
     """Deterministic bar-fill simulation broker for historical replay.
 
     Fill model (2026-08-23 拍板，docs/quant-system.md §25.3):
-        buy  : 花费 quote = quantity × px × (1 + slippage)
+        buy  : 花费 quote = quantity × px × (1 + slippage/100)
                到账 base  = quantity × (1 − fee_rate)     （手续费从所得币扣）
                avg_price  = 花费 / 到账                   （含手续费摊薄，对齐 Gate avg_deal_price）
-        sell : 到账 quote = quantity × px × (1 − slippage) × (1 − fee_rate)
+        sell : 到账 quote = quantity × px × (1 − slippage/100) × (1 − fee_rate)
                （手续费从所得 quote 扣；avg_price = px）
         资金不足 / min_quote 不足 / 无价格 → order.set_error（fail-closed，
         与实盘 CexBroker 语义一致——策略打 TD BATCH BUY FAIL / SLOT SKIP）。
@@ -180,9 +182,9 @@ class BacktestBroker(Broker):
             )
             return order
 
-        slippage = self._slippage
+        slippage = self._slippage / 100.0
         if side == "buy":
-            # 买：花费 quote = quantity × px × (1+slippage)，手续费从所得币扣
+            # 买：花费 quote = quantity × px × (1+slippage/100)，手续费从所得币扣
             cost = quantity * px * (1.0 + slippage)
             if self._cash < cost:
                 order.set_error(
@@ -195,7 +197,7 @@ class BacktestBroker(Broker):
             self._positions[symbol] = self._positions.get(symbol, 0.0) + received
             avg = cost / received if received > 0 else px
         else:
-            # 卖：到账 quote = quantity × px × (1−slippage) × (1−fee_rate)
+            # 卖：到账 quote = quantity × px × (1−slippage/100) × (1−fee_rate)
             bal = self._positions.get(symbol, 0.0)
             if bal < quantity:
                 order.set_error(

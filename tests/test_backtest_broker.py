@@ -136,11 +136,21 @@ class TestBuy:
 
     def test_slippage_makes_buy_costlier(self):
         px = _PriceSource(67.0)
-        b = _broker(initial_quote=100.0, price_source=px, slippage=0.01)
+        # slippage 百分比语义：1.0 = 1%
+        b = _broker(initial_quote=100.0, price_source=px, slippage=1.0)
         out = b._submit_order(_mk_order(side="buy", quantity=0.05))
         assert out.filled is True
         # 花费 0.05×67×1.01 = 3.3835
         assert b._cash == pytest.approx(100.0 - 0.05 * 67.0 * 1.01)
+
+    def test_slippage_percent_units(self):
+        """锁定百分比语义：0.1 = 0.1%（不是 10%）。"""
+        px = _PriceSource(67.0)
+        b = _broker(initial_quote=100.0, price_source=px, slippage=0.1)
+        out = b._submit_order(_mk_order(side="buy", quantity=0.05))
+        assert out.filled is True
+        # 花费 0.05×67×1.001 = 3.35335（若被当 10% 会是 3.685）
+        assert b._cash == pytest.approx(100.0 - 0.05 * 67.0 * 1.001)
 
 
 class TestSell:
@@ -177,7 +187,8 @@ class TestSell:
         assert "insufficient" in out.error.lower()
 
     def test_slippage_makes_sell_cheaper(self):
-        b, _ = self._bought(slippage=0.01)
+        # slippage 百分比语义：1.0 = 1%（买/卖同吃 1%）
+        b, _ = self._bought(slippage=1.0)
         out = b._submit_order(_mk_order(side="sell", quantity=0.04))
         assert out.filled is True
         # 买入同样吃 slippage：花费 0.05×80×1.01 = 4.04

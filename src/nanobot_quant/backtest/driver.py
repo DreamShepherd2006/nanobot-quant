@@ -131,7 +131,7 @@ class BacktestDriver:
             raise ValueError(f"batches 必须 ≥1（当前 {self.batches}）")
         self.slippage = float(
             slippage if slippage is not None else self.params.get("slippage", 0.0)
-        )
+        )  # 百分比语义（1=1%），与 exec_params/BacktestBroker 一致
         self.initial_quote = float(initial_quote)
         self.start_ts = start_ts
         self.end_ts = end_ts
