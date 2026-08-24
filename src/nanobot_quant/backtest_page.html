@@ -32,6 +32,10 @@
   .banner.msg.show { display:block; }
   .banner.msg.err { background:#fce4ec; border-color:#ef9a9a; color:#c62828; }
   .banner.msg.ok { background:#e8f5e9; border-color:#a5d6a7; color:#2e7d32; }
+  .progress-wrap { background:#f0f2f5; border-radius:6px; overflow:hidden; height:14px; margin:10px 0 4px; }
+  .progress-bar { height:100%; width:0%; background:linear-gradient(90deg,#4f8cff,#22c55e); transition:width .4s ease; }
+  .progress-bar.indet { width:100%; background:linear-gradient(90deg,#e5e7eb,#4f8cff,#e5e7eb); background-size:200% 100%; animation:indet 1.2s linear infinite; }
+  @keyframes indet { 0% { background-position:200% 0; } 100% { background-position:-200% 0; } }
   table { width:100%; border-collapse:collapse; font-size:.86em; margin-top:8px; }
   th, td { padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; }
   th { background:#fafafa; color:#555; font-weight:600; }
@@ -218,8 +222,11 @@ function pollResult(runId, tries) {
       const data = await r.json();
       if (data.status === "done") { renderResult(data.result, runId); setMsg(`✅ run_id=${runId} 完成`); }
       else if (data.status === "error") { renderError(data.error, runId); setMsg(`❌ run_id=${runId} 失败`, "err"); }
-      else if (tries < 600) { pollResult(runId, tries + 1); }
-      else { setMsg("等待超时，请到历史记录刷新", "err"); }
+      else {
+        if (data.status === "running" && data.progress) renderProgress(runId, data.progress);
+        if (tries < 600) { pollResult(runId, tries + 1); }
+        else { setMsg("等待超时，请到历史记录刷新", "err"); }
+      }
     } catch (e) {
       setMsg("轮询失败：" + e.message, "err");
     } finally {
@@ -268,6 +275,26 @@ function renderError(err, runId) {
   $("result").innerHTML = `<div class="banner msg err show">❌ run_id=${runId} 失败：${err}</div>`;
 }
 
+// 运行中进度（Step 2：pollResult / loadRun 收到 running 载荷时渲染进度条）
+function renderProgress(runId, prog) {
+  const box = $("result");
+  if (!prog) return;
+  const replay = prog.stage === "replay" && prog.bars_total;
+  const bar = replay
+    ? `<div class="progress-wrap"><div class="progress-bar" style="width:${Math.min(100, prog.pct || 0)}%"></div></div>`
+    : `<div class="progress-wrap"><div class="progress-bar indet"></div></div>`;
+  const line = replay
+    ? `${prog.bars_done}/${prog.bars_total} bar · ${prog.pct}%` +
+      (prog.ts ? ` · 最近 bar ${fmtTs(prog.ts)}` : "") +
+      (prog.fills ? ` · 成交 ${prog.fills} 笔` : "")
+    : `📡 正在预取历史数据…`;
+  box.innerHTML = `
+    <div class="banner msg show">⏳ run_id=${runId} 回测运行中</div>
+    ${bar}
+    <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
+  `;
+}
+
 // ── 历史记录 ────────────────────────────────────────────────────────────
 async function loadRuns() {
   try {
@@ -293,7 +320,12 @@ async function loadRun(runId) {
     const data = await r.json();
     if (data.status === "done") { renderResult(data.result, runId); setMsg(""); }
     else if (data.status === "error") { renderError(data.error, runId); setMsg(""); }
-    else { setMsg(`run_id=${runId} 仍在运行或已丢失`, "err"); }
+    else if (data.status === "running") {
+      renderProgress(runId, data.progress);
+      setMsg(`run_id=${runId} 运行中，自动跟进…`);
+      pollResult(runId, 0);
+    }
+    else { setMsg(`run_id=${runId} 已丢失（无结果文件）`, "err"); }
   } catch (e) {
     setMsg("读取失败：" + e.message, "err");
   }
