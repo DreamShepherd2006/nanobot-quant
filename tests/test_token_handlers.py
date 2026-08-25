@@ -309,3 +309,62 @@ class TestRenderListGatePair:
         # gate_symbol 覆盖 symbol（精确匹配 td 单元格，避免 XSPX_USDT 含 SPX_USDT 子串）
         assert ">XSPX_USDT<" in html
         assert ">SPX_USDT<" not in html
+
+
+class TestEditMappings:
+    def test_edit_set_and_clear_pair_mappings(self, _isolated_tokens):
+        """编辑弹窗：gate_symbol/okx_symbol 传值=设置（大写归一化）、传空=清除。"""
+        from nanobot_quant.token_handlers import token_add, token_edit
+
+        _call(token_add, {"symbol": "WEVM", "address": SOLANA_ADDR,
+                          "chain": "solana"})
+        resp = _call(token_edit, {"symbol": "WEVM", "address": SOLANA_ADDR,
+                                  "chain": "solana",
+                                  "gate_symbol": "xspx_usdt", "okx_symbol": "XSPX"})
+        assert resp.status_code == 200
+        e = _read_tokens()[0]
+        assert e["gate_symbol"] == "XSPX_USDT"  # 大写归一化
+        assert e["okx_symbol"] == "XSPX"
+        # 留空 = 清除映射（回退 symbol）
+        _call(token_edit, {"symbol": "WEVM", "address": SOLANA_ADDR,
+                           "chain": "solana",
+                           "gate_symbol": "", "okx_symbol": ""})
+        e = _read_tokens()[0]
+        assert "gate_symbol" not in e
+        assert "okx_symbol" not in e
+
+    def test_edit_pair_mapping_keeps_confirmation(self, _isolated_tokens):
+        """只改交易对映射、地址未变 → 确认门不重置。"""
+        from nanobot_quant.token_handlers import (
+            token_add,
+            token_confirm,
+            token_edit,
+        )
+
+        _call(token_add, {"symbol": "WEVM", "address": SOLANA_ADDR,
+                          "chain": "solana"})
+        _call(token_confirm, {"symbol": "WEVM", "address": SOLANA_ADDR})
+        _call(token_edit, {"symbol": "WEVM", "address": SOLANA_ADDR,
+                           "chain": "solana", "gate_symbol": "XSPX"})
+        assert _read_tokens()[0]["confirmed"] is True
+
+
+class TestRenderListOkxColumn:
+    def test_okx_column(self, _isolated_tokens):
+        """tokens 页 OKX 交易对列：symbol 回退 + okx_symbol 覆盖。"""
+        from nanobot_quant.token_handlers import _render_list
+
+        _write_tokens(
+            [
+                {"symbol": "CRCLX", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True},
+                {"symbol": "SPX", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True,
+                 "okx_symbol": "XSPX"},
+            ]
+        )
+        html = _render_list()
+        assert "<th>OKX 交易对</th>" in html
+        assert ">CRCLX-USDT<" in html
+        assert ">XSPX-USDT<" in html
+        assert ">SPX-USDT<" not in html
