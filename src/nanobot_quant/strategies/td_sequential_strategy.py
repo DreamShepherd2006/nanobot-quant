@@ -2012,16 +2012,17 @@ class TdSequentialStrategy(Strategy):
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 
     def _cex_slot_token_balance(self, slot: dict, symbol: str) -> float:
-        """子账号该标的持仓量（tokens.json gate_symbol 优先，回退 symbol）。"""
-        token = next(
-            (
-                t
-                for t in (self.parameters.get("tokens_json") or [])
-                if str(t.get("symbol") or "").upper() == str(symbol).upper()
-            ),
-            None,
-        )
-        key = str((token or {}).get("gate_symbol") or symbol).upper()
+        """子账号该标的持仓量（Gate 余额键=基础币，gate_symbol 可能是完整 pair）。
+
+        Gate sub_account_balances 的 available 键为基础币大写（如 "CRCLX"），
+        而 tokens.json 的 gate_symbol 可能是完整交易对（"CRCLXUSDT"/"CRCLX_USDT"）——
+        直接用 gate_symbol 作键会查不到而误判无持仓（曾致 CRCLX 真实持仓被释放台账）。
+        与对账导入同源：经 gate_pair 剥离 quote 得基础币键（td_live._reconcile_import_cex 同款）。
+        """
+        from nanobot_quant.gate_credentials import gate_pair
+
+        tokens_json = self.parameters.get("tokens_json") or []
+        key = gate_pair(symbol, tokens_json).split("_")[0]
         bal = self._cex_slot_balances(slot).get(key) or {}
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 

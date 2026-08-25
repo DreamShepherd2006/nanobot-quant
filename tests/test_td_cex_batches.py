@@ -362,6 +362,64 @@ def test_cex_sell_shrink(tmp_path):
     assert s._captured["submitted"][0].quantity == 0.02  # 缩量后下单数量
 
 
+# ── _cex_slot_token_balance 键映射（2026-08-26 修复）──────────────────
+# 回归：gate_symbol 是完整 pair（CRCLXUSDT/CRCLX_USDT）时，持仓检查
+# 仍命中 Gate 余额的基础币键（"CRCLX"），不得误判无持仓释放真实台账。
+
+
+def test_cex_token_balance_gate_symbol_pair(tmp_path):
+    """gate_symbol 为无分隔 pair（CRCLXUSDT）→ 命中基础币键。"""
+    bm = _make_bm(tmp_path, n=2)
+    s = _make_cex_strategy(
+        bm, _bars_with([100.0] * 60),
+        tokens_json=[{"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT"}],
+    )
+    s._cex_slot_balances = lambda slot: {
+        "USDT": {"available": 3.0, "locked": 0},
+        "CRCLX": {"available": 0.045, "locked": 0},
+    }
+    assert s._cex_slot_token_balance(bm.slots[0], "CRCLX") == 0.045
+
+
+def test_cex_token_balance_gate_symbol_underscore(tmp_path):
+    """gate_symbol 为下划线 pair（CRCLX_USDT）→ 同样命中基础币键。"""
+    bm = _make_bm(tmp_path, n=2)
+    s = _make_cex_strategy(
+        bm, _bars_with([100.0] * 60),
+        tokens_json=[{"symbol": "CRCLX", "gate_symbol": "CRCLX_USDT"}],
+    )
+    s._cex_slot_balances = lambda slot: {
+        "USDT": {"available": 3.0, "locked": 0},
+        "CRCLX": {"available": 0.045, "locked": 0},
+    }
+    assert s._cex_slot_token_balance(bm.slots[0], "CRCLX") == 0.045
+
+
+def test_cex_token_balance_fallback_symbol(tmp_path):
+    """无 gate_symbol → 回退 symbol 作余额键（现有行为回归）。"""
+    bm = _make_bm(tmp_path, n=2)
+    s = _make_cex_strategy(
+        bm, _bars_with([100.0] * 60),
+        tokens_json=[{"symbol": "SOL"}],
+    )
+    s._cex_slot_balances = lambda slot: {
+        "USDT": {"available": 3.0, "locked": 0},
+        "SOL": {"available": 0.5, "locked": 0},
+    }
+    assert s._cex_slot_token_balance(bm.slots[0], "SOL") == 0.5
+
+
+def test_cex_token_balance_not_found_zero(tmp_path):
+    """余额无该币 → 返回 0（fail-closed，不误报持仓）。"""
+    bm = _make_bm(tmp_path, n=2)
+    s = _make_cex_strategy(
+        bm, _bars_with([100.0] * 60),
+        tokens_json=[{"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT"}],
+    )
+    s._cex_slot_balances = lambda slot: {"USDT": {"available": 3.0, "locked": 0}}
+    assert s._cex_slot_token_balance(bm.slots[0], "CRCLX") == 0.0
+
+
 # ── pending 确认循环跳过 CEX（Step 2 实现）──────────────────────────
 
 def test_pending_confirmation_skips_cex(tmp_path):
