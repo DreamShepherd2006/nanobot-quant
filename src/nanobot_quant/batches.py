@@ -310,6 +310,21 @@ class BatchManager:
         open_lots.sort(key=key, reverse=(order == "lifo"))
         return open_lots[0]
 
+    def pick_all_slots(self, order: str = "fifo") -> list[dict[str, Any]]:
+        """返回全部 open 批次按 exit_order 排序（td_sell_all 高9 全平，2026-08-25）。
+
+        fifo：entry_time 最早在前（先买先卖）；lifo：最新在前。
+        """
+        open_lots = [
+            s for s in self.slots
+            if s["status"] == OPEN and s["lot"] is not None
+        ]
+        if not open_lots:
+            return []
+        key = lambda s: s["lot"]["entry_time"]  # noqa: E731
+        open_lots.sort(key=key, reverse=(order == "lifo"))
+        return open_lots
+
     # ── 状态机 ──────────────────────────────────────────────────────
     def open_lot(
         self, qty: float, entry_price: float,

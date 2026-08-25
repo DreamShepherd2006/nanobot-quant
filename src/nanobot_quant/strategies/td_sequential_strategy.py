@@ -71,6 +71,8 @@ class TdSequentialStrategy(Strategy):
         "max_position_pct": 0.20,   # max % of portfolio in one position
         "max_drawdown_pct": 0.15,   # skip new entries when drawdown > 15%
         "stop_loss_pct": 0.10,      # exit when loss exceeds 10%
+        "sell_only_profit": 0.0,    # 高9 毛浮盈门（0=关闭无条件卖，2026-08-25）
+        "td_sell_all": False,       # 高9 一次平所有盈利批（false=每轮一个）
         **DEFAULT_TD_PARAMS,
     }
 
@@ -199,6 +201,13 @@ class TdSequentialStrategy(Strategy):
         self._exit_order = self.parameters.get("exit_order", "fifo")
         self._take_profit_pct = float(
             self.parameters.get("take_profit_pct", 0.0) or 0.0
+        )
+        # 2026-08-25 高9 出场：毛浮盈门 + 全平开关（场景级覆盖见 _activate_scene）
+        self._sell_only_profit = float(
+            self.parameters.get("sell_only_profit", 0.0) or 0.0
+        )
+        self._td_sell_all = bool(
+            self.parameters.get("td_sell_all", False) or False
         )
         # 单边交易成本（Gate taker 0.1%）：止损/止盈净值口径
         self._fee_rate = float(self.parameters.get("fee_rate", 0.001) or 0.0)
@@ -499,6 +508,8 @@ class TdSequentialStrategy(Strategy):
         if sl is not None and getattr(self, "_risk", None) is not None:
             self._risk.stop_loss_pct = float(sl)
         self._take_profit_pct = float(p.get("take_profit_pct") or 0.0)
+        self._sell_only_profit = float(p.get("sell_only_profit") or 0.0)
+        self._td_sell_all = bool(p.get("td_sell_all") or False)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
@@ -1110,23 +1121,62 @@ class TdSequentialStrategy(Strategy):
         )
         for s in hits:
             self._sell_lot(s, price, signal, s.pop("_exit_reason", "exit"))
-        # 2) TD SELL 信号 → 按 exit_order 平一个批次（止损刚平完则无批次可平）
+        # 2) TD SELL 信号 → 平仓（2026-08-25 高9 出场逻辑）
+        #    卖出门：sell_only_profit>0 时只平毛浮盈 ≥ X 的批次（浮亏/微利不卖，死扛）；
+        #    td_sell_all=true 一次平掉所有通过盈利门的批；false 每轮只平一个（现有）。
         if setup_sell >= exit_setup or cd_sell >= exit_countdown:
-            s = bm.pick_exit_slot(self._exit_order)
-            if s is not None:
-                reason = (
-                    f"setup_sell={setup_sell}"
-                    if setup_sell >= exit_setup
-                    else f"cd_sell={cd_sell}"
-                )
-                self._sell_lot(s, price, signal, reason)
+            reason = (
+                f"setup_sell={setup_sell}"
+                if setup_sell >= exit_setup
+                else f"cd_sell={cd_sell}"
+            )
+            if self._td_sell_all:
+                candidates = bm.pick_all_slots(self._exit_order)
+                sold_any = False
+                for s in candidates:
+                    if self._profit_gate_blocked(s, price):
+                        continue
+                    self._sell_lot(s, price, signal, reason)
+                    sold_any = True
+                if not sold_any:
+                    self.logger.info(
+                        f"TD SELL SKIP | symbol={self.symbol} 无满足盈利门的批次"
+                        f"（sell_only_profit={self._sell_only_profit}，open={len(candidates)}）"
+                    )
             else:
-                # 可观测性：无仓卖 9 显式提示，区分「信号未出现」与
-                # 「信号出现但无 open 批次」（fail-closed，不做空）
-                self.logger.info(
-                    f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
-                    f"cd_sell={cd_sell}）"
-                )
+                s = bm.pick_exit_slot(self._exit_order)
+                if s is not None:
+                    if self._profit_gate_blocked(s, price):
+                        lot = s["lot"]
+                        pnl = (price - lot["entry_price"]) / lot["entry_price"]
+                        self.logger.info(
+                            f"TD SELL SKIP | symbol={self.symbol} 浮盈不足"
+                            f"（pnl={pnl:.4f} < sell_only_profit={self._sell_only_profit}）"
+                        )
+                    else:
+                        self._sell_lot(s, price, signal, reason)
+                else:
+                    # 可观测性：无仓卖 9 显式提示，区分「信号未出现」与
+                    # 「信号出现但无 open 批次」（fail-closed，不做空）
+                    self.logger.info(
+                        f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
+                        f"cd_sell={cd_sell}）"
+                    )
+
+    def _profit_gate_blocked(self, slot: dict, price: float) -> bool:
+        """高9 毛浮盈门（2026-08-25）：sell_only_profit>0 时毛浮盈 < X 拦截卖出。
+
+        毛口径 (price−entry)/entry 未扣手续费——用户自行计算含成本阈值
+        （如 Gate 双程 0.2% → 0.002）。0=关闭（无条件卖，现有行为）。
+        """
+        thr = getattr(self, "_sell_only_profit", 0.0) or 0.0
+        if thr <= 0:
+            return False
+        lot = slot.get("lot")
+        if lot is None or not lot.get("entry_price"):
+            return False
+        pnl = (price - lot["entry_price"]) / lot["entry_price"]
+        return pnl < thr
 
     def _symbol_min_hold(self) -> float:
         """当前标的的链上保留量（tokens.json min_hold，SOL 用作 gas 底线）。
