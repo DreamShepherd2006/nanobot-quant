@@ -93,11 +93,18 @@ def _render_list() -> str:
         chain = str(entry.get("chain") or "solana")
         st = _token_status(entry)
         issue = f"<div class='issue'>{html_escape(st['issue'])}</div>" if st["issue"] else ""
+        # Gate CEX pair for this entry (mirrors gate_pair(): gate_symbol wins, else symbol)
+        gs = str(entry.get("gate_symbol") or entry.get("symbol") or sym).upper().strip()
+        base = gs.replace("-", "").replace("_", "")
+        if base.endswith("USDT"):
+            base = base[:-4]
+        pair = f"{base}_USDT"
         rows.append(
             "<tr>"
             f"<td class='sym'>{html_escape(sym)}</td>"
             f"<td class='addr mono'>{html_escape(addr)}</td>"
             f"<td>{html_escape(chain)}</td>"
+            f"<td class='mono'>{html_escape(pair)}</td>"
             f"<td><span class='status {st['cls']}'>{st['label']}</span>{issue}</td>"
             "<td class='actions'>"
             f"<button class='btn-outline' data-act='confirm' data-symbol='{html_escape(sym)}' "
@@ -110,8 +117,8 @@ def _render_list() -> str:
         )
 
     table = (
-        "<table><thead><tr><th>Symbol</th><th>地址</th><th>链</th><th>状态</th><th>操作</th></tr></thead>"
-        f"<tbody>{''.join(rows) or '<tr><td colspan=5 class=empty>暂无自定义代币条目。'
+        "<table><thead><tr><th>Symbol</th><th>地址</th><th>链</th><th>Gate 交易对</th><th>状态</th><th>操作</th></tr></thead>"
+        f"<tbody>{''.join(rows) or '<tr><td colspan=6 class=empty>暂无自定义代币条目。'
         'L1 内建白名单（SOL / USDC / USDT）自动可用，无需录入。</td></tr>'}</tbody></table>"
     )
 

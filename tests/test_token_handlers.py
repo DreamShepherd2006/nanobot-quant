@@ -283,3 +283,29 @@ class TestResearchChainTokensLoading:
         assert resolved["ok"] is True
         assert resolved["needs_confirmation"] is True
         assert resolved["category"] == "chain_mismatch"
+
+
+class TestRenderListGatePair:
+    def test_gate_pair_column(self, _isolated_tokens):
+        """tokens 页 Gate 交易对列：symbol 回退 + gate_symbol 覆盖。"""
+        from nanobot_quant.token_handlers import _render_list
+
+        _write_tokens(
+            [
+                {"symbol": "CRCLX", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True},
+                {"symbol": "SPX", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True,
+                 "gate_symbol": "XSPX"},
+                {"symbol": "MU", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True},
+            ]
+        )
+        html = _render_list()
+        # 表头与回退对（symbol → {SYMBOL}_USDT）
+        assert "<th>Gate 交易对</th>" in html
+        assert ">CRCLX_USDT<" in html
+        assert ">MU_USDT<" in html
+        # gate_symbol 覆盖 symbol（精确匹配 td 单元格，避免 XSPX_USDT 含 SPX_USDT 子串）
+        assert ">XSPX_USDT<" in html
+        assert ">SPX_USDT<" not in html
