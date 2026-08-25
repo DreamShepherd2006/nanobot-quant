@@ -17,6 +17,7 @@ import logging
 import json
 
 import pandas as pd
+import pytest
 
 from nanobot_quant.batches import BatchManager
 from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
@@ -710,3 +711,45 @@ def test_cex_confirm_broker_uses_pending_account_id(tmp_path, monkeypatch):
     # 旧记录无 account_id → 回退全局 slot_map（不崩）
     broker_legacy = s._cex_confirm_broker(1, {})
     assert broker_legacy.sub_account == "gate_bot1"
+
+# ── 2026-08-26：Gate amount_precision 截断 → 台账记实际成交 filled ──
+
+def test_cex_buy_full_loop_uses_filled_qty(tmp_path):
+    """完整循环：CEX 下单 filled < 计划量（Gate 市价单 amount_precision
+    截断，实测 ETH 0.00126091→0.0012）→ open_lot 用实际成交 filled，
+    不用计划量——否则台账虚高 → 卖出缩量 → min_quote 卡 slot。"""
+    bm = _make_bm(tmp_path)
+    s = _make_cex_strategy(bm, _bars_with(_buy_closes()))
+
+    def _submit_with_filled(slot, req):
+        order = _mock_order(quantity=req.quantity)
+        order.custom_params = {"cex": {"filled": 0.0012, "avg_price": 2461.6}}
+        return order
+
+    s._cex_submit = _submit_with_filled
+    s.on_trading_iteration()
+    lots = bm.open_slots()
+    assert lots, "应建仓"
+    assert lots[0]["lot"]["qty"] == pytest.approx(0.0012)
+
+
+def test_cex_confirm_buy_uses_filled_not_planned(tmp_path):
+    """pending 确认：CEX BUY 用实际成交 filled 建仓（info.qty 是计划量，
+    Gate 截断后 filled < 计划量）——用计划量台账虚高（2026-08-26 修复）。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex")
+    s._batch_managers = {}
+    s._pending_buys[1] = {
+        "slot": 1, "symbol": "ETH", "order_id": "x", "chain": "",
+        "qty": 0.00126091, "price": 2458.54, "reason": "t", "cex": True,
+        "account_id": "gate_bot1",
+    }
+
+    class _FakeQ:
+        def _query_order(self, order_id, pair):
+            return ("filled", 0.0012, 0.0, 2461.6)
+
+    s._cex_confirm_broker = lambda slot_id, info: _FakeQ()
+    s._confirm_cex_buy(1, s._pending_buys[1])
+    lots = bm.open_slots()
+    assert lots and lots[0]["lot"]["qty"] == pytest.approx(0.0012)

@@ -301,16 +301,34 @@ class CexBroker(Broker):
                 print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
                       file=sys.stderr, flush=True)
                 return order
-            if min_quote > 0 and quantity * px < min_quote:
+            # Gate 市价单按金额成交，但服务端换算 base 数量时按 amount_precision
+            # 向下截断（2026-08-26 实测：ETH 下单 0.00126091 实际成交 0.0012、
+            # 退回 $0.146；UNI 0.72093→0.72）。买入前按 amount_precision 取整：
+            # ① 预检用取整后金额——防「取整后 < min_quote 卖出必卡 slot」
+            #   （3.1U ETH 截断后 2.95 < 3，高9 卖出被拒）
+            # ② 下单金额用取整后数量×现价——Gate 内部不再二次截断浪费金额
+            qty_floor = quantity
+            if ap > 0:
+                factor = 10 ** ap
+                qty_floor = math.floor(quantity * factor) / factor
+                if qty_floor <= 0:
+                    msg = f"Gate {pair} buy amount {quantity} below {ap} decimals (floors to 0)"
+                    order.set_error(msg)
+                    print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
+                          file=sys.stderr, flush=True)
+                    return order
+            buy_quote = qty_floor * px
+            if min_quote > 0 and buy_quote < min_quote:
                 msg = (
                     f"Gate {pair} below min order amount {min_quote:g} USDT "
-                    f"(qty {quantity} x {px:.2f} = ${quantity * px:.2f})"
+                    f"(qty {qty_floor} x {px:.2f} = ${buy_quote:.2f} after "
+                    f"{ap}-dec precision floor)"
                 )
                 order.set_error(msg)
                 print(f"CEX BROKER DIAG | submit REJECT {side} {quantity} {symbol}@{pair}: {msg}",
                       file=sys.stderr, flush=True)
                 return order
-            amount_str = f"{quantity * px:.{qp}f}" if qp > 0 else f"{quantity * px:.8f}"
+            amount_str = f"{buy_quote:.{qp}f}" if qp > 0 else f"{buy_quote:.8f}"
         else:
             if min_quote > 0 and px > 0 and quantity * px < min_quote:
                 msg = (
@@ -389,6 +407,7 @@ class CexBroker(Broker):
             # _record 交易记录「成交价」列用（CEX 无 swap_status 确认路径）
             cex = order.custom_params.get("cex") or {}
             cex["avg_price"] = avg
+            cex["filled"] = filled  # 实际成交 base 数量（amount_precision 截断后）
             order.custom_params["cex"] = cex
             self._tracked[oid] = {
                 "symbol": symbol, "pair": pair, "side": side,
