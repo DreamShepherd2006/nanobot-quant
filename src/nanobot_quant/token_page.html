@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>代币地址管理 — 业务管理</title>
+<title>代币管理（DEX · CEX）— 业务管理</title>
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
   body { font-family: -apple-system, sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:860px; margin:0 auto; }
@@ -39,11 +39,19 @@
   .msg.ok { display:block; background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; }
   .msg.err { display:block; background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; }
   .builtin { background:#f1f8e9; border:1px solid #c5e1a5; color:#33691e; border-radius:6px; padding:8px 14px; font-size:.85em; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:50; }
+  .modal-box { background:#fff; border-radius:10px; padding:20px 24px; width:min(540px, 92vw); box-shadow:0 8px 30px rgba(0,0,0,.25); }
+  .modal-box h3 { margin:0 0 12px; }
+  .modal-box label { display:block; margin:10px 0 4px; font-size:.85em; color:#666; }
+  .modal-box input, .modal-box select { width:100%; box-sizing:border-box; padding:8px 10px; border:1px solid #ccc; border-radius:6px; }
+  .modal-actions { margin-top:16px; display:flex; gap:10px; justify-content:flex-end; }
+  td.muted { color:#888; }
 </style>
 </head>
 <body>
-<h1>🪙 代币地址管理</h1>
-<p class="subtitle">管理自定义代币地址（tokens.json）。录入不等于信任——地址有疑问（链不匹配/格式错误）的条目在执行前会被拦截，需你确认后才放行；确认记忆化，改地址后自动重置。</p>
+<h1>🪙 代币管理（DEX 链上地址 · CEX 交易对映射）</h1>
+<p class="subtitle">管理自定义代币（tokens.json）。录入不等于信任——地址有疑问（链不匹配/格式错误）的条目在执行前会被拦截，需你确认后才放行；确认记忆化，改地址后自动重置。<br>
+DEX 通道：合约地址 + 链 + 确认门；CEX 通道：交易对（gate_symbol 或回退 {symbol}_USDT），地址/链字段对 CEX 不参与执行。</p>
 
 <div class="card">
   <h2>➕ 新增代币</h2>
@@ -58,6 +66,10 @@
     </select>
     <button class="btn-primary" id="btn-add">添加</button>
   </div>
+  <div class="form-row" style="margin-top:8px">
+    <input type="text" id="f-gate" placeholder="Gate 交易对（可选，如 XSPX 或 XSPX_USDT；留空=回退 {SYMBOL}_USDT）" autocomplete="off">
+    <input type="text" id="f-okx" placeholder="OKX 交易对（可选，如 XSPX；留空=回退 {SYMBOL}-USDT）" autocomplete="off">
+  </div>
 </div>
 
 <div class="builtin">L1 内建白名单（无需管理）：{builtin_html}</div>
@@ -65,6 +77,29 @@
 <div class="card">
   <h2>📋 自定义代币（{count_html}）</h2>
   {table_html}
+</div>
+
+<div id="edit-modal" class="modal" style="display:none">
+  <div class="modal-box">
+    <h3>编辑 <span id="e-sym"></span></h3>
+    <label>合约地址（修改后需重新确认）</label>
+    <input type="text" id="e-address" autocomplete="off">
+    <label>链</label>
+    <select id="e-chain">
+      <option value="solana">solana</option>
+      <option value="bnb">bnb</option>
+      <option value="xlayer">xlayer</option>
+      <option value="ethereum">ethereum</option>
+    </select>
+    <label>Gate 交易对（可选；留空 = 清除映射、回退 {SYMBOL}_USDT）</label>
+    <input type="text" id="e-gate" placeholder="如 XSPX 或 XSPX_USDT" autocomplete="off">
+    <label>OKX 交易对（可选；留空 = 清除映射、回退 {SYMBOL}-USDT）</label>
+    <input type="text" id="e-okx" placeholder="如 XSPX" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn-primary" id="e-save">保存</button>
+      <button class="btn-outline" id="e-cancel">取消</button>
+    </div>
+  </div>
 </div>
 
 <div id="msg" class="msg"></div>
@@ -105,8 +140,37 @@ document.getElementById('btn-add').addEventListener('click', function(){
   post('/config/tokens/add', {
     symbol: sym,
     address: addr,
-    chain: document.getElementById('f-chain').value
+    chain: document.getElementById('f-chain').value,
+    gate_symbol: document.getElementById('f-gate').value.trim(),
+    okx_symbol: document.getElementById('f-okx').value.trim()
   }, '已添加');
+});
+
+// ---- 行内编辑弹窗 ----
+var _editSym = null, _editChain = null;
+function openEdit(btn) {
+  _editSym = btn.dataset.symbol;
+  _editChain = btn.dataset.chain || 'solana';
+  document.getElementById('e-sym').textContent = _editSym;
+  document.getElementById('e-address').value = btn.dataset.address || '';
+  document.getElementById('e-chain').value = _editChain;
+  document.getElementById('e-gate').value = btn.dataset.gate || '';
+  document.getElementById('e-okx').value = btn.dataset.okx || '';
+  document.getElementById('edit-modal').style.display = 'flex';
+}
+document.getElementById('e-cancel').addEventListener('click', function(){
+  document.getElementById('edit-modal').style.display = 'none';
+});
+document.getElementById('e-save').addEventListener('click', function(){
+  var addr = document.getElementById('e-address').value;
+  if (!addr) { flash(false, '合约地址不能为空'); return; }
+  post('/config/tokens/edit', {
+    symbol: _editSym,
+    address: addr.trim(),
+    chain: document.getElementById('e-chain').value,
+    gate_symbol: document.getElementById('e-gate').value.trim(),
+    okx_symbol: document.getElementById('e-okx').value.trim()
+  }, '已保存');
 });
 
 document.querySelectorAll('button[data-act]').forEach(function(btn){
@@ -119,11 +183,7 @@ document.querySelectorAll('button[data-act]').forEach(function(btn){
       if (!confirm('确认地址无误并标记 ' + sym + ' 为已确认？（仅当你核实过该地址）')) return;
       post('/config/tokens/confirm', {symbol: sym, address: btn.dataset.address});
     } else if (act === 'edit') {
-      var addr = prompt('编辑 ' + sym + ' 的合约地址：', btn.dataset.address);
-      if (!addr) return;
-      var chain = prompt('编辑 ' + sym + ' 的链（solana/xlayer/ethereum）：', btn.dataset.chain || 'solana');
-      if (!chain) return;
-      post('/config/tokens/edit', {symbol: sym, address: addr.trim(), chain: chain.trim()});
+      openEdit(btn);
     }
   });
 });

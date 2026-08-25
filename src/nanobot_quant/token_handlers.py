@@ -93,25 +93,38 @@ def _render_list() -> str:
         chain = str(entry.get("chain") or "solana")
         st = _token_status(entry)
         issue = f"<div class='issue'>{html_escape(st['issue'])}</div>" if st["issue"] else ""
+        # Gate CEX pair for this entry (mirrors gate_pair(): gate_symbol wins, else symbol)
+        gs = str(entry.get("gate_symbol") or entry.get("symbol") or sym).upper().strip()
+        base = gs.replace("-", "").replace("_", "")
+        if base.endswith("USDT"):
+            base = base[:-4]
+        pair = f"{base}_USDT"
+        # OKX CEX ticker (research source): okx_symbol wins, else symbol; OKX pair uses '-'
+        osym = str(entry.get("okx_symbol") or entry.get("symbol") or sym).upper().strip()
+        opair = f"{osym.replace('-', '').replace('_', '')}-USDT"
         rows.append(
             "<tr>"
             f"<td class='sym'>{html_escape(sym)}</td>"
             f"<td class='addr mono'>{html_escape(addr)}</td>"
             f"<td>{html_escape(chain)}</td>"
+            f"<td class='mono'>{html_escape(pair)}</td>"
+            f"<td class='mono muted'>{html_escape(opair)}</td>"
             f"<td><span class='status {st['cls']}'>{st['label']}</span>{issue}</td>"
             "<td class='actions'>"
             f"<button class='btn-outline' data-act='confirm' data-symbol='{html_escape(sym)}' "
             f"data-address='{html_escape(addr)}' title='标记为已确认（仅当你核实过该地址后）'>确认</button>"
             f"<button class='btn-outline' data-act='edit' data-symbol='{html_escape(sym)}' "
-            f"data-address='{html_escape(addr)}' data-chain='{html_escape(chain)}'>编辑</button>"
+            f"data-address='{html_escape(addr)}' data-chain='{html_escape(chain)}' "
+            f"data-gate='{html_escape(entry.get('gate_symbol') or '')}' "
+            f"data-okx='{html_escape(entry.get('okx_symbol') or '')}'>编辑</button>"
             f"<button class='btn-danger' data-act='delete' data-symbol='{html_escape(sym)}'>删除</button>"
             "</td>"
             "</tr>"
         )
 
     table = (
-        "<table><thead><tr><th>Symbol</th><th>地址</th><th>链</th><th>状态</th><th>操作</th></tr></thead>"
-        f"<tbody>{''.join(rows) or '<tr><td colspan=5 class=empty>暂无自定义代币条目。'
+        "<table><thead><tr><th>Symbol</th><th>地址</th><th>链</th><th>Gate 交易对</th><th>OKX 交易对</th><th>状态</th><th>操作</th></tr></thead>"
+        f"<tbody>{''.join(rows) or '<tr><td colspan=7 class=empty>暂无自定义代币条目。'
         'L1 内建白名单（SOL / USDC / USDT）自动可用，无需录入。</td></tr>'}</tbody></table>"
     )
 
@@ -236,10 +249,20 @@ async def token_edit(request: Request) -> JSONResponse:
     entries = _read_tokens()
     for entry in entries:
         if str(entry.get("symbol", "")).upper() == symbol:
+            addr_changed = entry.get("address", "") != address
             entry["address"] = address
             entry["chain"] = chain
-            entry["confirmed"] = False  # new address ⇒ re-confirm required
+            if addr_changed:
+                entry["confirmed"] = False  # new address ⇒ re-confirm required
             _apply_meta_fields(entry, data)  # min_hold / cost_price
+            # 交易对映射：传值=设置（大写归一化）；传空=清除映射（回退 symbol）
+            for k in ("gate_symbol", "okx_symbol"):
+                if k in data:
+                    v = str(data.get(k) or "").upper().strip()
+                    if v:
+                        entry[k] = v
+                    else:
+                        entry.pop(k, None)
             _write_tokens(entries)
             check = _validate_token_entry(entry, chain=chain)
             if check["ok"]:
