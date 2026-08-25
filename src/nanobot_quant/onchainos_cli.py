@@ -281,6 +281,16 @@ _BUILTIN_TOKENS: dict[str, dict] = {
     "ETH":  {"chain": "ethereum", "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"},
     "BTC":  {"chain": "ethereum", "address": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"},
     "BNB":  {"chain": "bnb",      "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"},
+    # 2026-08-25 扩展：主流币（地址经官方浏览器核对）
+    "AVAX": {"chain": "avalanche", "address": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"},  # WAVAX
+    "LINK": {"chain": "ethereum",  "address": "0x514910771AF9Ca656af840dff83E8264EcF986CA"},
+    "UNI":  {"chain": "ethereum",  "address": "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984"},
+    "AAVE": {"chain": "ethereum",  "address": "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"},
+    "SHIB": {"chain": "ethereum",  "address": "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE"},
+    "PEPE": {"chain": "ethereum",  "address": "0x6982508145454Ce325dDbE47a25d4ec3d2311933"},
+    "ARB":  {"chain": "arbitrum",  "address": "0x912CE59144191C1204E64559FE8253a0e49E6548"},
+    "OP":   {"chain": "optimism",  "address": "0x4200000000000000000000000000000000000042"},
+    "POL":  {"chain": "polygon",   "address": "0x455e53CBB86018Ac2B8092FdCd39d8444aFFC3F6"},  # 原 MATIC 1:1
 }
 
 # Common aliases / full names → canonical symbol (L1 tolerance for

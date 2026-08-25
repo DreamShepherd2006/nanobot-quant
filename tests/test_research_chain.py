@@ -194,6 +194,19 @@ class TestResolveToken:
             assert r["chain"] == chain
             assert r["needs_confirmation"] is False
 
+    def test_builtin_major_tokens_resolved(self):
+        """2026-08-25 扩展：AVAX/LINK/UNI/AAVE/SHIB/PEPE/ARB/OP/POL 均为 L1 内建。"""
+        expect = {
+            "AVAX": "avalanche", "LINK": "ethereum", "UNI": "ethereum",
+            "AAVE": "ethereum", "SHIB": "ethereum", "PEPE": "ethereum",
+            "ARB": "arbitrum", "OP": "optimism", "POL": "polygon",
+        }
+        for sym, chain in expect.items():
+            r = resolve_token(sym)
+            assert r["ok"] is True and r["source"] == "builtin"
+            assert r["chain"] == chain
+            assert r["needs_confirmation"] is False
+
     def test_fake_coin_not_found(self):
         with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
             r = resolve_token("FAKECOIN")
