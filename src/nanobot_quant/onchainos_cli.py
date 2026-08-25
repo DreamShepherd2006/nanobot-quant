@@ -272,10 +272,15 @@ def get_kline(
 WSOL_ADDR = "So11111111111111111111111111111111111111112"
 
 # Well-known Solana tokens (native coin + common trading pairs)
-_BUILTIN_TOKENS: dict[str, str] = {
-    "SOL": WSOL_ADDR,
-    "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+_BUILTIN_TOKENS: dict[str, dict] = {
+    "SOL":  {"chain": "solana",   "address": WSOL_ADDR},
+    "USDC": {"chain": "solana",   "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+    "USDT": {"chain": "solana",   "address": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"},
+    # ETH/BTC/BNB use wrapped variants — the actual on-chain DEX pair
+    # (WETH/WBTC/WBNB) on their native chains; CEX 交易对由 gate_pair 回退 symbol。
+    "ETH":  {"chain": "ethereum", "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"},
+    "BTC":  {"chain": "ethereum", "address": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"},
+    "BNB":  {"chain": "bnb",      "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"},
 }
 
 # Common aliases / full names → canonical symbol (L1 tolerance for
@@ -371,10 +376,11 @@ def resolve_token(
                 "confirmed": True, "category": None, "suggestion": None,
                 "hint": None}
 
-    # L1: builtin (native coin + well-known SPL) — always trusted
+    # L1: builtin (well-known tokens per chain) — always trusted
     if raw in _BUILTIN_TOKENS:
-        return {"ok": True, "address": _BUILTIN_TOKENS[raw],
-                "chain": "solana", "source": "builtin",
+        _b = _BUILTIN_TOKENS[raw]
+        return {"ok": True, "address": _b["address"],
+                "chain": _b["chain"], "source": "builtin",
                 "needs_confirmation": False, "issue": None,
                 "confirmed": True, "category": None, "suggestion": None,
                 "hint": None}
