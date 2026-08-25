@@ -73,12 +73,19 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
     "entry_setup", "exit_setup", "exit_countdown",
 )
 
+#: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25）。
+#: sell_only_profit = 毛浮盈门（0=关闭无条件卖；>0 时 TD 高9 只平毛浮盈 ≥ X 的批次，
+#:   毛口径 (price−entry)/entry 未扣手续费，用户自行计算含成本阈值，如 Gate 双程 0.2% → 0.002）。
+#: td_sell_all = 高9 一次平掉所有满足盈利门的 open 批次（false=每轮只平一个，现有行为）。
+SCENE_ONLY_FIELDS: tuple[str, ...] = ("sell_only_profit", "td_sell_all")
+
 #: 场景卡片字段渲染顺序。
 SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
     "entry_setup", "exit_setup", "exit_countdown",
     "exit_order", "stop_loss_pct", "take_profit_pct",
+    "sell_only_profit", "td_sell_all",
     "td_start_slot", "min_account_value",
 )
 
@@ -96,6 +103,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
+        "sell_only_profit": 0.0, "td_sell_all": False,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "mid": {
@@ -105,6 +113,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
+        "sell_only_profit": 0.0, "td_sell_all": False,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "low": {
@@ -114,6 +123,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
         "entry_setup": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
+        "sell_only_profit": 0.0, "td_sell_all": False,
         "td_start_slot": 1, "min_account_value": 0,
     },
 }
@@ -298,6 +308,16 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 13, "integer": True,
         "label": "平仓 Countdown 阈值", "hint": "场景级覆盖（S3b-2）；留空 = 跟随全局 td_params（策略选择页设置）",
     },
+    "sell_only_profit": {
+        "group": "scene", "min": 0.0, "max": 1.0, "step": 0.001, "std": 0.0,
+        "label": "高9盈利门(毛)",
+        "hint": "TD SELL 高9 只平毛浮盈 ≥ 该值的批次（毛口径=(现价−入场)/入场，未扣手续费）；用户自行计算含成本阈值（如 Gate 双程 0.2% → 0.002）；0=关闭（无条件卖，现有行为）",
+    },
+    "td_sell_all": {
+        "group": "scene", "type": "bool", "std": False,
+        "label": "高9全平",
+        "hint": "true=高9 一次平掉所有满足盈利门的 open 批次；false=每轮只平一个（现有行为）",
+    },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],
         "label": "子账号池", "hint": "本场景使用的 Gate 子账号（slot i ↔ 列表第 i 个；S3 调度分频起消费，S1 仅配置）",
@@ -422,6 +442,12 @@ def _load_scenes(raw: dict) -> dict[str, dict[str, Any]]:
                         scene[fk] = None
                     elif validate_exec_param(fk, fv) is None:
                         scene[fk] = int(fv)
+                elif fk in SCENE_ONLY_FIELDS:
+                    # 2026-08-25：场景专属参数（无扁平键）；空/非法 → 保持默认
+                    if fv in (None, ""):
+                        continue
+                    if validate_exec_param(fk, fv) is None:
+                        scene[fk] = fv
         scenes[sk] = scene
     return scenes
 
@@ -500,6 +526,18 @@ def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
                         label = SCENES[sk]["label"]
                         return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
                     scene[fk] = int(v)
+                continue
+            if fk in SCENE_ONLY_FIELDS:
+                # 2026-08-25：场景专属参数（无扁平键）；空/缺失 → 默认
+                v = src.get(fk)
+                if v in (None, ""):
+                    scene[fk] = DEFAULT_SCENES[sk].get(fk)
+                    continue
+                err = validate_exec_param(fk, v)
+                if err is not None:
+                    label = SCENES[sk]["label"]
+                    return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
+                scene[fk] = v
                 continue
             if fk not in src:
                 continue

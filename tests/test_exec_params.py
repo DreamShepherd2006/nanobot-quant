@@ -13,6 +13,7 @@ from nanobot_quant.exec_params import (
     DEFAULT_SCENES,
     PARAM_META,
     SCENE_FIELD_MAP,
+    SCENE_ONLY_FIELDS,
     SCENE_THRESHOLD_FIELDS,
     load_exec_params,
     save_exec_params,
@@ -97,8 +98,9 @@ def test_meta_covers_all_defaults_and_three_groups():
     flat_keys = set(DEFAULT_EXEC_PARAMS) - {"scenes"}
     scene_flat_keys = set(SCENE_FIELD_MAP.values())  # td_enabled/td_symbols/...
     # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）也是 PARAM_META 键
+    # 2026-08-25：场景专属参数（sell_only_profit/td_sell_all）同样在 PARAM_META
     assert set(PARAM_META) == flat_keys | scene_flat_keys | {"sub_accounts"} | set(
-        SCENE_THRESHOLD_FIELDS)
+        SCENE_THRESHOLD_FIELDS) | set(SCENE_ONLY_FIELDS)
     groups = {m["group"] for m in PARAM_META.values()}
     assert groups == {"risk", "exec", "td", "scene"}
     # td_bars：固定窗口，范围 20-300（onchainos CLI 单次上限）
@@ -836,6 +838,24 @@ def test_save_flat_scene_patch_does_not_poison_globals(tmp_path):
     assert loaded["max_position_pct"] == 0.30
     # 再次加载（模拟后续其他模块消费）仍只反映文件内容，不再被全局污染
     assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
+def test_scene_only_fields_roundtrip(tmp_path):
+    """2026-08-25：场景专属参数（sell_only_profit/td_sell_all）保存→读回。
+
+    无扁平对应键（SCENE_ONLY_FIELDS），保存路径不得走 SCENE_FIELD_MAP 导致 KeyError，
+    读回不得被 int() 化（float/bool 原样）。
+    """
+    res = save_exec_params({"scenes": {"high": {
+        "sell_only_profit": 0.002, "td_sell_all": True,
+    }}})
+    assert res["ok"] is True
+    loaded = load_exec_params()
+    assert loaded["scenes"]["high"]["sell_only_profit"] == 0.002
+    assert loaded["scenes"]["high"]["td_sell_all"] is True
+    # 未保存场景保持默认（0/False），不污染
+    assert loaded["scenes"]["mid"]["sell_only_profit"] == 0.0
+    assert loaded["scenes"]["mid"]["td_sell_all"] is False
+
+
 def test_scene_low_only_enabled_starts_td(tmp_path):
     """2026-08-21 回归：只开 low（high/mid 停用）→ td_enabled=True。
 

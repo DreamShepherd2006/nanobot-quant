@@ -224,6 +224,83 @@ def test_batch_take_profit_hit(tmp_path):
 
 # ── 回收复用 ─────────────────────────────────────────────────────────
 
+# ── 高9 盈利门 + 全平（2026-08-25）──────────────────────────────────
+
+def test_sell_only_profit_zero_unconditional(tmp_path):
+    """sell_only_profit=0（默认）→ 高9 无条件卖（现有行为，浮亏也卖）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=115.0, entry_time="t1")  # 现价 113 → 浮亏
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s.on_trading_iteration()
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+def test_sell_only_profit_blocks_low_profit(tmp_path):
+    """sell_only_profit=0.002（Gate 双程 0.2%）→ 毛浮盈不足（微利）批次被拦截。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=112.9, entry_time="t1")  # 现价 113 → +0.09% < 0.2%
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.002)
+    s.on_trading_iteration()
+    assert "order" not in s._captured  # TD SELL SKIP（浮盈不足）
+    assert bm.slots[0]["status"] == "open"  # 死扛
+
+
+def test_sell_only_profit_blocks_loss(tmp_path):
+    """sell_only_profit>0 → 浮亏批次同样拦截（高9 不亏本卖）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=115.0, entry_time="t1")  # 现价 113 → 浮亏
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.002)
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+
+
+def test_sell_only_profit_passes_when_gate_met(tmp_path):
+    """毛浮盈 ≥ 阈值 → 高9 正常卖。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=105.0, entry_time="t1")  # 现价 113 → +7.6%
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.002)
+    s.on_trading_iteration()
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+def test_td_sell_all_clears_all_slots(tmp_path):
+    """td_sell_all=true → 高9 一次平掉所有盈利批（替代每轮一个）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=100.0, entry_time="t1")
+    bm.open_lot(qty=7, entry_price=101.0, entry_time="t2")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), td_sell_all=True)
+    s.on_trading_iteration()
+    assert bm.slots[0]["status"] == "available"
+    assert bm.slots[1]["status"] == "available"
+
+
+def test_td_sell_all_skips_loss_slots(tmp_path):
+    """td_sell_all=true + sell_only_profit → 亏损批保留、盈利批全平。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=115.0, entry_time="t1")  # 现价 113 → 亏损
+    bm.open_lot(qty=7, entry_price=100.0, entry_time="t2")  # 现价 113 → +13%
+    s = _make_batch_strategy(
+        bm, _bars_with(_sell_closes()), td_sell_all=True, sell_only_profit=0.002)
+    s.on_trading_iteration()
+    assert bm.slots[0]["status"] == "open"       # 亏损批死扛
+    assert bm.slots[1]["status"] == "available"  # 盈利批已平
+
+
+def test_td_sell_all_false_keeps_one_per_round(tmp_path):
+    """td_sell_all=false（默认）→ 每轮只平一个（现有行为）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=100.0, entry_time="t1")
+    bm.open_lot(qty=7, entry_price=101.0, entry_time="t2")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s.on_trading_iteration()
+    assert s._captured["order"][1] == 5  # fifo 只平 slot 1
+    assert bm.slots[0]["status"] == "available"
+    assert bm.slots[1]["status"] == "open"
+
+
 def test_batch_slot_reuse_after_close(tmp_path):
     """平仓后同周期不重建（信号级：slot 释放也不建，等新信号周期）；
     setup 重置后的新周期复用该 slot（2026-08-19 拍板）。"""
