@@ -154,7 +154,7 @@ class TestAdd:
         entries = _read_tokens()
         assert len(entries) == 1
         assert entries[0]["symbol"] == "SOL"
-        assert entries[0]["address"] == onchainos_cli._BUILTIN_TOKENS["SOL"]
+        assert entries[0]["address"] == onchainos_cli._BUILTIN_TOKENS["SOL"]["address"]
         assert entries[0]["chain"] == "solana"
         assert entries[0]["confirmed"] is True
 

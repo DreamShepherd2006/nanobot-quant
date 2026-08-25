@@ -128,7 +128,7 @@ def _render_list() -> str:
         'L1 内建白名单（SOL / USDC / USDT）自动可用，无需录入。</td></tr>'}</tbody></table>"
     )
 
-    builtin = "、".join(_BUILTIN_TOKENS) if isinstance(_BUILTIN_TOKENS, dict) else "SOL / USDC / USDT"
+    builtin = "、".join(_BUILTIN_TOKENS) + "（ETH/BTC/BNB 自动填充 WETH/WBTC/WBNB 地址）"
     return (
         _PAGE_HTML
         .replace("{table_html}", table)
@@ -177,13 +177,14 @@ async def token_add(request: Request) -> JSONResponse:
                  "error": f"{symbol} 是稳定币，无分析价值，不需要登记为 TD 标的"},
                 status_code=400,
             )
-        if chain != "solana":
+        _b = _BUILTIN_TOKENS[symbol]
+        if chain != _b["chain"]:
             return JSONResponse(
                 {"ok": False,
-                 "error": f"{symbol} 内置地址仅在 solana 链，不能登记到 {chain} 链"},
+                 "error": f"{symbol} 内置地址在 {_b['chain']} 链，不能登记到 {chain} 链"},
                 status_code=400,
             )
-        address = _BUILTIN_TOKENS[symbol]
+        address = _b["address"]
         if not address:
             return JSONResponse(
                 {"ok": False, "error": "address 不能为空"}, status_code=400

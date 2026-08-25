@@ -182,9 +182,30 @@ class TestResolveToken:
 
     def test_not_found_with_chain_hint(self):
         with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
-            r = resolve_token("BTC")
+            r = resolve_token("DOGE")
         assert r["ok"] is False and r["category"] == "not_found"
-        assert "no native token on Solana" in r["hint"]
+        assert "tokens.json" in r["hint"]
+
+    def test_builtin_eth_btc_bnb_resolved(self):
+        """ETH/BTC/BNB 现在为 L1 内建（WETH/WBTC/WBNB），直接解析、免确认。"""
+        for sym, chain in (("ETH", "ethereum"), ("BTC", "ethereum"), ("BNB", "bnb")):
+            r = resolve_token(sym)
+            assert r["ok"] is True and r["source"] == "builtin"
+            assert r["chain"] == chain
+            assert r["needs_confirmation"] is False
+
+    def test_builtin_major_tokens_resolved(self):
+        """2026-08-25 扩展：AVAX/LINK/UNI/AAVE/SHIB/PEPE/ARB/OP/POL 均为 L1 内建。"""
+        expect = {
+            "AVAX": "avalanche", "LINK": "ethereum", "UNI": "ethereum",
+            "AAVE": "ethereum", "SHIB": "ethereum", "PEPE": "ethereum",
+            "ARB": "arbitrum", "OP": "optimism", "POL": "polygon",
+        }
+        for sym, chain in expect.items():
+            r = resolve_token(sym)
+            assert r["ok"] is True and r["source"] == "builtin"
+            assert r["chain"] == chain
+            assert r["needs_confirmation"] is False
 
     def test_fake_coin_not_found(self):
         with mock.patch("nanobot_quant.onchainos_cli.search_token", return_value=None):
