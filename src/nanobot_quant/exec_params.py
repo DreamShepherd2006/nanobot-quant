@@ -293,9 +293,8 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "min_position_value": {
         "group": "exec", "min": 0, "max": 1000000, "step": 1, "std": 1.0,
-        "channels": "dex",
         "label": "对账导入阈值(USD)",
-        "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。CEX 通道用 Gate min_quote 动态阈值（≈$3），不读此参数",
+        "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。DEX/CEX 通用（2026-08-26 起 CEX 不再用 Gate min_quote 动态阈值，与交易门槛解耦）",
     },
     "entry_setup": {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,
