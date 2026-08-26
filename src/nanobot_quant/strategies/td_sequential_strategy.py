@@ -296,19 +296,9 @@ class TdSequentialStrategy(Strategy):
 
         共振错峰（2026-08-26）：每轮（心跳）重置全局建仓额度
         （_round_buy_used）——每轮每场景只建 1 笔，共振多标的错轮建仓。
+        波结束判定在 _activate_scene 开头（回测 driver 每 bar 亦调用，
+        语义与实盘自动一致）。
         """
-        # 共振错峰（2026-08-26 晚拍板）：额度跨轮保持（波锁）——
-        # LINK 建仓后其他标的（无论是否首次到 9）都被拦，等各自 setup
-        # 重置。波结束（所有标的离开买9信号区）时清额度 + 清 _wave_tried。
-        self._round_buy_used = getattr(self, "_round_buy_used", {})
-        last_setup = getattr(self, "_last_setup", {})
-        for scene, prev in last_setup.items():
-            if not any(v >= self._td_params.get("entry_setup", 9)
-                       for v in prev.values()):
-                self._round_buy_used[scene] = False
-                self._wave_tried = {}
-        if not hasattr(self, "_wave_tried"):
-            self._wave_tried: dict[tuple, bool] = {}
         # ── 链上补确认（2026-08-11）────────────────────────────────
         # 每轮迭代先处理 pending 卖出/买入的链上确认（SUCCESS 补台账、
         # ERROR/CANCELLED 记失败、PENDING 继续等），再评估新信号。
@@ -518,13 +508,25 @@ class TdSequentialStrategy(Strategy):
         2026-08-21（B1）：记录当前场景名，供 _record/_evaluate_symbol
         写 LIVE_STATE 与事件时标记来源场景。
 
-        2026-08-26（共振错峰）：场景每轮执行开始时由 on_trading_iteration
-        做波结束判定（该场景所有标的离开买9信号区 → 清额度 + 清 _wave_tried），
-        此处不再无条件重置——额度跨轮保持（波锁），LINK 建仓后其他标的
-        无论是否首次到 9 都被拦，等各自 setup 重置。回测 driver 每 bar
-        调用本方法，语义与实盘自动一致。
+        2026-08-26（共振错峰）：场景激活时做波结束判定——该场景所有标的
+        离开买9信号区（setup < entry_setup）→ 清额度 + 清 _wave_tried。
+        额度跨轮保持（波锁），LINK 建仓后其他标的无论是否首次到 9 都被
+        拦，等各自 setup 重置；回测 driver 每 bar 调用本方法，语义与实盘
+        自动一致（不可把判定放 on_trading_iteration——回测不走该路径）。
         """
         self._current_scene = name
+        # 共振错峰（2026-08-26 晚拍板）：波结束判定——上一轮该场景所有
+        # 标的离开买9信号区 → 新波，清额度 + 清 _wave_tried。回测 driver
+        # 每 bar 激活场景亦执行，与实盘语义一致。
+        self._round_buy_used = getattr(self, "_round_buy_used", {})
+        last_setup = getattr(self, "_last_setup", {})
+        prev = last_setup.get(name, {})
+        if not any(v >= self._td_params.get("entry_setup", 9)
+                   for v in prev.values()):
+            self._round_buy_used[name] = False
+            self._wave_tried = {}
+        if not hasattr(self, "_wave_tried"):
+            self._wave_tried: dict[tuple, bool] = {}
         p = rt.get("params") or {}
         self.symbols = list(p.get("symbols") or [])
         self.quantity_mode = str(p.get("quantity_mode") or "fixed")
