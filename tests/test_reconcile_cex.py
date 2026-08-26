@@ -83,10 +83,11 @@ def test_cex_reconcile_imports_natural_position(monkeypatch):
     assert abs(open_lots[0]["lot"]["entry_price"] - 74.14) < 1e-6  # gate ticker 兜底
 
 
-def test_cex_reconcile_skips_dust_below_min_quote(monkeypatch):
-    """持仓价值 < min_quote $3 → 不导入、slot 保持 available（P2-A）。
+def test_cex_reconcile_skips_dust_below_min_position_value(monkeypatch):
+    """持仓价值 < min_position_value（$1，2026-08-26 起导入阈值参数）→
+    不导入、slot 保持 available。
 
-    真实样本：gate_bot1 RENDER 0.0065（≈$0.01）远低于 $3。
+    真实样本：gate_bot1 RENDER 0.0065（≈$0.01）远低于 $1。
     """
     bm = _make_bm()
     runner = _make_runner(_creds(), _bal(), monkeypatch)
@@ -162,11 +163,12 @@ def test_cex_reconcile_empty_sub_balances(monkeypatch, capsys):
 
 
 def test_cex_reconcile_imports_multiple_slots(monkeypatch):
-    """多子账号各有持仓 → 各自导入对应 slot。"""
+    """多子账号各有持仓 → 各自导入对应 slot（$1.48 ≥ min_position_value $1 导入；
+    $0.37 dust < $1 跳过）。"""
     bm = _make_bm()
     balances = [
         {"uid": "59175220",
-         "available": {"CRCLX": "0.02"}, "locked": {}},        # $1.48 < $3 dust
+         "available": {"CRCLX": "0.005"}, "locked": {}},        # $0.37 dust
         {"uid": "59175258",
          "available": {"CRCLX": "0.112069"}, "locked": {}},    # $8.31 导入
     ]
@@ -174,7 +176,7 @@ def test_cex_reconcile_imports_multiple_slots(monkeypatch):
     runner._reconcile_import_cex(bm, "CRCLX", _tokens())
     open_lots = bm.open_slots()
     assert len(open_lots) == 1
-    assert open_lots[0]["slot"] == 2  # bot1 的 $1.48 dust 不占 slot
+    assert open_lots[0]["slot"] == 2  # bot1 的 $0.37 dust 不占 slot
 
 
 def test_cex_reconcile_matches_by_gate_symbol(monkeypatch):
@@ -191,11 +193,15 @@ def test_cex_reconcile_matches_by_gate_symbol(monkeypatch):
     assert open_lots[0]["slot"] == 2
 
 
-def test_cex_reconcile_dynamic_min_quote(monkeypatch):
-    """min_quote 从交易对规则动态拉取（非硬编码 $3），低于阈值即跳过。"""
+def test_cex_reconcile_dynamic_min_position_value(monkeypatch):
+    """导入阈值 = min_position_value（exec_params 参数，2026-08-26 起）——
+    设 $10 → $8.31 持仓 < $10 → 跳过导入（阈值可配，不再绑定 Gate min_quote）。"""
     bm = _make_bm()
-    # 0.112069 × 74.14 ≈ $8.31 ≥ $10? 否 → 跳过
-    runner = _make_runner(_creds(), _bal(), monkeypatch, min_quote="10")
+    monkeypatch.setattr(
+        "nanobot_quant.td_live._dust_threshold",
+        lambda: 10.0,
+    )
+    runner = _make_runner(_creds(), _bal(), monkeypatch)
     runner._reconcile_import_cex(bm, "CRCLX", _tokens())
     assert bm.open_slots() == []
 
@@ -253,3 +259,25 @@ def test_prepare_batches_heals_dex_uuid_ledger(monkeypatch, tmp_path):
     bm = _TdLiveRunner()._prepare_batches(2, "CRCLX", channel="gate")
     assert [s["account_id"] for s in bm.slots] == ["gate_bot1", "gate_bot2"]
     assert len(moved) == 1 and ".dex-uuid.bak." in moved[0][1]
+
+
+def test_cex_reconcile_imports_between_1_and_3_usd(monkeypatch):
+    """2026-08-26 用户拍板：导入阈值与交易门槛解耦——价值 ≥ min_position_value
+    （$1）的持仓即使 < Gate min_quote（$3）也导入台账（可见/可管理），
+    卖出时由 B 方案（<min_quote 释放台账）兜底不卡 slot。
+
+    真实样本：gate_bot3 BNB 0.003996 @ ≈$696 ≈ $2.78（< $3 但 ≥ $1 → 导入）。
+    """
+    bm = _make_bm("BNB", names=("gate_bot1", "gate_bot2"))
+    balances = [
+        {"uid": "59175220", "available": {}, "locked": {}},
+        {"uid": "59175258", "available": {"BNB": "0.003996"}, "locked": {}},
+    ]
+    runner = _make_runner(_creds(), balances, monkeypatch, price=696.0)
+    runner._reconcile_import_cex(
+        bm, "BNB", [{"symbol": "BNB", "chain": "bnb", "confirmed": True}]
+    )
+    open_lots = bm.open_slots()
+    assert len(open_lots) == 1
+    assert open_lots[0]["slot"] == 2
+    assert abs(open_lots[0]["lot"]["qty"] - 0.003996) < 1e-9
