@@ -43,7 +43,11 @@ _PAGE_HTML = _load_template("token_page.html")
 # Chains supported by the on-chain execution layer (keep in sync with the
 # resolve_token chain parameter; free-form chains fall back to validation
 # defaults).
-_CHAINS = ("solana", "xlayer", "ethereum")
+_CHAINS = (
+    "solana", "xlayer", "ethereum",
+    # 2026-08-26：补齐 L1 内建白名单主链（AVAX/ARB/OP/POL）
+    "bnb", "avalanche", "arbitrum", "optimism", "polygon",
+)
 
 
 # ── tokens.json storage (shared with the MCP pipeline) ─────────────

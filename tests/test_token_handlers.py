@@ -22,11 +22,38 @@ import pytest
 
 from nanobot_quant import onchainos_cli
 from nanobot_quant.token_handlers import (
+    _CHAINS,
     _read_tokens,
     _write_tokens,
     register_token_routes,
 )
 from nanobot_quant.tools import tools_research_chain
+
+
+class TestBuiltinChainsCoverage:
+    """L1 内建白名单的主链必须都能在代币页链下拉里选到。"""
+
+    def test_builtin_chains_in_chaIns(self):
+        from nanobot_quant.onchainos_cli import _BUILTIN_TOKENS
+
+        missing = sorted(
+            {b["chain"] for b in _BUILTIN_TOKENS.values()} - set(_CHAINS)
+        )
+        assert not missing, f"代币页链下拉缺少内置币主链: {missing}"
+
+    def test_page_dropdown_has_builtin_chains(self):
+        import pathlib
+
+        from nanobot_quant.onchainos_cli import _BUILTIN_TOKENS
+
+        html = pathlib.Path(__file__).resolve().parents[1] / "src" / "nanobot_quant" / "token_page.html"
+        text = html.read_text()
+        # 只取新增表单的第一个下拉（f-chain）
+        f_chain = text.split('<select id="f-chain">', 1)[1].split("</select>", 1)[0]
+        missing = sorted(
+            {b["chain"] for b in _BUILTIN_TOKENS.values()} - {l.strip().split('"')[1] for l in f_chain.splitlines() if "<option" in l}
+        )
+        assert not missing, f"f-chain 下拉缺少内置币主链: {missing}"
 
 SOLANA_ADDR = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 EVM_ADDR = "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8"
