@@ -469,3 +469,60 @@ class TestCancelOrder:
         b = _broker()
         b.cancel_order(SimpleNamespace(identifier="nope"))
         assert state["calls"] == []
+
+class TestBuyAmountPrecisionFloor:
+    """2026-08-26：Gate 市价单 amount_precision 截断（实测 ETH 下单
+    0.00126091 实际成交 0.0012、退回 $0.146）——买入前按精度向下取整：
+    ① 预检用取整后金额（防「截断后 < min_quote 卖出必卡 slot」）
+    ② 下单金额用取整后数量×现价（避免 Gate 内部二次截断浪费金额）。"""
+
+    # ETH_USDT: amount_precision=4（2026-08-26 实盘日志 filled=0.0012 确认）
+    _PAIR_META_ETH = {
+        "id": "ETH_USDT", "base": "ETH", "quote": "USDT",
+        "trade_status": "tradable", "amount_precision": 4,
+        "precision": 2, "min_quote_amount": 3,
+    }
+
+    @pytest.fixture(autouse=True)
+    def _clear_pair_meta_cache(self):
+        CexBroker._pair_meta_cache.clear()
+        yield
+        CexBroker._pair_meta_cache.clear()
+
+    def test_buy_floors_to_precision_before_min_quote(self, monkeypatch):
+        """3.1U ETH（qty=0.00126091）→ 取整 0.0012 → $2.95 < $3 → fail-closed
+        拒单——不产生「截断后卖出必卡」的仓位（2026-08-25 实盘卡 slot 案例）。"""
+        state = _fake_sdk(monkeypatch, [
+            self._PAIR_META_ETH,  # get_currency_pair
+        ])
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 2461.4)
+        order = _mk_order(quantity=0.00126091, symbol="ETH")
+        out = b._submit_order(order)
+        assert out.filled is False
+        assert "below min order amount 3 USDT" in out.error
+        assert "after 4-dec precision floor" in out.error
+        # 拒单只查了交易对规则，未发单
+        assert len(state["calls"]) == 1
+        assert state["calls"][0][0] == "pair_meta"
+
+    def test_buy_quote_uses_floored_qty(self, monkeypatch):
+        """3.5U ETH（qty=0.0014239）→ 取整 0.0014 → 下单金额 0.0014×2461.4=3.446
+        （precision=2 → "3.45"）；filled 写入 custom_params.cex.filled。"""
+        state = _fake_sdk(monkeypatch, [
+            self._PAIR_META_ETH,  # get_currency_pair
+            {"id": "123", "status": "closed", "left": "0",
+             "filled_amount": "0.0014", "avg_deal_price": "2461.6"},  # create
+            {"id": "123", "status": "closed", "left": "0",
+             "filled_amount": "0.0014", "avg_deal_price": "2461.6"},  # query
+        ])
+        b = _broker()
+        monkeypatch.setattr(b, "_price_of", lambda symbol: 2461.4)
+        order = _mk_order(quantity=0.0014239, symbol="ETH")
+        out = b._submit_order(order)
+        assert out.filled is True
+        label, args, kwargs = state["calls"][1]
+        assert label == "create" and args[3] == "buy"
+        assert args[4] == "3.45"
+        # 实际成交数量回填（amount_precision 截断后）——台账据此建仓
+        assert out.custom_params["cex"]["filled"] == 0.0014

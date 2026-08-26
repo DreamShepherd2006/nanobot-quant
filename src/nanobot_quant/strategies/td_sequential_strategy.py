@@ -941,21 +941,25 @@ class TdSequentialStrategy(Strategy):
                         continue
                     order, qty = ret
                     if order.is_filled():
-                        # 链上已确认成交 → 建仓
+                        # 链上已确认成交 → 建仓。CEX 用实际成交 filled（Gate
+                        # amount_precision 截断后 filled < 计划量，2026-08-26
+                        # 实测 ETH 0.00126091→0.0012）——台账记实际到账，
+                        # 否则账实差 → 卖出缩量 → min_quote 卡 slot。
+                        lot_qty = self._cex_filled(order) or qty
                         self.batch_manager.open_lot(
-                            slot=slot["slot"], qty=qty, entry_price=price,
+                            slot=slot["slot"], qty=lot_qty, entry_price=price,
                         )
                         # 交易状态变更立即落盘（重启不丢台账）
                         self.batch_manager.save()
                         self.logger.info(
                             f"TD BATCH LONG | symbol={self.symbol} slot={slot['slot']} "
-                            f"price={price:.2f} qty={qty} "
+                            f"price={price:.2f} qty={lot_qty} "
                             f"setup_buy={setup_buy} score={score:.1f}"
                         )
                         self._record(
                             "LONG",
-                            f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
-                            slot=slot["slot"], qty=qty, price=price,
+                            f"slot={slot['slot']} qty={lot_qty:.6g} price={price:.2f}",
+                            slot=slot["slot"], qty=lot_qty, price=price,
                             direction="buy", status="ok",
                             actual_price=self._cex_avg_price(order),
                             tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
@@ -1695,7 +1699,11 @@ class TdSequentialStrategy(Strategy):
             )
             return
         if status == "filled" and filled > 0:
-            qty = float(info.get("qty") or filled)
+            # 必须用实际成交 filled，不能用计划量（info.qty）——Gate 市价单
+            # amount_precision 截断后 filled < 计划量（2026-08-26 实测 ETH
+            # 0.00126091→0.0012），用计划量台账虚高 → 卖出缩量 → min_quote
+            # 卡 slot。
+            qty = float(filled)
             bm = self._batch_managers.get(symbol) or self.batch_manager
             bm.open_lot(slot=slot_id, qty=qty,
                         entry_price=float(info.get("price") or avg or 0))
@@ -1955,6 +1963,20 @@ class TdSequentialStrategy(Strategy):
         avg = cex.get("avg_price")
         try:
             return float(avg) if avg not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            return None
+
+    def _cex_filled(self, order) -> float | None:
+        """CEX 订单实际成交数量（Gate filled，含 amount_precision 截断）。
+
+        2026-08-26：Gate 市价单按金额成交、服务端换算 base 时按
+        amount_precision 向下截断（ETH 0.00126091→0.0012）——台账必须记
+        实际成交而非计划量，否则账实差 → 卖出缩量 → min_quote 卡 slot。
+        """
+        cex = (getattr(order, "custom_params", None) or {}).get("cex") or {}
+        f = cex.get("filled")
+        try:
+            return float(f) if f not in (None, "", 0) else None
         except (TypeError, ValueError):
             return None
 
