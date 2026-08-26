@@ -488,7 +488,9 @@ def test_pool_single_hit_only_buys_signal_symbol(tmp_path):
 
 
 def test_pool_both_hit_processed_in_pool_order(tmp_path):
-    """同 bar 双标的 Setup 9 → 按池子顺序（=优先级）全部处理，各自台账。"""
+    """共振错峰（2026-08-26）：同 bar 双标的 Setup 9 → 每轮每场景只建 1 笔——
+    池子顺序（=优先级）先者（AAA）建仓，后者（BBB）被全局额度拦截并打
+    denied 标记（等自己 setup 重置后的新周期才能建）。"""
     bm_a = _make_bm(tmp_path)
     bm_b = _make_bm(tmp_path)
     managers = {"AAA": bm_a, "BBB": bm_b}
@@ -499,10 +501,11 @@ def test_pool_both_hit_processed_in_pool_order(tmp_path):
     )
     s.on_trading_iteration()
     orders = captured.get("orders", [])
-    assert len(orders) == 2
-    # 池子顺序 AAA → BBB：AAA 先执行
+    assert len(orders) == 1  # 全局额度：本轮只建 1 笔
+    # 池子顺序 AAA → BBB：AAA 先执行建仓；BBB 被拦（denied）
     assert len(bm_a.open_slots()) == 1
-    assert len(bm_b.open_slots()) == 1
+    assert len(bm_b.open_slots()) == 0
+    assert s._denied_cycle.get("BBB") is True, "BBB 应打本周期错过标记"
 
 
 def test_pool_silent_when_all_hold(tmp_path):
