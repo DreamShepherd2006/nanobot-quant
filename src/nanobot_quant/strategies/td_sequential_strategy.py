@@ -2213,10 +2213,17 @@ class TdSequentialStrategy(Strategy):
             return 0.0
 
     def _cex_submit(self, slot: dict, req) -> Any:
-        """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。"""
-        return self._cex_slot_broker(slot).submit_order(
-            self.create_order(req.asset, req.quantity, req.action)
-        )
+        """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。
+
+        回测退出原因透传：SELL 的 req.reason（TD SELL / 止盈 / 止损）写进
+        order.custom_params["exit_reason"]，BacktestBroker 收进 _tracked →
+        fills_detail.reason；实盘 CexBroker 忽略该键，无副作用。
+        """
+        order = self.create_order(req.asset, req.quantity, req.action)
+        if req.action == "sell" and req.reason:
+            order.custom_params = order.custom_params or {}
+            order.custom_params["exit_reason"] = req.reason
+        return self._cex_slot_broker(slot).submit_order(order)
 
     def _buy_on_slot_cex(self, slot: dict, price: float, reason: str):
         """CEX 通道 BUY（Step 1）：子账号独立 key，无 wallet_switch；

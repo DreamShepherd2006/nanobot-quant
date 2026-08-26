@@ -209,7 +209,8 @@ class BacktestBroker(Broker):
                 del self._positions[symbol]
             proceeds = quantity * px * (1.0 - slippage) * (1.0 - self._fee_rate)
             self._cash += proceeds
-            avg = px
+            # 成交价（对齐实盘 avg_deal_price）：模拟滑点后价格，不含手续费
+            avg = px * (1.0 - slippage)
 
         oid = f"bt{self._order_seq}"
         self._order_seq += 1
@@ -217,7 +218,7 @@ class BacktestBroker(Broker):
         order.custom_params = order.custom_params or {}
         order.custom_params["cex"] = {
             "pair": pair,
-            "avg_price": avg,  # 含手续费摊薄——策略 _cex_avg_price 读它算滑点
+            "avg_price": avg,  # 含手续费摊薄（买）/ 滑点后成交价（卖）——策略 _cex_avg_price 读它算滑点
         }
         order.set_filled()
         order.status = "fill"  # lumibot v4.5.78 set_filled 不更新 status，手动同步
@@ -227,7 +228,9 @@ class BacktestBroker(Broker):
             "side": side,
             "quantity": quantity,
             "filled": quantity,
+            "strategy_price": px,  # 信号 bar 收盘价（策略价）
             "avg_price": avg,
+            "reason": (order.custom_params or {}).get("exit_reason"),
             "ts": time.time(),
         }
         return order

@@ -55,7 +55,8 @@ def _make_strategy(**params) -> TdSequentialStrategy:
 
     def _create_order(asset, quantity, action):
         captured["order"] = (asset, quantity, action)
-        return type("Order", (), {"identifier": "mock-id", "quantity": quantity})()
+        # 镜像 lumibot v4.5.78 Order：custom_params 默认 None
+        return type("Order", (), {"identifier": "mock-id", "quantity": quantity, "custom_params": None})()
 
     s.create_order = _create_order
     s.submit_order = lambda order: captured.setdefault("submitted", order)
@@ -768,3 +769,40 @@ def test_resonance_no_quota_without_scene():
     assert getattr(s, "_round_buy_used", False) is False
     s._evaluate_symbol()
     assert "order" in s._captured, "未激活场景不限制建仓"
+
+
+def test_cex_submit_sell_carries_exit_reason():
+    """CEX 分批卖出退出原因透传：_cex_submit 把 req.reason 写进
+    order.custom_params["exit_reason"]（BacktestBroker → fills_detail.reason）。
+    此前 CEX 分批卖出直连子账号 broker 下单，绕过 PortfolioEngine.submit_order，
+    exit_reason 丢失（回测 EXIT 原因列空白）。BUY 不写（LONG 无原因）。"""
+    from nanobot_quant.portfolio.order_schema import OrderRequest
+
+    s = _make_strategy()
+    captured: dict = {}
+
+    class _Broker:
+        def submit_order(self, order):
+            captured["order"] = order
+            return order
+
+    s._cex_slot_broker = lambda slot: _Broker()
+    s.create_order = lambda asset, quantity, action: type(
+        "Order",
+        (),
+        {"identifier": "oid", "quantity": quantity, "custom_params": None},
+    )()
+
+    req = OrderRequest(
+        asset="CRCLX", action="sell", quantity=0.04, price=80.0,
+        reason="take_profit: pnl_net=1.18%",
+    )
+    s._cex_submit({"slot": 1}, req)
+    assert captured["order"].custom_params["exit_reason"] == "take_profit: pnl_net=1.18%"
+
+    # BUY（reason 空）不写 exit_reason，与实盘 LONG 无原因列一致
+    s._cex_submit(
+        {"slot": 1},
+        OrderRequest(asset="CRCLX", action="buy", quantity=0.04, price=80.0, reason=""),
+    )
+    assert "exit_reason" not in (captured["order"].custom_params or {})

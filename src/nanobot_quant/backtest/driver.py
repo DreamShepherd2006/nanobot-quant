@@ -276,6 +276,7 @@ class BacktestDriver:
         bars_total: int | None,
         ts: str | None,
         fills: int,
+        fills_detail: list[dict] | None = None,
     ) -> None:
         """运行中进度写入（WebUI/MCP 轮询展示用，失败静默不阻塞回测）。
 
@@ -299,6 +300,7 @@ class BacktestDriver:
                 "pct": pct,
                 "ts": ts,
                 "fills": fills,
+                "fills_detail": fills_detail or [],  # 已成交明细（运行中实时可见）
             },
         }
         try:
@@ -391,11 +393,15 @@ class BacktestDriver:
                         {
                             "ts": ts.isoformat(),
                             "slot": slot_no,
+                            "scene": self.scene_name,
                             "symbol": meta.get("symbol"),
                             "pair": meta.get("pair"),
                             "side": meta.get("side"),
                             "quantity": meta.get("quantity"),
+                            "strategy_price": meta.get("strategy_price"),
                             "avg_price": meta.get("avg_price"),
+                            "reason": meta.get("reason"),
+                            "state": "LONG" if meta.get("side") == "buy" else "EXIT",
                         }
                     )
             # 净值快照（mark-to-market，各 slot 独立账本）
@@ -414,6 +420,7 @@ class BacktestDriver:
                 total_bars,
                 ts.isoformat(),
                 fills_now,
+                fills_detail=fills_detail,
             )
 
         # 成交记录（_tracked 是累计列表，结束时统计一次）
