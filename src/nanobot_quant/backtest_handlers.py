@@ -169,7 +169,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 symbols=symbols,
                 start=data.get("start") or None,
                 end=data.get("end") or None,
-                initial_quote=float(data.get("initial_quote") or 100),
+                initial_quote=float(data.get("initial_quote") or 1000),
                 batches=int(data["batches"]) if data.get("batches") else None,
                 slippage=float(data["slippage"]) if data.get("slippage") else None,
             )
