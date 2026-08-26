@@ -618,3 +618,50 @@ def test_write_account_funds_uid_missing(monkeypatch):
     funds = td_live_state.LIVE_STATE["funds"]["high"]
     assert funds[0]["usdt_available"] == 3.98
     assert funds[1]["usdt_available"] == 0.0  # uid 缺失 → 0（不崩）
+
+def test_write_positions_state_display_min_filter(monkeypatch):
+    """持仓显示阈值（2026-08-26 用户拍板：显示阈值独立于交易门槛）：
+    value < position_display_min_usd → 不写入 LIVE_STATE（dust 不刷屏）；
+    ≥ 阈值正常显示；台账本身不受影响。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.batches import BatchManager
+
+    monkeypatch.setattr(td_live_state, "LIVE_STATE", {
+        "running": False, "next_iteration": None, "updated_at": "",
+        "strategy_variant": "", "symbols": {}, "positions": {},
+    })
+    s = _make_strategy()
+    s._current_scene = "high"
+    s.parameters = dict(s.parameters, position_display_min_usd=1.0)
+    bm = BatchManager("CRCLX", ["acc-1", "acc-2"], path="/tmp/test-pos3.json")
+    bm.open_lot(qty=0.005, entry_price=87.99, slot=1)   # $0.44 < $1 → 不显示
+    bm.open_lot(qty=0.045, entry_price=87.99, slot=2)   # $3.99 ≥ $1 → 显示
+    s.batch_managers = {"CRCLX": bm}
+    s._batch_managers = None
+    s._cex_price_of = lambda sym: 88.65
+    s._write_positions_state()
+
+    rows = td_live_state.LIVE_STATE["positions"]["high"]["CRCLX"]
+    assert [r["slot"] for r in rows] == [2]
+    # 台账不受影响——两个批次都在（显示过滤不影响交易）
+    assert len(bm.open_slots()) == 2
+
+
+def test_load_batch_snapshot_display_min_filter(monkeypatch):
+    """离线快照显示阈值（TD 未运行时页面回退读台账）：成本价值
+    （entry_price × qty）< position_display_min_usd → 不返回（dust 不显示）。"""
+    from nanobot_quant import td_table_handlers
+    from nanobot_quant.batches import BatchManager
+
+    bm = BatchManager("CRCLX", ["acc-1", "acc-2"], path="/tmp/snap-test.json")
+    bm.open_lot(qty=0.005, entry_price=87.99, slot=1)   # $0.44 < $1 → 过滤
+    bm.open_lot(qty=0.045, entry_price=87.99, slot=2)   # $3.96 ≥ $1 → 显示
+    monkeypatch.setattr(BatchManager, "load", staticmethod(lambda **kw: bm))
+    monkeypatch.setattr(
+        "nanobot_quant.td_table_handlers.load_exec_params",
+        lambda: {"execution_channel": "gate",
+                 "position_display_min_usd": 1.0,
+                 "scenes": {"high": {"symbols": ["CRCLX"]}}},
+    )
+    rows = td_table_handlers._load_batch_snapshot("high")
+    assert [r["slot"] for r in rows] == [2]

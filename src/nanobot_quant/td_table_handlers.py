@@ -703,6 +703,8 @@ def _load_batch_snapshot(sc: str) -> list[dict]:
         _ep = load_exec_params() or {}
         channel = str(_ep.get("execution_channel") or "okx_dex")
         sc_cfg = (_ep.get("scenes") or {}).get(sc)
+        # 离线无实时价：用成本价值（entry_price × qty）做显示阈值过滤
+        display_min = float(_ep.get("position_display_min_usd") or 0.0)
     except Exception:  # noqa: BLE001
         return []
     if not sc_cfg:
@@ -718,6 +720,10 @@ def _load_batch_snapshot(sc: str) -> list[dict]:
             lot = s.get("lot")
             if lot is None:
                 continue
+            if display_min > 0:
+                value = float(lot.get("qty") or 0) * float(lot.get("entry_price") or 0)
+                if value < display_min:
+                    continue  # dust 批次不显示（台账仍在）
             out.append({
                 "symbol": sym,
                 "slot": s["slot"],

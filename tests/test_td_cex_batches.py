@@ -753,3 +753,31 @@ def test_cex_confirm_buy_uses_filled_not_planned(tmp_path):
     s._confirm_cex_buy(1, s._pending_buys[1])
     lots = bm.open_slots()
     assert lots and lots[0]["lot"]["qty"] == pytest.approx(0.0012)
+
+def test_cex_sell_releases_below_min_quote(tmp_path):
+    """B 方案（2026-08-26 用户拍板）：卖出价值 < Gate min_quote → 释放台账
+    不卖（服务端拒单 → EXIT_FAIL → 台账 open 卡 slot，2026-08-25 ETH
+    $2.96 实证）——EXIT_RELEASE 记录、_cex_submit 不调用。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    bm.open_lot(slot=1, qty=0.0012, entry_price=2461.6)   # $2.95 < $3
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex")
+    submitted = []
+    s._cex_submit = lambda slot, req: submitted.append(req) or _mock_order()
+    s._cex_slot_token_balance = lambda slot, symbol: 0.0012
+    s._cex_min_quote = lambda symbol: 3.0
+    s._sell_lot_cex(bm.slots[0], 2461.0, {"recommendation": "SELL"}, "test")
+    assert submitted == []          # 未发单
+    assert bm.open_slots() == []    # 台账已释放（仓位留在子账号）
+
+
+def test_cex_sell_above_min_quote_still_submits(tmp_path):
+    """B 方案不误伤：卖出价值 ≥ min_quote → 正常下单（预检放行）。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    bm.open_lot(slot=1, qty=0.0014, entry_price=2461.6)   # $3.45 ≥ $3
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex")
+    submitted = []
+    s._cex_submit = lambda slot, req: submitted.append(req) or _mock_order()
+    s._cex_slot_token_balance = lambda slot, symbol: 0.0014
+    s._cex_min_quote = lambda symbol: 3.0
+    s._sell_lot_cex(bm.slots[0], 2463.0, {"recommendation": "SELL"}, "test")
+    assert len(submitted) == 1      # 正常下单（预检放行，B 方案不误伤）

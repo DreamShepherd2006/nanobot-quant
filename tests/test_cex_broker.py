@@ -526,3 +526,10 @@ class TestBuyAmountPrecisionFloor:
         assert args[4] == "3.45"
         # 实际成交数量回填（amount_precision 截断后）——台账据此建仓
         assert out.custom_params["cex"]["filled"] == 0.0014
+    def test_min_quote_for_returns_pair_min_quote(self, monkeypatch):
+        """min_quote_for：从交易对规则缓存返回 min_quote_amount（2026-08-26
+        B 方案——策略卖出前预检用，价值 < min_quote 释放台账不卖）。"""
+        state = _fake_sdk(monkeypatch, [self._PAIR_META_ETH])
+        b = _broker()
+        assert b.min_quote_for("ETH") == 3.0
+        assert state["calls"][0][0] == "pair_meta"
