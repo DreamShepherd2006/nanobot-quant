@@ -51,7 +51,8 @@ def _make_strategy(**params) -> TdSequentialStrategy:
 
     def _create_order(asset, quantity, action):
         captured["order"] = (asset, quantity, action)
-        return type("Order", (), {"identifier": "mock-id", "quantity": quantity})()
+        # 镜像 lumibot v4.5.78 Order：custom_params 默认 None
+        return type("Order", (), {"identifier": "mock-id", "quantity": quantity, "custom_params": None})()
 
     s.create_order = _create_order
     s.submit_order = lambda order: captured.setdefault("submitted", order)

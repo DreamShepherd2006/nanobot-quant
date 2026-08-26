@@ -42,6 +42,7 @@
   th:first-child, td:first-child { text-align:left; }
   .roi-pos { color:#2e7d32; font-weight:700; }
   .roi-neg { color:#c62828; font-weight:700; }
+  .sl-neg { color:#c62828; }
   .run-row { display:flex; align-items:center; gap:10px; padding:6px 0; border-top:1px solid #f5f5f5; font-size:.88em; }
   .run-row:first-of-type { border-top:none; }
   .run-id { font-family:monospace; color:#1565c0; cursor:pointer; }
@@ -250,10 +251,7 @@ function renderResult(res, runId) {
   const roi = res.roi;
   const roiCls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
   const fills = res.fills_detail || [];
-  const rows = fills.map(f =>
-    `<tr><td>${fmtTs(f.ts)}</td><td>${f.slot}</td><td>${f.symbol || "—"}</td>` +
-    `<td>${f.side === "buy" ? "🟢 买" : "🔴 卖"}</td><td>${fmtN(f.quantity, 6)}</td><td>${fmtN(f.avg_price, 4)}</td></tr>`
-  ).join("");
+  const rows = fills.map(fillRow).join("");
   box.innerHTML = `
     <div class="kpis">
       <div class="kpi"><div class="v">${fmtN(res.initial_total, 2)} USDT</div><div class="k">初始资金（${res.batches} slot × ${fmtN(res.initial_quote, 2)}）</div></div>
@@ -266,8 +264,8 @@ function renderResult(res, runId) {
       场景 <code>${res.scene}</code> · 标的 <code>${(res.symbols || []).join(", ")}</code> ·
       周期 <code>${res.timestep}</code> · ${fmtTs(res.start_ts)} → ${fmtTs(res.end_ts)}
     </div>
-    <h3 style="font-size:.95em;margin:8px 0 2px;">成交明细</h3>
-    ${rows ? `<table><thead><tr><th>时间</th><th>slot</th><th>标的</th><th>方向</th><th>数量</th><th>成交价</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>'}
+    ${fillsBox(fills)}
+    ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
 }
 
@@ -292,6 +290,7 @@ function renderProgress(runId, prog) {
     <div class="banner msg show">⏳ run_id=${runId} 回测运行中</div>
     ${bar}
     <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
+    ${fillsBox(prog.fills_detail, `运行中已成交 ${prog.fills || 0} 笔，实时更新`)}
   `;
 }
 
@@ -333,6 +332,28 @@ async function loadRun(runId) {
 
 initForm();
 loadRuns();
+
+// 成交明细行（实盘交易记录口径：时间/场景/标的/方向/数量/策略价/成交价/滑点/slot/状态/原因）
+function fillRow(f) {
+  const sp = f.strategy_price;
+  const sl = sp ? ((f.avg_price - sp) / sp * 100) : null;
+  const slTxt = sl === null ? "—" : (sl >= 0 ? "+" : "") + sl.toFixed(2) + "%";
+  const reason = f.reason ? f.reason + " " : "";
+  return `<tr><td>${fmtTs(f.ts)}</td><td>${f.scene || "—"}</td><td>${f.symbol || "—"}</td>` +
+    `<td>${f.side === "buy" ? "🟢 买" : "🔴 卖"}</td><td>${fmtN(f.quantity, 6)}</td>` +
+    `<td>${sp ? fmtN(sp, 4) : "—"}</td><td>${f.avg_price ? fmtN(f.avg_price, 4) : "—"}</td>` +
+    `<td class="${sl !== null && sl < 0 ? "sl-neg" : ""}">${slTxt}</td>` +
+    `<td>${f.slot}</td><td>${f.state === "LONG" ? "✅ LONG" : "✅ EXIT"}</td>` +
+    `<td>slot=${f.slot} ${reason}qty=${fmtN(f.quantity, 6)} price=${sp ? fmtN(sp, 4) : "—"}</td></tr>`;
+}
+
+// 成交明细表格容器（运行中 / 完成后共用）
+function fillsBox(fills, note) {
+  const rows = (fills || []).map(fillRow).join("");
+  if (!rows) return "";
+  return `<h3 style="font-size:.95em;margin:8px 0 2px;">成交明细${note ? `（${note}）` : ""}</h3>` +
+    `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
 </script>
 </body>
 </html>

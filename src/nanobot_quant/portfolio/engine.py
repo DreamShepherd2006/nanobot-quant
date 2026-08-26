@@ -106,6 +106,11 @@ class PortfolioEngine:
         order = self._strategy.create_order(
             request.asset, request.quantity, request.action
         )
+        # 退出原因透传给 broker（回测 BacktestBroker 收进 _tracked →
+        # fills_detail.reason；实盘 broker 忽略该键，无副作用）
+        if request.reason:
+            order.custom_params = order.custom_params or {}
+            order.custom_params["exit_reason"] = request.reason
         submitted = self._strategy.submit_order(order)
         return submitted if submitted is not None else order
 

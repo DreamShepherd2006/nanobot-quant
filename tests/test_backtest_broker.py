@@ -42,13 +42,13 @@ def _asset(symbol="CRCLX"):
     return Asset(symbol=symbol, asset_type="crypto")
 
 
-def _mk_order(side="buy", quantity=0.05, symbol="CRCLX"):
+def _mk_order(side="buy", quantity=0.05, symbol="CRCLX", custom_params=None):
     return _Order(
         asset=_asset(symbol),
         side=side,
         quantity=quantity,
         identifier=None,
-        custom_params={},
+        custom_params=custom_params or {},
         error=None,
         filled=False,
         status="new",
@@ -195,6 +195,56 @@ class TestSell:
         assert b._cash == pytest.approx(
             100.0 - 0.05 * 80.0 * 1.01 + 0.04 * 80.0 * (1 - 0.01) * (1 - 0.001)
         )
+        # 卖：成交价 = 滑点后价格（对齐实盘 avg_deal_price），不含手续费
+        assert out.custom_params["cex"]["avg_price"] == pytest.approx(80.0 * (1 - 0.01))
+        # _tracked 记录策略价（信号 bar 收盘价）与成交价（取最后一条 = 卖单）
+        oid = list(b._tracked)[-1]
+        meta = b._tracked[oid]
+        assert meta["strategy_price"] == pytest.approx(80.0)
+        assert meta["avg_price"] == pytest.approx(80.0 * (1 - 0.01))
+
+    def test_sell_tracks_exit_reason(self):
+        # 策略侧 build_sell_order 把退出原因写进 order.custom_params["exit_reason"]
+        # （portfolio/engine.submit_order 透传），broker 收进 _tracked 供 fills_detail
+        b, _ = self._bought()
+        order = _mk_order(
+            side="sell",
+            quantity=0.04,
+            custom_params={"exit_reason": "take_profit: pnl_net=1.18%"},
+        )
+        b._submit_order(order)
+        meta = b._tracked[list(b._tracked)[-1]]
+        assert meta["reason"] == "take_profit: pnl_net=1.18%"
+        # 买单（无 exit_reason）reason 为 None
+        b2, _ = self._bought()
+        assert b2._tracked[list(b2._tracked)[0]]["reason"] is None
+
+    def test_engine_exit_reason_reaches_broker_tracked(self):
+        # 真实链路：策略 build_sell_order(reason=...) → PortfolioEngine.submit_order
+        # → strategy.submit_order → BacktestBroker._submit_order → _tracked["reason"]
+        from nanobot_quant.portfolio.engine import PortfolioEngine
+        from nanobot_quant.portfolio.order_schema import OrderRequest
+
+        b, _ = self._bought()
+
+        class _S:
+            def create_order(self, asset, quantity, action):
+                return _mk_order(side=action, quantity=quantity, symbol=asset)
+
+            def submit_order(self, order):
+                return b.submit_order(order)
+
+        engine = PortfolioEngine(_S())
+        req = OrderRequest(
+            asset="CRCLX",
+            action="sell",
+            quantity=0.04,
+            price=80.0,
+            reason="take_profit: pnl_net=1.18%",
+        )
+        engine.submit_order(req)
+        meta = b._tracked[list(b._tracked)[-1]]
+        assert meta["reason"] == "take_profit: pnl_net=1.18%"
 
 
 class TestBalancesPositions:
