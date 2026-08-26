@@ -21,7 +21,8 @@
 - 批次台账：BatchManager 用模拟账号（``bt-{scene}-s{i}``）+ 独立临时目录
   （不回写/复用实盘 batches.gate.*.json，干净重放）
 - 不读/不写 gate.json、不调任何真实下单/余额 API、只读 Gate 公开 K 线
-- 每 slot 初始资金纯模拟参数（默认 100U），与实盘子账号完全隔离
+- 每 slot 初始资金纯模拟参数（默认 1000U，2026-08-26 拍板放大——
+  回测专注收益率分析，资金约束不干扰信号成交；与实盘子账号完全隔离
 
 Step 3 验证点（docs/quant-system.md §25.6）：同一历史区间，回测决策日志
 （BUY / SLOT SKIP / HOLD / SELL / 止损）与实盘逻辑逐事件一致——即本驱动
@@ -54,7 +55,7 @@ from nanobot_quant.strategies.registry import load_selected
 from nanobot_quant.td_params import load_td_params
 
 # 回测撮合默认值（docs/quant-system.md §25.3 拍板）
-DEFAULT_INITIAL_QUOTE = 100.0   # 每 slot 初始资金（USDT，纯模拟）
+DEFAULT_INITIAL_QUOTE = 1000.0  # 每 slot 初始资金（USDT，纯模拟；2026-08-26 放大，专注收益率）
 DEFAULT_MIN_QUOTE = 3.0         # 对齐 Gate min_quote $3（服务端实时下发，回测固定默认）
 DEFAULT_FEE_RATE = 0.001        # Gate taker 单边 0.1%（全局扁平 fee_rate 覆盖）
 
