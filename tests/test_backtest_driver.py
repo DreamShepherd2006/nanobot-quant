@@ -103,7 +103,7 @@ def test_driver_run_structure(tmp_path):
     assert out["fills"] == 0
     assert all(s["open"] == [] for s in out["slots"].values())
     # 上涨行情 TD 不出买入（SELL 无持仓 → fail-closed SKIP，无成交）
-    assert out["net_values"][-1]["net"] == pytest.approx(200.0, abs=1e-3)
+    assert out["net_values"][-1]["net"] == pytest.approx(2000.0, abs=1e-3)
 
 
 def test_driver_trend_down_triggers_buy(tmp_path):
@@ -121,9 +121,9 @@ def test_driver_trend_down_triggers_buy(tmp_path):
     out = driver.run()
 
     assert out["fills"] >= 1, out
-    # 净值 = 现金 + 持仓×现价（每 slot 初始 100U）；交易有摩擦 → 略低于 200
+    # 净值 = 现金 + 持仓×现价（每 slot 初始 1000U）；交易有摩擦 → 略低于 2000
     assert out["net_values"][-1]["net"] > 0
-    assert out["net_values"][-1]["net"] < 200.0
+    assert out["net_values"][-1]["net"] < 2000.0
 
 
 # ── hooks（回测注入，实盘零影响） ────────────────────────────────────
@@ -226,7 +226,7 @@ def test_driver_result_roi_and_fills_detail(tmp_path):
     )
     out = driver.run()
 
-    assert out["initial_total"] == pytest.approx(200.0)
+    assert out["initial_total"] == pytest.approx(2000.0)
     assert out["fetched_bars"] == 100
     assert out["bars"] == out["fetched_bars"] - (driver.min_history - 1)
     assert out["final_net"] == pytest.approx(out["net_values"][-1]["net"])
@@ -234,8 +234,10 @@ def test_driver_result_roi_and_fills_detail(tmp_path):
     assert isinstance(out["fills_detail"], list)
     assert len(out["fills_detail"]) == out["fills"]
     for f in out["fills_detail"]:
-        assert {"ts", "slot", "symbol", "side", "quantity", "avg_price"} <= set(f)
+        assert {"ts", "slot", "scene", "symbol", "side", "quantity", "strategy_price", "avg_price", "reason", "state"} <= set(f)
         assert f["side"] in ("buy", "sell")
+        assert f["state"] in ("LONG", "EXIT")
+        assert f["scene"] == "mid"
 
 
 def _two_cycles_closes() -> list[float]:
