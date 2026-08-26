@@ -454,8 +454,10 @@ class _TdLiveRunner:
         - 数据源：主 key `/wallet/sub_account_balances` 一次拉全部子账号，
           按 slot 的 account_id（gate_botN）→ UID 匹配（无状态、无需还原）；
         - 无 gas/min_hold（CEX 无链上 gas），导入量 = 子账号可用余额；
-        - 阈值：价值 < Gate min_quote（交易对规则动态拉取，兜底 $3）不导入
-          ——CEX 卖出受 min_quote 硬限，导入死 lot 会卡 slot（P2-A）；
+        - 导入阈值 = min_position_value（exec_params，默认 $1，0=关闭）——
+          与交易门槛解耦（2026-08-26 用户拍板）：低价值仓（如 $2.78 BNB）
+          也能进台账显示，卖出时由 B 方案（<min_quote 释放台账）兜底不卡
+          slot；Gate 服务端 min_quote $3 只在卖出预检生效。
         - entry_price = cost_price（WebUI 设置）→ gate ticker 对账时市价
           兜底（P3-A）；
         - 已 open 的 slot 跳过（幂等，重启不重复导入）；主账号不是 slot
@@ -470,7 +472,7 @@ class _TdLiveRunner:
             load_gate_credentials,
             load_slot_map,
         )
-        from nanobot_quant.gate_sdk import get_currency_pair, sub_account_balances
+        from nanobot_quant.gate_sdk import sub_account_balances
         from nanobot_quant.tokens_store import token_meta
 
         creds = load_gate_credentials()
@@ -505,19 +507,10 @@ class _TdLiveRunner:
                 "（凭证页子账号 UID 未配置？）——跳过导入",
                 file=sys.stderr, flush=True,
             )
-        # P2-A 阈值：交易对 min_quote 动态拉取（与买卖预检同源），失败兜底 $3
+        # 导入阈值 = min_position_value（与 DEX 对账同源，2026-08-26 用户
+        # 拍板解耦——交易门槛 min_quote 只在卖出预检/下单生效，不卡导入）。
+        min_pos_value = _dust_threshold()
         pair = gate_pair(symbol, tokens_json)
-        min_quote = 3.0
-        try:
-            pair_meta = get_currency_pair(api_key, api_secret, pair)
-            if isinstance(pair_meta, dict):
-                min_quote = float(pair_meta.get("min_quote_amount") or 3.0)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[DIAG] td_live 对账: {symbol} pair meta 失败 {exc}，"
-                f"用默认 min_quote=${min_quote:g}",
-                file=sys.stderr, flush=True,
-            )
         try:
             rows = sub_account_balances(api_key, api_secret) or []
         except Exception as exc:  # noqa: BLE001
@@ -568,10 +561,10 @@ class _TdLiveRunner:
                     f"{symbol} 账户{name} 取价失败，跳过导入（无法判阈值/定价）"
                 )
                 continue
-            if bal * px < min_quote:
+            if min_pos_value > 0 and bal * px < min_pos_value:
                 reports.append(
                     f"{symbol} 账户{name} dust ${bal * px:.2f} < "
-                    f"${min_quote:g}（min_quote），跳过导入"
+                    f"${min_pos_value:g}（min_position_value），跳过导入"
                 )
                 continue
             if cost:

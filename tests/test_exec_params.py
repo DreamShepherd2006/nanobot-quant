@@ -649,7 +649,8 @@ def test_grouping_scheme2():
             "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
             "td_symbols", "td_sleeptime", "sub_accounts"} <= scene_group
     # ③ 只剩全局循环运行（K线窗口 + 并发拉取 + 监控刷新）
-    assert td_group == {"td_bars", "kline_concurrency", "td_ui_refresh_s"}
+    assert td_group == {"td_bars", "kline_concurrency", "td_ui_refresh_s",
+                        "position_display_min_usd"}
     assert "scene" in GROUP_TITLES
     assert "batch" not in GROUP_TITLES
 

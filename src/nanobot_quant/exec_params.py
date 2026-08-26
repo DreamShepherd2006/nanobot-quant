@@ -149,6 +149,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "kline_concurrency": 4,     # int 1-20 — TD 每轮并发拉取各标的 K 线的线程数（1=串行；标的池大时加大提速）
     # ── ⑤ UI ───────────────────────────────────────────────────────────
     "td_ui_refresh_s": 10,    # int 3-300 — /config/td-table 实时监控 tab 自动刷新间隔（秒）
+    "position_display_min_usd": 1.0,  # float 0-100 — 持仓小节显示阈值（<$X 不显示，0=全部；2026-08-26）
     # ── ④ 多场景（S1 配置层，2026-08-20；high ↔ 扁平同步）──────────────
     #  td_enabled / td_symbols / td_sleeptime / quantity_mode / td_quantity /
     #  td_fixed_amount / td_batches / exit_order / take_profit_pct /
@@ -292,9 +293,8 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "min_position_value": {
         "group": "exec", "min": 0, "max": 1000000, "step": 1, "std": 1.0,
-        "channels": "dex",
         "label": "对账导入阈值(USD)",
-        "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。CEX 通道用 Gate min_quote 动态阈值（≈$3），不读此参数",
+        "hint": "启动对账时链上持仓价值低于该值视为 dust 不导入（slot 保持可建仓），避免微量残留（如卖出后尾仓 $0.13）占用资金槽位；0=关闭。DEX/CEX 通用（2026-08-26 起 CEX 不再用 Gate min_quote 动态阈值，与交易门槛解耦）",
     },
     "entry_setup": {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,
@@ -326,6 +326,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "td_ui_refresh_s": {
         "group": "td", "min": 3, "max": 300, "step": 1, "std": 10, "integer": True,
         "label": "监控刷新(秒)", "hint": "/config/td-table「实时监控」tab 自动刷新间隔",
+    },
+    "position_display_min_usd": {
+        "group": "td", "min": 0, "max": 100, "step": 0.5, "std": 1.0,
+        "label": "持仓显示阈值(USDT)",
+        "hint": "实时监控「持仓（open 批次）」价值低于该值不显示（0=显示全部）。2026-08-26 用户拍板：显示阈值独立于交易门槛 min_quote（<$3 但 ≥$1 的仓位可显示）",
     },
 }
 

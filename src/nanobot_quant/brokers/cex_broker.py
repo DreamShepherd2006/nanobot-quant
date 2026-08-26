@@ -135,6 +135,19 @@ class CexBroker(Broker):
         self._pair_meta_cache[pair] = (now, meta)
         return meta
 
+    def min_quote_for(self, symbol: str) -> float:
+        """Gate 交易对 min_quote_amount（_pair_meta 缓存拉取；0=未知不过滤）。
+
+        2026-08-26 B 方案：策略卖出前预检——价值 < min_quote 的仓位直接
+        释放台账（服务端会拒单 → EXIT_FAIL → 卡 slot），不发起卖出。
+        """
+        try:
+            pair = gate_pair(symbol, self._tokens_json)
+            meta = self._pair_meta(pair)
+            return float(meta.get("min_quote_amount") or 0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     @staticmethod
     def _format_err(prefix: str, payload: Any = None) -> str:
         """Build a readable error string, keeping platform error codes intact."""

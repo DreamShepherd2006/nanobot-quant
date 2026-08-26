@@ -386,12 +386,24 @@ class TdSequentialStrategy(Strategy):
                 except Exception:  # noqa: BLE001
                     price = 0.0
                 rows = []
+                # 显示阈值（<$X 不显示；0=全部）。2026-08-26 用户拍板：
+                # 显示阈值独立于交易门槛（Gate min_quote）——<$3 但 ≥$1
+                # 的仓位可显示；价值用实时价（取价失败时用成本价近似）。
+                display_min = float(
+                    getattr(self, "parameters", {}).get(
+                        "position_display_min_usd", 0.0
+                    ) or 0.0
+                )
                 for s in open_lots:
                     lot = s["lot"]
                     entry = float(lot.get("entry_price") or 0)
                     pnl = None
                     if price > 0 and entry > 0:
                         pnl = (price - entry) / entry
+                    qty = float(lot.get("qty") or 0)
+                    value = qty * (price if price > 0 else entry)
+                    if display_min > 0 and value < display_min:
+                        continue  # dust 批次不显示（台账仍在，卖出不受影响）
                     rows.append({
                         "symbol": sym,
                         "slot": s["slot"],
@@ -1980,6 +1992,18 @@ class TdSequentialStrategy(Strategy):
         except (TypeError, ValueError):
             return None
 
+    def _cex_min_quote(self, symbol: str) -> float:
+        """Gate 交易对 min_quote_amount（broker 缓存拉取；0=未知不过滤）。
+
+        2026-08-26 B 方案：卖出预检——价值 < min_quote 释放台账不卖。
+        """
+        broker = getattr(self, "broker", None)
+        fn = getattr(broker, "min_quote_for", None)
+        try:
+            return float(fn(symbol) if fn else 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _is_cex(self) -> bool:
         """执行通道大类：cex=Gate 交易所子账号；dex=链上子钱包（默认）。"""
         return self.parameters.get("channel_family") == "cex"
@@ -2204,6 +2228,30 @@ class TdSequentialStrategy(Strategy):
                     "EXIT_SHRINK",
                     f"slot={slot['slot']} 台账 {lot['qty']:.6g} 子账号 {bal:.6f} → 缩量",
                 )
+            # B 方案（2026-08-26 用户拍板）：卖出价值 < Gate min_quote →
+            # 释放台账不卖——服务端会拒单（below min order amount）→
+            # EXIT_FAIL → 台账保持 open 卡 slot（2026-08-25 ETH $2.96 实证）。
+            # 仓位留在子账号（脱管），价值回升 ≥ min_quote 后由重启对账重新导入。
+            try:
+                min_q = self._cex_min_quote(self.symbol)
+            except Exception:  # noqa: BLE001
+                min_q = 0.0
+            if min_q > 0 and qty * price < min_q:
+                self.batch_manager.close_lot(slot["slot"])
+                self.batch_manager.save()
+                self.logger.warning(
+                    f"TD BATCH EXIT RELEASE | symbol={self.symbol} "
+                    f"slot={slot['slot']} 价值 ${qty * price:.2f} < "
+                    f"min_quote ${min_q:g}，释放台账（仓位留在子账号）"
+                )
+                self._record(
+                    "EXIT_RELEASE",
+                    f"slot={slot['slot']} 价值 ${qty * price:.2f} < "
+                    f"min_quote ${min_q:g} 释放台账",
+                    slot=slot["slot"], qty=qty, price=price,
+                    direction="sell", status="ok",
+                )
+                return
             req = self._portfolio.build_sell_order(
                 self.symbol, price, exit_reason,
                 quantity=qty,
