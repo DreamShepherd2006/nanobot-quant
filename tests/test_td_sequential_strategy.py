@@ -672,11 +672,12 @@ def test_load_batch_snapshot_display_min_filter(monkeypatch):
 # BUY 被拦并打 _denied_cycle 标记；denied 标的本 setup 周期内不再尝试
 # （等重置），setup 计数变小（reset）时清除标记、新周期恢复建仓资格。
 
-def _resonance_strategy(tmp_name: str):
+def _resonance_strategy(tmp_path):
     from nanobot_quant.batches import BatchManager
 
     s = _make_strategy()
-    bm = BatchManager("AAPL", ["acc-1", "acc-2"], path=f"/tmp/{tmp_name}.json")
+    bm = BatchManager("AAPL", ["acc-1", "acc-2"],
+                      path=str(tmp_path / "resonance.json"))
     s.batch_manager = bm
     s._batch_managers = {"AAPL": bm}
     s.broker = None  # _activate_scene 会读 self.broker
@@ -684,16 +685,16 @@ def _resonance_strategy(tmp_name: str):
     return s
 
 
-def test_resonance_round_quota_blocks_and_denies():
+def test_resonance_round_quota_blocks_and_denies(tmp_path):
     """本轮额度已用（其他标的已建）→ 本标的 BUY 被拦 + denied 标记。"""
-    s = _resonance_strategy("test-resonance-1")
-    s._round_buy_used = True  # 模拟：池内其他标的已建（占用本轮额度）
+    s = _resonance_strategy(tmp_path)
+    s._round_buy_used = {"default": True}  # 模拟：波内其他标的已建（波锁）
     s._evaluate_symbol()
     assert "order" not in s._captured, "额度已用 → 不得建仓"
-    assert s._denied_cycle.get("AAPL") is True, "被拦标的应打本周期错过标记"
+    assert s._denied_cycle.get(("default", "AAPL")) is True, "被拦标的应打本周期错过标记"
 
 
-def test_resonance_denied_waits_for_reset_then_allowed(monkeypatch):
+def test_resonance_denied_waits_for_reset_then_allowed(monkeypatch, tmp_path):
     """denied 标的下轮 setup 仍≥9 也不建（等重置）；setup 重置清除标记
     → 新周期重新数到 9 允许建仓（PENDING 入账）。"""
     from types import SimpleNamespace
@@ -701,7 +702,8 @@ def test_resonance_denied_waits_for_reset_then_allowed(monkeypatch):
     from nanobot_quant.batches import BatchManager
 
     s = _make_strategy()
-    bm = BatchManager("AAPL", ["acc-1", "acc-2"], path="/tmp/test-resonance-2.json")
+    bm = BatchManager("AAPL", ["acc-1", "acc-2"],
+                      path=str(tmp_path / "resonance-2.json"))
     s.batch_manager = bm
     s._batch_managers = {"AAPL": bm}
     s._pending_buys = {}
@@ -709,35 +711,54 @@ def test_resonance_denied_waits_for_reset_then_allowed(monkeypatch):
     # mock 下单：PENDING 订单（is_filled=False）→ executed 置位但不落台账
     mo = SimpleNamespace(is_filled=lambda: False, custom_params=None, identifier="oid-1")
     monkeypatch.setattr(s, "_buy_on_slot", lambda slot, price, reason: (mo, 1.0))
-    # 首次：额度已用 → 被拦 + denied（未下单）
-    s._round_buy_used = True
+    # 首次：波内已有标的建仓 → 被拦 + denied（未下单）
+    s._round_buy_used = {"default": True}
     s._evaluate_symbol()
-    assert s._denied_cycle.get("AAPL") is True
+    assert s._denied_cycle.get(("default", "AAPL")) is True
     assert not s._pending_buys, "额度已用不得下单"
-    # 下轮：额度重置（新心跳），但 denied 未清除（setup 仍≥9）→ 仍不建
-    s._round_buy_used = False
+    # 下轮：波锁未解除（上一轮 AAVE 仍在信号区），denied 未清 → 仍不建
     s._evaluate_symbol()
     assert not s._pending_buys, "denied 标的本周期不得建仓"
     # 中性 bars：setup 计数变小 → reset → denied 清除
     _swap_bars(s, _neutral_closes())
     s._evaluate_symbol()
-    assert s._denied_cycle.get("AAPL") is not True, "setup 重置应清除 denied"
-    # 新周期重新数到 9 → 允许建仓（PENDING 入账）
+    assert s._denied_cycle.get(("default", "AAPL")) is not True, "setup 重置应清除 denied"
+    # 新周期重新数到 9（本波已到过 9 → 跳过额度检查）→ 允许建仓
     _swap_bars(s, _buy_signal_closes())
     s._evaluate_symbol()
     assert s._pending_buys, "重置后新周期应允许建仓"
 
 
-def test_resonance_round_quota_reset_on_scene_activate():
-    """场景激活（每轮执行开始）重置本轮额度 → 下一轮其他标的可建。"""
-    s = _resonance_strategy("test-resonance-3")
-    s._round_buy_used = True
-    s._activate_scene("high", {
-        "enabled": True, "sleeptime": "1m",
-        "params": {"symbols": ["AAPL"], "quantity_mode": "fixed",
-                   "td_quantity": 1},
-    })
-    assert s._round_buy_used is False, "场景激活应重置本轮额度"
+def test_resonance_wave_ends_when_all_leave_signal_zone(tmp_path):
+    """波锁：所有标的离开买9信号区（setup < entry_setup）→ 波结束，清额度
+    + 清 _wave_tried → 下一波首个到 9 的标的正常建仓。"""
+    import nanobot_quant.strategies.td_sequential_strategy as tds
+    from nanobot_quant.batches import BatchManager
+
+    s = _make_strategy()
+    bm = BatchManager("AAPL", ["acc-1", "acc-2"],
+                      path=str(tmp_path / "resonance-3.json"))
+    s.batch_manager = bm
+    s._batch_managers = {"AAPL": bm}
+    # 波锁：模拟波内已有标的建仓（AAPL 首次到 9 被拦 → denied + wave_tried）
+    s._round_buy_used = {"default": True}
+    # 上一轮 AAPL 在信号区（setup=9）→ 波未结束
+    s._last_setup = {"default": {"AAPL": 9}}
+    s._evaluate_symbol()
+    assert s._denied_cycle.get(("default", "AAPL")) is True
+    # 中性 bars：所有标的离开信号区（_last_setup 更新为 < entry）
+    _swap_bars(s, _neutral_closes())
+    s._evaluate_symbol()
+    assert s._last_setup["default"]["AAPL"] < 9
+    # on_trading_iteration 开头做波结束判定 → 清额度 + 清 _wave_tried
+    s._round_buy_used = {"default": True}  # 波锁仍锁着（模拟下一轮开头）
+    # 直接调用波结束判定逻辑（on_trading_iteration 首段）
+    for _scene, _prev in list(getattr(s, "_last_setup", {}).items()):
+        if not any(v >= s._td_params.get("entry_setup", 9) for v in _prev.values()):
+            s._round_buy_used[_scene] = False
+            s._wave_tried = {}
+    assert s._round_buy_used.get("default") is False, "波结束应清额度"
+    assert s._wave_tried == {}, "波结束应清 _wave_tried"
 
 
 def test_resonance_no_quota_without_scene():

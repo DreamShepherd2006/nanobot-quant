@@ -297,7 +297,18 @@ class TdSequentialStrategy(Strategy):
         共振错峰（2026-08-26）：每轮（心跳）重置全局建仓额度
         （_round_buy_used）——每轮每场景只建 1 笔，共振多标的错轮建仓。
         """
-        self._round_buy_used = False  # 共振错峰：新的一轮，额度恢复
+        # 共振错峰（2026-08-26 晚拍板）：额度跨轮保持（波锁）——
+        # LINK 建仓后其他标的（无论是否首次到 9）都被拦，等各自 setup
+        # 重置。波结束（所有标的离开买9信号区）时清额度 + 清 _wave_tried。
+        self._round_buy_used = getattr(self, "_round_buy_used", {})
+        last_setup = getattr(self, "_last_setup", {})
+        for scene, prev in last_setup.items():
+            if not any(v >= self._td_params.get("entry_setup", 9)
+                       for v in prev.values()):
+                self._round_buy_used[scene] = False
+                self._wave_tried = {}
+        if not hasattr(self, "_wave_tried"):
+            self._wave_tried: dict[tuple, bool] = {}
         # ── 链上补确认（2026-08-11）────────────────────────────────
         # 每轮迭代先处理 pending 卖出/买入的链上确认（SUCCESS 补台账、
         # ERROR/CANCELLED 记失败、PENDING 继续等），再评估新信号。
@@ -507,14 +518,13 @@ class TdSequentialStrategy(Strategy):
         2026-08-21（B1）：记录当前场景名，供 _record/_evaluate_symbol
         写 LIVE_STATE 与事件时标记来源场景。
 
-        2026-08-26（共振错峰）：场景每轮执行开始时重置全局建仓额度
-        （_round_buy_used）——每轮（该场景）只允许一个标的建仓，共振
-        多标的按池顺序错轮建仓；回测 driver 每 bar 调用本方法，语义
-        与实盘自动一致。
+        2026-08-26（共振错峰）：场景每轮执行开始时由 on_trading_iteration
+        做波结束判定（该场景所有标的离开买9信号区 → 清额度 + 清 _wave_tried），
+        此处不再无条件重置——额度跨轮保持（波锁），LINK 建仓后其他标的
+        无论是否首次到 9 都被拦，等各自 setup 重置。回测 driver 每 bar
+        调用本方法，语义与实盘自动一致。
         """
         self._current_scene = name
-        # 共振错峰：本轮该场景尚未建仓（每轮每场景只建 1 笔）
-        self._round_buy_used = False
         p = rt.get("params") or {}
         self.symbols = list(p.get("symbols") or [])
         self.quantity_mode = str(p.get("quantity_mode") or "fixed")
@@ -696,6 +706,10 @@ class TdSequentialStrategy(Strategy):
         except Exception as e:  # noqa: BLE001
             return (None, fetch_len, drop_in_progress, e)
 
+    def _cur_scene(self) -> str:
+        """当前场景名（未激活场景/纸交易/execute_signal 直调 = "default"）。"""
+        return getattr(self, "_current_scene", "") or "default"
+
     def _evaluate_symbol(self, prefetched: tuple | None = None) -> None:
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。
 
@@ -836,8 +850,17 @@ class TdSequentialStrategy(Strategy):
             self._cycle_state: dict[str, dict] = {}
         if not hasattr(self, "_denied_cycle"):
             # 共振错峰（2026-08-26）：被全局额度拦截的标的在本 setup
-            # 周期内不再尝试建仓，setup 重置时清除（见下方 reset 分支）
-            self._denied_cycle: dict[str, bool] = {}
+            # 周期内不再尝试建仓，setup 重置时清除（见下方 reset 分支）。
+            # key=(scene, symbol)——同一 symbol 跨场景独立（用户拍板 per-scene）
+            self._denied_cycle: dict[tuple, bool] = {}
+        if not hasattr(self, "_wave_tried"):
+            # 共振错峰波锁：本波（自上次无信号以来）该标的是否已到过买9
+            # 信号区——首次到 9 时检查波内额度（round_used），非首次跳过额度
+            # 竞争（被拒的等重置、已建仓的走周期门控）。波结束时清空。
+            self._wave_tried: dict[tuple, bool] = {}
+        if not hasattr(self, "_last_setup"):
+            # 共振错峰波结束判定：每场景各标的上轮 setup_buy（信号区判定）
+            self._last_setup: dict[str, dict[str, float]] = {}
         st = self._cycle_state.get(self.symbol)
         if st is None:
             # 首次见到该标的：有 open 仓位 → 视为本周期已建仓（保守
@@ -853,8 +876,10 @@ class TdSequentialStrategy(Strategy):
             st["reset"] = True  # 计数变小 → 新信号周期
             # 共振错峰（2026-08-26）：新周期恢复被额度拦截标的的建仓资格
             if getattr(self, "_denied_cycle", None):
-                self._denied_cycle.pop(self.symbol, None)
+                self._denied_cycle.pop((self._cur_scene(), self.symbol), None)
         st["prev_setup"] = setup_buy
+        # 共振错峰波结束判定数据：记录本标的 setup（信号区判定用）
+        self._last_setup.setdefault(self._cur_scene(), {})[self.symbol] = setup_buy
         price = signal.get("price", 0) or 0
 
         # ── 实时状态共享（td-table「实时监控」tab，2026-08-11）──
@@ -927,13 +952,15 @@ class TdSequentialStrategy(Strategy):
             if batch_mode
             else not has_position
         )
-        # 共振错峰（2026-08-26，用户拍板）：每轮每场景全局只建 1 笔——
-        # 本轮已有标的建仓（_round_buy_used）则其余标的本轮被拦；被拦标的
-        # 本 setup 周期内不再尝试（_denied_cycle 标记），必须等自己 setup
-        # 重置后重新数到 9 的新周期才能建仓（「轮候」= 等下一次买9信号周期，
-        # 非下个心跳）。SELL/止损/止盈不受限。
-        round_used = bool(getattr(self, "_round_buy_used", False))
-        denied = bool(getattr(self, "_denied_cycle", {}).get(self.symbol, False))
+        # 共振错峰（2026-08-26 用户拍板，晚修订）：波锁——LINK 建仓后，
+        # 其他标的（无论是否首次到 9）都被拦（denied），等各自 setup 重置
+        # 后才能建仓。额度（_round_buy_used[scene]）跨轮保持，仅波结束
+        # （该场景所有标的离开买9信号区）时清除；_wave_tried 标记本波
+        # 已到过 9 的标的（首次到 9 才参与额度竞争，非首次跳过额度检查）。
+        scene = self._cur_scene()
+        round_used = bool(getattr(self, "_round_buy_used", {}).get(scene, False))
+        denied = bool(getattr(self, "_denied_cycle", {}).get((scene, self.symbol), False))
+        wave_first = not bool(getattr(self, "_wave_tried", {}).get((scene, self.symbol), False))
         if denied:
             # 本周期已被全局额度拦过：setup 重置前不再尝试（等新周期）
             print(
@@ -947,6 +974,7 @@ class TdSequentialStrategy(Strategy):
         elif (
             batch_mode
             and round_used
+            and wave_first
             and setup_buy >= entry_setup
             and score > score_threshold
             and can_buy
@@ -954,18 +982,20 @@ class TdSequentialStrategy(Strategy):
         ):
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 本轮已建仓"
-                f"（全局每轮 1 笔；本周期错过，等重置）",
+                f"（全局每轮 1 笔；等 setup 重置后新周期）",
                 file=sys.stderr, flush=True,
             )
-            self._denied_cycle.setdefault(self.symbol, True)
+            self._denied_cycle[(scene, self.symbol)] = True
+            self._wave_tried[(scene, self.symbol)] = True
             self._record(
-                "WAIT", "本轮已建仓（全局每轮 1 笔；本周期错过）", symbol=self.symbol
+                "WAIT", "本轮已建仓（全局每轮 1 笔；等重置后新周期）",
+                symbol=self.symbol,
             )
         if (
             setup_buy >= entry_setup
             and score > score_threshold
             and can_buy
-            and not (batch_mode and round_used)
+            and not (batch_mode and round_used and wave_first)
             and not denied
             and (not tdst_filter or (support is not None and price > support))
             # 信号周期门控（2026-08-19 分批次建仓）：同周期已建仓（bought 且
@@ -1034,7 +1064,11 @@ class TdSequentialStrategy(Strategy):
                         executed = True
                         st["bought"] = True
                         st["reset"] = False
-                        self._round_buy_used = True  # 共振错峰：本轮额度已用
+                        # 共振错峰：本轮额度已用 + 本波已到过 9
+                        self._round_buy_used = getattr(self, "_round_buy_used", {})
+                        self._round_buy_used[self._cur_scene()] = True
+                        self._wave_tried = getattr(self, "_wave_tried", {})
+                        self._wave_tried[(self._cur_scene(), self.symbol)] = True
                         break
                     # 已提交未确认（PENDING，2026-08-11）→ 不 open_lot，
                     # 记录 pending 由后续轮询补建仓（fail-safe，防假成功幽灵仓）
@@ -1077,7 +1111,11 @@ class TdSequentialStrategy(Strategy):
                     executed = True
                     st["bought"] = True
                     st["reset"] = False
-                    self._round_buy_used = True  # 共振错峰：本轮额度已用
+                    # 共振错峰：本轮额度已用 + 本波已到过 9
+                    self._round_buy_used = getattr(self, "_round_buy_used", {})
+                    self._round_buy_used[self._cur_scene()] = True
+                    self._wave_tried = getattr(self, "_wave_tried", {})
+                    self._wave_tried[(self._cur_scene(), self.symbol)] = True
                     break
                 if not executed:
                     self.logger.info(

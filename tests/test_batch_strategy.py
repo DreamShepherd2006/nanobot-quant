@@ -505,7 +505,7 @@ def test_pool_both_hit_processed_in_pool_order(tmp_path):
     # 池子顺序 AAA → BBB：AAA 先执行建仓；BBB 被拦（denied）
     assert len(bm_a.open_slots()) == 1
     assert len(bm_b.open_slots()) == 0
-    assert s._denied_cycle.get("BBB") is True, "BBB 应打本周期错过标记"
+    assert s._denied_cycle.get(("default", "BBB")) is True, "BBB 应打本周期错过标记"
 
 
 def test_pool_silent_when_all_hold(tmp_path):
