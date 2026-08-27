@@ -1139,3 +1139,96 @@ def test_cex_pending_query_error_keeps_waiting(tmp_path):
     s._check_pending_confirmations()
     assert bm.open_slots() == []
     assert 1 in s._pending_buys  # 继续等
+
+
+# ── cd 13 通道（Step 1，2026-08-27）─────────────────────────────────
+def _exit_call(s, price, setup_sell=0, cd_sell=13, exit_setup=9, exit_countdown=13):
+    """直接调用 _handle_batch_exits（单元路径）：绕过 TD 计算，精确控制
+    setup_sell/cd_sell，隔离高9 通道（setup_sell < exit_setup 不触发）与
+    cd 通道（cd_sell ≥ exit_countdown 触发）。"""
+    s._handle_batch_exits(
+        price=price, signal={}, setup_sell=setup_sell, cd_sell=cd_sell,
+        exit_setup=exit_setup, exit_countdown=exit_countdown,
+    )
+
+
+def test_cd_exit_breakeven_sells(tmp_path):
+    """cd 13 通道激活：浮盈 ≥ 保本门（0）→ 保本卖出（高9 通道不触发）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")  # 现价 110.5 → +0.45%
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _exit_call(s, price=110.5, setup_sell=0, cd_sell=13)
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+def test_cd_exit_negative_holds(tmp_path):
+    """cd 13 通道：浮亏 → 死扛（不卖，反正不能亏）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=111.0, entry_time="t1")  # 现价 110.5 → -0.45%
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _exit_call(s, price=110.5, setup_sell=0, cd_sell=13)
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+
+
+def test_cd_exit_all_clears_breakeven_keeps_loss(tmp_path):
+    """cd_exit_all=true（默认）→ cd 13 一次平所有 ≥0 批次；浮亏保留。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")   # +0.45% → 卖
+    bm.open_lot(qty=7, entry_price=111.5, entry_time="t2")  # -0.9% → 死扛
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _exit_call(s, price=110.5, setup_sell=0, cd_sell=13)
+    assert bm.slots[0]["status"] == "available"
+    assert bm.slots[1]["status"] == "open"
+
+
+def test_cd_exit_all_false_one_per_round(tmp_path):
+    """cd_exit_all=false → cd 13 每轮只平一个（FIFO）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    bm.open_lot(qty=7, entry_price=109.0, entry_time="t2")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), cd_exit_all=False)
+    _exit_call(s, price=110.5, setup_sell=0, cd_sell=13)
+    assert s._captured["order"][1] == 5  # fifo 只平 slot 1
+    assert bm.slots[0]["status"] == "available"
+    assert bm.slots[1]["status"] == "open"
+
+
+def test_cd_exit_min_profit_threshold(tmp_path):
+    """cd_exit_min_profit=0.002 → 浮盈 <0.2% 死扛；≥0.2% 卖。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")  # 现价 110.1 → +0.09%
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), cd_exit_min_profit=0.002)
+    _exit_call(s, price=110.1, setup_sell=0, cd_sell=13)
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+    # 浮盈 0.25% ≥ 0.2% → 卖
+    bm2 = _make_bm(tmp_path)
+    bm2.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s2 = _make_batch_strategy(bm2, _bars_with(_sell_closes()), cd_exit_min_profit=0.002)
+    _exit_call(s2, price=110.275, setup_sell=0, cd_sell=13)
+    assert s2._captured["order"][2] == "sell"
+    assert bm2.slots[0]["status"] == "available"
+
+
+def test_cd_exit_not_triggered_below_countdown(tmp_path):
+    """cd_sell < exit_countdown → cd 通道不触发（保持死扛）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    _exit_call(s, price=110.5, setup_sell=0, cd_sell=9)  # cd 9 < 13
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+
+
+def test_cd_exit_after_setup_gate_kept(tmp_path):
+    """高9 通道盈利门拦截的批次（浮盈 <sell_only_profit），cd 13 到达时
+    只要 ≥ 保本门仍被平仓（动能耗尽，不再死扛）——两条通道独立。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")  # +0.45% < 3% 高9 门拦
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.003)
+    _exit_call(s, price=110.5, setup_sell=9, cd_sell=13)  # 高9+cd13 同时
+    # 高9 通道拦（0.45% < 3%）→ 不动；cd 通道保本卖（≥0）
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"

@@ -72,6 +72,8 @@ class TdSequentialStrategy(Strategy):
         "max_drawdown_pct": 0.15,   # skip new entries when drawdown > 15%
         "stop_loss_pct": 0.10,      # exit when loss exceeds 10%
         "sell_only_profit": 0.0,    # 高9 毛浮盈门（0=关闭无条件卖，2026-08-25）
+        "cd_exit_min_profit": 0.0,  # cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，2026-08-27）
+        "cd_exit_all": True,        # cd 13 通道全平（true=一次清所有过门批次；false=每轮一个，2026-08-27）
         "td_sell_all": False,       # 高9 一次平所有盈利批（false=每轮一个）
         **DEFAULT_TD_PARAMS,
     }
@@ -205,6 +207,12 @@ class TdSequentialStrategy(Strategy):
         # 2026-08-25 高9 出场：毛浮盈门 + 全平开关（场景级覆盖见 _activate_scene）
         self._sell_only_profit = float(
             self.parameters.get("sell_only_profit", 0.0) or 0.0
+        )
+        self._cd_exit_min_profit = float(
+            self.parameters.get("cd_exit_min_profit", 0.0) or 0.0
+        )
+        self._cd_exit_all = bool(
+            self.parameters.get("cd_exit_all", True)
         )
         self._td_sell_all = bool(
             self.parameters.get("td_sell_all", False) or False
@@ -544,6 +552,8 @@ class TdSequentialStrategy(Strategy):
             self._risk.stop_loss_pct = float(sl)
         self._take_profit_pct = float(p.get("take_profit_pct") or 0.0)
         self._sell_only_profit = float(p.get("sell_only_profit") or 0.0)
+        self._cd_exit_min_profit = float(p.get("cd_exit_min_profit") or 0.0)
+        self._cd_exit_all = bool(p.get("cd_exit_all", True))
         self._td_sell_all = bool(p.get("td_sell_all") or False)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
@@ -1254,15 +1264,11 @@ class TdSequentialStrategy(Strategy):
         )
         for s in hits:
             self._sell_lot(s, price, signal, s.pop("_exit_reason", "exit"))
-        # 2) TD SELL 信号 → 平仓（2026-08-25 高9 出场逻辑）
-        #    卖出门：sell_only_profit>0 时只平毛浮盈 ≥ X 的批次（浮亏/微利不卖，死扛）；
-        #    td_sell_all=true 一次平掉所有通过盈利门的批；false 每轮只平一个（现有）。
-        if setup_sell >= exit_setup or cd_sell >= exit_countdown:
-            reason = (
-                f"setup_sell={setup_sell}"
-                if setup_sell >= exit_setup
-                else f"cd_sell={cd_sell}"
-            )
+        # 2a) 高9 通道（2026-08-25 高9 出场逻辑）：setup_sell ≥ exit_setup
+        #     卖出门：sell_only_profit>0 时只平毛浮盈 ≥ X 的批次（浮亏/微利不卖，死扛）；
+        #     td_sell_all=true 一次平掉所有通过盈利门的批；false 每轮只平一个（现有）。
+        if setup_sell >= exit_setup:
+            reason = f"setup_sell={setup_sell}"
             if self._td_sell_all:
                 candidates = bm.pick_all_slots(self._exit_order)
                 sold_any = False
@@ -1295,6 +1301,41 @@ class TdSequentialStrategy(Strategy):
                         f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
                         f"cd_sell={cd_sell}）"
                     )
+        # 2b) cd 13 通道（2026-08-27，Step 1）：cd_sell ≥ exit_countdown
+        #     动能最终耗尽确认（DeMark 标准）→ 保本离场：毛浮盈 ≥ cd_exit_min_profit
+        #     的批次平仓（默认 0 = 不亏本金就走，承担交易成本）；< 阈值死扛。
+        #     cd_exit_all=true 一次平掉所有过门批次；false 每轮只平一个。
+        if cd_sell >= exit_countdown:
+            reason = f"cd_sell={cd_sell}"
+            if self._cd_exit_all:
+                candidates = bm.pick_all_slots(self._exit_order)
+                sold_any = False
+                for s in candidates:
+                    if self._cd_gate_blocked(s, price):
+                        continue
+                    self._sell_lot(s, price, signal, reason)
+                    sold_any = True
+                if not sold_any:
+                    self.logger.info(
+                        f"TD CD EXIT SKIP | symbol={self.symbol} 无 ≥{self._cd_exit_min_profit} "
+                        f"浮盈批次（cd_sell={cd_sell}，open={len(candidates)}）"
+                    )
+            else:
+                s = bm.pick_exit_slot(self._exit_order)
+                if s is not None:
+                    if self._cd_gate_blocked(s, price):
+                        lot = s["lot"]
+                        pnl = (price - lot["entry_price"]) / lot["entry_price"]
+                        self.logger.info(
+                            f"TD CD EXIT SKIP | symbol={self.symbol} 浮盈不足"
+                            f"（pnl={pnl:.4f} < cd_exit_min_profit={self._cd_exit_min_profit}）"
+                        )
+                    else:
+                        self._sell_lot(s, price, signal, reason)
+                else:
+                    self.logger.info(
+                        f"TD CD EXIT SKIP | symbol={self.symbol} 无 open 批次（cd_sell={cd_sell}）"
+                    )
 
     def _profit_gate_blocked(self, slot: dict, price: float) -> bool:
         """高9 毛浮盈门（2026-08-25）：sell_only_profit>0 时毛浮盈 < X 拦截卖出。
@@ -1305,6 +1346,19 @@ class TdSequentialStrategy(Strategy):
         thr = getattr(self, "_sell_only_profit", 0.0) or 0.0
         if thr <= 0:
             return False
+        lot = slot.get("lot")
+        if lot is None or not lot.get("entry_price"):
+            return False
+        pnl = (price - lot["entry_price"]) / lot["entry_price"]
+        return pnl < thr
+
+    def _cd_gate_blocked(self, slot: dict, price: float) -> bool:
+        """cd 13 通道保本门（2026-08-27，Step 1）：毛浮盈 < cd_exit_min_profit 拦截。
+
+        默认 0 = 保本离场（不亏本金，承担交易成本）；>0 时要求毛浮盈 ≥ 阈值才平仓。
+        负浮盈（pnl<0）恒死扛——「反正不能亏」（用户拍板 2026-08-27）。
+        """
+        thr = getattr(self, "_cd_exit_min_profit", 0.0) or 0.0
         lot = slot.get("lot")
         if lot is None or not lot.get("entry_price"):
             return False
