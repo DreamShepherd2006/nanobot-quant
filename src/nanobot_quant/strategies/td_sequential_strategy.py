@@ -2218,14 +2218,14 @@ class TdSequentialStrategy(Strategy):
     def _cex_submit(self, slot: dict, req) -> Any:
         """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。
 
-        回测退出原因透传：SELL 的 req.reason（TD SELL / 止盈 / 止损）写进
-        order.custom_params["exit_reason"]，BacktestBroker 收进 _tracked →
-        fills_detail.reason；实盘 CexBroker 忽略该键，无副作用。
+        回测触发源透传：BUY 的 req.reason（TD LONG）写 entry_reason、SELL 的
+        req.reason（TD SELL / 止盈 / 止损）写 exit_reason，BacktestBroker 收进
+        _tracked → fills_detail.reason；实盘 CexBroker 忽略该键，无副作用。
         """
         order = self.create_order(req.asset, req.quantity, req.action)
-        if req.action == "sell" and req.reason:
+        if req.reason:
             order.custom_params = order.custom_params or {}
-            order.custom_params["exit_reason"] = req.reason
+            order.custom_params["entry_reason" if req.action == "buy" else "exit_reason"] = req.reason
         return self._cex_slot_broker(slot).submit_order(order)
 
     def _buy_on_slot_cex(self, slot: dict, price: float, reason: str):
