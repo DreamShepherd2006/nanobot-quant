@@ -70,7 +70,7 @@ SCENE_FIELD_MAP: dict[str, str] = {
 #: 场景级 TD 阈值字段（S3b-2）：值域同 td_params，但缺省 None = 回退全局
 #: td_params.json（策略选择页设置），不参与 high↔扁平同步。
 SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
-    "entry_setup", "exit_setup", "exit_countdown",
+    "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
 )
 
 #: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25）。
@@ -83,7 +83,7 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = ("sell_only_profit", "td_sell_all")
 SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
-    "entry_setup", "exit_setup", "exit_countdown",
+    "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
     "exit_order", "stop_loss_pct", "take_profit_pct",
     "sell_only_profit", "td_sell_all",
     "td_start_slot", "min_account_value",
@@ -101,7 +101,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
-        "entry_setup": None, "exit_setup": None, "exit_countdown": None,
+        "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
         "sell_only_profit": 0.0, "td_sell_all": False,
         "td_start_slot": 1, "min_account_value": 0,
@@ -111,7 +111,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
-        "entry_setup": None, "exit_setup": None, "exit_countdown": None,
+        "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
         "sell_only_profit": 0.0, "td_sell_all": False,
         "td_start_slot": 1, "min_account_value": 0,
@@ -121,7 +121,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
-        "entry_setup": None, "exit_setup": None, "exit_countdown": None,
+        "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
         "sell_only_profit": 0.0, "td_sell_all": False,
         "td_start_slot": 1, "min_account_value": 0,
@@ -299,6 +299,10 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "entry_setup": {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,
         "label": "入场 Setup 阈值", "hint": "场景级覆盖（S3b-2）；留空 = 跟随全局 td_params（策略选择页设置）",
+    },
+    "entry_countdown": {
+        "group": "scene", "min": 1, "max": 20, "step": 1, "std": 13, "integer": True,
+        "label": "入场 Countdown 阈值", "hint": "场景级覆盖；留空 = 跟随全局 td_params（策略选择页设置）。cd_buy ≥ N 触发做多（与 setup 双信号 OR）",
     },
     "exit_setup": {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,

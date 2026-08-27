@@ -550,7 +550,7 @@ class TdSequentialStrategy(Strategy):
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
         # 缺省 None → 保留全局 td_params（td_live 构造 parameters 时已 merge），
         # 非 None 覆盖 self._td_params（策略每 bar 读取处即此处覆盖生效）。
-        for key in ("entry_setup", "exit_setup", "exit_countdown"):
+        for key in ("entry_setup", "entry_countdown", "exit_setup", "exit_countdown"):
             v = p.get(key)
             if v is not None:
                 self._td_params[key] = int(v)
@@ -840,6 +840,7 @@ class TdSequentialStrategy(Strategy):
         # ── 4. Evaluate signals ──
         setup_buy = signal.get("setup_buy", 0) or 0
         setup_sell = signal.get("setup_sell", 0) or 0
+        cd_buy = signal.get("cd_buy", 0) or 0
         cd_sell = signal.get("cd_sell", 0) or 0
         score = signal.get("score", 0) or 0
 
@@ -923,21 +924,23 @@ class TdSequentialStrategy(Strategy):
             self._peak_portfolio = pv
 
         entry_setup = int(self._td_params.get("entry_setup", 9))
+        entry_countdown = int(self._td_params.get("entry_countdown", 13))
         exit_setup = int(self._td_params.get("exit_setup", 9))
         exit_countdown = int(self._td_params.get("exit_countdown", 13))
         score_threshold = float(self._td_params.get("score_threshold", 0.0))
 
         # 同周期已建仓 → 跳过 BUY（信号级：slot 平仓释放也不建，等 setup
         # 重置后再现新信号；只拦截 BUY，不 return——SELL/止损仍正常评估）
+        buy_signal = (setup_buy >= entry_setup) or (cd_buy >= entry_countdown)
         if (
             st["bought"]
             and not st["reset"]
-            and setup_buy >= entry_setup
+            and buy_signal
             and score > score_threshold
         ):
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 同周期已建仓"
-                f"（setup_buy={setup_buy} 未重置），等新信号周期",
+                f"（setup_buy={setup_buy} cd_buy={cd_buy} 未重置），等新信号周期",
                 file=sys.stderr, flush=True,
             )
             self._record(
@@ -977,7 +980,7 @@ class TdSequentialStrategy(Strategy):
             batch_mode
             and round_used
             and wave_first
-            and setup_buy >= entry_setup
+            and buy_signal
             and score > score_threshold
             and can_buy
             and not (st["bought"] and not st["reset"])
@@ -994,7 +997,7 @@ class TdSequentialStrategy(Strategy):
                 symbol=self.symbol,
             )
         if (
-            setup_buy >= entry_setup
+            buy_signal
             and score > score_threshold
             and can_buy
             and not (batch_mode and round_used and wave_first)
@@ -1023,7 +1026,7 @@ class TdSequentialStrategy(Strategy):
                         file=sys.stderr, flush=True,
                     )
                     return
-            reason = f"TD LONG setup_buy={setup_buy} score={score:.1f}"
+            reason = f"TD LONG setup_buy={setup_buy} cd_buy={cd_buy} score={score:.1f}"
             if batch_mode:
                 # ── 真分账 v1.1（B 方案 2026-08-10）：目标 slot 子钱包为风控基准 ──
                 # position_limit/数量比例/资金检查全部基于 slot 账户资产（pv_slot），

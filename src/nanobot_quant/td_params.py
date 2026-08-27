@@ -42,6 +42,7 @@ DEFAULT_TD_PARAMS: dict[str, Any] = {
     # ── ③ Strategy layer ──────────────────────────────────────────────
     "score_threshold": 0.0,     # float 0–100 — entry requires score > threshold
     "entry_setup": 9,           # int 1–20 — LONG entry when setup_buy >= entry_setup
+    "entry_countdown": 13,      # int 1–20 — LONG entry when cd_buy >= entry_countdown
     "exit_setup": 9,            # int 1–20 — exit when setup_sell >= exit_setup
     "exit_countdown": 13,       # int 1–20 — exit when cd_sell >= exit_countdown
     "tdst_filter": False,       # bool — require close > tdst_support for entry
@@ -85,6 +86,9 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "entry_setup": {"group": "strategy", "min": 1, "max": 20, "step": 1, "std": 9,
                     "label": "入场 Setup 阈值", "hint": "setup_buy ≥ N 触发做多",
                     "strategies": ["td_sequential", "td_sequential_cycle"]},
+    "entry_countdown": {"group": "strategy", "min": 1, "max": 20, "step": 1, "std": 13,
+                         "label": "入场 Countdown 阈值", "hint": "cd_buy ≥ N 触发做多（与 setup 双信号 OR）",
+                         "strategies": ["td_sequential"]},
     "exit_setup": {"group": "strategy", "min": 1, "max": 20, "step": 1, "std": 9,
                    "label": "平仓 Setup 阈值", "hint": "setup_sell ≥ N 平仓（当前偏早）",
                    "strategies": ["td_sequential", "td_sequential_cycle"]},
