@@ -106,11 +106,13 @@ class PortfolioEngine:
         order = self._strategy.create_order(
             request.asset, request.quantity, request.action
         )
-        # 退出原因透传给 broker（回测 BacktestBroker 收进 _tracked →
-        # fills_detail.reason；实盘 broker 忽略该键，无副作用）
+        # 触发源透传给 broker（回测 BacktestBroker 收进 _tracked →
+        # fills_detail.reason；实盘 broker 忽略该键，无副作用）——按方向
+        # 区分键：买入 entry_reason / 卖出 exit_reason（2026-08-27）
         if request.reason:
             order.custom_params = order.custom_params or {}
-            order.custom_params["exit_reason"] = request.reason
+            key = "entry_reason" if request.action == "buy" else "exit_reason"
+            order.custom_params[key] = request.reason
         submitted = self._strategy.submit_order(order)
         return submitted if submitted is not None else order
 

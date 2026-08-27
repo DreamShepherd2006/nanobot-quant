@@ -215,9 +215,16 @@ class TestSell:
         b._submit_order(order)
         meta = b._tracked[list(b._tracked)[-1]]
         assert meta["reason"] == "take_profit: pnl_net=1.18%"
-        # 买单（无 exit_reason）reason 为 None
+        # 买单带 entry_reason → reason 显示买入触发源（2026-08-27）
         b2, _ = self._bought()
-        assert b2._tracked[list(b2._tracked)[0]]["reason"] is None
+        b2._submit_order(_mk_order(
+            side="buy", quantity=0.05,
+            custom_params={"entry_reason": "TD LONG setup_buy=9 cd_buy=0 score=5.0"},
+        ))
+        assert b2._tracked[list(b2._tracked)[-1]]["reason"] == "TD LONG setup_buy=9 cd_buy=0 score=5.0"
+        # 无任何 reason 的订单 → None
+        b3, _ = self._bought()
+        assert b3._tracked[list(b3._tracked)[0]]["reason"] is None
 
     def test_engine_exit_reason_reaches_broker_tracked(self):
         # 真实链路：策略 build_sell_order(reason=...) → PortfolioEngine.submit_order
@@ -245,6 +252,33 @@ class TestSell:
         engine.submit_order(req)
         meta = b._tracked[list(b._tracked)[-1]]
         assert meta["reason"] == "take_profit: pnl_net=1.18%"
+
+    def test_engine_buy_reason_reaches_broker_tracked(self):
+        # 买入侧对称链路（2026-08-27）：engine 按 action=buy 写 entry_reason
+        # → BacktestBroker._tracked["reason"] 显示买入触发源（setup/cd_buy）
+        from nanobot_quant.portfolio.engine import PortfolioEngine
+        from nanobot_quant.portfolio.order_schema import OrderRequest
+
+        b, _ = self._bought()
+
+        class _S:
+            def create_order(self, asset, quantity, action):
+                return _mk_order(side=action, quantity=quantity, symbol=asset)
+
+            def submit_order(self, order):
+                return b.submit_order(order)
+
+        engine = PortfolioEngine(_S())
+        req = OrderRequest(
+            asset="LINK",
+            action="buy",
+            quantity=0.35,
+            price=11.34,
+            reason="TD LONG setup_buy=0 cd_buy=13 score=5.0",
+        )
+        engine.submit_order(req)
+        meta = b._tracked[list(b._tracked)[-1]]
+        assert meta["reason"] == "TD LONG setup_buy=0 cd_buy=13 score=5.0"
 
 
 class TestBalancesPositions:

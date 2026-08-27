@@ -230,7 +230,8 @@ class BacktestBroker(Broker):
             "filled": quantity,
             "strategy_price": px,  # 信号 bar 收盘价（策略价）
             "avg_price": avg,
-            "reason": (order.custom_params or {}).get("exit_reason"),
+            "reason": (order.custom_params or {}).get("entry_reason")
+                      or (order.custom_params or {}).get("exit_reason"),
             "ts": time.time(),
         }
         return order

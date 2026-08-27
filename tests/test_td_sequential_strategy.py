@@ -130,6 +130,75 @@ def test_buy_value_sizing():
     assert qty == expected, f"qty={qty} expected={expected} (price={last_price})"
 
 
+# ── BUY 双信号（setup_buy OR cd_buy，2026-08-27 接入）───────────────────
+
+def _fixed_signal(**overrides) -> dict:
+    """构造固定信号 dict（其余字段安全默认），供 _calc 短路替换。"""
+    sig = {
+        "setup_buy": 0, "setup_sell": 0,
+        "cd_buy": 0, "cd_sell": 0,
+        "score": 5.0, "price": 100.0,
+        "tdst_support": 90.0, "tdst_resistance": 110.0,
+        "recommendation": "HOLD", "rvol": 1.0,
+    }
+    sig.update(overrides)
+    return sig
+
+
+def test_buy_cd_buy_signal_triggers():
+    """cd_buy 接入执行层：setup_buy < entry_setup 但 cd_buy >= entry_countdown → BUY。"""
+    s = _make_strategy()
+    s._calc = lambda df: _fixed_signal(cd_buy=13)  # setup_buy=0 < 9, cd_buy=13 >= 13
+    s.on_trading_iteration()
+    assert s._captured.get("order") is not None
+    assert s._captured["order"][2] == "buy"
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+
+
+def test_buy_cd_buy_below_threshold_no_buy():
+    """cd_buy < entry_countdown 且 setup_buy < entry_setup → 不 BUY。"""
+    s = _make_strategy()
+    s._calc = lambda df: _fixed_signal(cd_buy=5)  # 5 < 13，且 setup_buy=0 < 9
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+
+
+def test_buy_cd_buy_threshold_parameterized():
+    """entry_countdown 参数化：cd_buy=9 时 entry_countdown=9 触发、=13 不触发。"""
+    s = _make_strategy(entry_countdown=9)
+    s._calc = lambda df: _fixed_signal(cd_buy=9)  # setup_buy=0 < 9
+    s.on_trading_iteration()
+    assert s._captured.get("order") is not None
+    assert s._captured["order"][2] == "buy"
+
+    s2 = _make_strategy(entry_countdown=13)
+    s2._calc = lambda df: _fixed_signal(cd_buy=9)  # 9 < 13
+    s2.on_trading_iteration()
+    assert "order" not in s2._captured
+
+
+def test_buy_cd_buy_signal_in_last_signal():
+    """cd_buy 进入 _last_signal（实时监控显示），供页面核对触发源。"""
+    s = _make_strategy()
+    s._calc = lambda df: _fixed_signal(cd_buy=13)
+    s.on_trading_iteration()
+    assert s._last_signal.get("cd_buy") == 13
+
+
+def test_activate_scene_injects_entry_countdown():
+    """场景激活把 entry_countdown 注入 _td_params（场景级覆盖）。"""
+    s = _make_strategy()
+    rt = {"broker": object(), "batch_managers": getattr(s, "batch_managers", None),
+          "params": {"entry_setup": 9, "entry_countdown": 9}}
+    s._activate_scene("high", rt)
+    assert s._td_params["entry_countdown"] == 9
+    # 缺省 None → 保留全局（不覆盖）
+    rt2 = {"broker": object(), "batch_managers": getattr(s, "batch_managers", None),
+           "params": {"entry_setup": 9, "entry_countdown": None}}
+    s._activate_scene("high", rt2)
+    assert s._td_params["entry_countdown"] == 9
+
+
 def test_buy_value_sizing_floor_one_blocked_by_risk():
     """极端小净值：floor 1 的仓位价值超出 max_position_pct → risk fail-closed。
 
@@ -407,6 +476,55 @@ def test_cycle_gate_new_period_after_reset():
     s._evaluate_symbol()
     assert "order" in s._captured, "重置后新周期应允许再建仓"
     assert s._cycle_state["AAPL"]["reset"] is False
+
+
+def test_cycle_gate_cd_buy_blocked_same_countdown_period():
+    """setup 9 建仓后同一 countdown 周期内 cd_buy 13 被拦（cd_triggered）。
+
+    根因（2026-08-27 实盘 K 线实证）：countdown 跨 setup 翻转持续累积
+    （LINK 09:5x setup 9 启动 → 10:14 cd 13 完成），10:11 setup 翻转触发
+    reset=True 会让旧门控放行 cd 13 补买——10:10 setup 9 建仓 + 10:14
+    cd 13 再建仓（4 根 bar 内两次）。cd_triggered 在本 countdown 周期
+    已建仓时置位，cd_buy 仍在触发区（>= entry_countdown）即拦。
+    """
+    s = _make_strategy()
+    s._evaluate_symbol()  # setup 9 建仓（cd_buy=0）
+    assert "order" in s._captured, "首次信号应建仓"
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    s._captured.clear()
+    # setup 翻转（reset=True）+ cd_buy 13 触发 → 同一 countdown 周期内补买被拦
+    s._calc = lambda df: _fixed_signal(cd_buy=13, setup_buy=1)
+    s._evaluate_symbol()
+    assert "order" not in s._captured, "同一 countdown 周期内 cd 13 补买应被拦"
+    assert s._cycle_state["AAPL"]["reset"] is True
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True  # cd_buy=13≠0 不清位
+
+
+def test_cycle_gate_cd_triggered_cleared_on_cd_zero_and_reset():
+    """cd 归 0（countdown 完成/未启动）+ setup 翻转（新周期）→ cd_triggered
+    清除，新 setup 周期允许再次建仓（cd_buy 独立触发保留）。"""
+    s = _make_strategy()
+    s._evaluate_symbol()  # 建仓 → cd_triggered=True
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    s._captured.clear()
+    # setup 翻转（1 < 9 → reset）+ cd 归 0 → 清位
+    s._calc = lambda df: _fixed_signal(cd_buy=0, setup_buy=1)
+    s._evaluate_symbol()
+    assert s._cycle_state["AAPL"]["reset"] is True
+    assert s._cycle_state["AAPL"]["cd_triggered"] is False
+    assert "order" not in s._captured  # buy_signal 不成立
+
+
+def test_cycle_gate_cd_buy_independent_trigger_allowed():
+    """setup 从未到 9（cd_triggered=False）时 cd_buy 13 独立触发 → 放行。
+
+    cd_buy 的预期用途：setup 长期在 1-8 波动、countdown 累积到 13 提供
+    独立买入通道——不被周期门控误伤。"""
+    s = _make_strategy()
+    s._calc = lambda df: _fixed_signal(cd_buy=13, setup_buy=0)
+    s._evaluate_symbol()
+    assert "order" in s._captured, "独立 cd 周期触发应放行"
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
 
 
 def test_cycle_gate_open_position_on_start_blocks():

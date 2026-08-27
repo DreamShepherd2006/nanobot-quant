@@ -246,6 +246,14 @@ class _DeMarkEngine:
                             self.df.at[self.df.index[i], "buy_countdown_count"] = self._cd
                             active_buy = False
                             buy_count = 0
+                        else:
+                            self.df.at[self.df.index[i], "buy_countdown_count"] = buy_count
+                else:
+                    # 不满足条件：写入当前累积值（持续值语义，2026-08-27）
+                    # 供策略周期门控区分「countdown 进行中」与「未启动/已结束」——
+                    # 否则非 +1 bar 返回 0，清位条件（reset and cd_buy==0）会在
+                    # countdown 跨 setup 翻转累积期间误触发，cd 13 补买绕过门控
+                    self.df.at[self.df.index[i], "buy_countdown_count"] = buy_count
 
             # ── Sell countdown ──
             if active_sell and i >= 2:
@@ -262,6 +270,10 @@ class _DeMarkEngine:
                             self.df.at[self.df.index[i], "sell_countdown_count"] = self._cd
                             active_sell = False
                             sell_count = 0
+                        else:
+                            self.df.at[self.df.index[i], "sell_countdown_count"] = sell_count
+                else:
+                    self.df.at[self.df.index[i], "sell_countdown_count"] = sell_count
 
         return self.df
 
