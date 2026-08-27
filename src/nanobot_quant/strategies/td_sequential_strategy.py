@@ -1348,9 +1348,22 @@ class TdSequentialStrategy(Strategy):
             return False
         lot = slot.get("lot")
         if lot is None or not lot.get("entry_price"):
+            print(
+                f"[TD HIGH9 GATE] symbol={self.symbol} slot={slot.get('slot')} "
+                f"entry={lot.get('entry_price') if lot else None!r} price={price} "
+                f"thr={thr} -> 放行（entry 无效，fail-open）",
+                file=sys.stderr, flush=True,
+            )
             return False
         pnl = (price - lot["entry_price"]) / lot["entry_price"]
-        return pnl < thr
+        blocked = pnl < thr
+        print(
+            f"[TD HIGH9 GATE] symbol={self.symbol} slot={slot.get('slot')} "
+            f"entry={lot['entry_price']} price={price} pnl={pnl:.4f} thr={thr} "
+            f"-> {'拦（死扛）' if blocked else '放行（卖）'}",
+            file=sys.stderr, flush=True,
+        )
+        return blocked
 
     def _cd_gate_blocked(self, slot: dict, price: float) -> bool:
         """cd 13 通道保本门（2026-08-27，Step 1）：毛浮盈 < cd_exit_min_profit 拦截。
@@ -1361,9 +1374,22 @@ class TdSequentialStrategy(Strategy):
         thr = getattr(self, "_cd_exit_min_profit", 0.0) or 0.0
         lot = slot.get("lot")
         if lot is None or not lot.get("entry_price"):
+            print(
+                f"[TD CD GATE] symbol={self.symbol} slot={slot.get('slot')} "
+                f"entry={lot.get('entry_price') if lot else None!r} price={price} "
+                f"thr={thr} -> 放行（entry 无效，fail-open）",
+                file=sys.stderr, flush=True,
+            )
             return False
         pnl = (price - lot["entry_price"]) / lot["entry_price"]
-        return pnl < thr
+        blocked = pnl < thr
+        print(
+            f"[TD CD GATE] symbol={self.symbol} slot={slot.get('slot')} "
+            f"entry={lot['entry_price']} price={price} pnl={pnl:.4f} thr={thr} "
+            f"-> {'拦（死扛）' if blocked else '放行（卖）'}",
+            file=sys.stderr, flush=True,
+        )
+        return blocked
 
     def _symbol_min_hold(self) -> float:
         """当前标的的链上保留量（tokens.json min_hold，SOL 用作 gas 底线）。

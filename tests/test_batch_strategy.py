@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 import pandas as pd
 
 from nanobot_quant.batches import BatchManager
@@ -1232,3 +1234,33 @@ def test_cd_exit_after_setup_gate_kept(tmp_path):
     # 高9 通道拦（0.45% < 3%）→ 不动；cd 通道保本卖（≥0）
     assert s._captured["order"][2] == "sell"
     assert bm.slots[0]["status"] == "available"
+
+
+def test_cd_exit_arb_repro(tmp_path):
+    """复现回测 ARB 场景：slot1 +0.54%（卖）、slot2 -0.11%（应死扛）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=44.444444, entry_price=0.0929, entry_time="t1")
+    bm.open_lot(qty=44.444444, entry_price=0.0935, entry_time="t2")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), cd_exit_min_profit=0.0)
+    _exit_call(s, price=0.0934, setup_sell=0, cd_sell=13)
+    assert bm.slots[0]["status"] == "available", "slot1 盈利应卖"
+    assert bm.slots[1]["status"] == "open", "slot2 浮亏应死扛（保本门拦截）"
+    assert s._captured["order"][1] == pytest.approx(44.444444)  # 卖单量 = 台账原量（fee 从所得扣）
+
+
+def test_cd_exit_after_activate_scene(tmp_path):
+    """模拟回测路径（_activate_scene 注入场景参数后）cd13 保本门仍拦浮亏。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=44.444444, entry_price=0.0930, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s.broker = object()  # _activate_scene 读 self.broker
+    s._activate_scene(
+        "high",
+        {"params": {"cd_exit_min_profit": 0.0, "cd_exit_all": True,
+                    "sell_only_profit": 0.003, "exit_order": "fifo"}},
+    )
+    _exit_call(s, price=0.0914, setup_sell=0, cd_sell=13)
+    assert "order" not in s._captured, "浮亏 -1.72% 应被保本门拦截"
+    assert bm.slots[0]["status"] == "open"
+    assert s._cd_exit_min_profit == 0.0
+    assert s._cd_exit_all is True
