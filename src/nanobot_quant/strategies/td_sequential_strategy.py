@@ -819,6 +819,16 @@ class TdSequentialStrategy(Strategy):
             f"[TD] BARS | symbol={self.symbol} final={len(df)} (min_history={self._min_history})",
             file=sys.stderr, flush=True,
         )
+        # 诊断（2026-08-27）：打印拉到的 K 线最后 3 根 close——排查 Gate limit
+        # 路径 CDN 缓存把 close 截成 2 位小数（0.0925→0.09）的问题。
+        close_col = "close" if "close" in df.columns else (
+            "Close" if "Close" in df.columns else None)
+        if close_col:
+            for _ts, _row in df.tail(3).iterrows():
+                print(
+                    f"[TD] BARS | symbol={self.symbol} ts={_ts} close={_row[close_col]}",
+                    file=sys.stderr, flush=True,
+                )
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {
