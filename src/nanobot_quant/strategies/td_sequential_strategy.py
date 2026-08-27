@@ -1055,7 +1055,7 @@ class TdSequentialStrategy(Strategy):
                         self.logger.info(
                             f"TD BATCH LONG | symbol={self.symbol} slot={slot['slot']} "
                             f"price={price:.2f} qty={lot_qty} "
-                            f"setup_buy={setup_buy} score={score:.1f}"
+                            f"setup_buy={setup_buy} cd_buy={cd_buy} score={score:.1f}"
                         )
                         self._record(
                             "LONG",
