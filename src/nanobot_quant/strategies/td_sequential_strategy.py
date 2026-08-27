@@ -868,12 +868,13 @@ class TdSequentialStrategy(Strategy):
         if st is None:
             # 首次见到该标的：有 open 仓位 → 视为本周期已建仓（保守
             # 不追——重启边界：setup 累加期重启会立即再建，此守卫避免）
-            st = {"bought": False, "prev_setup": 0, "reset": False}
+            st = {"bought": False, "prev_setup": 0, "reset": False, "cd_triggered": False}
             _bm = (getattr(self, "_batch_managers", None) or {}).get(
                 self.symbol
             ) or getattr(self, "batch_manager", None)
             if _bm is not None and _bm.any_open():
                 st["bought"] = True
+                st["cd_triggered"] = True  # 有 open 仓 → 本 countdown 周期已建仓
             self._cycle_state[self.symbol] = st
         if setup_buy < st["prev_setup"]:
             st["reset"] = True  # 计数变小 → 新信号周期
@@ -881,6 +882,14 @@ class TdSequentialStrategy(Strategy):
             if getattr(self, "_denied_cycle", None):
                 self._denied_cycle.pop((self._cur_scene(), self.symbol), None)
         st["prev_setup"] = setup_buy
+        # cd 周期门控（2026-08-27）：countdown 跨 setup 翻转持续累积（09:5x 启动 →
+        # 10:14 完成 13），setup 翻转触发 reset 会让 cd_buy 13 绕过周期门控——同一
+        # countdown 周期内 setup 9 已建仓 + cd 13 再补买（4 根 bar 内两次建仓）。
+        # cd_triggered：本 countdown 周期已建仓（setup 或 cd 触发均置位）；
+        # 清位条件：cd 计数归 0（countdown 完成/未启动）且 setup 翻转（新周期）——
+        # 之后 setup 重新数到 9 才允许再次建仓，cd_buy 独立触发（setup 从未到 9）保留。
+        if st["reset"] and cd_buy == 0:
+            st["cd_triggered"] = False
         # 共振错峰波结束判定数据：记录本标的 setup（信号区判定用）
         self._last_setup.setdefault(self._cur_scene(), {})[self.symbol] = setup_buy
         price = signal.get("price", 0) or 0
@@ -932,9 +941,14 @@ class TdSequentialStrategy(Strategy):
         # 同周期已建仓 → 跳过 BUY（信号级：slot 平仓释放也不建，等 setup
         # 重置后再现新信号；只拦截 BUY，不 return——SELL/止损仍正常评估）
         buy_signal = (setup_buy >= entry_setup) or (cd_buy >= entry_countdown)
+        # 周期门控（2026-08-27 扩展）：setup 周期（bought+未重置）或 countdown
+        # 周期（cd_triggered 且 cd_buy 仍在触发区——setup 翻转会让 cd 13 绕过
+        # 旧门控，同一 countdown 周期内 setup 9 已建仓 + cd 13 补买被拦）
+        cycle_blocked = (st["bought"] and not st["reset"]) or (
+            st["cd_triggered"] and cd_buy >= entry_countdown
+        )
         if (
-            st["bought"]
-            and not st["reset"]
+            cycle_blocked
             and buy_signal
             and score > score_threshold
         ):
@@ -983,7 +997,7 @@ class TdSequentialStrategy(Strategy):
             and buy_signal
             and score > score_threshold
             and can_buy
-            and not (st["bought"] and not st["reset"])
+            and not (cycle_blocked)
         ):
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 本轮已建仓"
@@ -1004,8 +1018,9 @@ class TdSequentialStrategy(Strategy):
             and not denied
             and (not tdst_filter or (support is not None and price > support))
             # 信号周期门控（2026-08-19 分批次建仓）：同周期已建仓（bought 且
-            # 未重置）→ 不 BUY；reset=True（计数变小）→ 新周期允许
-            and not (st["bought"] and not st["reset"])
+            # 未重置，或 cd_triggered 且 cd_buy 仍在触发区——cd 13 补买拦截）
+            # → 不 BUY；reset=True（计数变小）→ 新周期允许
+            and not (cycle_blocked)
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
@@ -1069,6 +1084,7 @@ class TdSequentialStrategy(Strategy):
                         executed = True
                         st["bought"] = True
                         st["reset"] = False
+                        st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
                         # 共振错峰：本轮额度已用 + 本波已到过 9
                         self._round_buy_used = getattr(self, "_round_buy_used", {})
                         self._round_buy_used[self._cur_scene()] = True
@@ -1116,6 +1132,7 @@ class TdSequentialStrategy(Strategy):
                     executed = True
                     st["bought"] = True
                     st["reset"] = False
+                    st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
                     # 共振错峰：本轮额度已用 + 本波已到过 9
                     self._round_buy_used = getattr(self, "_round_buy_used", {})
                     self._round_buy_used[self._cur_scene()] = True
@@ -1154,6 +1171,7 @@ class TdSequentialStrategy(Strategy):
                 )
                 st["bought"] = True
                 st["reset"] = False
+                st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
                 return
 
         # ── SELL signal / stop-loss / take-profit（分批：逐批独立）──

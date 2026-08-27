@@ -152,6 +152,7 @@ def test_buy_cd_buy_signal_triggers():
     s.on_trading_iteration()
     assert s._captured.get("order") is not None
     assert s._captured["order"][2] == "buy"
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
 
 
 def test_buy_cd_buy_below_threshold_no_buy():
@@ -475,6 +476,55 @@ def test_cycle_gate_new_period_after_reset():
     s._evaluate_symbol()
     assert "order" in s._captured, "重置后新周期应允许再建仓"
     assert s._cycle_state["AAPL"]["reset"] is False
+
+
+def test_cycle_gate_cd_buy_blocked_same_countdown_period():
+    """setup 9 建仓后同一 countdown 周期内 cd_buy 13 被拦（cd_triggered）。
+
+    根因（2026-08-27 实盘 K 线实证）：countdown 跨 setup 翻转持续累积
+    （LINK 09:5x setup 9 启动 → 10:14 cd 13 完成），10:11 setup 翻转触发
+    reset=True 会让旧门控放行 cd 13 补买——10:10 setup 9 建仓 + 10:14
+    cd 13 再建仓（4 根 bar 内两次）。cd_triggered 在本 countdown 周期
+    已建仓时置位，cd_buy 仍在触发区（>= entry_countdown）即拦。
+    """
+    s = _make_strategy()
+    s._evaluate_symbol()  # setup 9 建仓（cd_buy=0）
+    assert "order" in s._captured, "首次信号应建仓"
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    s._captured.clear()
+    # setup 翻转（reset=True）+ cd_buy 13 触发 → 同一 countdown 周期内补买被拦
+    s._calc = lambda df: _fixed_signal(cd_buy=13, setup_buy=1)
+    s._evaluate_symbol()
+    assert "order" not in s._captured, "同一 countdown 周期内 cd 13 补买应被拦"
+    assert s._cycle_state["AAPL"]["reset"] is True
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True  # cd_buy=13≠0 不清位
+
+
+def test_cycle_gate_cd_triggered_cleared_on_cd_zero_and_reset():
+    """cd 归 0（countdown 完成/未启动）+ setup 翻转（新周期）→ cd_triggered
+    清除，新 setup 周期允许再次建仓（cd_buy 独立触发保留）。"""
+    s = _make_strategy()
+    s._evaluate_symbol()  # 建仓 → cd_triggered=True
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    s._captured.clear()
+    # setup 翻转（1 < 9 → reset）+ cd 归 0 → 清位
+    s._calc = lambda df: _fixed_signal(cd_buy=0, setup_buy=1)
+    s._evaluate_symbol()
+    assert s._cycle_state["AAPL"]["reset"] is True
+    assert s._cycle_state["AAPL"]["cd_triggered"] is False
+    assert "order" not in s._captured  # buy_signal 不成立
+
+
+def test_cycle_gate_cd_buy_independent_trigger_allowed():
+    """setup 从未到 9（cd_triggered=False）时 cd_buy 13 独立触发 → 放行。
+
+    cd_buy 的预期用途：setup 长期在 1-8 波动、countdown 累积到 13 提供
+    独立买入通道——不被周期门控误伤。"""
+    s = _make_strategy()
+    s._calc = lambda df: _fixed_signal(cd_buy=13, setup_buy=0)
+    s._evaluate_symbol()
+    assert "order" in s._captured, "独立 cd 周期触发应放行"
+    assert s._cycle_state["AAPL"]["cd_triggered"] is True
 
 
 def test_cycle_gate_open_position_on_start_blocks():
