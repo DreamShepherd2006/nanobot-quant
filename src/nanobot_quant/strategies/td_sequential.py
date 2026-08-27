@@ -61,10 +61,16 @@ def calculate(
     last = engine.df.iloc[-1]
 
     def _scalar(val):
-        """Convert numpy/pandas scalar to Python native, NaN → None."""
+        """Convert numpy/pandas scalar to Python native, NaN → None.
+
+        2026-08-27：去掉 round(v, 2)——低价币（如 ARB 0.09253）会被截成
+        2 位（0.09），导致盈利门/止损的 pnl 判定失真（真实 +2.8% 被当成
+        0% 而拦下卖出）。price/TDST 是价格，必须保留完整精度；展示层
+        （td-table/实时监控）自行格式化。
+        """
         try:
             v = float(val)
-            return round(v, 2) if not np.isnan(v) else None
+            return v if not np.isnan(v) else None
         except (ValueError, TypeError):
             return str(val)
 

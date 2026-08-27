@@ -73,11 +73,15 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
     "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
 )
 
-#: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25）。
+#: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25；cd13 通道 2026-08-27）。
 #: sell_only_profit = 毛浮盈门（0=关闭无条件卖；>0 时 TD 高9 只平毛浮盈 ≥ X 的批次，
 #:   毛口径 (price−entry)/entry 未扣手续费，用户自行计算含成本阈值，如 Gate 双程 0.2% → 0.002）。
 #: td_sell_all = 高9 一次平掉所有满足盈利门的 open 批次（false=每轮只平一个，现有行为）。
-SCENE_ONLY_FIELDS: tuple[str, ...] = ("sell_only_profit", "td_sell_all")
+#: cd_exit_min_profit = cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，承担交易成本）。
+#: cd_exit_all = cd 13 一次平掉所有 ≥ 保本门的 open 批次（false=每轮只平一个）。
+SCENE_ONLY_FIELDS: tuple[str, ...] = (
+    "sell_only_profit", "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
+)
 
 #: 场景卡片字段渲染顺序。
 SCENE_FIELD_ORDER: tuple[str, ...] = (
@@ -85,7 +89,7 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
     "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
     "exit_order", "stop_loss_pct", "take_profit_pct",
-    "sell_only_profit", "td_sell_all",
+    "sell_only_profit", "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
     "td_start_slot", "min_account_value",
 )
 
@@ -104,6 +108,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
         "sell_only_profit": 0.0, "td_sell_all": False,
+        "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "mid": {
@@ -114,6 +119,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
         "sell_only_profit": 0.0, "td_sell_all": False,
+        "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
     },
     "low": {
@@ -124,6 +130,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
         "sell_only_profit": 0.0, "td_sell_all": False,
+        "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
     },
 }
@@ -321,6 +328,16 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "type": "bool", "std": False,
         "label": "高9全平",
         "hint": "true=高9 一次平掉所有满足盈利门的 open 批次；false=每轮只平一个（现有行为）",
+    },
+    "cd_exit_min_profit": {
+        "group": "scene", "min": 0.0, "max": 1.0, "step": 0.001, "std": 0.0,
+        "label": "cd13保本门(毛)",
+        "hint": "cd_sell 到达平仓 Countdown 阈值时，毛浮盈 ≥ 该值的批次平仓（保本离场）；< 该值死扛（负浮盈恒不卖）。默认 0 = 不亏本金就走（承担交易成本，2026-08-27 拍板）",
+    },
+    "cd_exit_all": {
+        "group": "scene", "type": "bool", "std": True,
+        "label": "cd13全平",
+        "hint": "true=cd 13 一次平掉所有 ≥ 保本门的 open 批次；false=每轮只平一个",
     },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],

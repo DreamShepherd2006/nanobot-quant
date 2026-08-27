@@ -476,3 +476,28 @@ def test_get_datetime_contract():
     assert src.get_datetime(adjust_for_delay=False) == datetime(
         2026, 8, 22, tzinfo=timezone.utc
     )
+
+
+def test_driver_cd13_loss_holds(tmp_path):
+    """driver 级复现：BUY 后下跌 → cd_sell 13 触发 → 保本门应拦（浮亏不卖）。
+
+    序列：120 平盘 + 30 下跌（buy setup 9 → BUY 建仓）+ 60 继续跌
+    （sell setup 9 → sell countdown 13）→ cd_sell 13 触发时浮亏 → 死扛。
+    """
+    closes = [100.0] * 120 + [100 - 0.5 * i for i in range(1, 31)] + \
+             [85 - 0.2 * i for i in range(1, 61)]
+    params = _params()
+    params["scenes"]["mid"].update({
+        "stop_loss_pct": 0.0, "take_profit_pct": 0.0,
+        "cd_exit_min_profit": 0.0, "cd_exit_all": True,
+        "sell_only_profit": 0.003, "td_sell_all": True,
+    })
+    driver = BacktestDriver(
+        scene="mid", params=params,
+        fetcher=_FakeFetcher(closes, bar="1m"),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    sells = [f for f in out["fills_detail"] if f["side"] == "sell"]
+    assert out["fills"] >= 1, "应有 BUY 成交"
+    assert not sells, f"浮亏应死扛，但出现卖出: {sells}"
