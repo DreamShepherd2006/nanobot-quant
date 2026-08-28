@@ -75,13 +75,21 @@ class KlineCache:
         fetch: ``callable(symbol, bar, limit) -> DataFrame`` — source-specific
             full fetch (same semantics as the registry ``fetch_kline``).
             Must raise on failure and never return empty data.
+        fetch_range: optional ``callable(symbol, bar, start_ts, end_ts) ->
+            DataFrame`` — to_ts 区间拉取（[start_ts, end_ts] unix 秒）。提供时
+            增量走区间拉取（含尾重叠 upsert、缺口自动补齐），绕开 limit 路径
+            CDN 缓存窗口（2026-08-28：低流动性币 append 可能固化旧价 →
+            回测/实盘信号漂移）。未提供（如 DEX CLI 不支持区间）退回 need
+            自适应拉取。
         keep_extra: how many extra rows beyond the requested length to keep
             after trimming (avoids rebuild on small length fluctuation).
     """
 
     def __init__(self, fetch: Callable[[str, str, int], pd.DataFrame],
-                 keep_extra: int = 8) -> None:
+                 keep_extra: int = 8,
+                 fetch_range: Optional[Callable[[str, str, int, int], pd.DataFrame]] = None) -> None:
         self._fetch = fetch
+        self._fetch_range = fetch_range
         self._keep_extra = max(1, int(keep_extra))
         self._entries: dict[str, _Entry] = {}
 
@@ -100,7 +108,9 @@ class KlineCache:
             self._entries[symbol] = e
         else:
             e.length = length
-            self._incremental(e, symbol, bar)
+            status = self._incremental(e, symbol, bar)
+            if status is None:      # 缺口 → 本轮跳过 TD 评估（fail-closed）
+                return None
         return e.df.iloc[-length:].copy()
 
     def clear(self) -> None:
@@ -120,27 +130,38 @@ class KlineCache:
         _diag(f"prefetch symbol={symbol} bar={bar} n={len(df)}")
         return _Entry(bar, length, df.sort_index())
 
-    def _incremental(self, e: _Entry, symbol: str, bar: str) -> None:
+    def _incremental(self, e: _Entry, symbol: str, bar: str) -> Optional[bool]:
+        """Incremental update; returns True (updated) / False (kept, retry
+        next round) / None (gap → caller should skip this round)."""
         tail_ts = e.df.index[-1]
         now = _now_for(tail_ts)
         # 未知周期显式 KeyError（fail-closed），放在 try 外避免被吞成
         # incr-fail 无限重试——旧 fallback 60s 曾致 3m 每轮 gap 全量重拉。
         period = pd.Timedelta(seconds=_PERIOD_SECONDS[bar])
         try:
-            # 自适应增量窗口：调用方可能跳过若干周期才访问一次（S3a 多场景
-            # 调度：mid=5m 每 5 轮才访问 1m 缓存，期间产生多根新 bar）。
-            # 固定 limit=2 在跳过多轮时会把第 3 根起误判为缺口 → 每轮
-            # 全量重拉（120 倍退化）。按距缓存尾的时间差估算需要拉多少根：
-            #   need = elapsed_bars + 2  （+2 = 1 根进行中容差 + 1 根余量）
-            # elapsed 为 0（同周期内重复访问）时退化为固定 limit=2。
-            elapsed = max(0, int((now - tail_ts) / period))
-            need = min(max(elapsed + 2, 2), 1000)
-            new = self._fetch(symbol, bar, need)
-        except Exception as exc:  # 增量失败 → 保留缓存，下一轮再试
+            if self._fetch_range is not None:
+                # to_ts 区间拉取（2026-08-28）：[缓存尾 ts, now]——含尾重叠（按
+                # ts upsert 校验价格）、缺口自动补齐；绕开 limit 路径 CDN 缓存
+                # 窗口（低流动性币 append 时可能固化旧价 → 回测/实盘漂移）。
+                new = self._fetch_range(
+                    symbol, bar,
+                    int(tail_ts.timestamp()), int(now.timestamp()),
+                )
+            else:
+                # 自适应增量窗口：调用方可能跳过若干周期才访问一次（S3a 多场景
+                # 调度：mid=5m 每 5 轮才访问 1m 缓存，期间产生多根新 bar）。
+                # 固定 limit=2 在跳过多轮时会把第 3 根起误判为缺口 → 每轮
+                # 全量重拉（120 倍退化）。按距缓存尾的时间差估算需要拉多少根：
+                #   need = elapsed_bars + 2  （+2 = 1 根进行中容差 + 1 根余量）
+                # elapsed 为 0（同周期内重复访问）时退化为固定 limit=2。
+                elapsed = max(0, int((now - tail_ts) / period))
+                need = min(max(elapsed + 2, 2), 1000)
+                new = self._fetch(symbol, bar, need)
+        except Exception as exc:  # 增量失败 → 保留缓存，下一轮再试（非缺口，不 SKIP）
             _diag(f"incr-fail symbol={symbol}: {exc} (cache kept)")
-            return
+            return False
         if new is None or new.empty:
-            return
+            return False  # 无新 bar（区间内无数据）→ 保留缓存
         new = new.sort_index()
         gap = False
         appended = 0
@@ -158,13 +179,15 @@ class KlineCache:
                 gap = True                   # 跳跃 → 缺口 → 全量重拉
                 break
         if gap:
-            _diag(f"gap symbol={symbol} tail={tail_ts} new={ts} → full refetch")
-            rebuilt = self._rebuild(symbol, bar, e.length)
-            e.bar, e.length, e.df = rebuilt.bar, rebuilt.length, rebuilt.df
-        else:
-            if appended:
-                _diag(f"incr symbol={symbol} +{appended} cache={len(e.df)}")
-            self._trim(e)
+            # 2026-08-28：缺口不再自动全量重拉（静默掩盖数据源问题）——报缺口
+            # 日志 + 本轮跳过 TD 评估（fail-closed）；下轮区间拉取自动补齐，
+            # 连续缺口持续报出供人工核查。
+            _diag(f"GAP symbol={symbol} tail={tail_ts} new={ts}（数据源缺口，本轮跳过 TD 评估，请核查）")
+            return None
+        if appended:
+            _diag(f"incr symbol={symbol} +{appended} cache={len(e.df)}")
+        self._trim(e)
+        return True
 
     def _trim(self, e: _Entry) -> None:
         cap = e.length + self._keep_extra

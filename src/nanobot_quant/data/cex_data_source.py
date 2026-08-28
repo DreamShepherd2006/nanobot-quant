@@ -39,13 +39,33 @@ class CexDataSource(DataSource):
         super().__init__(**kwargs)
         self._tokens_json = tokens_json or []
         self._use_cache = use_cache
-        self._cache = KlineCache(self._fetch_kline) if use_cache else None
+        self._cache = KlineCache(
+            self._fetch_kline, fetch_range=self._fetch_kline_range
+        ) if use_cache else None
 
     def _fetch_kline(self, symbol: str, bar: str, limit: int) -> "pd.DataFrame":
         """Registry fetch + non-empty guard (shared by full/incremental paths)."""
         df = get_data_source("gate_cex").fetch_kline(symbol, bar=bar, limit=limit)
         if df is None or df.empty:
             raise RuntimeError(f"No Gate CEX kline for {symbol} (bar={bar})")
+        return df
+
+    def _fetch_kline_range(self, symbol: str, bar: str,
+                           start_ts: int, end_ts: int) -> "pd.DataFrame":
+        """to_ts 区间拉取：[start_ts, end_ts]（unix 秒）。
+
+        2026-08-28：增量改走区间（to_ts 语义）而非 limit——绕开 limit 路径
+        CDN 缓存窗口（低流动性币 append 可能固化旧价）；经 gate_cex.fetch_kline
+        start/end → 分页拉取（缺口自动补齐、超深度截断由 paged 处理）。
+        """
+        from datetime import datetime, timezone
+        df = get_data_source("gate_cex").fetch_kline(
+            symbol, bar=bar, limit=1000,
+            start=datetime.fromtimestamp(start_ts, tz=timezone.utc),
+            end=datetime.fromtimestamp(end_ts, tz=timezone.utc),
+        )
+        if df is None or df.empty:
+            raise RuntimeError(f"No Gate CEX kline range for {symbol} (bar={bar})")
         return df
 
     def get_chains(self, asset=None, quote=None):
@@ -78,6 +98,10 @@ class CexDataSource(DataSource):
         limit = max(1, min(int(length), 1000))
         if self._cache is not None:
             df = self._cache.get(symbol, bar, limit)
+            if df is None:
+                # 2026-08-28：K 线缺口 → 本轮跳过（fail-closed，不基于缺口
+                # 数据算信号）；下轮区间拉取自动补齐，连续缺口持续报 GAP。
+                return None
         else:
             df = self._fetch_kline(symbol, bar, limit)
         # lumibot v4.5.78 Bars.__init__ 构造时访问小写列 df["close"] 派生 return 列；
