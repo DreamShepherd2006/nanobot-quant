@@ -559,7 +559,7 @@ def test_write_positions_state(monkeypatch):
         "running": False, "next_iteration": None, "updated_at": "",
         "strategy_variant": "", "symbols": {}, "positions": {},
     })
-    s = _make_strategy()
+    s = _make_strategy(live_mode=True)
     s._current_scene = "high"
     bm = BatchManager("CRCLX", ["acc-1", "acc-2"], path="/tmp/test-pos.json")
     bm.open_lot(qty=0.045, entry_price=87.99, slot=2)
@@ -588,7 +588,7 @@ def test_write_positions_state_price_failure_fallback(monkeypatch):
         "running": False, "next_iteration": None, "updated_at": "",
         "strategy_variant": "", "symbols": {}, "positions": {},
     })
-    s = _make_strategy()
+    s = _make_strategy(live_mode=True)
     s._current_scene = "mid"
     bm = BatchManager("SOL", ["acc-1"], path="/tmp/test-pos2.json")
     bm.open_lot(qty=0.0457, entry_price=87.42, slot=1)
@@ -642,7 +642,7 @@ def test_write_account_funds_cex(monkeypatch):
         "running": False, "next_iteration": None, "updated_at": "",
         "strategy_variant": "", "symbols": {}, "positions": {},
     })
-    s = _make_strategy(channel_family="cex")
+    s = _make_strategy(channel_family="cex", live_mode=True)
     s._current_scene = "high"
     monkeypatch.setattr(
         "nanobot_quant.exec_params.load_exec_params",
@@ -716,7 +716,7 @@ def test_write_account_funds_uid_missing(monkeypatch):
         "running": False, "next_iteration": None, "updated_at": "",
         "strategy_variant": "", "symbols": {}, "positions": {},
     })
-    s = _make_strategy(channel_family="cex")
+    s = _make_strategy(channel_family="cex", live_mode=True)
     s._current_scene = "high"
     monkeypatch.setattr(
         "nanobot_quant.exec_params.load_exec_params",
@@ -749,7 +749,7 @@ def test_write_positions_state_display_min_filter(monkeypatch):
         "running": False, "next_iteration": None, "updated_at": "",
         "strategy_variant": "", "symbols": {}, "positions": {},
     })
-    s = _make_strategy()
+    s = _make_strategy(live_mode=True)
     s._current_scene = "high"
     s.parameters = dict(s.parameters, position_display_min_usd=1.0)
     bm = BatchManager("CRCLX", ["acc-1", "acc-2"], path="/tmp/test-pos3.json")
