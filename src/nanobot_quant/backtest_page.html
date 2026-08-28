@@ -325,6 +325,7 @@ function renderResult(res, runId) {
       <div class="kpi"><div class="v">${res.fills || 0}</div><div class="k">成交笔数</div></div>
       <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
     </div>
+    ${capitalBox(res.capital_stats)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
@@ -351,8 +352,20 @@ function renderProgress(runId, prog) {
     <div class="banner msg show">⏳ run_id=${runId} 回测运行中</div>
     ${bar}
     <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
+    ${prog.capital_stats ? capitalBox(prog.capital_stats) : ""}
     ${fillsBox(prog.fills_detail, `运行中已成交 ${prog.fills || 0} 笔，实时更新`)}
   `;
+}
+
+// 资金效率指标（周转率/利用率，2026-08-29）
+function capitalBox(cs) {
+  if (!cs) return "";
+  return `
+    <div class="kpis">
+      <div class="kpi"><div class="v">${fmtN(cs.turnover, 2)}</div><div class="k">资金周转率（单边 · 累计买入÷总资金）</div></div>
+      <div class="kpi"><div class="v">${fmtN(cs.turnover_two_side, 2)}</div><div class="k">资金周转率（双边 · 含卖出回笼）</div></div>
+      <div class="kpi"><div class="v">${(cs.utilization * 100).toFixed(1)}%</div><div class="k">平均资金利用率（在途÷总资金）</div></div>
+    </div>`;
 }
 
 // ── 历史记录 ────────────────────────────────────────────────────────────
