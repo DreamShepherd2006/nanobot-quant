@@ -222,6 +222,15 @@ def test_fixed_amount_override(tmp_path):
     assert driver.strategy.fixed_amount == 5.0
     # 结果带实际生效配置（诊断显示用）
     assert out["backtest_config"]["td_fixed_amount"] == 5.0
+    # 2026-08-29：结果区先展示回测参数——策略实际生效值快照
+    cfg = out["backtest_config"]
+    assert cfg["min_hold_bars"] is not None
+    assert cfg["entry_setup"] is not None
+    assert cfg["exit_setup"] is not None
+    assert cfg["stop_loss_pct"] is not None
+    assert cfg["take_profit_pct"] is not None
+    assert cfg["slippage"] is not None
+    assert cfg["start_ts"] and cfg["end_ts"]
 
 
 def test_insufficient_history_fail_closed(tmp_path):
@@ -566,3 +575,40 @@ def test_replay_prefetch_warmup_and_eval_start():
     )
     ds2.prefetch()
     assert ds2.start_idx == 89
+
+
+def test_driver_min_hold_follows_exec_params(tmp_path):
+    """min_hold_bars 跟随 exec_params 全局（回测表单无该键）；表单可覆盖。
+
+    2026-08-29 修复：此前 _build_strategy 只读回测表单的 min_hold_bars、
+    缺省恒 10，/config/exec 改全局/场景值对回测无效（回测与实盘不一致）。
+    """
+    # 场景 A：表单无 min_hold_bars 键 → 回退 exec_params 全局（隔离路径无文件 → 默认 10）
+    p = _params()
+    p.pop("min_hold_bars", None)
+    driver = BacktestDriver(
+        scene="mid", params=p, fetcher=_FakeFetcher(_rising_closes(100)),
+        ledger_dir=tmp_path,
+    )
+    assert driver._min_hold_bars_value() == 10
+
+    # 场景 B（用户实测 bug）：exec_params 全局改 0 → 回测生效 0
+    import json
+    raw = _params()
+    raw["min_hold_bars"] = 0
+    (tmp_path / "exec_params.json").write_text(json.dumps(raw), encoding="utf-8")
+    p2 = _params()
+    p2.pop("min_hold_bars", None)  # 模拟回测表单无该键
+    driver2 = BacktestDriver(
+        scene="mid", params=p2, fetcher=_FakeFetcher(_rising_closes(100)),
+        ledger_dir=tmp_path,
+    )
+    assert driver2._min_hold_bars_value() == 0
+
+    # 场景 C：表单显式覆盖优先（回测页未来加字段时）
+    p3 = _params(min_hold_bars=25)
+    driver3 = BacktestDriver(
+        scene="mid", params=p3, fetcher=_FakeFetcher(_rising_closes(100)),
+        ledger_dir=tmp_path,
+    )
+    assert driver3._min_hold_bars_value() == 25

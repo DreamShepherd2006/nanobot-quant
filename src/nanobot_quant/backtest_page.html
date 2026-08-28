@@ -57,6 +57,13 @@
   .kpi { background:#f8fafc; border:1px solid #e0e7ef; border-radius:6px; padding:8px 14px; min-width:120px; }
   .kpi .v { font-size:1.25em; font-weight:700; }
   .kpi .k { font-size:.76em; color:#888; margin-top:2px; }
+  .bt-params { background:#fbfcfe; border:1px solid #e0e7ef; border-radius:6px; padding:10px 12px; margin-bottom:10px; }
+  .bt-params-title { font-weight:700; font-size:.9em; margin-bottom:8px; }
+  .bt-params-table { border-collapse:collapse; font-size:.82em; width:100%; }
+  .bt-params-table td { padding:3px 10px 3px 0; border-bottom:1px dashed #e8eef5; vertical-align:top; }
+  .bt-params-table tr:last-child td { border-bottom:none; }
+  .bt-params-table .pk { color:#888; white-space:nowrap; }
+  .bt-params-table .pv { font-weight:600; color:#1f2937; }
   code { background:#eef; padding:1px 5px; border-radius:3px; font-size:.85em; }
 </style>
 </head>
@@ -254,6 +261,47 @@ function pollResult(runId, tries) {
 }
 
 // ── 结果渲染 ────────────────────────────────────────────────────────────
+function pctFmt(v, digits) {
+  if (v === null || v === undefined || v === "") return "—";
+  return (v * 100).toFixed(digits ?? 2) + "%";
+}
+function onOff(v) { return v ? "开" : "关"; }
+
+// 回测参数块：结果区顶部先展示本次实际生效参数（2026-08-29）
+function paramsRows(res) {
+  const cfg = res.backtest_config || {};
+  const rows = [
+    ["场景", `<code>${cfg.scene ?? res.scene ?? "—"}</code>`],
+    ["标的", `<code>${(cfg.symbols || res.symbols || []).join(", ")}</code>`],
+    ["周期", `<code>${cfg.timestep ?? res.timestep ?? "—"}</code>`],
+    ["评估区间", `${fmtTs(cfg.start_ts ?? res.start_ts)} → ${fmtTs(cfg.end_ts ?? res.end_ts)}`],
+    ["初始资金", `${fmtN(cfg.initial_total ?? res.initial_total, 2)} USDT（${cfg.batches ?? res.batches ?? "—"} slot × ${fmtN(cfg.initial_quote ?? res.initial_quote, 2)}）`],
+    ["批次数量", `${cfg.batches ?? res.batches ?? "—"} slot`],
+    ["固定金额", cfg.td_fixed_amount != null ? `${cfg.td_fixed_amount} U` : "—"],
+    ["滑点", cfg.slippage != null ? `${cfg.slippage}%` : "—"],
+    ["入场 Setup 阈值", cfg.entry_setup ?? "—"],
+    ["入场 Countdown 阈值", cfg.entry_countdown ?? "—"],
+    ["平仓 Setup 阈值", cfg.exit_setup ?? "—"],
+    ["平仓 Countdown 阈值", cfg.exit_countdown ?? "—"],
+    ["最短持有期", cfg.min_hold_bars != null ? `${cfg.min_hold_bars} bar` : "—"],
+    ["止损阈值", pctFmt(cfg.stop_loss_pct)],
+    ["止盈线", pctFmt(cfg.take_profit_pct)],
+    ["高9盈利门(毛)", pctFmt(cfg.sell_only_profit)],
+    ["高9全平", onOff(cfg.td_sell_all)],
+    ["cd13保本门(毛)", pctFmt(cfg.cd_exit_min_profit)],
+    ["cd13全平", onOff(cfg.cd_exit_all)],
+    ["平仓顺序", cfg.exit_order ?? "—"],
+    ["建仓起始批次", cfg.td_start_slot ?? "—"],
+    ["子账户最小资金", cfg.min_account_value != null ? `${cfg.min_account_value} USD` : "—"],
+  ];
+  return rows
+    .map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`)
+    .join("");
+}
+function paramsBox(res) {
+  return `<div class="bt-params"><div class="bt-params-title">📋 回测参数（实际生效）</div><table class="bt-params-table">${paramsRows(res)}</table></div>`;
+}
+
 function renderResult(res, runId) {
   const box = $("result");
   if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
@@ -269,17 +317,13 @@ function renderResult(res, runId) {
   const fills = res.fills_detail || [];
   const rows = fills.map(fillRow).join("");
   box.innerHTML = `
+    ${paramsBox(res)}
     <div class="kpis">
       <div class="kpi"><div class="v">${fmtN(res.initial_total, 2)} USDT</div><div class="k">初始资金（${res.batches} slot × ${fmtN(res.initial_quote, 2)}）</div></div>
       <div class="kpi"><div class="v">${fmtN(res.final_net, 2)} USDT</div><div class="k">期末净值</div></div>
       <div class="kpi"><div class="v ${roiCls}">${roi === null || roi === undefined ? "—" : (roi * 100).toFixed(2) + "%"}</div><div class="k">ROI</div></div>
       <div class="kpi"><div class="v">${res.fills || 0}</div><div class="k">成交笔数</div></div>
       <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
-      <div class="kpi"><div class="v">${res.backtest_config ? `${res.backtest_config.td_fixed_amount ?? "—"}U / ${res.backtest_config.batches ?? "—"} slots / 滑点 ${res.backtest_config.slippage ?? "—"}` : "—"}</div><div class="k">实际生效配置（固定金额/批次/滑点）</div></div>
-    </div>
-    <div style="font-size:.84em;color:#888;margin:4px 0 10px;">
-      场景 <code>${res.scene}</code> · 标的 <code>${(res.symbols || []).join(", ")}</code> ·
-      周期 <code>${res.timestep}</code> · ${fmtTs(res.start_ts)} → ${fmtTs(res.end_ts)}
     </div>
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
