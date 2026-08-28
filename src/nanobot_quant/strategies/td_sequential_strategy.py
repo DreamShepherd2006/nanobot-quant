@@ -1380,11 +1380,14 @@ class TdSequentialStrategy(Strategy):
                         f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
                         f"cd_sell={cd_sell}）"
                     )
-        # 2b) cd 13 通道（2026-08-27，Step 1）：cd_sell ≥ exit_countdown
+        # 2b) cd 13 通道（2026-08-27，Step 1；2026-08-28 改 elif 互斥）：cd_sell ≥ exit_countdown
         #     动能最终耗尽确认（DeMark 标准）→ 保本离场：毛浮盈 ≥ cd_exit_min_profit
         #     的批次平仓（默认 0 = 不亏本金就走，承担交易成本）；< 阈值死扛。
         #     cd_exit_all=true 一次平掉所有过门批次；false 每轮只平一个。
-        if cd_sell >= exit_countdown:
+        #     互斥语义（高9 优先）：同 bar 高9 触发时（无论卖出或被门拦）cd13 不再评估
+        #     ——高9 盈利门「让利润奔跑」不被 cd13 保本门绕过；cd13 仅在高9 未触发
+        #     （setup 回落、cd 持续累积）时独立起作用。
+        elif cd_sell >= exit_countdown:
             reason = f"cd_sell={cd_sell}"
             if self._cd_exit_all:
                 candidates = bm.pick_all_slots(self._exit_order)
