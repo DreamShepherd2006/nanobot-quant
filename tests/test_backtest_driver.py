@@ -323,7 +323,8 @@ def test_replay_data_source_accepts_datetime():
         length=120,
         fetcher=lambda pair, s, e, bar: None,
     )
-    assert src._start_ts == _to_ts(datetime(2026, 8, 22))
+    assert src._user_start_ts == _to_ts(datetime(2026, 8, 22))
+    assert src._prefetch_start_ts == _to_ts(datetime(2026, 8, 22)) - 119 * 60  # 预热窗口
     assert src._end_ts == _to_ts(datetime(2026, 8, 23))
 
 # ── bar 映射（回归：driver 传 Gate 风格 "15m" 曾落到默认 "1D"） ──
@@ -418,7 +419,8 @@ def test_replay_data_source_accepts_datetime():
         length=120,
         fetcher=lambda pair, s, e, bar: None,
     )
-    assert src._start_ts == _to_ts(datetime(2026, 8, 22))
+    assert src._user_start_ts == _to_ts(datetime(2026, 8, 22))
+    assert src._prefetch_start_ts == _to_ts(datetime(2026, 8, 22)) - 119 * 60  # 预热窗口
     assert src._end_ts == _to_ts(datetime(2026, 8, 23))
 
 # ── 黑名单误伤（回归：1m 深度上限 400 曾把 CRCLX 标成「无交易对」） ──
@@ -523,3 +525,44 @@ def test_driver_cd13_loss_holds(tmp_path):
     sells = [f for f in out["fills_detail"] if f["side"] == "sell"]
     assert out["fills"] >= 1, "应有 BUY 成交"
     assert not sells, f"浮亏应死扛，但出现卖出: {sells}"
+
+
+def test_replay_prefetch_warmup_and_eval_start():
+    """引擎增强：prefetch 提前 length-1 根（TD 计数覆盖更早重置点），
+    评估从用户 start 起——与实盘 KlineCache（从启动起累积）对齐。"""
+    from nanobot_quant.backtest.replay_data_source import ReplayDataSource
+
+    calls = []
+
+    def fetcher(pair, start, end, bar):
+        calls.append((pair, start, end, bar))
+        idx = pd.date_range(
+            pd.Timestamp(start, unit="s", tz="UTC"), periods=200, freq="1min"
+        )
+        return pd.DataFrame(
+            {"close": [100.0] * 200, "open": [99.0] * 200,
+             "high": [101.0] * 200, "low": [98.0] * 200,
+             "volume": [1.0] * 200},
+            index=idx,
+        )
+
+    user_start = int(pd.Timestamp("2026-08-28 00:00", tz="UTC").timestamp())
+    ds = ReplayDataSource(
+        symbols=["SOL"], timestep="1m", start_ts=user_start,
+        length=90, fetcher=fetcher,
+    )
+    ds.prefetch()
+
+    # prefetch 起点 = 用户 start − (length−1)×60s（预热窗口）
+    assert calls[0][1] == user_start - 89 * 60
+    # 评估起点 = 第一个 ≥ 用户 start 的索引（预热段不评估）
+    assert ds.start_idx == 89
+    # 预热段数据存在（TD 计数用它）
+    assert ds.bar_times[0].timestamp() == user_start - 89 * 60
+    # 无 start（拉满）时退回旧行为：length−1 预热
+    ds2 = ReplayDataSource(
+        symbols=["SOL"], timestep="1m", start_ts=None, length=90,
+        fetcher=fetcher,
+    )
+    ds2.prefetch()
+    assert ds2.start_idx == 89
