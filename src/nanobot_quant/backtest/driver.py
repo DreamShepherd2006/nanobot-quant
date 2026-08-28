@@ -104,6 +104,7 @@ class BacktestDriver:
         initial_quote: float = DEFAULT_INITIAL_QUOTE,
         batches: Optional[int] = None,
         slippage: Optional[float] = None,
+        fixed_amount: Optional[float] = None,
         fetcher: Optional[Callable] = None,
         ledger_dir: Optional[Path | str] = None,
         progress_path: Optional[Path | str] = None,
@@ -133,6 +134,9 @@ class BacktestDriver:
         self.slippage = float(
             slippage if slippage is not None else self.params.get("slippage", 0.0)
         )  # 百分比语义（1=1%），与 exec_params/BacktestBroker 一致
+        self.fixed_amount = (
+            float(fixed_amount) if fixed_amount is not None else None
+        )
         self.initial_quote = float(initial_quote)
         self.start_ts = start_ts
         self.end_ts = end_ts
@@ -203,7 +207,11 @@ class BacktestDriver:
                 "symbols": self.symbols,
                 "quantity": 10,
                 "quantity_mode": self.scene_cfg.get("quantity_mode", "fixed"),
-                "td_fixed_amount": self.scene_cfg.get("td_fixed_amount", 10.0),
+                "td_fixed_amount": float(
+                    self.fixed_amount
+                    if self.fixed_amount is not None
+                    else self.scene_cfg.get("td_fixed_amount", 10.0)
+                ),
                 "sleeptime": str(self.scene_cfg.get("sleeptime", "15m")),
                 "max_position_pct": self.params["max_position_pct"],
                 "max_drawdown_pct": self.params["max_drawdown_pct"],

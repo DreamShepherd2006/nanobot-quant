@@ -130,6 +130,7 @@ def _auto_backtest_driver(
     initial_quote: float,
     batches: int | None,
     slippage: float | None,
+    fixed_amount: float | None,
 ) -> None:
     """New engine (backtest.driver): scene-based replay on Gate CEX history.
 
@@ -161,6 +162,7 @@ def _auto_backtest_driver(
             initial_quote=initial_quote,
             batches=batches,
             slippage=slippage,
+            fixed_amount=fixed_amount,
             progress_path=backtests_dir() / f"{run_id}.json",
         )
         return d.run()
@@ -180,6 +182,7 @@ def run_backtest(
     initial_quote: float = 100.0,
     batches: int | None = None,
     slippage: float | None = None,
+    fixed_amount: float | None = None,
 ) -> dict:
     """Start a full backtest in the background (run_id + poll contract).
 
@@ -199,6 +202,8 @@ def run_backtest(
         initial_quote: Per-slot simulated starting USDT — engine="driver".
         batches: Override scene batch count — engine="driver" only.
         slippage: Override global slippage — engine="driver" only.
+        fixed_amount: Override per-trade fixed USDT amount (quantity_mode=
+                "fixed_amount") — engine="driver" only; None = scene config.
 
     Returns:
         dict with status=started and run_id. The backtest runs in a
@@ -210,7 +215,7 @@ def run_backtest(
         syms = list(symbols) if symbols else ([symbol] if symbol else None)
         threading.Thread(
             target=_auto_backtest_driver,
-            args=(run_id, scene, syms, start, end, initial_quote, batches, slippage),
+            args=(run_id, scene, syms, start, end, initial_quote, batches, slippage, fixed_amount),
             daemon=True,
         ).start()
     else:

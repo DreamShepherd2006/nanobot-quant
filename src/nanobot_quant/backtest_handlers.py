@@ -172,6 +172,9 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 initial_quote=float(data.get("initial_quote") or 1000),
                 batches=int(data["batches"]) if data.get("batches") else None,
                 slippage=float(data["slippage"]) if data.get("slippage") else None,
+                fixed_amount=float(data["fixed_amount"])
+                if data.get("fixed_amount")
+                else None,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")
