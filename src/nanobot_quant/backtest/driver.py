@@ -112,6 +112,10 @@ class BacktestDriver:
         # 1. 参数：默认复用 exec_params 当前配置（场景参数默认复用、可临时覆盖，
         #    覆盖不影响实盘——2026-08-23 拍板）
         self.params = params if params is not None else load_exec_params()
+        # 2026-08-29：全局扁平键基准（场景留空/回测表单缺键时回退用）。
+        # params 为回测表单（无 min_hold_bars 等全局键）时必须从 exec_params
+        # 读全局值，否则 min_hold_bars 等恒用类默认、与实盘不一致。
+        self._exec_params = load_exec_params() if params is not None else self.params
         self.scene_name = scene
         self.scenes = self.params.get("scenes") or {}
         scene_cfg = self.scenes.get(scene)
@@ -195,6 +199,16 @@ class BacktestDriver:
             for i in range(1, self.batches + 1)
         }
 
+    def _min_hold_bars_value(self) -> int:
+        """回测生效的 min_hold_bars：回测表单显式覆盖优先；缺省回退 exec_params
+        全局（2026-08-29 修复：此前只读表单、恒默认 10，改全局对回测无效）。"""
+        return int(
+            self.params.get(
+                "min_hold_bars", self._exec_params.get("min_hold_bars", 10)
+            )
+            or 0
+        )
+
     def _build_strategy(self, main_broker: BacktestBroker) -> Any:
         """复用 td_live 的 parameters 构造语义（live_mode=False）。"""
         from nanobot_quant.strategies.td_sequential_strategy import (
@@ -212,6 +226,7 @@ class BacktestDriver:
             **{
                 "symbols": self.symbols,
                 "quantity": 10,
+                "min_hold_bars": self._min_hold_bars_value(),
                 "quantity_mode": self._merged_params.get("quantity_mode", "fixed"),
                 "td_fixed_amount": float(
                     self._merged_params.get("td_fixed_amount", 10.0)
@@ -478,10 +493,48 @@ class BacktestDriver:
             "backtest_config": {
                 "scene": self.scene_name,
                 "symbols": self.symbols,
+                "timestep": self.timestep,
+                "start_ts": (
+                    bar_times[start_idx].isoformat()
+                    if len(bar_times) > start_idx
+                    else None
+                ),
+                "end_ts": bar_times[-1].isoformat() if bar_times else None,
                 "batches": self.batches,
+                "initial_quote": self.initial_quote,
+                "initial_total": round(initial_total, 6),
                 "td_fixed_amount": self._merged_params.get("td_fixed_amount"),
                 "slippage": self.slippage,
-                "initial_quote": self.initial_quote,
+                # 策略实际生效值（_activate_scene 每 bar 注入后；
+                # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）
+                "entry_setup": (strategy._td_params or {}).get("entry_setup"),
+                "entry_countdown": (strategy._td_params or {}).get(
+                    "entry_countdown"
+                ),
+                "exit_setup": (strategy._td_params or {}).get("exit_setup"),
+                "exit_countdown": (strategy._td_params or {}).get(
+                    "exit_countdown"
+                ),
+                "min_hold_bars": getattr(strategy, "_min_hold_bars", None),
+                "exit_order": getattr(strategy, "_exit_order", None),
+                "stop_loss_pct": getattr(
+                    getattr(strategy, "_risk", None), "stop_loss_pct", None
+                ),
+                "take_profit_pct": getattr(
+                    strategy, "_take_profit_pct", None
+                ),
+                "sell_only_profit": getattr(
+                    strategy, "_sell_only_profit", None
+                ),
+                "td_sell_all": getattr(strategy, "_td_sell_all", None),
+                "cd_exit_min_profit": getattr(
+                    strategy, "_cd_exit_min_profit", None
+                ),
+                "cd_exit_all": getattr(strategy, "_cd_exit_all", None),
+                "td_start_slot": getattr(strategy, "_start_slot", None),
+                "min_account_value": getattr(
+                    strategy, "_min_account_value", None
+                ),
             },
         }
         print(

@@ -1264,3 +1264,177 @@ def test_cd_exit_after_activate_scene(tmp_path):
     assert bm.slots[0]["status"] == "open"
     assert s._cd_exit_min_profit == 0.0
     assert s._cd_exit_all is True
+
+
+# ── min_hold_bars 最短持有期（2026-08-28）─────────────────────────
+
+
+def test_min_hold_blocks_high9_and_cd13(tmp_path):
+    """买入后 min_hold_bars 根 bar 内高9/cd13 均被拦截（TD SELL SKIP）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")  # 浮盈充足
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:09:00")  # 剩 9 bar
+    # 高9：浮盈充足 → 本应卖，但 min_hold 拦截
+    _exit_call(s, price=115.0, setup_sell=9, cd_sell=0)
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+    # cd13：同样拦截（保本门也会放行，但 min_hold 先拦）
+    bm2 = _make_bm(tmp_path / "cd13")
+    bm2.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s2 = _make_batch_strategy(bm2, _bars_with(_sell_closes()), min_hold_bars=10)
+    s2._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s2._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:09:00")
+    _exit_call(s2, price=110.5, setup_sell=0, cd_sell=13)
+    assert "order" not in s2._captured
+    assert s2.batch_manager.slots[0]["status"] == "open"
+
+
+def test_min_hold_expires_after_n_bars(tmp_path):
+    """持有期过后（当前 bar ≥ 到期）→ 高9 恢复正常卖出。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:00:00")  # 已到期
+    _exit_call(s, price=115.0, setup_sell=9, cd_sell=0)
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+def test_min_hold_zero_disabled(tmp_path):
+    """min_hold_bars=0 → 关闭（即使记录了持有期也不拦）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=0)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:09:00")
+    _exit_call(s, price=115.0, setup_sell=9, cd_sell=0)
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+def test_min_hold_sl_unaffected(tmp_path):
+    """min_hold 期间止损仍生效（风控优先）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:09:00")
+    # 止损：-10.9% < stop_loss_pct(0.1) → 触发（即使 min_hold）
+    _exit_call(s, price=98.0, setup_sell=0, cd_sell=0)
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+def test_min_hold_td_sell_all_filters(tmp_path):
+    """td_sell_all=true：min_hold 内的批次被过滤保留、老批正常平。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")   # 老批（已过持有期）
+    bm.open_lot(qty=7, entry_price=109.0, entry_time="t2")  # 新批（min_hold）
+    s = _make_batch_strategy(
+        bm, _bars_with(_sell_closes()), min_hold_bars=10, td_sell_all=True
+    )
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 09:00:00")  # 老批已过
+    s._min_hold_until[("AAPL", 2)] = pd.Timestamp("2026-08-28 10:09:00")  # 新批未过
+    _exit_call(s, price=115.0, setup_sell=9, cd_sell=0)
+    assert bm.slots[0]["status"] == "available"  # 老批平掉
+    assert bm.slots[1]["status"] == "open"        # 新批保留
+
+
+def test_min_hold_bars_default_in_exec_params():
+    """exec_params 默认 min_hold_bars=10（全局参数，场景化后置）。"""
+    from nanobot_quant.exec_params import DEFAULT_EXEC_PARAMS
+
+    assert DEFAULT_EXEC_PARAMS["min_hold_bars"] == 10
+    meta = DEFAULT_EXEC_PARAMS  # PARAM_META 校验在 exec_params 模块加载时执行
+
+
+# ── TD 出场互斥：高9 优先，cd13 不补刀（2026-08-28）───────────────
+
+
+def test_double_trigger_high9_gate_blocks_cd13(tmp_path):
+    """同 bar 高9+cd13 双触发：高9 盈利门拦（毛 0.14% < 0.3%）→ cd13 不再补卖。
+
+    旧行为（两个独立 if）：高9 拦后 cd13 保本门（≥0）放行 → 卖出去，高9 盈利门被绕过。
+    """
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(
+        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit=0.003
+    )
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    # 毛 +0.14%（≥0 但 <0.3%）：高9 盈利门拦、cd13 保本门本会放行
+    _exit_call(s, price=110.15, setup_sell=9, cd_sell=13)
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+
+
+def test_double_trigger_single_exit(tmp_path):
+    """同 bar 双触发且高9 过门：只平一个批次，cd13 不补卖第二个（保住一轮一个）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")   # 老批
+    bm.open_lot(qty=7, entry_price=109.0, entry_time="t2")  # 新批
+    s = _make_batch_strategy(
+        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit=0.003
+    )
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    # 毛 +0.5% / +1.8%：都过高9 盈利门；fifo 平老批一个，cd13 不再评估新批
+    _exit_call(s, price=110.55, setup_sell=9, cd_sell=13)
+    assert bm.slots[0]["status"] == "available"
+    assert bm.slots[1]["status"] == "open"
+
+
+def test_cd13_alone_when_high9_absent(tmp_path):
+    """高9 未触发（setup 回落 8）+ cd13 触发：cd13 独立保本卖（elif 不破坏该路径）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(
+        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit=0.003
+    )
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    _exit_call(s, price=110.5, setup_sell=8, cd_sell=13)
+    assert s._captured["order"][2] == "sell"
+    assert bm.slots[0]["status"] == "available"
+
+
+# ── min_hold_bars 场景级覆盖（2026-08-28）───────────────────────────
+
+
+def test_scene_min_hold_overrides_global(tmp_path):
+    """场景填 min_hold_bars → 覆盖全局值（20 > 全局 10）并实际拦截。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s.broker = None  # _activate_scene 同步 broker（单测无真实 broker）
+    s._activate_scene(
+        "high", {"params": {"min_hold_bars": 20, "sleeptime": "1m"}}
+    )
+    assert s._min_hold_bars == 20
+    # 买入 5 bar 后触发高9（浮盈充足但 < 20 bar 持有期 → 拦截）
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:30:00")  # 到期 10:30
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:05:00")  # 5 bar 后（<20）
+    _exit_call(s, price=115.0, setup_sell=9, cd_sell=0)
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+
+
+def test_scene_min_hold_falls_back_to_global(tmp_path):
+    """场景留空（None）→ 回退全局 10；先设 20 再留空 → 重置为 10（防残留）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s.broker = None  # _activate_scene 同步 broker（单测无真实 broker）
+    s._activate_scene(
+        "high", {"params": {"min_hold_bars": 20, "sleeptime": "1m"}}
+    )
+    assert s._min_hold_bars == 20
+    # 多场景轮换：下一个场景留空 → 回退全局，不得残留上一场景的 20
+    s._activate_scene(
+        "high", {"params": {"min_hold_bars": None, "sleeptime": "1m"}}
+    )
+    assert s._min_hold_bars == 10

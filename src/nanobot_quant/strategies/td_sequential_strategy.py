@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import functools
+import pandas as pd
 import logging
 import sys
 import time
@@ -76,6 +77,7 @@ class TdSequentialStrategy(Strategy):
         "cd_exit_min_profit": 0.0,  # cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，2026-08-27）
         "cd_exit_all": True,        # cd 13 通道全平（true=一次清所有过门批次；false=每轮一个，2026-08-27）
         "td_sell_all": False,       # 高9 一次平所有盈利批（false=每轮一个）
+        "min_hold_bars": 10,        # 买入后 N 根 bar 内 TD SELL（高9/cd13）不触发（0=关闭；止损/止盈不受限，2026-08-28）
         **DEFAULT_TD_PARAMS,
     }
 
@@ -130,6 +132,9 @@ class TdSequentialStrategy(Strategy):
         self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
             self.sleeptime, "day"
         )
+        self._min_hold_bars = int(self.parameters.get("min_hold_bars", 10) or 0)
+        self._min_hold_until: dict[tuple, pd.Timestamp] = {}
+        self._current_bar_time: pd.Timestamp | None = None
         # 固定窗口：每轮拉最近 N 根 K 线（不累积增长）。
         # N 可经 exec_params.td_bars 配置（默认 120），必须覆盖 TD
         # 计数序列（setup 9 + countdown 13 约需 35+ 根），并低于
@@ -595,6 +600,14 @@ class TdSequentialStrategy(Strategy):
         self._cd_exit_min_profit = float(p.get("cd_exit_min_profit") or 0.0)
         self._cd_exit_all = bool(p.get("cd_exit_all", True))
         self._td_sell_all = bool(p.get("td_sell_all") or False)
+        mh = p.get("min_hold_bars")
+        if mh is not None:
+            self._min_hold_bars = int(mh)
+        else:
+            # 场景留空 → 回退全局（td_live/driver 构造 parameters 时已注入
+            # 扁平 min_hold_bars；缺失走类默认 10）。2026-08-28：None 时
+            # 必须重置，否则上一场景的值残留（多场景轮换共用同一策略对象）。
+            self._min_hold_bars = int(self.parameters.get("min_hold_bars", 10) or 0)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
@@ -794,6 +807,7 @@ class TdSequentialStrategy(Strategy):
                 )
                 return
             df = bars.df.copy()
+            self._current_bar_time = self._bar_utc_ts(bars.df.index[-1])
         else:
             # ── 1. Fetch historical data ──
             # 数据源契约：Gate CEX（drops_in_progress_bars=True）在 rows_to_df 已过滤
@@ -849,6 +863,7 @@ class TdSequentialStrategy(Strategy):
                 return
 
             df = bars.df.copy()
+            self._current_bar_time = self._bar_utc_ts(bars.df.index[-1])
         _got = len(df)
         if drop_in_progress and len(df) > 2:
             # 丢弃进行中的最后一根（live + 数据源未过滤；回测数据源全为已收盘 bar）
@@ -1129,6 +1144,10 @@ class TdSequentialStrategy(Strategy):
                         self.batch_manager.open_lot(
                             slot=slot["slot"], qty=lot_qty, entry_price=price,
                         )
+                        # 最短持有期（2026-08-28）：买入后 min_hold_bars 根 bar 内
+                        # TD SELL（高9/cd13）不触发——避免震荡市双向 countdown
+                        # 刚买就卖；止损/止盈在 _handle_batch_exits 前检查不受限。
+                        self._note_min_hold(self.symbol, slot["slot"])
                         # 交易状态变更立即落盘（重启不丢台账）
                         self.batch_manager.save()
                         self.logger.info(
@@ -1326,7 +1345,11 @@ class TdSequentialStrategy(Strategy):
             if self._td_sell_all:
                 candidates = bm.pick_all_slots(self._exit_order)
                 sold_any = False
+                hold_skipped = 0
                 for s in candidates:
+                    if self._min_hold_blocked(s):
+                        hold_skipped += 1
+                        continue
                     if self._profit_gate_blocked(s, price):
                         continue
                     self._sell_lot(s, price, signal, reason)
@@ -1334,12 +1357,19 @@ class TdSequentialStrategy(Strategy):
                 if not sold_any:
                     self.logger.info(
                         f"TD SELL SKIP | symbol={self.symbol} 无满足盈利门的批次"
-                        f"（sell_only_profit={self._sell_only_profit}，open={len(candidates)}）"
+                        f"（sell_only_profit={self._sell_only_profit}，open={len(candidates)}"
+                        + (f"，min_hold 跳过 {hold_skipped}" if hold_skipped else "")
+                        + "）"
                     )
             else:
                 s = bm.pick_exit_slot(self._exit_order)
                 if s is not None:
-                    if self._profit_gate_blocked(s, price):
+                    if self._min_hold_blocked(s):
+                        self.logger.info(
+                            f"TD SELL SKIP | symbol={self.symbol} min_hold"
+                            f"（剩余 {self._min_hold_remaining(s)} bar < {self._min_hold_bars}）"
+                        )
+                    elif self._profit_gate_blocked(s, price):
                         lot = s["lot"]
                         pnl = (price - lot["entry_price"]) / lot["entry_price"]
                         self.logger.info(
@@ -1355,16 +1385,23 @@ class TdSequentialStrategy(Strategy):
                         f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
                         f"cd_sell={cd_sell}）"
                     )
-        # 2b) cd 13 通道（2026-08-27，Step 1）：cd_sell ≥ exit_countdown
+        # 2b) cd 13 通道（2026-08-27，Step 1；2026-08-28 改 elif 互斥）：cd_sell ≥ exit_countdown
         #     动能最终耗尽确认（DeMark 标准）→ 保本离场：毛浮盈 ≥ cd_exit_min_profit
         #     的批次平仓（默认 0 = 不亏本金就走，承担交易成本）；< 阈值死扛。
         #     cd_exit_all=true 一次平掉所有过门批次；false 每轮只平一个。
-        if cd_sell >= exit_countdown:
+        #     互斥语义（高9 优先）：同 bar 高9 触发时（无论卖出或被门拦）cd13 不再评估
+        #     ——高9 盈利门「让利润奔跑」不被 cd13 保本门绕过；cd13 仅在高9 未触发
+        #     （setup 回落、cd 持续累积）时独立起作用。
+        elif cd_sell >= exit_countdown:
             reason = f"cd_sell={cd_sell}"
             if self._cd_exit_all:
                 candidates = bm.pick_all_slots(self._exit_order)
                 sold_any = False
+                hold_skipped = 0
                 for s in candidates:
+                    if self._min_hold_blocked(s):
+                        hold_skipped += 1
+                        continue
                     if self._cd_gate_blocked(s, price):
                         continue
                     self._sell_lot(s, price, signal, reason)
@@ -1372,12 +1409,19 @@ class TdSequentialStrategy(Strategy):
                 if not sold_any:
                     self.logger.info(
                         f"TD CD EXIT SKIP | symbol={self.symbol} 无 ≥{self._cd_exit_min_profit} "
-                        f"浮盈批次（cd_sell={cd_sell}，open={len(candidates)}）"
+                        f"浮盈批次（cd_sell={cd_sell}，open={len(candidates)}"
+                        + (f"，min_hold 跳过 {hold_skipped}" if hold_skipped else "")
+                        + "）"
                     )
             else:
                 s = bm.pick_exit_slot(self._exit_order)
                 if s is not None:
-                    if self._cd_gate_blocked(s, price):
+                    if self._min_hold_blocked(s):
+                        self.logger.info(
+                            f"TD CD EXIT SKIP | symbol={self.symbol} min_hold"
+                            f"（剩余 {self._min_hold_remaining(s)} bar < {self._min_hold_bars}）"
+                        )
+                    elif self._cd_gate_blocked(s, price):
                         lot = s["lot"]
                         pnl = (price - lot["entry_price"]) / lot["entry_price"]
                         self.logger.info(
@@ -2811,3 +2855,72 @@ class TdSequentialStrategy(Strategy):
         except Exception:  # noqa: BLE001
             pass
         return tx_hash if not is_placeholder_tx_hash(tx_hash) else ""
+    def _bar_seconds(self) -> int:
+        """当前场景 bar 周期秒数（min_hold 换算用）。"""
+        return _parse_sleeptime_seconds(self.sleeptime)
+
+    def _note_min_hold(self, symbol: str, slot: int, ts=None) -> None:
+        """记录最短持有期到期时间（BUY / 对账导入 / 确认补仓共用，2026-08-28）。
+
+        到期 = 买入时刻 + min_hold_bars × bar 周期；min_hold_bars=0 不记录。
+        ts 缺省用当前 bar 时间（实盘 BUY 路径）；对账/确认路径显式传时间。
+        """
+        if self._min_hold_bars <= 0:
+            return
+        base = self._bar_utc_ts(ts) if ts is not None else self._current_bar_time
+        if base is None:
+            return
+        self._min_hold_until[(symbol, slot)] = base + pd.Timedelta(
+            seconds=self._min_hold_bars * self._bar_seconds()
+        )
+
+    @staticmethod
+    def _bar_utc_ts(ts) -> pd.Timestamp:
+        """bar 时间戳统一转 UTC naive（min_hold 比较基准）。"""
+        ts = pd.Timestamp(ts)
+        return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo else ts
+
+    def _min_hold_blocked(self, slot: dict) -> bool:
+        """买入后 min_hold_bars 根 bar 内 TD SELL（高9/cd13）被拦截。"""
+        if self._min_hold_bars <= 0:
+            return False
+        until = self._min_hold_until.get((self.symbol, slot["slot"]))
+        if until is None:
+            return False
+        return self._current_bar_time < until
+
+    def _min_hold_remaining(self, slot: dict) -> int:
+        """剩余持有 bar 数（诊断日志用；未记录返回 -1）。"""
+        until = self._min_hold_until.get((self.symbol, slot["slot"]))
+        if until is None:
+            return -1
+        remain = (until - self._current_bar_time).total_seconds()
+        return max(int(remain // self._bar_seconds()) + 1, 0)
+
+    def _profit_gate_blocked(self, slot: dict, price: float) -> bool:
+        """高9 毛浮盈门（2026-08-25）：sell_only_profit>0 时毛浮盈 < X 拦截卖出。
+
+        毛口径 (price−entry)/entry 未扣手续费——用户自行计算含成本阈值
+        （如 Gate 双程 0.2% → 0.002）。0=关闭（无条件卖，现有行为）。
+        """
+        thr = getattr(self, "_sell_only_profit", 0.0) or 0.0
+        if thr <= 0:
+            return False
+        lot = slot.get("lot")
+        if lot is None or not lot.get("entry_price"):
+            print(
+                f"[TD HIGH9 GATE] symbol={self.symbol} slot={slot.get('slot')} "
+                f"entry={lot.get('entry_price') if lot else None!r} price={price} "
+                f"thr={thr} -> 放行（entry 无效，fail-open）",
+                file=sys.stderr, flush=True,
+            )
+            return False
+        pnl = (price - lot["entry_price"]) / lot["entry_price"]
+        blocked = pnl < thr
+        print(
+            f"[TD HIGH9 GATE] symbol={self.symbol} slot={slot.get('slot')} "
+            f"entry={lot['entry_price']} price={price} pnl={pnl:.4f} thr={thr} "
+            f"-> {'拦（死扛）' if blocked else '放行（卖）'}",
+            file=sys.stderr, flush=True,
+        )
+        return blocked
