@@ -67,10 +67,12 @@ SCENE_FIELD_MAP: dict[str, str] = {
     "min_account_value": "min_account_value",
 }
 
-#: 场景级 TD 阈值字段（S3b-2）：值域同 td_params，但缺省 None = 回退全局
-#: td_params.json（策略选择页设置），不参与 high↔扁平同步。
+#: 场景级 TD 阈值字段（S3b-2；min_hold_bars 2026-08-28）：值域同 td_params 或
+#: exec_params 全局键（min_hold_bars），但缺省 None = 回退全局
+#: （td_params.json / 扁平 exec_params 键），不参与 high↔扁平同步。
 SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
     "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
+    "min_hold_bars",
 )
 
 #: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25；cd13 通道 2026-08-27）。
@@ -88,6 +90,7 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
     "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
+    "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
     "sell_only_profit", "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
     "td_start_slot", "min_account_value",
@@ -106,6 +109,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
+        "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
         "sell_only_profit": 0.0, "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
@@ -117,6 +121,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
+        "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
         "sell_only_profit": 0.0, "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
@@ -128,6 +133,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
+        "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
         "sell_only_profit": 0.0, "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
@@ -278,7 +284,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "min_hold_bars": {
         "group": "td", "min": 0, "max": 300, "step": 1, "std": 10, "integer": True,
         "label": "最短持有期（bar）",
-        "hint": "买入后 N 根 bar 内 TD SELL（高9/cd13）不触发——避免震荡市双向 countdown 刚买就卖（UNI 49 秒案例）；止损/止盈不受限（风控优先）；0=关闭（2026-08-28）",
+        "hint": "买入后 N 根 bar 内 TD SELL（高9/cd13）不触发——避免震荡市双向 countdown 刚买就卖（UNI 49 秒案例）；止损/止盈不受限（风控优先）；0=关闭；场景卡片内留空 = 跟随全局值（2026-08-28）",
     },
     # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {

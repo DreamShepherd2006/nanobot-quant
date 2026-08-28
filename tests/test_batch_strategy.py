@@ -1398,3 +1398,43 @@ def test_cd13_alone_when_high9_absent(tmp_path):
     _exit_call(s, price=110.5, setup_sell=8, cd_sell=13)
     assert s._captured["order"][2] == "sell"
     assert bm.slots[0]["status"] == "available"
+
+
+# ── min_hold_bars 场景级覆盖（2026-08-28）───────────────────────────
+
+
+def test_scene_min_hold_overrides_global(tmp_path):
+    """场景填 min_hold_bars → 覆盖全局值（20 > 全局 10）并实际拦截。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s.broker = None  # _activate_scene 同步 broker（单测无真实 broker）
+    s._activate_scene(
+        "high", {"params": {"min_hold_bars": 20, "sleeptime": "1m"}}
+    )
+    assert s._min_hold_bars == 20
+    # 买入 5 bar 后触发高9（浮盈充足但 < 20 bar 持有期 → 拦截）
+    s._min_hold_until[("AAPL", 1)] = pd.Timestamp("2026-08-28 10:30:00")  # 到期 10:30
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:05:00")  # 5 bar 后（<20）
+    _exit_call(s, price=115.0, setup_sell=9, cd_sell=0)
+    assert "order" not in s._captured
+    assert bm.slots[0]["status"] == "open"
+
+
+def test_scene_min_hold_falls_back_to_global(tmp_path):
+    """场景留空（None）→ 回退全局 10；先设 20 再留空 → 重置为 10（防残留）。"""
+    bm = _make_bm(tmp_path)
+    bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), min_hold_bars=10)
+    s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
+    s.broker = None  # _activate_scene 同步 broker（单测无真实 broker）
+    s._activate_scene(
+        "high", {"params": {"min_hold_bars": 20, "sleeptime": "1m"}}
+    )
+    assert s._min_hold_bars == 20
+    # 多场景轮换：下一个场景留空 → 回退全局，不得残留上一场景的 20
+    s._activate_scene(
+        "high", {"params": {"min_hold_bars": None, "sleeptime": "1m"}}
+    )
+    assert s._min_hold_bars == 10

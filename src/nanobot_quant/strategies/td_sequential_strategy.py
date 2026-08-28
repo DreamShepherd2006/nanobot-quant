@@ -603,6 +603,11 @@ class TdSequentialStrategy(Strategy):
         mh = p.get("min_hold_bars")
         if mh is not None:
             self._min_hold_bars = int(mh)
+        else:
+            # 场景留空 → 回退全局（td_live/driver 构造 parameters 时已注入
+            # 扁平 min_hold_bars；缺失走类默认 10）。2026-08-28：None 时
+            # 必须重置，否则上一场景的值残留（多场景轮换共用同一策略对象）。
+            self._min_hold_bars = int(self.parameters.get("min_hold_bars", 10) or 0)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
