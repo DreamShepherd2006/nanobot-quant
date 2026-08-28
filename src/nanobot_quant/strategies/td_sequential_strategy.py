@@ -340,6 +340,12 @@ class TdSequentialStrategy(Strategy):
                 rt["last_run"] = now
                 self._activate_scene(name, rt)
                 _t_start = time.monotonic()
+                # 余额快照预取（2026-08-28 A2）：K 线之前——用户拍板「提取
+                # 完 K 线紧接着计算，有信号马上买卖」——余额必须先就绪。
+                # BUY 路径从快照取（零网络）；SELL/估值保持逐查。
+                _t0 = time.monotonic()
+                self._prefetch_slot_balances()
+                _bal = time.monotonic() - _t0
                 # ticker 并发预取（2026-08-28）：串行取价是每轮耗时大头，
                 # 池标的 + GT 并发预取填 15s 类级缓存，本轮后续调用零网络。
                 _t0 = time.monotonic()
@@ -358,9 +364,18 @@ class TdSequentialStrategy(Strategy):
                     self._evaluate_symbol(prefetched.get(sym))
                 self._write_positions_state()
                 _calc = time.monotonic() - _t0
+                # 余额快照失败信息写入 LIVE_STATE（实时监控信号区显示，
+                # 不阻塞主循环；预取失败时 balances_error 已设）
+                try:
+                    from nanobot_quant import td_live_state
+                    td_live_state.set_balances_error(
+                        name, getattr(self, "_balances_error", None)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 print(
                     f"[TD] TIMING | scene={name} kline={_kline:.1f}s "
-                    f"ticker={_ticker:.1f}s calc={_calc:.1f}s "
+                    f"bal={_bal:.1f}s ticker={_ticker:.1f}s calc={_calc:.1f}s "
                     f"total={time.monotonic() - _t_start:.1f}s",
                     file=sys.stderr, flush=True,
                 )
@@ -482,13 +497,17 @@ class TdSequentialStrategy(Strategy):
             creds = load_gate_credentials()
             if not creds:
                 return
-            balances = fetch_all_balances(creds)
-            sub_by_uid: dict = {}
-            rows = balances.get("sub_accounts") or []
-            if isinstance(rows, list):
-                for r in rows:
-                    if isinstance(r, dict) and r.get("uid"):
-                        sub_by_uid[str(r["uid"])] = r.get("balances") or {}
+            # 2026-08-28 A2：优先复用预取快照（_prefetch_slot_balances 已
+            # 每轮 1 次批量拉，uid→balances）——不再重复 fetch；预取失败/
+            # 未预取（execute_signal 直调）才回退独立拉取。
+            sub_by_uid: dict = getattr(self, "_slot_balances", None) or {}
+            if not sub_by_uid:
+                balances = fetch_all_balances(creds)
+                rows = balances.get("sub_accounts") or []
+                if isinstance(rows, list):
+                    for r in rows:
+                        if isinstance(r, dict) and r.get("uid"):
+                            sub_by_uid[str(r["uid"])] = r.get("balances") or {}
             subs_cfg = creds.get("sub_accounts") or {}
             funds: list[dict] = []
             for i, acct in enumerate(accts, start=1):
@@ -830,28 +849,29 @@ class TdSequentialStrategy(Strategy):
                 return
 
             df = bars.df.copy()
-        print(
-            f"[TD] BARS | symbol={self.symbol} requested={fetch_len} "
-            f"got={len(df)} drop_in_progress={drop_in_progress}",
-            file=sys.stderr, flush=True,
-        )
+        _got = len(df)
         if drop_in_progress and len(df) > 2:
             # 丢弃进行中的最后一根（live + 数据源未过滤；回测数据源全为已收盘 bar）
             df = df.iloc[:-1]
+        # 诊断（2026-08-28 A1）：压缩为 2 行/标的——原 4-6 行 × 10 标的 =
+        # 40-60 次 stderr flush/轮，HF 容器日志管道背压是 calc 段耗时大头
+        # （TIMING 实测无信号轮 calc≈11s）。信息全保留：K 线契约（got/final/
+        # min/drop）+ 尾 3 根 close（CDN 精度排查，逗号分隔一行）。
         print(
-            f"[TD] BARS | symbol={self.symbol} final={len(df)} (min_history={self._min_history})",
+            f"[TD] BARS | symbol={self.symbol} got={_got} "
+            f"final={len(df)} min={self._min_history} drop={int(drop_in_progress)}",
             file=sys.stderr, flush=True,
         )
-        # 诊断（2026-08-27）：打印拉到的 K 线最后 3 根 close——排查 Gate limit
-        # 路径 CDN 缓存把 close 截成 2 位小数（0.0925→0.09）的问题。
         close_col = "close" if "close" in df.columns else (
             "Close" if "Close" in df.columns else None)
         if close_col:
-            for _ts, _row in df.tail(3).iterrows():
-                print(
-                    f"[TD] BARS | symbol={self.symbol} ts={_ts} close={_row[close_col]}",
-                    file=sys.stderr, flush=True,
-                )
+            tail = ", ".join(
+                f"{_ts}:{_row[close_col]}" for _ts, _row in df.tail(3).iterrows()
+            )
+            print(
+                f"[TD] BARS | symbol={self.symbol} tail={tail}",
+                file=sys.stderr, flush=True,
+            )
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {
@@ -2273,8 +2293,30 @@ class TdSequentialStrategy(Strategy):
             self._cex_brokers[key] = broker
         return broker
 
-    def _cex_slot_balances(self, slot: dict) -> dict:
-        """子账号 spot 余额 {CURRENCY: {available, locked}}；失败返回 {}。"""
+    def _cex_slot_balances(self, slot: dict, use_snapshot: bool = False) -> dict:
+        """子账号 spot 余额 {CURRENCY: {available, locked}}；失败返回 {}。
+
+        2026-08-28 A2：use_snapshot=True（BUY 路径）从预取快照取（零网络）；
+        预取已跑但快照缺失（失败/未覆盖）→ 返回 {}（fail-closed 资金 0 →
+        SLOT SKIP）。快照未构建（execute_signal 直调未预取）→ 回退逐查
+        （保持旧行为，直调路径不受影响）。默认逐查（SELL/估值——安全
+        关键路径不赌快照实时性，余额误判会误触发幽灵批次清理）。
+        """
+        if use_snapshot:
+            try:
+                name = str(slot.get("account_id") or "")
+                if not name:
+                    from nanobot_quant.gate_credentials import load_slot_map
+                    name = load_slot_map().get(str(slot.get("slot"))) or \
+                        f"gate_bot{slot.get('slot')}"
+                uid = self._name_to_uid.get(name)
+                bal = self._slot_balances.get(uid) if uid else None
+                if bal is not None:
+                    return bal
+            except Exception:  # noqa: BLE001
+                pass  # 匹配异常 → 走下方回退/fail-closed 分支
+            if getattr(self, "_balances_prefetched", False):
+                return {}  # 预取失败/未覆盖 → fail-closed
         try:
             return self._cex_slot_broker(slot)._balances()
         except Exception as exc:  # noqa: BLE001
@@ -2283,9 +2325,13 @@ class TdSequentialStrategy(Strategy):
             )
             return {}
 
-    def _cex_slot_quote_balance(self, slot: dict, quote: str = "USDT") -> float:
+    def _cex_slot_quote_balance(
+        self, slot: dict, quote: str = "USDT", use_snapshot: bool = False
+    ) -> float:
         """子账号 quote 币种可用+锁定余额。"""
-        bal = self._cex_slot_balances(slot).get(quote) or {}
+        bal = self._cex_slot_balances(
+            slot, use_snapshot=use_snapshot
+        ).get(quote) or {}
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 
     def _cex_slot_token_balance(self, slot: dict, symbol: str) -> float:
@@ -2303,10 +2349,10 @@ class TdSequentialStrategy(Strategy):
         bal = self._cex_slot_balances(slot).get(key) or {}
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 
-    def _cex_slot_portfolio_value(self, slot: dict) -> float:
+    def _cex_slot_portfolio_value(self, slot: dict, use_snapshot: bool = False) -> float:
         """子账号总资产 USD：USDT + Σ(持仓 × Gate 价)；失败返回 0（fail-closed）。"""
         try:
-            balances = self._cex_slot_balances(slot)
+            balances = self._cex_slot_balances(slot, use_snapshot=use_snapshot)
             total = 0.0
             for cur, b in balances.items():
                 avail = float(b.get("available") or 0) + float(b.get("locked") or 0)
@@ -2382,6 +2428,67 @@ class TdSequentialStrategy(Strategy):
         with ThreadPoolExecutor(max_workers=min(concurrency, len(symbols))) as ex:
             list(ex.map(self._cex_price_of, symbols))
 
+    def _prefetch_slot_balances(self) -> None:
+        """CEX 通道预取子账号余额快照（2026-08-28 A2，K 线提取之前）。
+
+        每轮 1 次 fetch_all_balances（主 key 批量拉全部子账号，~2s）→ 存
+        uid→balances 快照 + name→uid 映射。BUY 路径从快照取（零网络——
+        用户拍板：余额放 K 线前，信号出来后立即买卖、余额必须已就绪）；
+        SELL/估值保持逐查（安全关键路径不赌快照实时性——余额误判会触发
+        幽灵批次清理导致持仓脱管）。失败 → fail-closed：快照空（BUY 资金
+        0 → SLOT SKIP）并在实时监控信号区显示 balances_error。DEX 通道
+        跳过（真分账依赖 wallet switch 逐账户查询）。execute_signal 直调
+        未预取时回退逐查（保持旧行为，见 _cex_slot_balances）。
+        """
+        self._balances_error = None
+        self._slot_balances = {}
+        self._name_to_uid = {}
+        self._balances_prefetched = False
+        if self.parameters.get("channel_family") != "cex":
+            return
+        try:
+            from nanobot_quant.gate_credentials import (
+                fetch_all_balances,
+                load_gate_credentials,
+            )
+            creds = load_gate_credentials()
+            if not creds:
+                raise RuntimeError("gate.json not found")
+            snap = fetch_all_balances(creds)
+            if not isinstance(snap, dict):
+                raise RuntimeError("fetch_all_balances 返回非 dict")
+            err = snap.get("__error") or (snap.get("main") or {}).get("__error")
+            if err:
+                raise RuntimeError(err)
+            rows = snap.get("sub_accounts") or []
+            if isinstance(rows, list):
+                for r in rows:
+                    if isinstance(r, dict) and r.get("uid"):
+                        self._slot_balances[str(r["uid"])] = r.get("balances") or {}
+            subs_cfg = creds.get("sub_accounts") or {}
+            if isinstance(subs_cfg, dict):
+                items = subs_cfg.items()
+            else:
+                items = (
+                    (sa.get("name"), sa) for sa in subs_cfg
+                    if isinstance(sa, dict)
+                )
+            for name, sa in items:
+                uid = sa.get("uid") if isinstance(sa, dict) else sa
+                if name and uid:
+                    self._name_to_uid[str(name)] = str(uid)
+            self._balances_prefetched = True
+        except Exception as exc:  # noqa: BLE001
+            self._slot_balances = {}
+            self._name_to_uid = {}
+            self._balances_prefetched = True
+            self._balances_error = str(exc)
+            print(
+                f"[TD] BAL SNAP FAIL | {type(exc).__name__}: {exc} "
+                "（本轮 BUY 跳过，实时监控显示 balances_error）",
+                file=sys.stderr, flush=True,
+            )
+
     def _cex_submit(self, slot: dict, req) -> Any:
         """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。
 
@@ -2403,7 +2510,7 @@ class TdSequentialStrategy(Strategy):
         检查 → 子账号 broker 下单。返回 (order, qty) 或 None（跳下一 slot）。
         """
         try:
-            pv_slot = self._cex_slot_portfolio_value(slot)
+            pv_slot = self._cex_slot_portfolio_value(slot, use_snapshot=True)
             if pv_slot <= 0:
                 self.logger.warning(
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 余额查询失败/为零"
@@ -2438,7 +2545,7 @@ class TdSequentialStrategy(Strategy):
                         file=sys.stderr, flush=True,
                     )
                     return None
-            bal = self._cex_slot_quote_balance(slot, "USDT")
+            bal = self._cex_slot_quote_balance(slot, "USDT", use_snapshot=True)
             needed = qty * price
             if bal < needed:
                 self.logger.warning(

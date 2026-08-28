@@ -737,6 +737,28 @@ def _load_batch_snapshot(sc: str) -> list[dict]:
     return out
 
 
+def _scene_bal_err_block(sc: str) -> str:
+    """场景余额快照失败横幅（2026-08-28 A2：实时监控信号区显示）。
+
+    批量余额预取失败 → fail-closed（本轮 BUY 跳过）；页面显示原因。
+    仅运行中且有错误时渲染。
+    """
+    try:
+        errs = td_live_state.get_state().get("balances_error") or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(errs, dict):
+        return ""
+    err_txt = errs.get(sc)
+    if not err_txt:
+        return ""
+    return (
+        f'<div class="sig sell" style="margin:4px 0 8px;padding:4px 8px;'
+        f'font-size:12px">⚠️ 余额快照失败：{_esc(str(err_txt))}'
+        '（本轮 BUY 跳过，SELL/止损止盈不受影响）</div>'
+    )
+
+
 def _scene_positions_block(sc: str, running: bool) -> str:
     """场景卡片持仓小节（2026-08-22 方案 A：场景卡片内）。
 
@@ -922,6 +944,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f' · 周期 {sleep_txt} · {len(syms)} 标的'
             f'{" · " + _esc(slot_txt) if slot_txt else ""} · {st_txt}'
             f' · 数据更新 {upd_txt}</h4>'
+            f'{_scene_bal_err_block(sc)}'
             '<table>'
             '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
             '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
