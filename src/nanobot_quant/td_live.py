@@ -173,6 +173,7 @@ class _TdLiveRunner:
             **{
                 "symbols": next(iter(enabled.values())).get("symbols") or [],
                 "quantity": 10,
+                "min_hold_bars": int(params.get("min_hold_bars", 10) or 0),
                 "quantity_mode": "fixed",
                 "td_fixed_amount": 10.0,
                 # 固定 K 线窗口（方案 B）：每轮拉最近 N 根，不累积增长
@@ -425,6 +426,10 @@ class _TdLiveRunner:
                 entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
                 slot=slot["slot"],
             )
+            # 对账导入同样进入最短持有期（避免导入后立即被 TD SELL 打出）
+            _note = getattr(getattr(self, "strategy", None), "_note_min_hold", None)
+            if _note:
+                _note(symbol, slot["slot"], _t)
             imported_any = True
             reports.append(
                 f"{symbol} 账户{aid[:8]} 链上 {bal}（保留 {min_hold}）→ "
@@ -579,6 +584,10 @@ class _TdLiveRunner:
                 entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
                 slot=slot["slot"],
             )
+            # 对账导入同样进入最短持有期（避免导入后立即被 TD SELL 打出）
+            _note = getattr(getattr(self, "strategy", None), "_note_min_hold", None)
+            if _note:
+                _note(symbol, slot["slot"], _t)
             imported_any = True
             reports.append(
                 f"{symbol} 账户{name}(uid {uid}) 子账号 {bal} → "

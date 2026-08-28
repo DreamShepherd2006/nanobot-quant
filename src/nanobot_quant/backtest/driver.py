@@ -212,6 +212,7 @@ class BacktestDriver:
             **{
                 "symbols": self.symbols,
                 "quantity": 10,
+                "min_hold_bars": int(self.params.get("min_hold_bars", 10) or 0),
                 "quantity_mode": self._merged_params.get("quantity_mode", "fixed"),
                 "td_fixed_amount": float(
                     self._merged_params.get("td_fixed_amount", 10.0)

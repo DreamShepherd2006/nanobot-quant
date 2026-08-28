@@ -154,6 +154,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     # ── ③ TD 循环运行（全局）──────────────────────────────────────────
     "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
     "kline_concurrency": 4,     # int 1-20 — TD 每轮并发拉取各标的 K 线的线程数（1=串行；标的池大时加大提速）
+    "min_hold_bars": 10,        # int 0-300 — 买入后 N 根 bar 内 TD SELL（高9/cd13）不触发（0=关闭；止损/止盈不受限，2026-08-28）
     # ── ⑤ UI ───────────────────────────────────────────────────────────
     "td_ui_refresh_s": 10,    # int 3-300 — /config/td-table 实时监控 tab 自动刷新间隔（秒）
     "position_display_min_usd": 1.0,  # float 0-100 — 持仓小节显示阈值（<$X 不显示，0=全部；2026-08-26）
@@ -273,6 +274,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "kline_concurrency": {
         "group": "td", "min": 1, "max": 20, "step": 1, "std": 4, "integer": True,
         "label": "K 线并发拉取", "hint": "TD 每轮并发拉取各标的 K 线的线程数（1=串行）。串行 12 标的 ≈30s+/轮，并发 4 ≈10s；标的池大时加大提速。Gate 公共端点限流 200 次/10s/端点（IP），并发数 ≤ 池子大小即可",
+    },
+    "min_hold_bars": {
+        "group": "td", "min": 0, "max": 300, "step": 1, "std": 10, "integer": True,
+        "label": "最短持有期（bar）",
+        "hint": "买入后 N 根 bar 内 TD SELL（高9/cd13）不触发——避免震荡市双向 countdown 刚买就卖（UNI 49 秒案例）；止损/止盈不受限（风控优先）；0=关闭（2026-08-28）",
     },
     # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {
