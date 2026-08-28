@@ -186,8 +186,9 @@ class TestIncremental:
         with pytest.raises(KeyError):
             cache.get("SOL", "7Q", 120)  # 第二次同 bar → 增量路径 → KeyError
 
-    def test_gap_triggers_full_refetch(self):
-        """新 bar ts 跳跃 > 1 周期 → 缺口 → 全量重拉重建。"""
+    def test_gap_reports_and_skips_without_refetch(self):
+        """新 bar ts 跳跃 > 1 周期 → 报缺口 + 本轮返回 None（SKIP），
+        不再自动全量重拉（2026-08-28：缺口需人工核查，静默掩盖禁止）。"""
         src = _FakeFetch(_df(130))
         cache = KlineCache(src)
         cache.get("SOL", "1m", 120)
@@ -196,9 +197,37 @@ class TestIncremental:
         jump_ts = last + pd.Timedelta(seconds=120)
         src.df.loc[jump_ts] = [v + 0.1 for v in src.df.iloc[-1].values]
         out = cache.get("SOL", "1m", 120)
-        assert len(out) == 120
-        assert src.calls[-1] == ("SOL", "1m", 120)  # 全量重拉
-        pd.testing.assert_frame_equal(out, src.df.iloc[-120:])
+        assert out is None                          # gap → 本轮 SKIP
+        assert src.calls[-1] != ("SOL", "1m", 120)  # 未全量重拉
+        # 下轮补齐缺口（+60s 补上）→ 增量恢复正常
+        src.df.loc[last + pd.Timedelta(seconds=60)] = [v + 0.05 for v in src.df.iloc[-1].values]
+        src.df = src.df.sort_index()
+        out = cache.get("SOL", "1m", 120)
+        assert out is not None and len(out) == 120
+
+    def test_range_incremental_uses_fetch_range(self):
+        """提供 fetch_range（to_ts 区间）时增量走区间拉取 [缓存尾 ts, now]，
+        尾重叠覆盖（upsert），不再走 limit need 路径。"""
+        base = _df(130)
+        calls = []
+
+        def fetch(symbol, bar, limit):
+            return base.iloc[-limit:]
+
+        def fetch_range(symbol, bar, start_ts, end_ts):
+            calls.append((start_ts, end_ts))
+            s = pd.Timestamp(start_ts, unit="s", tz="UTC")
+            e2 = pd.Timestamp(end_ts, unit="s", tz="UTC")
+            return base[(base.index >= s) & (base.index <= e2)]
+
+        cache = KlineCache(fetch, fetch_range=fetch_range)
+        out1 = cache.get("SOL", "1m", 120)      # prefetch（走 fetch）
+        assert out1 is not None and len(out1) == 120
+        out2 = cache.get("SOL", "1m", 120)      # 增量（走 fetch_range）
+        assert calls, "增量应走 fetch_range 区间拉取"
+        tail_ts = int(base.index[-1].timestamp())
+        assert calls[0][0] == tail_ts            # from = 缓存尾 ts
+        assert out2 is not None and len(out2) == 120
 
     def test_multi_new_bars_appended_without_false_gap(self):
         """跳过一轮后 limit=2 返回 2 根新收盘 bar → 顺序逐根 append，不误判 gap。

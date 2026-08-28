@@ -69,7 +69,8 @@ class _FakeGate:
         self.price_calls = []
 
     def fetch_kline(self, symbol, bar="1D", limit=120, start=None, end=None):
-        self.kline_calls.append({"symbol": symbol, "bar": bar, "limit": limit})
+        self.kline_calls.append({"symbol": symbol, "bar": bar, "limit": limit,
+                                 "start": start, "end": end})
         if self.kline is None:
             return None  # 模拟真实源网络失败返回 None（DataSource 的 if 检查触发）
         return self.kline.iloc[-limit:]  # 真实源语义：返回最近 limit 根
@@ -175,7 +176,11 @@ class TestIncrementalCache:
         assert fake.kline_calls[-1]["limit"] == 120       # 首轮全量预取
         assert len(bars1.df) == 120
         bars2 = ds.get_historical_prices(_asset(), length=120, timestep="minute")
-        assert fake.kline_calls[-1]["limit"] == 2         # 次轮增量
+        # 次轮增量：to_ts 区间拉取（fetch_range——start/end 有值，limit=1000 为
+        # 区间拉取上限参数），不再走 limit=2 need 路径（2026-08-28）
+        call = fake.kline_calls[-1]
+        assert call["start"] is not None and call["end"] is not None
+        assert call["limit"] == 1000
         assert len(bars2.df) == 120                        # 缓存尾部返回
         assert list(bars2.df.columns) == ["open", "high", "low", "close", "volume"]
 
