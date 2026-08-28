@@ -440,8 +440,11 @@ def _isolate_price_cache():
     calls 断言失败。每个测试前后清空。
     """
     from nanobot_quant.brokers.cex_broker import CexBroker
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 
     CexBroker._price_cache.clear()
+    TdSequentialStrategy._price_cache.clear()
     yield
     CexBroker._price_cache.clear()
+    TdSequentialStrategy._price_cache.clear()
 

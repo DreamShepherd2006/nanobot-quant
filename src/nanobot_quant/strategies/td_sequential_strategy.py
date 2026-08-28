@@ -19,6 +19,7 @@ from __future__ import annotations
 import functools
 import logging
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from lumibot.strategies.strategy import Strategy
@@ -338,15 +339,31 @@ class TdSequentialStrategy(Strategy):
                     continue
                 rt["last_run"] = now
                 self._activate_scene(name, rt)
+                _t_start = time.monotonic()
+                # ticker 并发预取（2026-08-28）：串行取价是每轮耗时大头，
+                # 池标的 + GT 并发预取填 15s 类级缓存，本轮后续调用零网络。
+                _t0 = time.monotonic()
+                self._prefetch_ticker_prices()
+                _ticker = time.monotonic() - _t0
                 # K 线并发预取（2026-08-24）：只并发拉取 K 线（每标的
                 # HTTP ~1.5-2s），TD 计算/下单/台账仍在主线程串行——
                 # wallet switch 是全局状态，并发切换会互相踩。
+                _t0 = time.monotonic()
                 prefetched = self._prefetch_all_bars()
+                _kline = time.monotonic() - _t0
+                _t0 = time.monotonic()
                 for sym in self.symbols:
                     self.symbol = sym
                     self.batch_manager = self.batch_managers.get(sym)
                     self._evaluate_symbol(prefetched.get(sym))
                 self._write_positions_state()
+                _calc = time.monotonic() - _t0
+                print(
+                    f"[TD] TIMING | scene={name} kline={_kline:.1f}s "
+                    f"ticker={_ticker:.1f}s calc={_calc:.1f}s "
+                    f"total={time.monotonic() - _t_start:.1f}s",
+                    file=sys.stderr, flush=True,
+                )
             try:
                 from nanobot_quant import td_live_state
                 td_live_state.set_next_due(
@@ -2310,8 +2327,18 @@ class TdSequentialStrategy(Strategy):
             )
             return 0.0
 
+    _PRICE_CACHE_TTL = 15.0
+    _price_cache: dict[str, tuple[float, float]] = {}  # 类级共享（同轮多场景策略实例共享 ticker 取价）
+
     def _cex_price_of(self, currency: str) -> float:
-        """Gate 计价（子账号持仓估值用）：gate_cex 优先，okx_cex 兜底。"""
+        """Gate 计价（子账号持仓估值用）：gate_cex 优先，okx_cex 兜底。
+
+        类级 15s 缓存（2026-08-28）：ticker 取价是每轮耗时大头（串行
+        ~1.5-2s/次），迭代开始 ``_prefetch_ticker_prices`` 并发预取填缓存，
+        本轮所有估值/持仓小节/止损止盈调用全部命中（零网络）；与
+        CexBroker._price_of 同 TTL 语义。0 不入缓存（fail-closed，临时
+        失败不固化）。回测 override 分支在缓存前返回，零影响。
+        """
         # 回测驱动注入（方案 B Step 3）：历史重放价格源（当前 bar 收盘价），
         # 零网络。实盘默认 None → 走下方真实 ticker 路径，零影响。
         override = getattr(self, "_price_source_override", None)
@@ -2320,15 +2347,40 @@ class TdSequentialStrategy(Strategy):
                 return float(override(currency))
             except Exception:  # noqa: BLE001
                 return 0.0
+        now = time.time()
+        cached = self._price_cache.get(currency)
+        if cached and now - cached[0] < self._PRICE_CACHE_TTL:
+            return cached[1]
         try:
             from nanobot_quant.data_sources import get_data_source
             px = get_data_source("gate_cex").get_price(currency)
             if px and px > 0:
-                return float(px)
-            px = get_data_source("okx_cex").get_price(currency)
-            return float(px) if px and px > 0 else 0.0
+                px = float(px)
+            else:
+                px = get_data_source("okx_cex").get_price(currency)
+                px = float(px) if px and px > 0 else 0.0
         except Exception:  # noqa: BLE001
             return 0.0
+        if px > 0:
+            self._price_cache[currency] = (now, px)
+        return px
+
+    def _prefetch_ticker_prices(self) -> None:
+        """迭代开始并发预取 ticker 价格（填类级 15s 缓存）。
+
+        2026-08-28：ticker 取价串行是每轮耗时大头（~1.5-2s/次，多标的池
+        累计 ~10-20s）。池标的 + 固定平台币（GT 子账号 dust 估值）并发预取
+        后，本轮所有估值/持仓小节/止损止盈调用全部命中缓存（零网络）。
+        """
+        symbols = [s for s in getattr(self, "symbols", []) if s]
+        if "GT" not in symbols:
+            symbols.append("GT")
+        if not symbols:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+        concurrency = max(1, int(self.parameters.get("kline_concurrency", 4) or 4))
+        with ThreadPoolExecutor(max_workers=min(concurrency, len(symbols))) as ex:
+            list(ex.map(self._cex_price_of, symbols))
 
     def _cex_submit(self, slot: dict, req) -> Any:
         """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。
