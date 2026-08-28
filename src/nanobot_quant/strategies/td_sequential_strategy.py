@@ -382,6 +382,8 @@ class TdSequentialStrategy(Strategy):
         止损/止盈仍用 TD bar 收盘价（signal.price）不受影响。TD 未运行时
         页面回退读台账离线快照（无实时价）。展示层异常不阻塞主循环。
         """
+        if not self.parameters.get("live_mode"):
+            return  # 回测/纸交易不写 LIVE_STATE（2026-08-28：防回测污染实盘监控）
         try:
             from nanobot_quant import td_live_state
 
@@ -443,6 +445,8 @@ class TdSequentialStrategy(Strategy):
         场景 sub_accounts 取本场景 slot 对应子账号；DEX 子钱包资金展示
         待补（docs/quant-system.md 记录）。展示层异常不阻塞主循环。
         """
+        if not self.parameters.get("live_mode"):
+            return  # 回测/纸交易不写 LIVE_STATE（2026-08-28）
         try:
             from nanobot_quant import td_live_state
             from nanobot_quant.exec_params import load_exec_params
@@ -607,10 +611,12 @@ class TdSequentialStrategy(Strategy):
             from nanobot_quant import td_live_state
             sig = getattr(self, "_last_signal", {})
             sym = symbol or self.symbol
-            td_live_state.update_symbol(sym, {
-                **sig, "signal": event, "note": note,
-            }, scene=getattr(self, "_current_scene", "") or "")
             if self.parameters.get("live_mode"):
+                # 仅实盘写 LIVE_STATE（2026-08-28：回测/纸交易不再污染实时监控——
+                # 回测标的曾覆盖实盘监控的标的/信号/持仓显示）
+                td_live_state.update_symbol(sym, {
+                    **sig, "signal": event, "note": note,
+                }, scene=getattr(self, "_current_scene", "") or "")
                 td_live_state.append_event({
                     "symbol": sym, "event": event, "note": note,
                     "scene": getattr(self, "_current_scene", "") or "",
@@ -938,10 +944,11 @@ class TdSequentialStrategy(Strategy):
             "time": _time_s,
         }
         try:
-            from nanobot_quant import td_live_state
-            td_live_state.update_symbol(self.symbol, {
-                **self._last_signal, "signal": "HOLD",
-            }, scene=getattr(self, "_current_scene", "") or "")
+            if self.parameters.get("live_mode"):
+                from nanobot_quant import td_live_state
+                td_live_state.update_symbol(self.symbol, {
+                    **self._last_signal, "signal": "HOLD",
+                }, scene=getattr(self, "_current_scene", "") or "")
         except Exception:  # noqa: BLE001
             pass
 

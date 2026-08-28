@@ -316,6 +316,12 @@ def test_render_live_contains_trade_section(monkeypatch, tmp_path: Path):
         "symbol": "CRCLX", "event": "BUY_FAIL", "note": "slot=3",
         "slot": 3, "qty": 0.04, "direction": "buy", "status": "fail",
     })
+    # 低价币完整精度（2026-08-28：策略价列曾 :.2f 显示 0.09，误导）
+    td_live_state.append_event({
+        "symbol": "ARB", "event": "EXIT", "note": "slot=2 cd_sell=13 qty=43",
+        "slot": 2, "qty": 43, "price": 0.09315, "actual_price": 0.09317,
+        "direction": "sell", "status": "ok", "tx_hash": "bb22",
+    })
     html = _render_live(with_script=False, tq={})
     assert "📊 交易记录" in html
     assert "trade-form" in html
@@ -328,6 +334,9 @@ def test_render_live_contains_trade_section(monkeypatch, tmp_path: Path):
     assert "✅" in html and "❌" in html
     # 原因列内容：成功事件显示 slot/qty/price 明细
     assert "slot=2 qty=0.021226 price=136.8" in html
+    # 策略价/成交价列完整精度（ARB 不再显示 0.09）
+    assert '<td class="num">0.09315</td>' in html
+    assert '<td class="num">0.09317</td>' in html
     # tx_hash 可点击（solscan 链接）
     assert 'href="https://solscan.io/tx/4xKd9aBcDEfGhIjKlMnOpQrStUvWxYz0123456789abc"' in html
     assert "↗" in html

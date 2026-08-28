@@ -990,7 +990,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f'<td><b>{_esc(str(e.get("symbol", "")))}</b></td>'
             f'<td>{dir_txt}</td>'
             f'<td class="num">{_fmt_qty(e.get("qty"))}</td>'
-            f'<td class="num">{float(e.get("price", 0) or 0):.2f}</td>'
+            f'<td class="num">{_fmt_price(e.get("price"))}</td>'
             f'<td class="num">{_actual_price_cell(e.get("actual_price"))}</td>'
             f'<td class="num">{_slip_cell(e.get("actual_price"), e.get("price"))}</td>'
             f'<td class="num">{slot_txt}</td>'
