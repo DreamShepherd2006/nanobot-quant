@@ -118,7 +118,11 @@ def test_events_path_fallback():
 
 
 def test_record_not_written_when_not_live(tmp_path: Path):
-    """回测/纸交易（live_mode 未设）只更新内存、不写事件文件。"""
+    """回测/纸交易（live_mode 未设）不写事件文件、也不更新 LIVE_STATE。
+
+    2026-08-28：回测曾无条件更新 LIVE_STATE（update_symbol），导致回测
+    选择的标的覆盖实盘实时监控的标的/信号/持仓显示——现在回测完全隔离。
+    """
     from tests.test_batch_strategy import _make_batch_strategy, _make_bm, _bars_with, _buy_closes  # noqa: PLC0415
 
     ev_file = tmp_path / "td_live_events.jsonl"
@@ -129,8 +133,8 @@ def test_record_not_written_when_not_live(tmp_path: Path):
     s = _make_batch_strategy(bm, _bars_with(_buy_closes()))
     s._record("LONG", "slot=1 qty=0.1")
     assert not ev_file.exists()  # live_mode=False → 不写文件
-    # 但内存状态已更新（按策略自身 symbol 键，scene 缺省归入 default）
-    assert td_live_state.get_state()["symbols"]["default"][s.symbol]["signal"] == "LONG"
+    # 内存 LIVE_STATE 也不更新（回测不污染实盘监控）
+    assert "default" not in td_live_state.get_state().get("symbols", {})
 
 
 def test_record_written_when_live(tmp_path: Path):
