@@ -156,7 +156,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
             f"[BACKTEST-PAGE] 启动请求 scene={scene} symbols={symbols} "
             f"range={data.get('start') or '拉满'}→{data.get('end') or '现在'} "
             f"initial_quote={data.get('initial_quote')} batches={data.get('batches')} "
-            f"slippage={data.get('slippage')}"
+            f"slippage={data.get('slippage')} fixed_amount={data.get('fixed_amount')}"
         )
         if not symbols:
             return JSONResponse({"ok": False, "error": "至少选择一个标的"}, status_code=400)

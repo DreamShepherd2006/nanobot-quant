@@ -23,7 +23,7 @@ import json
 import os
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 
@@ -121,6 +121,17 @@ def _auto_backtest(
     _run_guarded(run_id, prep=_prep, run=_run)
 
 
+def _parse_ts(value: str | None):
+    """start/end → datetime。无时区输入明确按 UTC
+    （页面提交已由前端把本地时间转成 UTC ISO）。"""
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _auto_backtest_driver(
     run_id: str,
     scene: str,
@@ -142,11 +153,6 @@ def _auto_backtest_driver(
 
     def _prep() -> None:
         from nanobot_quant.backtest.driver import BacktestDriver  # noqa: F401
-
-    def _parse_ts(value: str | None):
-        if not value:
-            return None
-        return datetime.fromisoformat(value)
 
     def _run():
         from nanobot_quant.backtest.driver import BacktestDriver

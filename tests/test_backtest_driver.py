@@ -213,9 +213,15 @@ def test_fixed_amount_override(tmp_path):
         ledger_dir=tmp_path,
     )
     assert driver.fixed_amount == 5.0
+    # 覆盖值合并进场景参数（_activate_scene 每 bar 从 rt.params 重读）
+    assert driver._merged_params["td_fixed_amount"] == 5.0
     out = driver.run()
     assert out["symbols"] == ["RENDER"]
     assert out["fetched_bars"] > 0
+    # 策略实际生效值（覆盖 > 场景）：修复前被 _activate_scene 覆盖回场景值
+    assert driver.strategy.fixed_amount == 5.0
+    # 结果带实际生效配置（诊断显示用）
+    assert out["backtest_config"]["td_fixed_amount"] == 5.0
 
 
 def test_insufficient_history_fail_closed(tmp_path):

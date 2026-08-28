@@ -122,6 +122,16 @@
 const SCENES = __SCENES__;
 const SYMBOLS = __SYMBOLS__;
 
+// datetime-local（浏览器本地时区）→ UTC ISO。回测区间按 UTC 语义，
+// 避免服务器时区与用户本地时区不一致导致区间错位（2026-08-28 实测）。
+function toUtc(v) {
+  if (!v) return "";
+  const [d, t] = v.split("T");
+  const [Y, M, D] = d.split("-").map(Number);
+  const [h, m] = (t || "00:00").split(":").map(Number);
+  return new Date(Y, M - 1, D, h, m).toISOString();
+}
+
 function $(id) { return document.getElementById(id); }
 
 function fmtTs(iso) {
@@ -196,8 +206,8 @@ async function startBacktest() {
   const body = {
     scene: $("scene").value,
     symbols,
-    start: $("start").value || null,
-    end: $("end").value || null,
+    start: toUtc($("start").value) || null,
+    end: toUtc($("end").value) || null,
     initial_quote: parseFloat($("initial_quote").value) || 100,
     batches: $("batches").value ? parseInt($("batches").value, 10) : null,
     slippage: $("slippage").value ? parseFloat($("slippage").value) : null,
@@ -265,6 +275,7 @@ function renderResult(res, runId) {
       <div class="kpi"><div class="v ${roiCls}">${roi === null || roi === undefined ? "—" : (roi * 100).toFixed(2) + "%"}</div><div class="k">ROI</div></div>
       <div class="kpi"><div class="v">${res.fills || 0}</div><div class="k">成交笔数</div></div>
       <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
+      <div class="kpi"><div class="v">${res.backtest_config ? `${res.backtest_config.td_fixed_amount ?? "—"}U / ${res.backtest_config.batches ?? "—"} slots / 滑点 ${res.backtest_config.slippage ?? "—"}` : "—"}</div><div class="k">实际生效配置（固定金额/批次/滑点）</div></div>
     </div>
     <div style="font-size:.84em;color:#888;margin:4px 0 10px;">
       场景 <code>${res.scene}</code> · 标的 <code>${(res.symbols || []).join(", ")}</code> ·
