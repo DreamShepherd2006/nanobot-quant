@@ -42,6 +42,7 @@ def _to_ts(value) -> Optional[int]:
         dt = datetime.strptime(value.strip(), "%Y-%m-%d")
         return int(dt.replace(tzinfo=timezone.utc).timestamp())
     raise TypeError(f"无法解析回测时间戳: {value!r}")
+from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
 from nanobot_quant.gate_credentials import gate_pair
 
 _BAR_MAP = {
@@ -57,6 +58,11 @@ _BAR_MAP = {
 }
 
 _DEFAULT_BAR = "1D"
+
+
+def _bar_seconds(bar: str) -> int:
+    """Gate bar 周期 → 秒（periods 注册表为唯一规范源）。"""
+    return INTERVAL_SECONDS.get(bar, 60)
 
 
 def _bar_map() -> dict:
@@ -118,9 +124,16 @@ class ReplayDataSource:
         self._symbols = list(symbols)
         self._timestep = str(timestep)
         self._bar = _resolve_bar(timestep)
-        self._start_ts = _to_ts(start_ts)
+        # 用户指定 start（评估起点）与拉取起点（含预热窗口）分离：
+        # prefetch 提前 (length-1) 根，TD 计数覆盖更早重置点，与实盘
+        # KlineCache（从启动起累积）对齐（2026-08-28 引擎增强）。
+        self._user_start_ts = _to_ts(start_ts)
         self._end_ts = _to_ts(end_ts)
         self._length = max(1, int(length))
+        self._prefetch_start_ts = self._user_start_ts
+        if self._user_start_ts is not None:
+            warmup_seconds = (self._length - 1) * _bar_seconds(self._bar)
+            self._prefetch_start_ts = self._user_start_ts - warmup_seconds
         self._tokens_json = tokens_json or []
         self._fetcher = fetcher or self._default_fetch
         self._frames: dict[str, pd.DataFrame] = {}   # symbol -> 小写列 + naive/UTC index
@@ -142,7 +155,7 @@ class ReplayDataSource:
         for symbol in self._symbols:
             pair = gate_pair(symbol, self._tokens_json)
             try:
-                df = self._fetcher(pair, self._start_ts or 0, end_ts, self._bar)
+                df = self._fetcher(pair, self._prefetch_start_ts or 0, end_ts, self._bar)
             except Exception as exc:  # noqa: BLE001
                 print(f"[BACKTEST] prefetch {symbol} failed: {exc}",
                       flush=True)
@@ -161,8 +174,20 @@ class ReplayDataSource:
 
     @property
     def start_idx(self) -> int:
-        """第一个有完整 length 窗口的时间索引（策略 min_history 要求）。"""
-        return max(0, self._length - 1)
+        """评估起点：用户 start 对应的索引。
+
+        prefetch 已从 start 前 (length-1) 根拉起（TD 计数覆盖更早重置点），
+        因此评估从用户 start 起即可；无 start（拉满）时退回旧行为
+        （length-1 预热）。
+        """
+        if not self._bar_times:
+            return 0
+        if self._user_start_ts is None:
+            return max(0, self._length - 1)
+        for i, ts in enumerate(self._bar_times):
+            if ts.timestamp() >= self._user_start_ts:
+                return i
+        return len(self._bar_times) - 1
 
     def seek(self, ts) -> None:
         """定位当前重放时间——所有标的窗口尾对齐到 ``ts``。"""
