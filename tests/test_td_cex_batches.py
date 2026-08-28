@@ -93,7 +93,7 @@ def _make_cex_strategy(bm: BatchManager, bars, **params) -> TdSequentialStrategy
     s._cex_submit = lambda slot, req: captured["submitted"].append(
         _mock_order(quantity=req.quantity)
     ) or _mock_order(quantity=req.quantity)
-    s._cex_slot_balances = lambda slot: {"USDT": {"available": 1e9, "locked": 0}}
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {"USDT": {"available": 1e9, "locked": 0}}
     s._captured = captured
     return s
 
@@ -151,7 +151,7 @@ def test_cex_buy_full_loop_opens_lot(tmp_path):
 def test_cex_buy_insufficient_funds_skips(tmp_path):
     bm = _make_bm(tmp_path)
     s = _make_cex_strategy(bm, _bars_with(_buy_closes()))
-    s._cex_slot_balances = lambda slot: {"USDT": {"available": 1.0, "locked": 0}}
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {"USDT": {"available": 1.0, "locked": 0}}
     slot = bm.available_slots()[0]
     result = s._buy_on_slot(slot, price=70.0, reason="setup_buy")
     assert result is None  # 资金不足 → 跳过，不建仓
@@ -164,7 +164,7 @@ def test_cex_buy_position_limit_block(tmp_path):
         bm, _bars_with(_buy_closes()),
         max_position_pct=0.01,  # 1% 上限 → 大仓位 BLOCK
     )
-    s._cex_slot_portfolio_value = lambda slot: 100.0  # 小资产账户
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0  # 小资产账户
     slot = bm.available_slots()[0]
     result = s._buy_on_slot(slot, price=70.0, reason="setup_buy")
     assert result is None
@@ -180,7 +180,7 @@ def test_cex_buy_fixed_amount_skips_position_limit(tmp_path):
         quantity_mode="fixed_amount", td_fixed_amount=100.0,
         max_position_pct=0.25,
     )
-    s._cex_slot_portfolio_value = lambda slot: 11.45  # 小账号：100U 远超 25% 上限
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 11.45  # 小账号：100U 远超 25% 上限
     s.on_trading_iteration()
     assert len(s._captured["submitted"]) == 1
     assert len(bm.open_slots()) == 1
@@ -193,7 +193,7 @@ def test_cex_buy_fixed_amount_insufficient_funds(tmp_path):
         bm, _bars_with(_buy_closes()),
         quantity_mode="fixed_amount", td_fixed_amount=10.0,
     )
-    s._cex_slot_balances = lambda slot: {"USDT": {"available": 5.0, "locked": 0}}
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {"USDT": {"available": 5.0, "locked": 0}}
     s.on_trading_iteration()
     assert s._captured["submitted"] == []
     assert bm.open_slots() == []
@@ -375,7 +375,7 @@ def test_cex_token_balance_gate_symbol_pair(tmp_path):
         bm, _bars_with([100.0] * 60),
         tokens_json=[{"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT"}],
     )
-    s._cex_slot_balances = lambda slot: {
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {
         "USDT": {"available": 3.0, "locked": 0},
         "CRCLX": {"available": 0.045, "locked": 0},
     }
@@ -389,7 +389,7 @@ def test_cex_token_balance_gate_symbol_underscore(tmp_path):
         bm, _bars_with([100.0] * 60),
         tokens_json=[{"symbol": "CRCLX", "gate_symbol": "CRCLX_USDT"}],
     )
-    s._cex_slot_balances = lambda slot: {
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {
         "USDT": {"available": 3.0, "locked": 0},
         "CRCLX": {"available": 0.045, "locked": 0},
     }
@@ -403,7 +403,7 @@ def test_cex_token_balance_fallback_symbol(tmp_path):
         bm, _bars_with([100.0] * 60),
         tokens_json=[{"symbol": "SOL"}],
     )
-    s._cex_slot_balances = lambda slot: {
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {
         "USDT": {"available": 3.0, "locked": 0},
         "SOL": {"available": 0.5, "locked": 0},
     }
@@ -417,7 +417,7 @@ def test_cex_token_balance_not_found_zero(tmp_path):
         bm, _bars_with([100.0] * 60),
         tokens_json=[{"symbol": "CRCLX", "gate_symbol": "CRCLXUSDT"}],
     )
-    s._cex_slot_balances = lambda slot: {"USDT": {"available": 3.0, "locked": 0}}
+    s._cex_slot_balances = lambda slot, use_snapshot=False: {"USDT": {"available": 3.0, "locked": 0}}
     assert s._cex_slot_token_balance(bm.slots[0], "CRCLX") == 0.0
 
 

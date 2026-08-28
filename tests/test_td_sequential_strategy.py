@@ -958,3 +958,78 @@ def test_cex_price_of_caches_and_prefetch_concurrent(monkeypatch):
     s._prefetch_ticker_prices()
     assert sorted(set(calls)) == ["CRCLX", "GT", "SOL"]
     assert s._cex_price_of("SOL") == 105.0      # 预取已填缓存（零网络）
+
+
+def test_prefetch_slot_balances_snapshot_and_fail_closed(monkeypatch):
+    """A2 批量余额快照：构建（name→uid→balances）+ 命中零网络；失败 fail-closed。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+    s = _make_strategy(channel_family="cex")
+
+    def fake_fetch(creds):
+        return {
+            "main": {"USDT": {"available": 100, "locked": 0}},
+            "sub_accounts": [
+                {"uid": "59175220",
+                 "balances": {"USDT": {"available": 4.5, "locked": 0}}},
+                {"uid": "59175258",
+                 "balances": {"USDT": {"available": 0.5, "locked": 0}}},
+            ],
+        }
+
+    def fake_load():
+        return {
+            "main": {"api_key": "k", "api_secret": "s"},
+            "sub_accounts": {
+                "gate_bot1": {"uid": "59175220"},
+                "gate_bot2": {"uid": "59175258"},
+            },
+        }
+
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.fetch_all_balances", fake_fetch)
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.load_gate_credentials", fake_load)
+
+    s._prefetch_slot_balances()
+    assert s._balances_prefetched is True
+    assert s._slot_balances == {
+        "59175220": {"USDT": {"available": 4.5, "locked": 0}},
+        "59175258": {"USDT": {"available": 0.5, "locked": 0}},
+    }
+    assert s._name_to_uid == {"gate_bot1": "59175220", "gate_bot2": "59175258"}
+    assert s._balances_error is None
+
+    # use_snapshot=True：命中快照（逐查 broker 不应被调）
+    slot1 = {"slot": 1, "account_id": "gate_bot1", "status": "available"}
+
+    def _boom(_slot):
+        raise AssertionError("use_snapshot 命中快照时不应调 broker")
+
+    s._cex_slot_broker = _boom
+    bal = s._cex_slot_balances(slot1, use_snapshot=True)
+    assert bal["USDT"]["available"] == 4.5
+
+    # 预取失败 → fail-closed：快照空 + balances_error + 资金 0
+    def fake_fetch_err(_creds):
+        return {"__error": "401 invalid key"}
+
+    monkeypatch.setattr(
+        "nanobot_quant.gate_credentials.fetch_all_balances", fake_fetch_err)
+    s._prefetch_slot_balances()
+    assert s._slot_balances == {}
+    assert "401" in (s._balances_error or "")
+    assert s._cex_slot_balances(slot1, use_snapshot=True) == {}  # fail-closed
+
+    # 未预取（execute_signal 直调未跑预取）→ 回退逐查（保持旧行为）
+    s._balances_prefetched = False
+
+    class _FakeBroker:
+        def _balances(self):
+            return {"USDT": {"available": 7.0, "locked": 0}}
+
+    s._cex_slot_broker = lambda _slot: _FakeBroker()
+    bal = s._cex_slot_balances(slot1, use_snapshot=True)
+    assert bal["USDT"]["available"] == 7.0
+    # 清理类级缓存不影响本次（无 ticker 调用）
+    TdSequentialStrategy._price_cache.clear()

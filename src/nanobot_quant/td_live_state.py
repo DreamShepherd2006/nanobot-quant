@@ -127,6 +127,17 @@ def set_account_funds(scene: str, funds: list) -> None:
         LIVE_STATE["updated_at"] = _now_iso()
 
 
+def set_balances_error(scene: str, error: str | None) -> None:
+    """写入场景余额快照失败信息（实时监控信号区显示，2026-08-28 A2）。
+
+    A2 批量余额预取失败 → fail-closed（本轮 BUY 跳过），WebUI 实时监控
+    场景卡片显示原因；成功时 None（清空）。
+    """
+    with _lock:
+        LIVE_STATE.setdefault("balances_error", {})[scene or "default"] = error
+        LIVE_STATE["updated_at"] = _now_iso()
+
+
 def get_state() -> dict:
     """供 td-table「实时监控」tab 读取（同进程，无 IO）。"""
     with _lock:
@@ -138,6 +149,7 @@ def get_state() -> dict:
             "symbols": dict(LIVE_STATE["symbols"]),
             "positions": dict(LIVE_STATE.get("positions", {})),
             "funds": dict(LIVE_STATE.get("funds", {})),
+            "balances_error": dict(LIVE_STATE.get("balances_error", {})),
         }
 
 
