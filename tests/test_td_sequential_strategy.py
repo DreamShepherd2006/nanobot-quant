@@ -924,3 +924,37 @@ def test_cex_submit_sell_carries_exit_reason():
         OrderRequest(asset="CRCLX", action="buy", quantity=0.04, price=80.0, reason=""),
     )
     assert "exit_reason" not in (captured["order"].custom_params or {})
+
+
+def test_cex_price_of_caches_and_prefetch_concurrent(monkeypatch):
+    """类级 15s 缓存：首次网络、TTL 内命中；预取并发调池标的 + GT。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+    calls: list[str] = []
+
+    class _GS:
+        def get_price(self, sym):
+            calls.append(sym)
+            return {"CRCLX": 88.0, "SOL": 105.0, "GT": 8.0}.get(sym, 1.0)
+
+    class _OKX:
+        def get_price(self, sym):
+            return 0.0
+
+    def fake_get(name):
+        return _GS() if name == "gate_cex" else _OKX()
+
+    monkeypatch.setattr("nanobot_quant.data_sources.get_data_source", fake_get)
+    s = _make_strategy(kline_concurrency=4)
+    # 缓存：首次网络，TTL 内命中
+    assert s._cex_price_of("CRCLX") == 88.0
+    n = len(calls)
+    assert s._cex_price_of("CRCLX") == 88.0
+    assert len(calls) == n                      # 命中缓存零网络
+    # 预取：池标的 + GT 并发（每个标的只查一次）
+    TdSequentialStrategy._price_cache.clear()
+    calls.clear()
+    s.symbols = ["SOL", "CRCLX"]
+    s._prefetch_ticker_prices()
+    assert sorted(set(calls)) == ["CRCLX", "GT", "SOL"]
+    assert s._cex_price_of("SOL") == 105.0      # 预取已填缓存（零网络）
