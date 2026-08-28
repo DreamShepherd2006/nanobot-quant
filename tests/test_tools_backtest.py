@@ -166,3 +166,22 @@ def test_run_backtest_legacy_requires_symbol():
     """旧引擎缺 symbol → 明确错误（fail-closed，不起线程）。"""
     result = run_backtest(engine="backtest_runner")
     assert "error" in result
+
+
+def test_parse_ts_naive_means_utc():
+    """start/end 无时区输入明确按 UTC；带 Z 的 aware 输入原样保留。"""
+    from nanobot_quant.tools.tools_backtest import _parse_ts
+
+    dt = _parse_ts("2026-08-28T13:00")
+    assert dt is not None
+    assert dt.tzinfo is not None
+    assert dt.utcoffset().total_seconds() == 0
+    assert dt.hour == 13
+
+    dt2 = _parse_ts("2026-08-28T05:00:00.000Z")
+    assert dt2 is not None
+    assert dt2.tzinfo is not None
+    assert dt2.hour == 5
+
+    assert _parse_ts("") is None
+    assert _parse_ts(None) is None

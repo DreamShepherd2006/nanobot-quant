@@ -156,7 +156,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
             f"[BACKTEST-PAGE] 启动请求 scene={scene} symbols={symbols} "
             f"range={data.get('start') or '拉满'}→{data.get('end') or '现在'} "
             f"initial_quote={data.get('initial_quote')} batches={data.get('batches')} "
-            f"slippage={data.get('slippage')}"
+            f"slippage={data.get('slippage')} fixed_amount={data.get('fixed_amount')}"
         )
         if not symbols:
             return JSONResponse({"ok": False, "error": "至少选择一个标的"}, status_code=400)
@@ -172,6 +172,9 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 initial_quote=float(data.get("initial_quote") or 1000),
                 batches=int(data["batches"]) if data.get("batches") else None,
                 slippage=float(data["slippage"]) if data.get("slippage") else None,
+                fixed_amount=float(data["fixed_amount"])
+                if data.get("fixed_amount")
+                else None,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")

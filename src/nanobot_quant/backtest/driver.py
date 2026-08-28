@@ -104,6 +104,7 @@ class BacktestDriver:
         initial_quote: float = DEFAULT_INITIAL_QUOTE,
         batches: Optional[int] = None,
         slippage: Optional[float] = None,
+        fixed_amount: Optional[float] = None,
         fetcher: Optional[Callable] = None,
         ledger_dir: Optional[Path | str] = None,
         progress_path: Optional[Path | str] = None,
@@ -133,6 +134,15 @@ class BacktestDriver:
         self.slippage = float(
             slippage if slippage is not None else self.params.get("slippage", 0.0)
         )  # 百分比语义（1=1%），与 exec_params/BacktestBroker 一致
+        self.fixed_amount = (
+            float(fixed_amount) if fixed_amount is not None else None
+        )
+        # 回测覆盖参数（覆盖 > 场景 > 类默认）。_activate_scene 每 bar 从
+        # rt.params 重读 td_fixed_amount，仅注入 strategy.parameters 会被
+        # 每 bar 覆盖回场景值（2026-08-28 实测：页面填 10 成交仍 4U）。
+        self._merged_params = dict(self.scene_cfg)
+        if self.fixed_amount is not None:
+            self._merged_params["td_fixed_amount"] = self.fixed_amount
         self.initial_quote = float(initial_quote)
         self.start_ts = start_ts
         self.end_ts = end_ts
@@ -202,8 +212,10 @@ class BacktestDriver:
             **{
                 "symbols": self.symbols,
                 "quantity": 10,
-                "quantity_mode": self.scene_cfg.get("quantity_mode", "fixed"),
-                "td_fixed_amount": self.scene_cfg.get("td_fixed_amount", 10.0),
+                "quantity_mode": self._merged_params.get("quantity_mode", "fixed"),
+                "td_fixed_amount": float(
+                    self._merged_params.get("td_fixed_amount", 10.0)
+                ),
                 "sleeptime": str(self.scene_cfg.get("sleeptime", "15m")),
                 "max_position_pct": self.params["max_position_pct"],
                 "max_drawdown_pct": self.params["max_drawdown_pct"],
@@ -241,6 +253,7 @@ class BacktestDriver:
             f"{strategy.parameters.get('exit_setup')}",
             file=sys.stderr, flush=True,
         )
+        self.strategy = strategy
         return strategy
 
     def _build_batch_managers(self) -> dict[str, BatchManager]:
@@ -355,7 +368,7 @@ class BacktestDriver:
             "enabled": True,
             "sleeptime": str(self.scene_cfg.get("sleeptime", "15m")),
             "symbols": self.symbols,
-            "params": self.scene_cfg,
+            "params": self._merged_params,
             "broker": main_broker,
             "batch_managers": batch_managers,
             "last_run": None,
@@ -462,6 +475,14 @@ class BacktestDriver:
             "net_values": net_values,
             "slots": slots_summary,
             "ledger_dir": str(self.ledger_dir),
+            "backtest_config": {
+                "scene": self.scene_name,
+                "symbols": self.symbols,
+                "batches": self.batches,
+                "td_fixed_amount": self._merged_params.get("td_fixed_amount"),
+                "slippage": self.slippage,
+                "initial_quote": self.initial_quote,
+            },
         }
         print(
             f"[BACKTEST] 完成 scene={self.scene_name} bars={len(net_values)} "
