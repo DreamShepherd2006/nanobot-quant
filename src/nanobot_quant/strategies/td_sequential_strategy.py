@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import functools
+import math
 import pandas as pd
 import logging
 import sys
@@ -2391,6 +2392,19 @@ class TdSequentialStrategy(Strategy):
         except (TypeError, ValueError):
             return 0.0
 
+    def _cex_amount_precision(self, symbol: str) -> int:
+        """Gate 交易对 amount_precision（broker 拉取；异常回退 0）。
+
+        2026-08-29 精度死锁统一处理：卖出可卖量 = floor(数量, 精度)；
+        EXIT_RELEASE 日志据此计算「价值达标所需最低价格」。
+        """
+        broker = getattr(self, "broker", None)
+        fn = getattr(broker, "amount_precision_for", None)
+        try:
+            return int(fn(symbol) if fn else 0)
+        except (TypeError, ValueError):
+            return 0
+
     def _is_cex(self) -> bool:
         """执行通道大类：cex=Gate 交易所子账号；dex=链上子钱包（默认）。"""
         return self.parameters.get("channel_family") == "cex"
@@ -2755,15 +2769,22 @@ class TdSequentialStrategy(Strategy):
             if min_q > 0 and qty * price < min_q:
                 self.batch_manager.close_lot(slot["slot"])
                 self.batch_manager.save()
+                # 2026-08-29 精度死锁显性化：给出「价值达标所需最低价格」，
+                # 避免释放后静默——用户能看到是精度限制而非资金问题。
+                ap = self._cex_amount_precision(self.symbol)
+                sellable = math.floor(qty * 10**ap) / 10**ap if ap >= 0 else qty
+                price_floor = min_q / sellable if sellable > 0 else float("inf")
                 self.logger.warning(
                     f"TD BATCH EXIT RELEASE | symbol={self.symbol} "
                     f"slot={slot['slot']} 价值 ${qty * price:.2f} < "
-                    f"min_quote ${min_q:g}，释放台账（仓位留在子账号）"
+                    f"min_quote ${min_q:g}，释放台账（仓位留在子账号）——"
+                    f"精度限制：可卖量 {sellable:g}，需价格 ≥${price_floor:.0f} 或补仓才可卖"
                 )
                 self._record(
                     "EXIT_RELEASE",
                     f"slot={slot['slot']} 价值 ${qty * price:.2f} < "
-                    f"min_quote ${min_q:g} 释放台账",
+                    f"min_quote ${min_q:g} 释放台账（可卖量 {sellable:g}，"
+                    f"需价格 ≥${price_floor:.0f} 或补仓）",
                     slot=slot["slot"], qty=qty, price=price,
                     direction="sell", status="ok",
                 )

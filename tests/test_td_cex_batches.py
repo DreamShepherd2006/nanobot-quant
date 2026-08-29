@@ -770,6 +770,34 @@ def test_cex_sell_releases_below_min_quote(tmp_path):
     assert bm.open_slots() == []    # 台账已释放（仓位留在子账号）
 
 
+def test_cex_exit_release_log_has_price_floor(tmp_path, monkeypatch):
+    """2026-08-29 精度死锁显性化：EXIT_RELEASE 记录带
+    「可卖量/需价格 ≥$X 或补仓」提示（BNB 批次 0.004（买入量）、子账号
+    余额 0.004983（含残留）——预检按批次量 0.004×690.6=$2.76<min_quote →
+    释放；价格阈值 = 3/floor(0.004)=$750，不再静默释放）。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    bm.open_lot(slot=1, qty=0.004, entry_price=691.3)
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex")
+    submitted = []
+    s._cex_submit = lambda slot, req: submitted.append(req) or _mock_order()
+    s._cex_slot_token_balance = lambda slot, symbol: 0.004983  # 含残留
+    s._cex_min_quote = lambda symbol: 3.0
+    s._cex_amount_precision = lambda symbol: 3   # BNB amount_precision=3
+    events = []
+    monkeypatch.setattr(
+        "nanobot_quant.td_live_state.append_event", lambda e: events.append(e)
+    )
+    s.parameters["live_mode"] = True
+    s._sell_lot_cex(bm.slots[0], 690.6, {"recommendation": "SELL"}, "test")
+    assert submitted == []
+    assert bm.open_slots() == []
+    rel = [e for e in events if e["event"] == "EXIT_RELEASE"]
+    assert rel, "EXIT_RELEASE 事件应写入事件文件"
+    msg = rel[0]["note"]
+    assert "可卖量 0.004" in msg
+    assert "需价格 ≥$750" in msg
+
+
 def test_cex_sell_above_min_quote_still_submits(tmp_path):
     """B 方案不误伤：卖出价值 ≥ min_quote → 正常下单（预检放行）。"""
     bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])

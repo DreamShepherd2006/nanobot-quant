@@ -263,6 +263,29 @@ def test_page_resolve_error_banner(monkeypatch):
     body = resp.body.decode()
     assert "标的解析失败" in body
     assert "not_found" in body
+def test_trade_rows_exit_release():
+    """2026-08-29：EXIT_RELEASE 事件进交易记录——此前 _TRADE_EVENTS 缺
+    该事件名，load_trade_events 过滤导致「买入后无卖出记录」假象。
+    显示语义：方向 sell、状态 release（↩️ 徽标）、可被状态筛选选中。"""
+    from nanobot_quant.td_table_handlers import _trade_rows
+
+    events = [
+        {"ts": "t1", "symbol": "BNB", "event": "EXIT_RELEASE",
+         "slot": 2, "qty": 0.004983, "price": 690.6, "direction": "sell",
+         "status": "ok",
+         "note": "slot=2 价值 $2.76 < min_quote $3 释放台账（可卖量 0.004，需价格 ≥$750 或补仓）"},
+    ]
+    rows = _trade_rows(events)
+    assert [r["event"] for r in rows] == ["EXIT_RELEASE"]
+    assert rows[0]["direction"] == "sell"
+    assert rows[0]["status"] == "release"     # 覆盖为显示徽标 ↩️
+    assert rows[0]["symbol"] == "BNB"
+    # 状态筛选可选（tq_st=release）
+    assert [r["event"] for r in _trade_rows(events, {"tq_st": "release"})] == ["EXIT_RELEASE"]
+    # 方向筛选（tq_dir=sell）
+    assert [r["event"] for r in _trade_rows(events, {"tq_dir": "sell"})] == ["EXIT_RELEASE"]
+
+
 def test_trade_rows_filter(monkeypatch):
     """交易记录过滤：只含成交事件、最新在前、查询条件生效（方案 B）。"""
     from nanobot_quant.td_table_handlers import _trade_rows
