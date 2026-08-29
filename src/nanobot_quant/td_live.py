@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -477,7 +478,10 @@ class _TdLiveRunner:
             load_gate_credentials,
             load_slot_map,
         )
-        from nanobot_quant.gate_sdk import sub_account_balances
+        from nanobot_quant.gate_sdk import (
+            get_currency_pair,
+            sub_account_balances,
+        )
         from nanobot_quant.tokens_store import token_meta
 
         creds = load_gate_credentials()
@@ -539,6 +543,16 @@ class _TdLiveRunner:
         # 不能用 gate_symbol 原值——它可能是完整 pair（"CRCLX_USDT"）。
         # 从 gate_pair 剥离 quote，与下单/取价同源。
         bal_key = gate_pair(symbol, tokens_json).split("_")[0]
+        # 交易对规则（min_quote_amount / amount_precision）：一次拉取供全部
+        # slot 的精度可卖性检查用（2026-08-29 三端之二）。拉取失败时
+        # min_q=0 → 检查跳过（宁可见仓，不静默丢仓；卖出端 RELEASE 兜底）。
+        pair_meta: dict = {}
+        try:
+            pair_meta = get_currency_pair(api_key, api_secret, pair) or {}
+        except Exception:  # noqa: BLE001
+            pair_meta = {}
+        min_q = float(pair_meta.get("min_quote_amount") or 0)
+        ap = int(pair_meta.get("amount_precision") or 0)
         reports: list[str] = []
         imported_any = False
         px: float | None = None
@@ -572,6 +586,26 @@ class _TdLiveRunner:
                     f"${min_pos_value:g}（min_position_value），跳过导入"
                 )
                 continue
+            # 精度可卖性（2026-08-29 三端之二，用户拍板）：市值 ≥
+            # min_position_value 但 floor(余额→amount_precision) 后价值 <
+            # min_quote 的仓不导入——导入 → 卖出 RELEASE → 重启再导入的
+            # 死锁循环（BNB 0.004983 实证：floor 0.004×691.6=$2.76 <$3
+            # 卖不掉）。币留子账号，价格回升/补仓后由下次重启对账导入。
+            if min_q > 0:
+                sellable = math.floor(bal * 10**ap) / 10**ap if ap >= 0 else bal
+                if sellable <= 0:
+                    reports.append(
+                        f"{symbol} 账户{name} 精度死锁：可卖量 floor 后为 0"
+                        f"（余额 {bal:g} < 步进），不导入"
+                    )
+                    continue
+                if sellable * px < min_q:
+                    reports.append(
+                        f"{symbol} 账户{name} 精度死锁：可卖量 {sellable:g} "
+                        f"价值 ${sellable * px:.2f} < min_quote ${min_q:g}（需价格 "
+                        f"≥${min_q / sellable:.0f} 或补仓），不导入"
+                    )
+                    continue
             if cost:
                 price = float(cost)
                 note = "cost_price"

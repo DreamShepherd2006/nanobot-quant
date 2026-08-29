@@ -770,6 +770,61 @@ def test_cex_sell_releases_below_min_quote(tmp_path):
     assert bm.open_slots() == []    # 台账已释放（仓位留在子账号）
 
 
+def test_cex_buy_fixed_amount_floor_when_above_min_quote(tmp_path):
+    """2026-08-29 精度死锁根治（买入端）：fixed_amount=4U、BNB 690 →
+    floor(4/690=0.005797, 3位)=0.005 价值 $3.45 ≥ min_quote → 用 0.005
+    不上取整（当前生产配置零变化）。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
+                           quantity_mode="fixed_amount", td_fixed_amount=4.0)
+    s._cex_amount_precision = lambda symbol: 3   # BNB
+    s._cex_min_quote = lambda symbol: 3.0
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
+    s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
+    calls = []
+    s._cex_submit = lambda slot, req: calls.append((slot, req)) or _mock_order()
+    ret = s._buy_on_slot_cex(bm.slots[0], 690.0, "test")
+    assert ret is not None
+    order, qty = ret
+    assert qty == 0.005
+    assert calls[0][1].quantity == 0.005
+
+
+def test_cex_buy_fixed_amount_rounds_up_below_min_quote(tmp_path):
+    """2026-08-29 精度死锁根治（买入端）：floor 后价值 < min_quote →
+    上取整到最小合法量（BNB 2500 价、fixed_amount=3.1 → floor 0.001
+    价值 $2.5 <$3 → ceil 0.002 价值 $5.0，超配 ≤ 一个步进）。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
+                           quantity_mode="fixed_amount", td_fixed_amount=3.1)
+    s._cex_amount_precision = lambda symbol: 3   # BNB
+    s._cex_min_quote = lambda symbol: 3.0
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
+    s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
+    calls = []
+    s._cex_submit = lambda slot, req: calls.append((slot, req)) or _mock_order()
+    ret = s._buy_on_slot_cex(bm.slots[0], 2500.0, "test")
+    assert ret is not None
+    order, qty = ret
+    assert qty == 0.002          # ceil(3.1/2500=0.00124, 3位)
+    assert calls[0][1].quantity == 0.002
+
+
+def test_cex_buy_fixed_amount_skips_when_roundup_still_below(tmp_path):
+    """2026-08-29 精度死锁根治（买入端）：fixed_amount=2U（<min_quote）
+    BNB 2500 → ceil(0.0008, 3位)=0.001 价值 $2.5 仍 <$3 → fail-closed 跳过。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
+                           quantity_mode="fixed_amount", td_fixed_amount=2.0)
+    s._cex_amount_precision = lambda symbol: 3
+    s._cex_min_quote = lambda symbol: 3.0
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
+    s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
+    s._cex_submit = lambda slot, req: None  # 不应被调用
+    ret = s._buy_on_slot_cex(bm.slots[0], 2500.0, "test")
+    assert ret is None
+
+
 def test_cex_exit_release_log_has_price_floor(tmp_path, monkeypatch):
     """2026-08-29 精度死锁显性化：EXIT_RELEASE 记录带
     「可卖量/需价格 ≥$X 或补仓」提示（BNB 批次 0.004（买入量）、子账号

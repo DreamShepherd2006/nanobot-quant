@@ -2393,17 +2393,21 @@ class TdSequentialStrategy(Strategy):
             return 0.0
 
     def _cex_amount_precision(self, symbol: str) -> int:
-        """Gate 交易对 amount_precision（broker 拉取；异常回退 0）。
+        """Gate 交易对 amount_precision（broker 拉取；-1=未知禁用取整）。
 
         2026-08-29 精度死锁统一处理：卖出可卖量 = floor(数量, 精度)；
         EXIT_RELEASE 日志据此计算「价值达标所需最低价格」。
+        注意：broker 缺失/异常回退 -1（而非 0）——0 是合法精度（整数
+        标的如 ARB），回退 0 会把小数数量全砍掉。
         """
         broker = getattr(self, "broker", None)
         fn = getattr(broker, "amount_precision_for", None)
         try:
-            return int(fn(symbol) if fn else 0)
+            if not fn:
+                return -1
+            return int(fn(symbol))
         except (TypeError, ValueError):
-            return 0
+            return -1
 
     def _is_cex(self) -> bool:
         """执行通道大类：cex=Gate 交易所子账号；dex=链上子钱包（默认）。"""
@@ -2681,6 +2685,36 @@ class TdSequentialStrategy(Strategy):
                 qty = float(self.quantity or 0)
             if qty <= 0:
                 return None
+            # 2026-08-29 精度死锁根治（买入端，用户拍板）：fixed_amount 模式
+            # 按 amount_precision 预检——floor 后价值 ≥ min_quote 用 floor 量
+            # （可略少于目标金额）；floor 后 < min_quote 上取整到最小合法量
+            # （超配 ≤ 一个步进，否则服务端按精度截断后成交金额 < min_quote
+            # 直接拒单 BUY_FAIL）；上取整后仍 < min_quote 或资金不足 →
+            # fail-closed 跳过（不追）。
+            if self.quantity_mode == "fixed_amount":
+                _ap = self._cex_amount_precision(self.symbol)
+                _min_q = self._cex_min_quote(self.symbol)
+                if _ap >= 0:
+                    _qty_floor = math.floor(qty * 10**_ap) / 10**_ap
+                    if _min_q > 0 and _qty_floor * price < _min_q:
+                        _qty_ceil = math.ceil(qty * 10**_ap) / 10**_ap
+                        if _qty_ceil * price < _min_q:
+                            self.logger.warning(
+                                f"TD SLOT SKIP (min_quote) | symbol={self.symbol} "
+                                f"slot={slot['slot']} 上取整后价值 ${_qty_ceil * price:.2f} "
+                                f"仍 < min_quote ${_min_q:g}（fixed_amount 太低），跳过"
+                            )
+                            return None
+                        qty = _qty_ceil
+                        print(
+                            f"[TD] BUY ROUND-UP | symbol={self.symbol} "
+                            f"slot={slot['slot']} qty {_qty_floor:g}→{_qty_ceil:g} "
+                            f"（floor 价值 ${_qty_floor * price:.2f} < min_quote "
+                            f"${_min_q:g}，上取整超配 ≤ 一个步进）",
+                            file=sys.stderr, flush=True,
+                        )
+                    else:
+                        qty = _qty_floor
             if self.quantity_mode != "fixed_amount":
                 result = self._risk.can_enter(
                     position_value=qty * price,
