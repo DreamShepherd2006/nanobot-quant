@@ -85,16 +85,21 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
 #: td_sell_all = 高9 一次平掉所有满足盈利门的 open 批次（false=每轮只平一个，现有行为）。
 #: cd_exit_min_profit = cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，承担交易成本）。
 #: cd_exit_all = cd 13 一次平掉所有 ≥ 保本门的 open 批次（false=每轮只平一个）。
+#: cd_entry_setup_gap = cd 入场时效门槛（2026-08-29 拍板 B）：cd_buy ≥ entry_countdown 触发做多时，
+#:   setup 最近一次归零（>0 → 0）距当前 ≤ N 根才允许——保留「setup 结构尚在进行」的 cd 确认
+#:   （LINK 场景），过滤跨多轮周期的陈旧信号；setup 从未归零（结构连续）恒允许；0=关闭（回归
+#:   旧 cd 独立触发行为）。cd 进场门限建立在 setup 结构延续基础上，非独立计算。
 SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
-    "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
+    "td_sell_all", "cd_exit_min_profit", "cd_exit_all", "cd_entry_setup_gap",
 )
 
 #: 场景卡片字段渲染顺序。
 SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
-    "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
+    "entry_setup", "entry_countdown", "cd_entry_setup_gap",
+    "exit_setup", "exit_countdown",
     "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
     "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
@@ -114,7 +119,8 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
-        "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
+        "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
+        "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
         "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
@@ -128,7 +134,8 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
-        "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
+        "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
+        "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
         "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
@@ -142,7 +149,8 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
-        "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
+        "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
+        "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
         "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
@@ -334,6 +342,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "entry_countdown": {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 13, "integer": True,
         "label": "入场 Countdown 阈值", "hint": "场景级覆盖；留空 = 跟随全局 td_params（策略选择页设置）。cd_buy ≥ N 触发做多（与 setup 双信号 OR）",
+    },
+    "cd_entry_setup_gap": {
+        "group": "scene", "min": 0, "max": 300, "step": 1, "std": 5, "integer": True,
+        "label": "CD 入场时效门槛(bar)",
+        "hint": "cd_buy ≥ 入场 Countdown 阈值触发做多时，setup 最近一次归零距当前 ≤ N 根才允许——保留「setup 结构尚在进行」的 cd 确认（LINK 场景），过滤跨多轮周期的陈旧信号（2026-08-29 拍板 B）；setup 从未归零（结构连续）恒允许；0=关闭（回归旧 cd 独立触发行为）",
     },
     "exit_setup": {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 9, "integer": True,

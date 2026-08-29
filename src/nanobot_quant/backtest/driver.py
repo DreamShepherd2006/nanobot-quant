@@ -609,6 +609,9 @@ class BacktestDriver:
                 ),
                 "momentum_exit": getattr(strategy, "_momentum_exit", None),
                 "cd_stall_n": getattr(strategy, "_cd_stall_n", None),
+                "cd_entry_setup_gap": getattr(
+                    strategy, "_cd_entry_setup_gap", None
+                ),
                 "td_sell_all": getattr(strategy, "_td_sell_all", None),
                 "cd_exit_min_profit": getattr(
                     strategy, "_cd_exit_min_profit", None

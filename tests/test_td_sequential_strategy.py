@@ -28,6 +28,17 @@ def _buy_signal_closes() -> list[float]:
     return closes
 
 
+def _make_df() -> pd.DataFrame:
+    """与 _make_strategy 相同的 58 根测试 bars（索引一致，供归零时间戳定位）。"""
+    closes = _buy_signal_closes()
+    return pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
+    )
+
+
 def _make_strategy(**params) -> TdSequentialStrategy:
     from lumibot.entities import Bars
 
@@ -40,13 +51,7 @@ def _make_strategy(**params) -> TdSequentialStrategy:
     s.portfolio_value = 100_000.0
     s.cash = 100_000.0
 
-    closes = _buy_signal_closes()
-    df = pd.DataFrame(
-        {"open": closes, "high": [c + 1 for c in closes],
-         "low": [c - 1 for c in closes], "close": closes,
-         "volume": [1_000_000] * len(closes)},
-        index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
-    )
+    df = _make_df()
     s._bars = Bars(df, "ONCHAIN", None)
     s.get_position = lambda symbol: None  # 无持仓 → BUY 分支
     s.get_historical_prices = lambda symbol, length, timestep: s._bars
@@ -183,6 +188,90 @@ def test_buy_cd_buy_signal_in_last_signal():
     s._calc = lambda df: _fixed_signal(cd_buy=13)
     s.on_trading_iteration()
     assert s._last_signal.get("cd_buy") == 13
+
+
+# ── cd 入场时效门槛（2026-08-29 拍板 B）───────────────────────────────
+
+def _preset_cycle(s, ts=None, prev_setup=0):
+    """预置周期门控状态：可指定 setup 归零时间戳与上轮 setup 计数。"""
+    if not hasattr(s, "_cycle_state"):
+        s._cycle_state = {}
+    s._cycle_state["AAPL"] = {
+        "bought": False, "prev_setup": prev_setup, "reset": False,
+        "cd_triggered": False, "last_setup_zero_ts": ts,
+    }
+
+
+def test_cd_entry_fresh_allowed_within_gap():
+    """cd 时效门槛：setup 最近归零 ≤ N 根（如 2 根前）→ cd 入场允许。"""
+    s = _make_strategy()
+    df = _make_df()
+    _preset_cycle(s, ts=df.index[-3])
+    s._calc = lambda df: _fixed_signal(cd_buy=13)
+    s.on_trading_iteration()
+    assert s._captured.get("order") is not None
+    assert s._captured["order"][2] == "buy"
+
+
+def test_cd_entry_stale_blocked():
+    """cd 时效门槛：setup 归零 > N 根（陈旧）→ cd 入场拦截。"""
+    s = _make_strategy()
+    df = _make_df()
+    _preset_cycle(s, ts=df.index[-20])
+    s._calc = lambda df: _fixed_signal(cd_buy=13)
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+
+
+def test_cd_entry_stale_window_out_blocked():
+    """cd 时效门槛：归零事件在窗口外（>120 根前）→ 陈旧拦截。"""
+    s = _make_strategy()
+    _preset_cycle(s, ts=pd.Timestamp("2020-01-01"))
+    s._calc = lambda df: _fixed_signal(cd_buy=13)
+    s.on_trading_iteration()
+    assert "order" not in s._captured
+
+
+def test_cd_entry_no_reset_never_stale():
+    """cd 时效门槛：setup 从未归零（结构连续，LINK 场景）→ 恒允许。"""
+    s = _make_strategy()
+    _preset_cycle(s, ts=None)
+    s._calc = lambda df: _fixed_signal(cd_buy=13)
+    s.on_trading_iteration()
+    assert s._captured.get("order") is not None
+    assert s._captured["order"][2] == "buy"
+
+
+def test_cd_entry_gap_zero_disabled():
+    """cd_entry_setup_gap=0（关闭）→ 陈旧 setup 也允许 cd 入场（回归旧行为）。"""
+    s = _make_strategy(cd_entry_setup_gap=0)
+    df = _make_df()
+    _preset_cycle(s, ts=df.index[-20])
+    s._calc = lambda df: _fixed_signal(cd_buy=13)
+    s.on_trading_iteration()
+    assert s._captured.get("order") is not None
+    assert s._captured["order"][2] == "buy"
+
+
+def test_setup_zero_event_tracked():
+    """归零事件跟踪：prev_setup>0 且当前 setup=0 → last_setup_zero_ts 记录当前 bar。"""
+    s = _make_strategy()
+    df = _make_df()
+    _preset_cycle(s, ts=None, prev_setup=5)
+    s._calc = lambda df: _fixed_signal(cd_buy=3)  # setup_buy=0（默认）
+    s.on_trading_iteration()
+    assert s._cycle_state["AAPL"]["last_setup_zero_ts"] == df.index[-1]
+
+
+def test_cd_entry_stale_blocked_but_setup_still_buys():
+    """cd 时效拦截不影响 setup 通道：setup_buy=9（当前结构）→ 照常买入。"""
+    s = _make_strategy()
+    df = _make_df()
+    _preset_cycle(s, ts=df.index[-20])
+    s._calc = lambda df: _fixed_signal(setup_buy=9, cd_buy=13)
+    s.on_trading_iteration()
+    assert s._captured.get("order") is not None
+    assert s._captured["order"][2] == "buy"
 
 
 def test_activate_scene_injects_entry_countdown():

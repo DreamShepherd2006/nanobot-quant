@@ -281,6 +281,7 @@ function paramsRows(res) {
     ["滑点", cfg.slippage != null ? `${cfg.slippage}%` : "—"],
     ["入场 Setup 阈值", cfg.entry_setup ?? "—"],
     ["入场 Countdown 阈值", cfg.entry_countdown ?? "—"],
+    ["CD 入场时效门槛(bar)", cfg.cd_entry_setup_gap != null ? cfg.cd_entry_setup_gap : "—"],
     ["平仓 Setup 阈值", cfg.exit_setup ?? "—"],
     ["平仓 Countdown 阈值", cfg.exit_countdown ?? "—"],
     ["最短持有期", cfg.min_hold_bars != null ? `${cfg.min_hold_bars} bar` : "—"],

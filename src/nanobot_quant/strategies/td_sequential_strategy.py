@@ -77,6 +77,7 @@ class TdSequentialStrategy(Strategy):
         "sell_only_profit_low": 0.002,  # 高9 毛浮盈门下档（<此值死扛；[下,上) 由动能判断）
         "momentum_exit": True,          # 高9 动能判断开关（true=拍板主方案；false=回退上门简单门，方案 B）
         "cd_stall_n": 3,                # 动能停滞阈值：cd_sell 连续 N 根无 +1 判定动能弱（下门落袋）
+        "cd_entry_setup_gap": 5,        # cd 入场时效门槛：setup 最近归零距当前 ≤ N 根才允许 cd 触发（0=关闭，2026-08-29 拍板 B）
         "cd_exit_min_profit": 0.0,  # cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，2026-08-27）
         "cd_exit_all": True,        # cd 13 通道全平（true=一次清所有过门批次；false=每轮一个，2026-08-27）
         "td_sell_all": False,       # 高9 一次平所有盈利批（false=每轮一个）
@@ -226,6 +227,12 @@ class TdSequentialStrategy(Strategy):
         )
         self._cd_stall_n = max(
             int(self.parameters.get("cd_stall_n", 3) or 3), 1
+        )
+        # 2026-08-29 拍板 B：cd 入场时效门槛——setup 最近归零距当前 ≤ N 根才允许 cd 触发
+        # （0=关闭，回归旧 cd 独立触发；场景级覆盖见 _activate_scene）。注意 0 是合法值，
+        # 不能用 `or 5` 兜底（会把 0 顶成 5）。
+        self._cd_entry_setup_gap = max(
+            int(self.parameters.get("cd_entry_setup_gap", 5)), 0
         )
         # 动能停滞状态（per-symbol，2026-08-29）：
         #   {symbol: {"prev": cd_sell, "stall": 连续无 +1 根数}}
@@ -619,6 +626,14 @@ class TdSequentialStrategy(Strategy):
         )
         self._momentum_exit = bool(p.get("momentum_exit", True))
         self._cd_stall_n = max(int(p.get("cd_stall_n") or 3), 1)
+        gap = p.get("cd_entry_setup_gap")
+        if gap is not None:
+            self._cd_entry_setup_gap = max(int(gap), 0)
+        else:
+            # 场景留空 → 回退全局（类默认 5 / td_live 注入的扁平值；0 是合法关闭值）
+            self._cd_entry_setup_gap = max(
+                int(self.parameters.get("cd_entry_setup_gap", 5)), 0
+            )
         self._cd_exit_min_profit = float(p.get("cd_exit_min_profit") or 0.0)
         self._cd_exit_all = bool(p.get("cd_exit_all", True))
         self._td_sell_all = bool(p.get("td_sell_all") or False)
@@ -985,6 +1000,10 @@ class TdSequentialStrategy(Strategy):
             # 共振错峰（2026-08-26）：新周期恢复被额度拦截标的的建仓资格
             if getattr(self, "_denied_cycle", None):
                 self._denied_cycle.pop((self._cur_scene(), self.symbol), None)
+        # 2026-08-29 拍板 B：cd 入场时效门槛——记录 setup 归零事件（>0 → 0）
+        # 的 bar 时间戳（跨轮记忆），cd 触发时按「距当前 bar 数」判定新鲜度。
+        if st["prev_setup"] > 0 and setup_buy == 0:
+            st["last_setup_zero_ts"] = df.index[-1] if len(df) else None
         st["prev_setup"] = setup_buy
         # cd 周期门控（2026-08-27）：countdown 跨 setup 翻转持续累积（09:5x 启动 →
         # 10:14 完成 13），setup 翻转触发 reset 会让 cd_buy 13 绕过周期门控——同一
@@ -1045,7 +1064,34 @@ class TdSequentialStrategy(Strategy):
 
         # 同周期已建仓 → 跳过 BUY（信号级：slot 平仓释放也不建，等 setup
         # 重置后再现新信号；只拦截 BUY，不 return——SELL/止损仍正常评估）
-        buy_signal = (setup_buy >= entry_setup) or (cd_buy >= entry_countdown)
+        # 2026-08-29 拍板 B：cd 入场时效门槛——cd 通道触发要求 setup 最近归零
+        # ≤ N 根（cd 进场门限建立在 setup 结构延续基础上，非独立计算）；
+        # setup 从未归零（结构连续）恒允许；0=关闭（回归旧 cd 独立触发）。
+        cd_ok = cd_buy >= entry_countdown
+        _gap = getattr(self, "_cd_entry_setup_gap", 5) or 0
+        if cd_ok and setup_buy < entry_setup and _gap > 0:
+            _ts = st.get("last_setup_zero_ts")
+            if _ts is not None and len(df):
+                _idx = df.index
+                if _ts in _idx:
+                    _bars = len(_idx) - 1 - _idx.get_loc(_ts)
+                    if _bars > _gap:
+                        cd_ok = False
+                        print(
+                            f"[TD] CD STALE SKIP | symbol={self.symbol} "
+                            f"setup 归零 {_bars} 根前 > {_gap}（陈旧 cd 信号），跳过 cd 入场",
+                            file=sys.stderr, flush=True,
+                        )
+                else:
+                    # 归零事件在窗口外（>120 根前）→ 陈旧
+                    cd_ok = False
+                    print(
+                        f"[TD] CD STALE SKIP | symbol={self.symbol} "
+                        f"setup 归零在窗口外（陈旧 cd 信号），跳过 cd 入场",
+                        file=sys.stderr, flush=True,
+                    )
+            # _ts is None = setup 从未归零（结构连续）→ 新鲜，保留
+        buy_signal = (setup_buy >= entry_setup) or cd_ok
         # 周期门控（2026-08-27 扩展）：setup 周期（bought+未重置）或 countdown
         # 周期（cd_triggered 且 cd_buy 仍在触发区——setup 翻转会让 cd 13 绕过
         # 旧门控，同一 countdown 周期内 setup 9 已建仓 + cd 13 补买被拦）
