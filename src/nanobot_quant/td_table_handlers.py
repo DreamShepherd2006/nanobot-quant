@@ -558,10 +558,13 @@ _TRADE_EVENTS = {
     "EXIT": ("sell", "ok"), "EXIT_PENDING": ("sell", "pending"),
     "EXIT_FAIL": ("sell", "fail"),
     "EXIT_SKIP": ("sell", "skip"), "EXIT_SHRINK": ("sell", "shrink"),
+    # 2026-08-29：价值 < min_quote 释放台账不卖（仓位留子账号，等价格回升/补仓）
+    "EXIT_RELEASE": ("sell", "release"),
 }
 
 _STATUS_BADGE = {
     "ok": "✅", "pending": "⏳", "fail": "❌", "skip": "⏭", "shrink": "↩️",
+    "release": "↩️",
 }
 
 # 链 → 交易浏览器 URL 模板（tx_hash 点击跳转）
@@ -1034,7 +1037,8 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         for v, lab in opts))
     tq_dir_opts = [("", "全部方向"), ("buy", "买"), ("sell", "卖")]
     tq_st_opts = [("", "全部状态"), ("ok", "✅ 成功"), ("pending", "⏳ 待确认"),
-                  ("fail", "❌ 失败"), ("skip", "⏭ 跳过"), ("shrink", "↩️ 缩量")]
+                  ("fail", "❌ 失败"), ("skip", "⏭ 跳过"), ("shrink", "↩️ 缩量"),
+                  ("release", "↩️ 释放")]
     tq_n_opts = [("20", "20 条"), ("50", "50 条"), ("100", "100 条")]
     scene_opts = [("", "全部场景")] + [
         (sc, _SCENE_META.get(sc, (sc, sc))[0]) for sc in ("high", "mid", "low")]

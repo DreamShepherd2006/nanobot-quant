@@ -148,6 +148,19 @@ class CexBroker(Broker):
         except Exception:  # noqa: BLE001
             return 0.0
 
+    def amount_precision_for(self, symbol: str) -> int:
+        """Gate 交易对 amount_precision（基础币数量小数位；未知回退 0）。
+
+        2026-08-29 精度死锁统一处理：卖出可卖量 = floor(数量, 精度)；
+        日志显性化需据此计算「价值达标所需最低价格」。
+        """
+        try:
+            pair = gate_pair(symbol, self._tokens_json)
+            meta = self._pair_meta(pair)
+            return int(meta.get("amount_precision") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
     @staticmethod
     def _format_err(prefix: str, payload: Any = None) -> str:
         """Build a readable error string, keeping platform error codes intact."""
