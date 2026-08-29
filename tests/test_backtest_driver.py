@@ -286,6 +286,61 @@ def _two_cycles_closes() -> list[float]:
     return flat + d1 + r1 + d2 + r2 + d3 + [76.5] * 15
 
 
+def test_driver_capital_stats_zero_fills(tmp_path):
+    """零成交（上涨行情无买入）→ 周转率/利用率全 0，结构完整。"""
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_rising_closes(100)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    cs = out["capital_stats"]
+    assert cs["turnover"] == 0.0
+    assert cs["turnover_two_side"] == 0.0
+    assert cs["utilization"] == 0.0
+    assert cs["total_funds"] == out["initial_total"]
+
+
+def test_driver_capital_stats_turnover(tmp_path):
+    """资金周转率（单边/双边）与平均利用率，与撮合账本公式一致。
+
+    下跌序列触发 BUY → 持续下跌触发止损 SELL（回笼）→ 资金复用再买入。
+    资金流 = qty × avg_price × (1 − fee_rate)（买卖通用）；
+    单边 = Σ买入 ÷ 总资金；双边 = Σ(买入+卖出) ÷ 总资金；
+    利用率 = 时间加权平均在途 ÷ 总资金 ∈ (0,1)。
+    """
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["fills"] >= 1
+    cs = out["capital_stats"]
+    assert cs["total_funds"] == pytest.approx(out["initial_total"], abs=1e-3)
+
+    buy_flow = sum(
+        float(f["quantity"]) * float(f["avg_price"]) * (1.0 - driver.fee_rate)
+        for f in out["fills_detail"]
+        if f["side"] == "buy"
+    )
+    sell_flow = sum(
+        float(f["quantity"]) * float(f["avg_price"]) * (1.0 - driver.fee_rate)
+        for f in out["fills_detail"]
+        if f["side"] == "sell"
+    )
+    assert cs["buy_flow"] == pytest.approx(buy_flow, abs=1e-3)
+    assert cs["sell_flow"] == pytest.approx(sell_flow, abs=1e-3)
+    assert cs["turnover"] == pytest.approx(buy_flow / out["initial_total"], abs=1e-5)
+    assert cs["turnover_two_side"] == pytest.approx(
+        (buy_flow + sell_flow) / out["initial_total"], abs=1e-5
+    )
+    assert cs["turnover_two_side"] > cs["turnover"]
+    assert 0.0 < cs["utilization"] < 1.0
+
+
 def test_driver_multi_slot_fills_detail(tmp_path):
     """回归：跨 slot oid 冲突（两 broker 各自从 bt0 起）不再丢 fills_detail。"""
     params = _params()

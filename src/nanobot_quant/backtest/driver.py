@@ -297,6 +297,76 @@ class BacktestDriver:
 
     # ── 驱动 ──────────────────────────────────────────────────────────
 
+    def _capital_stats(
+        self,
+        fills_detail: list[dict],
+        initial_total: float,
+        end_ts: str | None,
+    ) -> dict[str, float]:
+        """资金周转率与平均利用率（2026-08-29）。
+
+        资金流 = quantity × avg_price × (1 − fee_rate)（买卖通用，与撮合账本一致）：
+          - buy  : 实际现金支出（= qty×px×(1+slippage)）
+          - sell : 实际现金回笼（= qty×px×(1−slippage)×(1−fee_rate)）
+        周转率（单边）= Σ买入金额 ÷ 总资金（总资金 = 初始资金×批次）；
+        双边 = Σ(买入+卖出) ÷ 总资金。
+        利用率 = 按持有时间加权的平均在途资金 ÷ 总资金（评估区间 [首笔成交, end_ts]）。
+        """
+        empty = {
+            "turnover": 0.0,
+            "turnover_two_side": 0.0,
+            "utilization": 0.0,
+            "buy_flow": 0.0,
+            "sell_flow": 0.0,
+            "total_funds": round(initial_total, 6),
+        }
+        if not fills_detail or initial_total <= 0:
+            return empty
+
+        buy_flow = sell_flow = 0.0
+        events: list[tuple] = []
+        for f in fills_detail:
+            flow = float(f["quantity"]) * float(f["avg_price"]) * (1.0 - self.fee_rate)
+            if f["side"] == "buy":
+                buy_flow += flow
+            else:
+                sell_flow += flow
+            events.append((datetime.fromisoformat(f["ts"]), flow, f["side"]))
+
+        turnover = buy_flow / initial_total
+        turnover_two = (buy_flow + sell_flow) / initial_total
+
+        # 平均在途（时间加权）：首笔成交 → 评估区间末（end_ts 兜底最后一笔成交）
+        events.sort(key=lambda e: e[0])
+        start = events[0][0]
+        if end_ts:
+            end = datetime.fromisoformat(end_ts)
+            if end <= start:
+                end = events[-1][0]
+        else:
+            end = events[-1][0]
+        deployed = 0.0
+        weighted = 0.0
+        prev = start
+        for ts, flow, side in events:
+            if ts > end:
+                break
+            weighted += deployed * (ts - prev).total_seconds()
+            deployed += flow if side == "buy" else -flow
+            prev = ts
+        weighted += deployed * (end - prev).total_seconds()
+        duration = (end - start).total_seconds()
+        utilization = (weighted / duration) / initial_total if duration > 0 else 0.0
+
+        return {
+            "turnover": round(turnover, 6),
+            "turnover_two_side": round(turnover_two, 6),
+            "utilization": round(max(utilization, 0.0), 6),
+            "buy_flow": round(buy_flow, 6),
+            "sell_flow": round(sell_flow, 6),
+            "total_funds": round(initial_total, 6),
+        }
+
     def _write_progress(
         self,
         stage: str,
@@ -305,6 +375,7 @@ class BacktestDriver:
         ts: str | None,
         fills: int,
         fills_detail: list[dict] | None = None,
+        capital_stats: dict | None = None,
     ) -> None:
         """运行中进度写入（WebUI/MCP 轮询展示用，失败静默不阻塞回测）。
 
@@ -329,6 +400,7 @@ class BacktestDriver:
                 "ts": ts,
                 "fills": fills,
                 "fills_detail": fills_detail or [],  # 已成交明细（运行中实时可见）
+                "capital_stats": capital_stats,  # 资金周转率/利用率（运行中实时）
             },
         }
         try:
@@ -449,6 +521,9 @@ class BacktestDriver:
                 ts.isoformat(),
                 fills_now,
                 fills_detail=fills_detail,
+                capital_stats=self._capital_stats(
+                    fills_detail, self.initial_quote * self.batches, ts.isoformat()
+                ),
             )
 
         # 成交记录（_tracked 是累计列表，结束时统计一次）
@@ -487,6 +562,9 @@ class BacktestDriver:
             "batches": self.batches,
             "fills": fills,
             "fills_detail": fills_detail,
+            "capital_stats": self._capital_stats(
+                fills_detail, initial_total, bar_times[-1].isoformat() if bar_times else None
+            ),
             "net_values": net_values,
             "slots": slots_summary,
             "ledger_dir": str(self.ledger_dir),
