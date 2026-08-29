@@ -188,6 +188,72 @@ def load_events(n: int = 20) -> list[dict]:
         except ValueError:
             continue
     return events
+
+
+def _iter_tail_lines(path: Path, max_lines: int = 200000) -> "Iterator[str]":
+    """从文件尾部逐行向前迭代（分块读取，不整文件加载）。"""
+    block_size = 65536
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        pos = size
+        leftover = b""
+        emitted = 0
+        while pos > 0 and emitted < max_lines:
+            read_size = min(block_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            data = f.read(read_size) + leftover
+            parts = data.split(b"\n")
+            leftover = parts[0]  # 当前块末尾可能不完整
+            for part in reversed(parts[1:]):
+                line = part.decode("utf-8", errors="replace").strip()
+                if line:
+                    yield line
+                    emitted += 1
+                    if emitted >= max_lines:
+                        return
+        if leftover.strip():
+            yield leftover.decode("utf-8", errors="replace").strip()
+
+
+def load_trade_events(
+    n: int = 20, trade_event_names: "set[str] | None" = None
+) -> list[dict]:
+    """倒序扫描事件文件，跳过非成交事件（SKIP 洪峰），凑够 n 条成交事件。
+
+    2026-08-29：SKIP（无可用资金 slot 等）高频写入会把文件尾部窗口
+    挤满，交易记录查询若只读最后 n 条原始事件再过滤，成交记录
+    （LONG/EXIT/各 FAIL/PENDING…）会被 SKIP 挤出展示窗口。
+    改为从文件尾倒序过滤：只保留 ``trade_event_names`` 中的成交事件名，
+    直到凑够 n 条（或到文件头）。返回顺序与 ``load_events`` 一致
+    （文件顺序 旧→新，最新在后），调用方无需改动。
+    """
+    path = events_path()
+    if not path.exists():
+        return []
+    events: list[dict] = []
+    try:
+        for line in _iter_tail_lines(path):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if (
+                trade_event_names is not None
+                and str(ev.get("event", "")) not in trade_event_names
+            ):
+                continue
+            events.append(ev)
+            if len(events) >= n:
+                break
+    except OSError:
+        return []
+    events.reverse()  # 文件顺序（旧→新），与 load_events 契约一致
+    return events
 _STABLE_SYMS = ("USDC", "USDT", "USDG")
 
 

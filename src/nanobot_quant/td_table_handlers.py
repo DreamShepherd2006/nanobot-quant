@@ -851,9 +851,13 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     try:
         from nanobot_quant import td_live_state
         st = td_live_state.get_state()
-        events = td_live_state.load_events(500)  # 交易记录查询需要更多历史
+        events_all = td_live_state.load_events(500)  # 信号历史：原始事件（含 SKIP）
+        events = td_live_state.load_trade_events(
+            500, trade_event_names=set(_TRADE_EVENTS)
+        )  # 交易记录：倒序扫描跳过 SKIP 洪峰（2026-08-29）
     except Exception:  # noqa: BLE001
         st = {"running": False, "symbols": {}, "updated_at": None, "next_iteration": None}
+        events_all = []
         events = []
 
     run_txt = "🟢 运行中" if st.get("running") else "⏹ 已停止"
@@ -963,7 +967,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     sq_sym = (tq.get("sq_sym") or "").strip().upper()
     sq_ev = (tq.get("sq_ev") or "").strip()
     sq_scene = (tq.get("sq_scene") or "").strip()
-    events_sig = [e for e in events
+    events_sig = [e for e in events_all
                   if (not sq_sym or str(e.get("symbol", "")).upper() == sq_sym)
                   and (not sq_ev or str(e.get("event", "")) == sq_ev)
                   and (not sq_scene or str(e.get("scene") or "") == sq_scene)]
