@@ -47,6 +47,8 @@ _CHAINS = (
     "solana", "xlayer", "ethereum",
     # 2026-08-26：补齐 L1 内建白名单主链（AVAX/ARB/OP/POL）
     "bnb", "avalanche", "arbitrum", "optimism", "polygon",
+    # 2026-08-29：Tron 链（TRX 原生币；onchainos resolve_chain("tron") → 195）
+    "tron",
 )
 
 
