@@ -2685,36 +2685,42 @@ class TdSequentialStrategy(Strategy):
                 qty = float(self.quantity or 0)
             if qty <= 0:
                 return None
-            # 2026-08-29 精度死锁根治（买入端，用户拍板）：fixed_amount 模式
-            # 按 amount_precision 预检——floor 后价值 ≥ min_quote 用 floor 量
-            # （可略少于目标金额）；floor 后 < min_quote 上取整到最小合法量
-            # （超配 ≤ 一个步进，否则服务端按精度截断后成交金额 < min_quote
-            # 直接拒单 BUY_FAIL）；上取整后仍 < min_quote 或资金不足 →
-            # fail-closed 跳过（不追）。
+            # 2026-08-30 买入对齐可卖步进数（用户拍板，替换 08-29 floor-优先逻辑）：
+            # fixed_amount = 最小值语义——实际买入量按 amount_precision 向上
+            # 对齐到「保证可卖」的步进数：floor(到账量×0.999 手续费) 后价值
+            # 仍 ≥ min_quote，买入仓从此不会再产生卖不掉的精度死锁。
+            # 超支门：对齐金额 − fixed_amount ≤ 一个步进价值才买，否则
+            # fail-closed 跳过并提示该币 fixed_amount 下限（对齐金额 − 步进）。
             if self.quantity_mode == "fixed_amount":
                 _ap = self._cex_amount_precision(self.symbol)
                 _min_q = self._cex_min_quote(self.symbol)
-                if _ap >= 0:
-                    _qty_floor = math.floor(qty * 10**_ap) / 10**_ap
-                    if _min_q > 0 and _qty_floor * price < _min_q:
-                        _qty_ceil = math.ceil(qty * 10**_ap) / 10**_ap
-                        if _qty_ceil * price < _min_q:
+                if _ap >= 0 and _min_q > 0 and price > 0:
+                    _step = 10 ** -_ap                      # 数量步进
+                    n_target = math.floor(qty / _step)      # 目标金额步进（不超买）
+                    m = math.ceil(_min_q / (_step * price))  # 至少几个步进够 min_quote
+                    n_sellable = math.ceil(m / 0.999)       # 预留 0.1% 手续费损耗
+                    n_buy = max(n_target, n_sellable)
+                    _aligned = n_buy * _step
+                    if n_buy > n_target:
+                        _over = _aligned * price - self.fixed_amount
+                        if _over > _step * price:
+                            _need = n_sellable * _step * price - _step * price
                             self.logger.warning(
                                 f"TD SLOT SKIP (min_quote) | symbol={self.symbol} "
-                                f"slot={slot['slot']} 上取整后价值 ${_qty_ceil * price:.2f} "
-                                f"仍 < min_quote ${_min_q:g}（fixed_amount 太低），跳过"
+                                f"slot={slot['slot']} 对齐可卖量 {n_sellable * _step:g} "
+                                f"价值 ${n_sellable * _step * price:.2f} 超支 ${_over:.2f} "
+                                f"> 一个步进 ${_step * price:.2f}（该币需 "
+                                f"fixed_amount ≥ ${_need:.2f}），跳过"
                             )
                             return None
-                        qty = _qty_ceil
                         print(
-                            f"[TD] BUY ROUND-UP | symbol={self.symbol} "
-                            f"slot={slot['slot']} qty {_qty_floor:g}→{_qty_ceil:g} "
-                            f"（floor 价值 ${_qty_floor * price:.2f} < min_quote "
-                            f"${_min_q:g}，上取整超配 ≤ 一个步进）",
+                            f"[TD] BUY ALIGN | symbol={self.symbol} "
+                            f"slot={slot['slot']} qty {qty:g}→{_aligned:g} "
+                            f"（{n_target}→{n_buy} 步进，保证可卖量 "
+                            f"${n_sellable * _step * price:.2f}）",
                             file=sys.stderr, flush=True,
                         )
-                    else:
-                        qty = _qty_floor
+                    qty = _aligned
             if self.quantity_mode != "fixed_amount":
                 result = self._risk.can_enter(
                     position_value=qty * price,

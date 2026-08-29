@@ -149,17 +149,19 @@ class CexBroker(Broker):
             return 0.0
 
     def amount_precision_for(self, symbol: str) -> int:
-        """Gate 交易对 amount_precision（基础币数量小数位；未知回退 0）。
+        """Gate 交易对 amount_precision（基础币数量小数位；未知回退 -1）。
 
-        2026-08-29 精度死锁统一处理：卖出可卖量 = floor(数量, 精度)；
-        日志显性化需据此计算「价值达标所需最低价格」。
+        2026-08-29/30 精度死锁统一处理：卖出可卖量 = floor(数量, 精度)；
+        -1 = 拉取失败/未知 → 禁用取整（0 是合法精度如 ARB 整数位，
+        `or 0` 会把它吞掉，必须用 is not None 判断）。
         """
         try:
             pair = gate_pair(symbol, self._tokens_json)
             meta = self._pair_meta(pair)
-            return int(meta.get("amount_precision") or 0)
+            v = meta.get("amount_precision")
+            return int(v) if v is not None else -1
         except Exception:  # noqa: BLE001
-            return 0
+            return -1
 
     @staticmethod
     def _format_err(prefix: str, payload: Any = None) -> str:

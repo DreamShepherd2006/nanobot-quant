@@ -770,10 +770,11 @@ def test_cex_sell_releases_below_min_quote(tmp_path):
     assert bm.open_slots() == []    # 台账已释放（仓位留在子账号）
 
 
-def test_cex_buy_fixed_amount_floor_when_above_min_quote(tmp_path):
-    """2026-08-29 精度死锁根治（买入端）：fixed_amount=4U、BNB 690 →
-    floor(4/690=0.005797, 3位)=0.005 价值 $3.45 ≥ min_quote → 用 0.005
-    不上取整（当前生产配置零变化）。"""
+def test_cex_buy_fixed_amount_aligns_to_sellable(tmp_path, capsys):
+    """2026-08-30 买入对齐可卖步进数（用户拍板）：fixed_amount=4U、BNB 690 →
+    目标 5 步进（0.005）不够——扣费后 floor 4 步进 $2.76 <min_quote 卖不掉；
+    对齐到 n_sellable=6 步进 → 0.006（$4.15，超支 $0.15 ≤ 步进 $0.69）
+    → 买入 0.006，此后该仓一定卖得掉。"""
     bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
     s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
                            quantity_mode="fixed_amount", td_fixed_amount=4.0)
@@ -786,43 +787,82 @@ def test_cex_buy_fixed_amount_floor_when_above_min_quote(tmp_path):
     ret = s._buy_on_slot_cex(bm.slots[0], 690.0, "test")
     assert ret is not None
     order, qty = ret
-    assert qty == 0.005
-    assert calls[0][1].quantity == 0.005
+    assert qty == 0.006
+    assert calls[0][1].quantity == 0.006
+    assert "[TD] BUY ALIGN" in capsys.readouterr().err
 
 
-def test_cex_buy_fixed_amount_rounds_up_below_min_quote(tmp_path):
-    """2026-08-29 精度死锁根治（买入端）：floor 后价值 < min_quote →
-    上取整到最小合法量（BNB 2500 价、fixed_amount=3.1 → floor 0.001
-    价值 $2.5 <$3 → ceil 0.002 价值 $5.0，超配 ≤ 一个步进）。"""
+def test_cex_buy_fixed_amount_align_under_step_over(tmp_path):
+    """2026-08-30 超支门：对齐超支 ≤ 一个步进价值才买——BNB 3.5U 690 →
+    对齐 0.006=$4.15、超支 $0.65 ≤ 步进 $0.69 → 放行。"""
     bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
     s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
-                           quantity_mode="fixed_amount", td_fixed_amount=3.1)
-    s._cex_amount_precision = lambda symbol: 3   # BNB
+                           quantity_mode="fixed_amount", td_fixed_amount=3.5)
+    s._cex_amount_precision = lambda symbol: 3
     s._cex_min_quote = lambda symbol: 3.0
     s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
     s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
     calls = []
     s._cex_submit = lambda slot, req: calls.append((slot, req)) or _mock_order()
-    ret = s._buy_on_slot_cex(bm.slots[0], 2500.0, "test")
+    ret = s._buy_on_slot_cex(bm.slots[0], 690.0, "test")
     assert ret is not None
     order, qty = ret
-    assert qty == 0.002          # ceil(3.1/2500=0.00124, 3位)
-    assert calls[0][1].quantity == 0.002
+    assert qty == 0.006
+    assert calls[0][1].quantity == 0.006
 
 
-def test_cex_buy_fixed_amount_skips_when_roundup_still_below(tmp_path):
-    """2026-08-29 精度死锁根治（买入端）：fixed_amount=2U（<min_quote）
-    BNB 2500 → ceil(0.0008, 3位)=0.001 价值 $2.5 仍 <$3 → fail-closed 跳过。"""
+def test_cex_buy_fixed_amount_skips_over_step_over(tmp_path):
+    """2026-08-30 超支门：fixed_amount=3.1U（过低）→ 对齐 0.006=$4.15
+    超支 $1.05 > 步进 $0.69 → fail-closed 跳过 + 提示下限 $3.46
+    （对齐金额 4.15 − 步进 0.69）。"""
     bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
     s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
-                           quantity_mode="fixed_amount", td_fixed_amount=2.0)
+                           quantity_mode="fixed_amount", td_fixed_amount=3.1)
     s._cex_amount_precision = lambda symbol: 3
     s._cex_min_quote = lambda symbol: 3.0
     s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
     s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
     s._cex_submit = lambda slot, req: None  # 不应被调用
-    ret = s._buy_on_slot_cex(bm.slots[0], 2500.0, "test")
+    ret = s._buy_on_slot_cex(bm.slots[0], 690.0, "test")
     assert ret is None
+
+
+def test_cex_buy_fixed_amount_no_align_when_target_sufficient(tmp_path):
+    """2026-08-30 对齐只发生在逼近下边界：BTC 78032（ap=6）4U →
+    n_target=51 ≥ n_sellable=40 → 0.000051 不超买（当前行为零变化）。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
+                           quantity_mode="fixed_amount", td_fixed_amount=4.0)
+    s._cex_amount_precision = lambda symbol: 6   # BTC
+    s._cex_min_quote = lambda symbol: 3.0
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
+    s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
+    calls = []
+    s._cex_submit = lambda slot, req: calls.append((slot, req)) or _mock_order()
+    ret = s._buy_on_slot_cex(bm.slots[0], 78032.0, "test")
+    assert ret is not None
+    order, qty = ret
+    assert qty == 0.000051          # floor(4/78032, 6位)，不超买
+    assert calls[0][1].quantity == 0.000051
+
+
+def test_cex_buy_fixed_amount_unknown_precision_no_floor(tmp_path):
+    """2026-08-30 拉取失败 -1 修复：精度未知时禁用取整（不按整数 floor）
+    ——qty 保持 4/690=0.005797 原值提交，宁可由服务端拒单可见也不乱砍。"""
+    bm = _make_bm(tmp_path, n=2, account_ids=["gate_bot1", "gate_bot2"])
+    s = _make_cex_strategy(bm, _bars_with([100.0] * 60), channel_family="cex",
+                           quantity_mode="fixed_amount", td_fixed_amount=4.0)
+    s._cex_amount_precision = lambda symbol: -1   # 拉取失败/未知
+    s._cex_min_quote = lambda symbol: 3.0
+    s._cex_slot_portfolio_value = lambda slot, use_snapshot=False: 100.0
+    s._cex_slot_quote_balance = lambda slot, cur, use_snapshot=False: 10.0
+    calls = []
+    s._cex_submit = lambda slot, req: calls.append((slot, req)) or _mock_order()
+    ret = s._buy_on_slot_cex(bm.slots[0], 690.0, "test")
+    assert ret is not None
+    order, qty = ret
+    assert abs(qty - 4.0 / 690.0) < 1e-9
+    assert calls[0][1].quantity == pytest.approx(4.0 / 690.0)
 
 
 def test_cex_exit_release_log_has_price_floor(tmp_path, monkeypatch):
