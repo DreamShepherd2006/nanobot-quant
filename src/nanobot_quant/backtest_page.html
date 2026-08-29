@@ -306,6 +306,25 @@ function paramsBox(res) {
   return `<div class="bt-params"><div class="bt-params-title">📋 回测参数（实际生效）</div><table class="bt-params-table">${paramsRows(res)}</table></div>`;
 }
 
+// SKIP 统计（2026-08-29）：回测期各类拦截计数——验证 cd 时效门/盈利门/min_hold 生效
+const SKIP_LABELS = {
+  cd_stale: "CD 陈旧拦截（时效门）",
+  sell_profit_gate: "高9 盈利门拦",
+  sell_min_hold: "高9 min_hold 拦",
+  sell_no_open: "高9 无持仓",
+  cd_exit_profit_gate: "cd13 保本门拦",
+  cd_exit_min_hold: "cd13 min_hold 拦",
+  cd_exit_no_open: "cd13 无持仓",
+  batch_wait: "周期门控/波锁等待",
+};
+function skipBox(skips) {
+  if (!skips || !Object.keys(skips).length) return "";
+  const rows = Object.entries(skips)
+    .map(([k, v]) => `<tr><td class="pk">${SKIP_LABELS[k] || k}</td><td class="pv">${v}</td></tr>`)
+    .join("");
+  return `<div class="bt-params"><div class="bt-params-title">🚦 SKIP 统计（回测期累计）</div><table class="bt-params-table">${rows}</table></div>`;
+}
+
 function renderResult(res, runId) {
   const box = $("result");
   if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
@@ -330,6 +349,7 @@ function renderResult(res, runId) {
       <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
     </div>
     ${capitalBox(res.capital_stats)}
+    ${skipBox(res.skip_counts)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;

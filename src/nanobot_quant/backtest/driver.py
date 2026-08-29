@@ -562,6 +562,7 @@ class BacktestDriver:
             "batches": self.batches,
             "fills": fills,
             "fills_detail": fills_detail,
+            "skip_counts": dict(getattr(strategy, "_skip_counts", {}) or {}),
             "capital_stats": self._capital_stats(
                 fills_detail, initial_total, bar_times[-1].isoformat() if bar_times else None
             ),

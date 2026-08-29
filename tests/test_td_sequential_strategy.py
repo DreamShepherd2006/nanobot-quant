@@ -211,6 +211,7 @@ def test_cd_entry_fresh_allowed_within_gap():
     s.on_trading_iteration()
     assert s._captured.get("order") is not None
     assert s._captured["order"][2] == "buy"
+    assert s._skip_counts.get("cd_stale", 0) == 0  # 新鲜不计数
 
 
 def test_cd_entry_stale_blocked():
@@ -221,6 +222,7 @@ def test_cd_entry_stale_blocked():
     s._calc = lambda df: _fixed_signal(cd_buy=13)
     s.on_trading_iteration()
     assert "order" not in s._captured
+    assert s._skip_counts.get("cd_stale") == 1  # SKIP 计数（回测 JSON 核对）
 
 
 def test_cd_entry_stale_window_out_blocked():
@@ -251,6 +253,7 @@ def test_cd_entry_gap_zero_disabled():
     s.on_trading_iteration()
     assert s._captured.get("order") is not None
     assert s._captured["order"][2] == "buy"
+    assert s._skip_counts.get("cd_stale", 0) == 0  # 关闭时不计数
 
 
 def test_setup_zero_event_tracked():

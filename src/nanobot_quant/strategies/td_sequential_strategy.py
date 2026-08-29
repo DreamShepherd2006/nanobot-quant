@@ -243,6 +243,9 @@ class TdSequentialStrategy(Strategy):
         self._cd_exit_all = bool(
             self.parameters.get("cd_exit_all", True)
         )
+        # SKIP 统计（2026-08-29）：累计各类 SKIP 拦截次数（cd 时效门/盈利门/
+        # min_hold/无持仓/周期门控），供回测 JSON 输出核对功能是否生效。
+        self._skip_counts: dict[str, int] = {}
         self._td_sell_all = bool(
             self.parameters.get("td_sell_all", False) or False
         )
@@ -1077,6 +1080,7 @@ class TdSequentialStrategy(Strategy):
                     _bars = len(_idx) - 1 - _idx.get_loc(_ts)
                     if _bars > _gap:
                         cd_ok = False
+                        self._bump_skip("cd_stale")
                         print(
                             f"[TD] CD STALE SKIP | symbol={self.symbol} "
                             f"setup 归零 {_bars} 根前 > {_gap}（陈旧 cd 信号），跳过 cd 入场",
@@ -1085,6 +1089,7 @@ class TdSequentialStrategy(Strategy):
                 else:
                     # 归零事件在窗口外（>120 根前）→ 陈旧
                     cd_ok = False
+                    self._bump_skip("cd_stale")
                     print(
                         f"[TD] CD STALE SKIP | symbol={self.symbol} "
                         f"setup 归零在窗口外（陈旧 cd 信号），跳过 cd 入场",
@@ -1103,6 +1108,7 @@ class TdSequentialStrategy(Strategy):
             and buy_signal
             and score > score_threshold
         ):
+            self._bump_skip("batch_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 同周期已建仓"
                 f"（setup_buy={setup_buy} cd_buy={cd_buy} 未重置），等新信号周期",
@@ -1133,6 +1139,7 @@ class TdSequentialStrategy(Strategy):
         wave_first = not bool(getattr(self, "_wave_tried", {}).get((scene, self.symbol), False))
         if denied:
             # 本周期已被全局额度拦过：setup 重置前不再尝试（等新周期）
+            self._bump_skip("batch_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 本买9周期已错过"
                 f"（等 setup 重置后新周期）",
@@ -1150,6 +1157,7 @@ class TdSequentialStrategy(Strategy):
             and can_buy
             and not (cycle_blocked)
         ):
+            self._bump_skip("batch_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 本轮已建仓"
                 f"（全局每轮 1 笔；等 setup 重置后新周期）",
@@ -1433,6 +1441,10 @@ class TdSequentialStrategy(Strategy):
                     self._sell_lot(s, price, signal, reason)
                     sold_any = True
                 if not sold_any:
+                    if candidates:
+                        self._bump_skip("sell_profit_gate")
+                    else:
+                        self._bump_skip("sell_no_open")
                     self.logger.info(
                         f"TD SELL SKIP | symbol={self.symbol} 无满足盈利门的批次"
                         f"（{gate_desc}，open={len(candidates)}"
@@ -1443,6 +1455,7 @@ class TdSequentialStrategy(Strategy):
                 s = bm.pick_exit_slot(self._exit_order)
                 if s is not None:
                     if self._min_hold_blocked(s):
+                        self._bump_skip("sell_min_hold")
                         self.logger.info(
                             f"TD SELL SKIP | symbol={self.symbol} min_hold"
                             f"（剩余 {self._min_hold_remaining(s)} bar < {self._min_hold_bars}）"
@@ -1450,6 +1463,7 @@ class TdSequentialStrategy(Strategy):
                     elif self._profit_gate_blocked(s, price, setup_sell, cd_sell):
                         lot = s["lot"]
                         pnl = (price - lot["entry_price"]) / lot["entry_price"]
+                        self._bump_skip("sell_profit_gate")
                         self.logger.info(
                             f"TD SELL SKIP | symbol={self.symbol} 浮盈不足"
                             f"（pnl={pnl:.4f} < {gate_desc}）"
@@ -1459,6 +1473,7 @@ class TdSequentialStrategy(Strategy):
                 else:
                     # 可观测性：无仓卖 9 显式提示，区分「信号未出现」与
                     # 「信号出现但无 open 批次」（fail-closed，不做空）
+                    self._bump_skip("sell_no_open")
                     self.logger.info(
                         f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
                         f"cd_sell={cd_sell}）"
@@ -1485,6 +1500,10 @@ class TdSequentialStrategy(Strategy):
                     self._sell_lot(s, price, signal, reason)
                     sold_any = True
                 if not sold_any:
+                    if candidates:
+                        self._bump_skip("cd_exit_profit_gate")
+                    else:
+                        self._bump_skip("cd_exit_no_open")
                     self.logger.info(
                         f"TD CD EXIT SKIP | symbol={self.symbol} 无 ≥{self._cd_exit_min_profit} "
                         f"浮盈批次（cd_sell={cd_sell}，open={len(candidates)}"
@@ -1495,6 +1514,7 @@ class TdSequentialStrategy(Strategy):
                 s = bm.pick_exit_slot(self._exit_order)
                 if s is not None:
                     if self._min_hold_blocked(s):
+                        self._bump_skip("cd_exit_min_hold")
                         self.logger.info(
                             f"TD CD EXIT SKIP | symbol={self.symbol} min_hold"
                             f"（剩余 {self._min_hold_remaining(s)} bar < {self._min_hold_bars}）"
@@ -1502,6 +1522,7 @@ class TdSequentialStrategy(Strategy):
                     elif self._cd_gate_blocked(s, price):
                         lot = s["lot"]
                         pnl = (price - lot["entry_price"]) / lot["entry_price"]
+                        self._bump_skip("cd_exit_profit_gate")
                         self.logger.info(
                             f"TD CD EXIT SKIP | symbol={self.symbol} 浮盈不足"
                             f"（pnl={pnl:.4f} < cd_exit_min_profit={self._cd_exit_min_profit}）"
@@ -1509,9 +1530,14 @@ class TdSequentialStrategy(Strategy):
                     else:
                         self._sell_lot(s, price, signal, reason)
                 else:
+                    self._bump_skip("cd_exit_no_open")
                     self.logger.info(
                         f"TD CD EXIT SKIP | symbol={self.symbol} 无 open 批次（cd_sell={cd_sell}）"
                     )
+
+    def _bump_skip(self, key: str) -> None:
+        """SKIP 拦截计数（跨 bar/标的累计）。"""
+        self._skip_counts[key] = self._skip_counts.get(key, 0) + 1
 
     def _update_cd_stall(self, symbol: str, cd_sell: int) -> None:
         """动能停滞状态（2026-08-29）：cd_sell 连续 N 根无 +1 → 动能弱。
