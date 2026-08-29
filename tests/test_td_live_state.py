@@ -111,6 +111,49 @@ def test_load_events_limit(tmp_path: Path):
     assert [e["event"] for e in events] == ["E2", "E3", "E4"]
 
 
+def test_load_trade_events_skips_skip_flood(tmp_path: Path):
+    """SKIP 洪峰挤满尾部窗口时，成交记录仍能倒序扫描找回。
+
+    2026-08-29：资金耗尽后每个 bar 每标的写一条 SKIP（~600 条/小时），
+    load_events 尾部窗口会被 SKIP 填满，成交记录（LONG/EXIT）被挤出。
+    load_trade_events 从文件尾倒序扫描、跳过非成交事件，直到凑够 n 条。
+    """
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+
+    # 先写 2 条历史成交，再写 1000 条 SKIP 洪峰（模拟资金耗尽后的高频空转）
+    td_live_state.append_event({"symbol": "CRCLX", "event": "LONG", "note": "slot=2"})
+    td_live_state.append_event({"symbol": "ETH", "event": "EXIT", "note": "slot=2 cd_sell=13"})
+    for _ in range(1000):
+        td_live_state.append_event(
+            {"symbol": "X", "event": "SKIP", "note": "无可用资金 slot，跳过 BUY"}
+        )
+
+    # 原始 load_events 窗口全是 SKIP → 过滤后无成交
+    raw = td_live_state.load_events(500)
+    assert all(e["event"] == "SKIP" for e in raw)
+    # 交易记录读取：倒序扫描找回全部成交事件
+    trades = td_live_state.load_trade_events(
+        20, trade_event_names={"LONG", "EXIT", "EXIT_SKIP", "BUY_FAIL", "EXIT_FAIL"}
+    )
+    assert [e["event"] for e in trades] == ["LONG", "EXIT"]  # 文件顺序旧→新
+    assert trades[0]["symbol"] == "CRCLX"
+    assert trades[1]["symbol"] == "ETH"
+
+
+def test_load_trade_events_limit(tmp_path: Path):
+    """n 限制：只返回最近 n 条成交事件（跨 SKIP 计数）。"""
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    for i in range(3):
+        td_live_state.append_event({"symbol": "A", "event": f"LONG{i}", "note": ""})
+        td_live_state.append_event({"symbol": "B", "event": "SKIP", "note": ""})
+    trades = td_live_state.load_trade_events(2, trade_event_names={"LONG0", "LONG1", "LONG2"})
+    assert [e["event"] for e in trades] == ["LONG1", "LONG2"]
+
+
 def test_events_path_fallback():
     # 无 /data、/mnt/workspace 时回退 home 路径（不抛异常）
     p = td_live_state.events_path()
