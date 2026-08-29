@@ -601,9 +601,14 @@ class BacktestDriver:
                 "take_profit_pct": getattr(
                     strategy, "_take_profit_pct", None
                 ),
-                "sell_only_profit": getattr(
-                    strategy, "_sell_only_profit", None
+                "sell_only_profit_high": getattr(
+                    strategy, "_sell_only_profit_high", None
                 ),
+                "sell_only_profit_low": getattr(
+                    strategy, "_sell_only_profit_low", None
+                ),
+                "momentum_exit": getattr(strategy, "_momentum_exit", None),
+                "cd_stall_n": getattr(strategy, "_cd_stall_n", None),
                 "td_sell_all": getattr(strategy, "_td_sell_all", None),
                 "cd_exit_min_profit": getattr(
                     strategy, "_cd_exit_min_profit", None

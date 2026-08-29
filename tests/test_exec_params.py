@@ -840,21 +840,46 @@ def test_save_flat_scene_patch_does_not_poison_globals(tmp_path):
     # 再次加载（模拟后续其他模块消费）仍只反映文件内容，不再被全局污染
     assert DEFAULT_SCENES["high"]["enabled"] == enabled_before
 def test_scene_only_fields_roundtrip(tmp_path):
-    """2026-08-25：场景专属参数（sell_only_profit/td_sell_all）保存→读回。
+    """2026-08-25：场景专属参数（sell_only_profit_high/low/td_sell_all）保存→读回。
 
     无扁平对应键（SCENE_ONLY_FIELDS），保存路径不得走 SCENE_FIELD_MAP 导致 KeyError，
     读回不得被 int() 化（float/bool 原样）。
     """
     res = save_exec_params({"scenes": {"high": {
-        "sell_only_profit": 0.002, "td_sell_all": True,
+        "sell_only_profit_high": 0.002, "td_sell_all": True,
+        "momentum_exit": True, "cd_stall_n": 3,
     }}})
     assert res["ok"] is True
     loaded = load_exec_params()
-    assert loaded["scenes"]["high"]["sell_only_profit"] == 0.002
+    assert loaded["scenes"]["high"]["sell_only_profit_high"] == 0.002
     assert loaded["scenes"]["high"]["td_sell_all"] is True
-    # 未保存场景保持默认（0/False），不污染
-    assert loaded["scenes"]["mid"]["sell_only_profit"] == 0.0
+    assert loaded["scenes"]["high"]["momentum_exit"] is True
+    assert loaded["scenes"]["high"]["cd_stall_n"] == 3
+    # 未保存场景保持默认（0/False/True），不污染
+    assert loaded["scenes"]["mid"]["sell_only_profit_high"] == 0.0
+    assert loaded["scenes"]["mid"]["sell_only_profit_low"] == 0.002
     assert loaded["scenes"]["mid"]["td_sell_all"] is False
+    assert loaded["scenes"]["mid"]["momentum_exit"] is True
+
+
+def test_sell_only_profit_legacy_migration(tmp_path):
+    """2026-08-29 迁移：旧单值 sell_only_profit（文件内残留键）→ sell_only_profit_high。
+
+    旧文件（双档前）只有 sell_only_profit=0.003，读回后 high=0.003、
+    low 用默认 0.002（动能判断随 momentum_exit=True 生效）。
+    """
+    import os
+    from nanobot_quant.exec_params import exec_params_path, load_exec_params
+    path = exec_params_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    raw = json.loads(path.read_text()) if path.exists() else {}
+    raw.setdefault("scenes", {}).setdefault("high", {})["sell_only_profit"] = 0.003
+    path.write_text(json.dumps(raw, ensure_ascii=False))
+    loaded = load_exec_params()
+    assert loaded["scenes"]["high"]["sell_only_profit_high"] == 0.003
+    assert loaded["scenes"]["high"]["sell_only_profit_low"] == 0.002
+    assert loaded["scenes"]["high"]["momentum_exit"] is True
+    assert loaded["scenes"]["high"]["cd_stall_n"] == 3
 
 
 def test_scene_low_only_enabled_starts_td(tmp_path):

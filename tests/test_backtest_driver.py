@@ -578,7 +578,7 @@ def test_driver_cd13_loss_holds(tmp_path):
     params["scenes"]["mid"].update({
         "stop_loss_pct": 0.0, "take_profit_pct": 0.0,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
-        "sell_only_profit": 0.003, "td_sell_all": True,
+        "sell_only_profit_high": 0.003, "td_sell_all": True,
     })
     driver = BacktestDriver(
         scene="mid", params=params,

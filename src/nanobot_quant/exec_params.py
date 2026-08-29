@@ -75,14 +75,19 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
     "min_hold_bars",
 )
 
-#: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25；cd13 通道 2026-08-27）。
-#: sell_only_profit = 毛浮盈门（0=关闭无条件卖；>0 时 TD 高9 只平毛浮盈 ≥ X 的批次，
-#:   毛口径 (price−entry)/entry 未扣手续费，用户自行计算含成本阈值，如 Gate 双程 0.2% → 0.002）。
+#: 场景专属参数（无扁平对应；high 高9 出场逻辑 2026-08-25；cd13 通道 2026-08-27；
+#:   动能判断双档 2026-08-29 拍板落地）。
+#: sell_only_profit_high / _low = 高9 毛浮盈门上下档（2026-08-29 拍板双档）：
+#:   pnl ≥ high 无条件卖；pnl < low 死扛；[low, high) 区间由动能判断（momentum_exit）。
+#:   毛口径 (price−entry)/entry 未扣手续费，用户自行计算含成本阈值（如 Gate 双程 0.2% → 0.002）。
+#: momentum_exit = 高9 动能判断开关（true=拍板主方案；false=回退 high 简单门，方案 B）。
+#: cd_stall_n = 动能停滞阈值：cd_sell 连续 N 根无 +1 判定动能弱（下门落袋）。
 #: td_sell_all = 高9 一次平掉所有满足盈利门的 open 批次（false=每轮只平一个，现有行为）。
 #: cd_exit_min_profit = cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，承担交易成本）。
 #: cd_exit_all = cd 13 一次平掉所有 ≥ 保本门的 open 批次（false=每轮只平一个）。
 SCENE_ONLY_FIELDS: tuple[str, ...] = (
-    "sell_only_profit", "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
+    "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
+    "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
 )
 
 #: 场景卡片字段渲染顺序。
@@ -92,7 +97,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "entry_setup", "entry_countdown", "exit_setup", "exit_countdown",
     "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
-    "sell_only_profit", "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
+    "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
+    "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
     "td_start_slot", "min_account_value",
 )
 
@@ -111,7 +117,9 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
-        "sell_only_profit": 0.0, "td_sell_all": False,
+        "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
+        "momentum_exit": True, "cd_stall_n": 3,
+        "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
     },
@@ -123,7 +131,9 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
-        "sell_only_profit": 0.0, "td_sell_all": False,
+        "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
+        "momentum_exit": True, "cd_stall_n": 3,
+        "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
     },
@@ -135,7 +145,9 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
-        "sell_only_profit": 0.0, "td_sell_all": False,
+        "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
+        "momentum_exit": True, "cd_stall_n": 3,
+        "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
     },
@@ -331,10 +343,25 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "min": 1, "max": 20, "step": 1, "std": 13, "integer": True,
         "label": "平仓 Countdown 阈值", "hint": "场景级覆盖（S3b-2）；留空 = 跟随全局 td_params（策略选择页设置）",
     },
-    "sell_only_profit": {
+    "sell_only_profit_high": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.001, "std": 0.0,
-        "label": "高9盈利门(毛)",
-        "hint": "TD SELL 高9 只平毛浮盈 ≥ 该值的批次（毛口径=(现价−入场)/入场，未扣手续费）；用户自行计算含成本阈值（如 Gate 双程 0.2% → 0.002）；0=关闭（无条件卖，现有行为）",
+        "label": "高9盈利门(毛·上)",
+        "hint": "高9 出场上限门：毛浮盈 ≥ 该值无条件卖（让利润奔跑的终点，2026-08-29 双档）；0=关闭（无条件卖，现有行为）。毛口径=(现价−入场)/入场，未扣手续费，用户自行计算含成本阈值（如 Gate 双程 0.2% → 0.002）",
+    },
+    "sell_only_profit_low": {
+        "group": "scene", "min": 0.0, "max": 1.0, "step": 0.001, "std": 0.002,
+        "label": "高9盈利门(毛·下)",
+        "hint": "高9 出场下限门：毛浮盈 < 该值死扛（不卖）；[下, 上) 区间由动能判断（见「高9动能判断」）。0=仅浮亏死扛（[0, 上) 全部动能判断）",
+    },
+    "momentum_exit": {
+        "group": "scene", "type": "bool", "std": True,
+        "label": "高9动能判断",
+        "hint": "true=启用动能判断（2026-08-29 拍板主方案）：毛浮盈在 [下, 上) 区间时，动能强（setup_sell≥10 或 cd_sell>0 且未停滞）持有至上门；动能弱（cd_sell 连续 N 根无 +1）下门落袋；未知（首次高9）持有。false=动能判断整体关闭、回固定上门简单门（方案 B）",
+    },
+    "cd_stall_n": {
+        "group": "scene", "min": 1, "max": 30, "step": 1, "std": 3, "integer": True,
+        "label": "动能停滞阈值(bar)",
+        "hint": "cd_sell 连续 N 根无 +1 判定动能弱（下门落袋）；仅在动能判断开启时生效（2026-08-29 拍板）",
     },
     "td_sell_all": {
         "group": "scene", "type": "bool", "std": False,
@@ -486,6 +513,13 @@ def _load_scenes(raw: dict) -> dict[str, dict[str, Any]]:
                         continue
                     if validate_exec_param(fk, fv) is None:
                         scene[fk] = fv
+                elif fk == "sell_only_profit":
+                    # 2026-08-29 迁移：旧单值高9盈利门 → sell_only_profit_high
+                    # （low 用默认 0.002，动能判断自动随 momentum_exit 生效）
+                    if fv not in (None, "") and validate_exec_param(
+                        "sell_only_profit_high", fv
+                    ) is None:
+                        scene["sell_only_profit_high"] = fv
         scenes[sk] = scene
     return scenes
 

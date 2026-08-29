@@ -239,10 +239,10 @@ def test_sell_only_profit_zero_unconditional(tmp_path):
 
 
 def test_sell_only_profit_blocks_low_profit(tmp_path):
-    """sell_only_profit=0.002（Gate 双程 0.2%）→ 毛浮盈不足（微利）批次被拦截。"""
+    """sell_only_profit_high=0.002（Gate 双程 0.2%）→ 毛浮盈不足（微利）批次被拦截。"""
     bm = _make_bm(tmp_path)
     bm.open_lot(qty=5, entry_price=112.9, entry_time="t1")  # 现价 113 → +0.09% < 0.2%
-    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.002)
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit_high=0.002)
     s.on_trading_iteration()
     assert "order" not in s._captured  # TD SELL SKIP（浮盈不足）
     assert bm.slots[0]["status"] == "open"  # 死扛
@@ -252,7 +252,7 @@ def test_sell_only_profit_blocks_loss(tmp_path):
     """sell_only_profit>0 → 浮亏批次同样拦截（高9 不亏本卖）。"""
     bm = _make_bm(tmp_path)
     bm.open_lot(qty=5, entry_price=115.0, entry_time="t1")  # 现价 113 → 浮亏
-    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.002)
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit_high=0.002)
     s.on_trading_iteration()
     assert "order" not in s._captured
     assert bm.slots[0]["status"] == "open"
@@ -262,7 +262,7 @@ def test_sell_only_profit_passes_when_gate_met(tmp_path):
     """毛浮盈 ≥ 阈值 → 高9 正常卖。"""
     bm = _make_bm(tmp_path)
     bm.open_lot(qty=5, entry_price=105.0, entry_time="t1")  # 现价 113 → +7.6%
-    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.002)
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit_high=0.002)
     s.on_trading_iteration()
     assert s._captured["order"][2] == "sell"
     assert bm.slots[0]["status"] == "available"
@@ -285,7 +285,7 @@ def test_td_sell_all_skips_loss_slots(tmp_path):
     bm.open_lot(qty=5, entry_price=115.0, entry_time="t1")  # 现价 113 → 亏损
     bm.open_lot(qty=7, entry_price=100.0, entry_time="t2")  # 现价 113 → +13%
     s = _make_batch_strategy(
-        bm, _bars_with(_sell_closes()), td_sell_all=True, sell_only_profit=0.002)
+        bm, _bars_with(_sell_closes()), td_sell_all=True, sell_only_profit_high=0.002)
     s.on_trading_iteration()
     assert bm.slots[0]["status"] == "open"       # 亏损批死扛
     assert bm.slots[1]["status"] == "available"  # 盈利批已平
@@ -301,6 +301,91 @@ def test_td_sell_all_false_keeps_one_per_round(tmp_path):
     assert s._captured["order"][1] == 5  # fifo 只平 slot 1
     assert bm.slots[0]["status"] == "available"
     assert bm.slots[1]["status"] == "open"
+
+
+# ── 高9 动能判断双档（2026-08-29 拍板落地）────────────────────────
+
+
+def _gate_slot(entry_price):
+    return {"slot": 1, "lot": {"entry_price": entry_price, "qty": 5,
+                               "entry_time": "t1", "symbol": "TEST"}}
+
+
+def _momentum_strategy(tmp_path, **params):
+    """直接测 _profit_gate_blocked 的策略（绕过 TD 计算，精确控制信号/停滞状态）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(
+        bm, _bars_with(_sell_closes()),
+        sell_only_profit_high=0.003, **params,
+    )
+    s.symbol = "TEST"
+    s._cd_stall_state = {"TEST": {"prev": 0, "stall": 0}}
+    return s
+
+
+def test_momentum_gate_disabled_simple_high(tmp_path):
+    """momentum_exit=false（方案 B）→ 回退上门简单门：pnl < high 拦、≥ high 放。"""
+    s = _momentum_strategy(tmp_path, momentum_exit=False)
+    # +0.25% ∈ [0.2%, 0.3%) 简单门下仍拦（无动能判断）
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.25, 9, 0) is True
+    # +0.35% ≥ 0.3% 放
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.35, 9, 0) is False
+
+
+def test_momentum_gate_below_low_dead_hold(tmp_path):
+    """动能开启：pnl < low（0.2%）→ 死扛（无论动能）。"""
+    s = _momentum_strategy(tmp_path)
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.15, 9, 0) is True    # +0.15%
+    assert s._profit_gate_blocked(_gate_slot(100.0), 99.5, 9, 13) is True     # -0.5% 浮亏
+
+
+def test_momentum_gate_above_high_unconditional(tmp_path):
+    """动能开启：pnl ≥ high（0.3%）→ 无条件卖（动能无关）。"""
+    s = _momentum_strategy(tmp_path)
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.35, 9, 0) is False
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.35, 10, 5) is False
+
+
+def test_momentum_gate_strong_setup_hold(tmp_path):
+    """[low, high) + setup_sell≥10（累加强）→ 持有至上门。"""
+    s = _momentum_strategy(tmp_path)
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.25, 10, 0) is True
+
+
+def test_momentum_gate_strong_cd_progress_hold(tmp_path):
+    """[low, high) + cd_sell>0 且未停滞 → 持有（countdown 推进）。"""
+    s = _momentum_strategy(tmp_path)
+    s._cd_stall_state["TEST"] = {"prev": 2, "stall": 1}
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.25, 9, 2) is True
+
+
+def test_momentum_gate_weak_stall_sell(tmp_path):
+    """[low, high) + cd_sell 连续 ≥N 根无 +1（停滞弱）→ 下门落袋。"""
+    s = _momentum_strategy(tmp_path)
+    s._cd_stall_state["TEST"] = {"prev": 0, "stall": 3}  # ≥ cd_stall_n=3
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.25, 9, 0) is False
+    # stall=2（未达阈值）→ 未知 → 持有
+    s._cd_stall_state["TEST"] = {"prev": 0, "stall": 2}
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.25, 9, 0) is True
+
+
+def test_momentum_gate_unknown_first_high9_hold(tmp_path):
+    """[low, high) + 首次高9（setup=9、cd=0、未停滞）→ 动能未知 → 持有。"""
+    s = _momentum_strategy(tmp_path)
+    assert s._profit_gate_blocked(_gate_slot(100.0), 100.25, 9, 0) is True
+
+
+def test_cd_stall_state_update(tmp_path):
+    """_update_cd_stall：cd_sell 变化清零、不变递增（per-symbol 独立）。"""
+    bm = _make_bm(tmp_path)
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()))
+    s._update_cd_stall("AAA", 0)    # 首根：prev 初始 0 → stall 1
+    s._update_cd_stall("AAA", 0)    # 无 +1 → stall 2
+    s._update_cd_stall("AAA", 1)    # +1 → 清零
+    s._update_cd_stall("AAA", 13)   # 变化 → 保持 0
+    assert s._cd_stall_state["AAA"] == {"prev": 13, "stall": 0}
+    s._update_cd_stall("BBB", 0)    # 另一 symbol 独立计数
+    assert s._cd_stall_state["BBB"] == {"prev": 0, "stall": 1}
 
 
 def test_batch_slot_reuse_after_close(tmp_path):
@@ -1229,7 +1314,7 @@ def test_cd_exit_after_setup_gate_kept(tmp_path):
     只要 ≥ 保本门仍被平仓（动能耗尽，不再死扛）——两条通道独立。"""
     bm = _make_bm(tmp_path)
     bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")  # +0.45% < 3% 高9 门拦
-    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit=0.003)
+    s = _make_batch_strategy(bm, _bars_with(_sell_closes()), sell_only_profit_high=0.003)
     _exit_call(s, price=110.5, setup_sell=9, cd_sell=13)  # 高9+cd13 同时
     # 高9 通道拦（0.45% < 3%）→ 不动；cd 通道保本卖（≥0）
     assert s._captured["order"][2] == "sell"
@@ -1257,7 +1342,7 @@ def test_cd_exit_after_activate_scene(tmp_path):
     s._activate_scene(
         "high",
         {"params": {"cd_exit_min_profit": 0.0, "cd_exit_all": True,
-                    "sell_only_profit": 0.003, "exit_order": "fifo"}},
+                    "sell_only_profit_high": 0.003, "exit_order": "fifo"}},
     )
     _exit_call(s, price=0.0914, setup_sell=0, cd_sell=13)
     assert "order" not in s._captured, "浮亏 -1.72% 应被保本门拦截"
@@ -1363,7 +1448,7 @@ def test_double_trigger_high9_gate_blocks_cd13(tmp_path):
     bm = _make_bm(tmp_path)
     bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
     s = _make_batch_strategy(
-        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit=0.003
+        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit_high=0.003
     )
     s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
     # 毛 +0.14%（≥0 但 <0.3%）：高9 盈利门拦、cd13 保本门本会放行
@@ -1378,7 +1463,7 @@ def test_double_trigger_single_exit(tmp_path):
     bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")   # 老批
     bm.open_lot(qty=7, entry_price=109.0, entry_time="t2")  # 新批
     s = _make_batch_strategy(
-        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit=0.003
+        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit_high=0.003
     )
     s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
     # 毛 +0.5% / +1.8%：都过高9 盈利门；fifo 平老批一个，cd13 不再评估新批
@@ -1392,7 +1477,7 @@ def test_cd13_alone_when_high9_absent(tmp_path):
     bm = _make_bm(tmp_path)
     bm.open_lot(qty=5, entry_price=110.0, entry_time="t1")
     s = _make_batch_strategy(
-        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit=0.003
+        bm, _bars_with(_sell_closes()), min_hold_bars=0, sell_only_profit_high=0.003
     )
     s._current_bar_time = pd.Timestamp("2026-08-28 10:00:00")
     _exit_call(s, price=110.5, setup_sell=8, cd_sell=13)
