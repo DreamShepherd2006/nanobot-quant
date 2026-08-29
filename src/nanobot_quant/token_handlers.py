@@ -47,6 +47,11 @@ _CHAINS = (
     "solana", "xlayer", "ethereum",
     # 2026-08-26：补齐 L1 内建白名单主链（AVAX/ARB/OP/POL）
     "bnb", "avalanche", "arbitrum", "optimism", "polygon",
+    # 2026-08-29：Tron 链（TRX 原生币；onchainos resolve_chain("tron") → 195）
+    "tron",
+    # 2026-08-29：XRP Ledger（XRPL）——仅 CEX 登记用（Gate XRP_USDT）；
+    # onchainos 不支持 XRPL，DEX 执行会 fail-closed 明确报错，不会误下单
+    "xrp",
 )
 
 
