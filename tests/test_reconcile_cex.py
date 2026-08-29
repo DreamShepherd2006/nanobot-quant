@@ -30,7 +30,8 @@ def _creds(bot2_uid="59175258"):
     }
 
 
-def _make_runner(creds, balances, monkeypatch, price=74.14, min_quote="3"):
+def _make_runner(creds, balances, monkeypatch, price=74.14, min_quote="3",
+                 amount_precision=3):
     """mock gate 四件套：凭证 / 子账号余额 / 交易对规则 / gate ticker。"""
     monkeypatch.setattr("nanobot_quant.gate_credentials.load_gate_credentials",
                         lambda: creds)
@@ -41,6 +42,7 @@ def _make_runner(creds, balances, monkeypatch, price=74.14, min_quote="3"):
     monkeypatch.setattr("nanobot_quant.gate_sdk.get_currency_pair",
                         lambda api_key, api_secret, pair: {
                             "min_quote_amount": min_quote,
+                            "amount_precision": amount_precision,
                             "trade_status": "tradable",
                         })
 
@@ -95,6 +97,44 @@ def test_cex_reconcile_skips_dust_below_min_position_value(monkeypatch):
                                  [{"symbol": "RENDER", "chain": "solana",
                                    "confirmed": True}])
     assert bm.open_slots() == []
+
+
+def test_cex_reconcile_skips_sell_unavailable_deadlock(monkeypatch, capsys):
+    """2026-08-29 精度死锁根治（导入端）：市值 ≥ min_position_value 但
+    floor(余额→amount_precision) 后价值 < min_quote 的仓不导入——
+    导入 → 卖出 RELEASE → 重启再导入的死锁循环（BNB 0.004983 实证：
+    0.004983×691.6=$3.44 ≥$1，但 floor 0.004×691.6=$2.76 <$3 卖不掉）。
+    币留子账号，价格回升/补仓后由下次重启对账导入。"""
+    bm = _make_bm("BNB", names=("gate_bot1", "gate_bot2"))
+    bal = [
+        {"uid": "59175220", "available": {}, "locked": {}},
+        {"uid": "59175258", "available": {"BNB": "0.004983"}, "locked": {}},
+    ]
+    # BNB 市价 691.6、min_quote $3、amount_precision=3
+    runner = _make_runner(_creds(), bal, monkeypatch, price=691.6)
+    runner._reconcile_import_cex(bm, "BNB",
+                                 [{"symbol": "BNB", "chain": "bnb",
+                                   "cost_price": None, "confirmed": True}])
+    assert bm.open_slots() == []
+    out = capsys.readouterr().err
+    assert "精度死锁" in out
+    assert "需价格 ≥$750" in out
+
+
+def test_cex_reconcile_imports_sellable_balance(monkeypatch):
+    """可卖性通过时正常导入：ARB 45×$0.088=$3.96 ≥ min_quote $3
+    （amount_precision=0，floor(45)=45）。"""
+    bm = _make_bm("ARB", names=("gate_bot1", "gate_bot2"))
+    bal = [
+        {"uid": "59175220", "available": {}, "locked": {}},
+        {"uid": "59175258", "available": {"ARB": "45"}, "locked": {}},
+    ]
+    runner = _make_runner(_creds(), bal, monkeypatch, price=0.088, amount_precision=0)
+    runner._reconcile_import_cex(bm, "ARB",
+                                 [{"symbol": "ARB", "chain": "arbitrum",
+                                   "cost_price": None, "confirmed": True}])
+    assert [s["slot"] for s in bm.open_slots()] == [2]
+    assert bm.open_slots()[0]["lot"]["qty"] == 45.0
 
 
 def test_cex_reconcile_uses_cost_price_when_set(monkeypatch):
@@ -262,11 +302,15 @@ def test_prepare_batches_heals_dex_uuid_ledger(monkeypatch, tmp_path):
 
 
 def test_cex_reconcile_imports_between_1_and_3_usd(monkeypatch):
-    """2026-08-26 用户拍板：导入阈值与交易门槛解耦——价值 ≥ min_position_value
-    （$1）的持仓即使 < Gate min_quote（$3）也导入台账（可见/可管理），
-    卖出时由 B 方案（<min_quote 释放台账）兜底不卡 slot。
+    """2026-08-29 用户拍板（推翻 8/26 的「$1-$3 也导入」规则）：
+    min_position_value（$1）与交易门槛解耦后，$1-$3 区间的仓曾照常导入、
+    由卖出端 RELEASE 兜底——但产生「导入 → 卖出 RELEASE → 重启再导入」
+    死锁循环（BNB 0.004983 实证）。根治 = 源头不导入：floor(余额→精度)
+    后价值 < min_quote 的仓不导入（floor 只会比原值更小，故 $1-$3 区间
+    全部命中）。币留子账号，价格回升/补仓后由下次重启对账导入。
 
-    真实样本：gate_bot3 BNB 0.003996 @ ≈$696 ≈ $2.78（< $3 但 ≥ $1 → 导入）。
+    真实样本：gate_bot3 BNB 0.003996 @ ≈$696 ≈ $2.78（< $3 但 ≥ $1
+    → 旧规则导入；新规则 floor 0.003×696=$2.09 < $3 → 不导入）。
     """
     bm = _make_bm("BNB", names=("gate_bot1", "gate_bot2"))
     balances = [
@@ -277,7 +321,4 @@ def test_cex_reconcile_imports_between_1_and_3_usd(monkeypatch):
     runner._reconcile_import_cex(
         bm, "BNB", [{"symbol": "BNB", "chain": "bnb", "confirmed": True}]
     )
-    open_lots = bm.open_slots()
-    assert len(open_lots) == 1
-    assert open_lots[0]["slot"] == 2
-    assert abs(open_lots[0]["lot"]["qty"] - 0.003996) < 1e-9
+    assert bm.open_slots() == []
