@@ -562,6 +562,7 @@ class BacktestDriver:
             "batches": self.batches,
             "fills": fills,
             "fills_detail": fills_detail,
+            "skip_counts": dict(getattr(strategy, "_skip_counts", {}) or {}),
             "capital_stats": self._capital_stats(
                 fills_detail, initial_total, bar_times[-1].isoformat() if bar_times else None
             ),
@@ -601,8 +602,16 @@ class BacktestDriver:
                 "take_profit_pct": getattr(
                     strategy, "_take_profit_pct", None
                 ),
-                "sell_only_profit": getattr(
-                    strategy, "_sell_only_profit", None
+                "sell_only_profit_high": getattr(
+                    strategy, "_sell_only_profit_high", None
+                ),
+                "sell_only_profit_low": getattr(
+                    strategy, "_sell_only_profit_low", None
+                ),
+                "momentum_exit": getattr(strategy, "_momentum_exit", None),
+                "cd_stall_n": getattr(strategy, "_cd_stall_n", None),
+                "cd_entry_setup_gap": getattr(
+                    strategy, "_cd_entry_setup_gap", None
                 ),
                 "td_sell_all": getattr(strategy, "_td_sell_all", None),
                 "cd_exit_min_profit": getattr(

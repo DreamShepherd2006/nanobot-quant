@@ -81,14 +81,20 @@ def _flat_then_falling(flat: int = 120, fall: int = 40,
     return [base] * flat + [base - i * step for i in range(1, fall + 1)]
 
 
+def _flat_then_rising(flat: int = 60, rise: int = 40,
+                      base: float = 100.0, step: float = 0.5) -> list[float]:
+    """平盘 → 连续递增（翻转启动 sell setup → setup_sell 数到 9+，无持仓 SKIP）。"""
+    return [base] * flat + [base + i * step for i in range(1, rise + 1)]
+
+
 # ── 结构 ─────────────────────────────────────────────────────────────
 
 def test_driver_run_structure(tmp_path):
-    """上涨序列（无 TD 买入信号）：结构完整、零成交、槽位全空。"""
+    """平盘→上涨（无 TD 买入信号、高9 无持仓）：结构完整、零成交、SKIP 计数。"""
     driver = BacktestDriver(
         scene="mid",
         params=_params(),
-        fetcher=_FakeFetcher(_rising_closes(100)),
+        fetcher=_FakeFetcher(_flat_then_rising(60, 40)),
         ledger_dir=tmp_path,
     )
     out = driver.run()
@@ -102,6 +108,10 @@ def test_driver_run_structure(tmp_path):
     assert len(out["net_values"]) == 61
     assert out["fills"] == 0
     assert all(s["open"] == [] for s in out["slots"].values())
+    # SKIP 统计：平盘→上涨高9 数到 9+ 但无持仓 → fail-closed SKIP 计数
+    # （回测 JSON 核对；纯单边上涨因翻转确认 setup 永不启动，无 SKIP 可计）
+    assert isinstance(out["skip_counts"], dict)
+    assert out["skip_counts"].get("sell_no_open", 0) > 0
     # 上涨行情 TD 不出买入（SELL 无持仓 → fail-closed SKIP，无成交）
     assert out["net_values"][-1]["net"] == pytest.approx(2000.0, abs=1e-3)
 
@@ -578,7 +588,7 @@ def test_driver_cd13_loss_holds(tmp_path):
     params["scenes"]["mid"].update({
         "stop_loss_pct": 0.0, "take_profit_pct": 0.0,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
-        "sell_only_profit": 0.003, "td_sell_all": True,
+        "sell_only_profit_high": 0.003, "td_sell_all": True,
     })
     driver = BacktestDriver(
         scene="mid", params=params,

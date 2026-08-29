@@ -281,12 +281,16 @@ function paramsRows(res) {
     ["滑点", cfg.slippage != null ? `${cfg.slippage}%` : "—"],
     ["入场 Setup 阈值", cfg.entry_setup ?? "—"],
     ["入场 Countdown 阈值", cfg.entry_countdown ?? "—"],
+    ["CD 入场时效门槛(bar)", cfg.cd_entry_setup_gap != null ? cfg.cd_entry_setup_gap : "—"],
     ["平仓 Setup 阈值", cfg.exit_setup ?? "—"],
     ["平仓 Countdown 阈值", cfg.exit_countdown ?? "—"],
     ["最短持有期", cfg.min_hold_bars != null ? `${cfg.min_hold_bars} bar` : "—"],
     ["止损阈值", pctFmt(cfg.stop_loss_pct)],
     ["止盈线", pctFmt(cfg.take_profit_pct)],
-    ["高9盈利门(毛)", pctFmt(cfg.sell_only_profit)],
+    ["高9盈利门(毛·上)", pctFmt(cfg.sell_only_profit_high)],
+    ["高9盈利门(毛·下)", pctFmt(cfg.sell_only_profit_low)],
+    ["高9动能判断", onOff(cfg.momentum_exit)],
+    ["动能停滞阈值(bar)", cfg.cd_stall_n ?? "—"],
     ["高9全平", onOff(cfg.td_sell_all)],
     ["cd13保本门(毛)", pctFmt(cfg.cd_exit_min_profit)],
     ["cd13全平", onOff(cfg.cd_exit_all)],
@@ -300,6 +304,25 @@ function paramsRows(res) {
 }
 function paramsBox(res) {
   return `<div class="bt-params"><div class="bt-params-title">📋 回测参数（实际生效）</div><table class="bt-params-table">${paramsRows(res)}</table></div>`;
+}
+
+// SKIP 统计（2026-08-29）：回测期各类拦截计数——验证 cd 时效门/盈利门/min_hold 生效
+const SKIP_LABELS = {
+  cd_stale: "CD 陈旧拦截（时效门）",
+  sell_profit_gate: "高9 盈利门拦",
+  sell_min_hold: "高9 min_hold 拦",
+  sell_no_open: "高9 无持仓",
+  cd_exit_profit_gate: "cd13 保本门拦",
+  cd_exit_min_hold: "cd13 min_hold 拦",
+  cd_exit_no_open: "cd13 无持仓",
+  batch_wait: "周期门控/波锁等待",
+};
+function skipBox(skips) {
+  if (!skips || !Object.keys(skips).length) return "";
+  const rows = Object.entries(skips)
+    .map(([k, v]) => `<tr><td class="pk">${SKIP_LABELS[k] || k}</td><td class="pv">${v}</td></tr>`)
+    .join("");
+  return `<div class="bt-params"><div class="bt-params-title">🚦 SKIP 统计（回测期累计）</div><table class="bt-params-table">${rows}</table></div>`;
 }
 
 function renderResult(res, runId) {
@@ -326,6 +349,7 @@ function renderResult(res, runId) {
       <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
     </div>
     ${capitalBox(res.capital_stats)}
+    ${skipBox(res.skip_counts)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
