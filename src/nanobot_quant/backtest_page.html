@@ -64,6 +64,12 @@
   .bt-params-table tr:last-child td { border-bottom:none; }
   .bt-params-table .pk { color:#888; white-space:nowrap; }
   .bt-params-table .pv { font-weight:600; color:#1f2937; }
+  .ov-block { margin:10px 0 4px; border:1px solid #e0e7ef; border-radius:6px; padding:6px 10px; }
+  .ov-block summary { cursor:pointer; font-weight:600; font-size:.88em; color:#334155; }
+  .ov-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px 12px; margin-top:8px; }
+  .ov-item { display:flex; flex-direction:column; gap:2px; }
+  .ov-item label { font-size:.76em; color:#64748b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ov-item input, .ov-item select { font-size:.84em; padding:3px 6px; border:1px solid #cbd5e1; border-radius:4px; width:100%; box-sizing:border-box; }
   code { background:#eef; padding:1px 5px; border-radius:3px; font-size:.85em; }
 </style>
 </head>
@@ -108,6 +114,29 @@
     <input type="number" id="slippage" value="" min="0" max="0.05" step="0.001">
     <span class="f-hint">留空 = 全局滑点（exec_params）；0 = 按 bar 收盘价成交</span>
   </div>
+  <details open class="ov-block">
+    <summary>⚙️ 参数覆盖（留空 = 跟随场景配置 · 仅本次回测生效，不回写实盘）</summary>
+    <div class="ov-grid">
+      <div class="ov-item"><label for="entry_setup">入场 Setup 阈值</label><input type="number" id="entry_setup" min="1" max="20" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="entry_countdown">入场 Countdown 阈值</label><input type="number" id="entry_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="cd_entry_setup_gap">CD 入场时效门槛(bar)</label><input type="number" id="cd_entry_setup_gap" min="0" max="300" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="exit_setup">平仓 Setup 阈值</label><input type="number" id="exit_setup" min="1" max="20" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="exit_countdown">平仓 Countdown 阈值</label><input type="number" id="exit_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="min_hold_bars">最短持有期(bar)</label><input type="number" id="min_hold_bars" min="0" max="300" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="sell_only_profit_high">高9盈利门(毛·上)</label><input type="number" id="sell_only_profit_high" min="0" max="0.1" step="0.001" placeholder="场景值"></div>
+      <div class="ov-item"><label for="sell_only_profit_low">高9盈利门(毛·下)</label><input type="number" id="sell_only_profit_low" min="0" max="0.1" step="0.001" placeholder="场景值"></div>
+      <div class="ov-item"><label for="cd_stall_n">动能停滞阈值(bar)</label><input type="number" id="cd_stall_n" min="1" max="50" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="cd_exit_min_profit">cd13保本门(毛)</label><input type="number" id="cd_exit_min_profit" min="0" max="0.1" step="0.001" placeholder="场景值"></div>
+      <div class="ov-item"><label for="stop_loss_pct">止损阈值</label><input type="number" id="stop_loss_pct" min="0" max="1" step="0.01" placeholder="场景值"></div>
+      <div class="ov-item"><label for="take_profit_pct">止盈线</label><input type="number" id="take_profit_pct" min="0" max="1" step="0.01" placeholder="场景值"></div>
+      <div class="ov-item"><label for="exit_order">平仓顺序</label><select id="exit_order"><option value="">（跟随场景）</option><option value="fifo">fifo</option><option value="lifo">lifo</option></select></div>
+      <div class="ov-item"><label for="td_start_slot">建仓起始批次</label><input type="number" id="td_start_slot" min="1" max="50" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="min_account_value">子账户最小资金</label><input type="number" id="min_account_value" min="0" max="100000" step="1" placeholder="场景值"></div>
+      <div class="ov-item"><label for="momentum_exit">高9动能判断</label><select id="momentum_exit"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
+      <div class="ov-item"><label for="td_sell_all">高9全平</label><select id="td_sell_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
+      <div class="ov-item"><label for="cd_exit_all">cd13全平</label><select id="cd_exit_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
+    </div>
+  </details>
   <div class="actions">
     <button class="btn-primary" id="run-btn" onclick="startBacktest()">▶ 启动回测</button>
     <span class="f-hint">长区间（数百根 bar）需要几十秒，启动后自动轮询结果</span>
@@ -186,17 +215,78 @@ function initForm() {
     document.querySelectorAll("#symbols input").forEach(cb => { cb.checked = pool.includes(cb.value); });
     if (SCENES[first].batches) $("batches").value = SCENES[first].batches;
   }
-  // 切换场景时同步默认勾选/批次
+  // 切换场景时同步默认勾选/批次/覆盖参数占位值
   sel.addEventListener("change", () => {
     const cfg = SCENES[sel.value] || {};
     const pool = cfg.symbols || [];
     document.querySelectorAll("#symbols input").forEach(cb => { cb.checked = pool.includes(cb.value); });
     if (cfg.batches) $("batches").value = cfg.batches;
+    updateOverridesPlaceholders();
+  });
+  updateOverridesPlaceholders();
+}
+
+// 覆盖字段 → 场景配置键（与 collectOverrides 的字段一一对应）
+const OV_KEYS = ["entry_setup","entry_countdown","cd_entry_setup_gap",
+  "exit_setup","exit_countdown","min_hold_bars",
+  "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
+  "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
+  "momentum_exit","td_sell_all","cd_exit_all"];
+
+function sceneValue(scene, key) {
+  const cfg = SCENES[scene] || {};
+  const v = cfg[key];
+  if (v !== null && v !== undefined && v !== "") return { v: v, src: "场景" };
+  const eff = (cfg._effective || {})[key];
+  return { v: eff, src: "全局" };
+}
+function ovDisplay(v) {
+  if (v === null || v === undefined) return "默认";
+  if (typeof v === "boolean") return v ? "开" : "关";
+  return String(v);
+}
+
+// 覆盖输入框 placeholder / select 首项显示对应场景配置值（场景级 → 回退全局生效值），方便对比覆盖前后
+function updateOverridesPlaceholders() {
+  const scene = $("scene").value;
+  OV_KEYS.forEach(k => {
+    const el = $(k);
+    if (!el) return;
+    const r = sceneValue(scene, k);
+    if (el.tagName === "SELECT") {
+      const opt = el.options[0];
+      if (opt) opt.text = r.src === "场景"
+        ? `（跟随场景 · ${ovDisplay(r.v)}）`
+        : `（跟随场景 · 回退全局 · ${ovDisplay(r.v)}）`;
+    } else {
+      el.placeholder = r.src === "场景" ? ovDisplay(r.v) : `回退全局 · ${ovDisplay(r.v)}`;
+    }
   });
 }
 
 function selectedSymbols() {
   return Array.from(document.querySelectorAll("#symbols input:checked")).map(cb => cb.value);
+}
+
+// 参数覆盖：只收集填了值的字段（留空 = 跟随场景配置）。
+// 覆盖仅作用于本次回测（driver overrides），绝不回写 exec_params。
+function collectOverrides() {
+  const overrides = {};
+  const numKeys = ["entry_setup","entry_countdown","cd_entry_setup_gap",
+    "exit_setup","exit_countdown","min_hold_bars",
+    "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
+    "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value"];
+  numKeys.forEach(id => {
+    const v = $(id).value;
+    if (v !== "") overrides[id] = parseFloat(v);
+  });
+  ["momentum_exit","td_sell_all","cd_exit_all"].forEach(id => {
+    const v = $(id).value;
+    if (v !== "") overrides[id] = v === "on";
+  });
+  const eo = $("exit_order").value;
+  if (eo !== "") overrides.exit_order = eo;
+  return overrides;
 }
 
 // ── 启动 + 轮询 ─────────────────────────────────────────────────────────
@@ -219,6 +309,7 @@ async function startBacktest() {
     batches: $("batches").value ? parseInt($("batches").value, 10) : null,
     slippage: $("slippage").value ? parseFloat($("slippage").value) : null,
     fixed_amount: $("fixed_amount").value ? parseFloat($("fixed_amount").value) : null,
+    overrides: collectOverrides(),
   };
   const btn = $("run-btn");
   btn.disabled = true;

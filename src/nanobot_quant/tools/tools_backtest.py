@@ -142,6 +142,7 @@ def _auto_backtest_driver(
     batches: int | None,
     slippage: float | None,
     fixed_amount: float | None,
+    overrides: dict | None = None,
 ) -> None:
     """New engine (backtest.driver): scene-based replay on Gate CEX history.
 
@@ -169,6 +170,7 @@ def _auto_backtest_driver(
             batches=batches,
             slippage=slippage,
             fixed_amount=fixed_amount,
+            overrides=overrides,
             progress_path=backtests_dir() / f"{run_id}.json",
         )
         return d.run()
@@ -189,6 +191,7 @@ def run_backtest(
     batches: int | None = None,
     slippage: float | None = None,
     fixed_amount: float | None = None,
+    overrides: dict | None = None,
 ) -> dict:
     """Start a full backtest in the background (run_id + poll contract).
 
@@ -210,6 +213,11 @@ def run_backtest(
         slippage: Override global slippage — engine="driver" only.
         fixed_amount: Override per-trade fixed USDT amount (quantity_mode=
                 "fixed_amount") — engine="driver" only; None = scene config.
+        overrides: Extra strategy-parameter overrides for this backtest only
+                (e.g. {"sell_only_profit_high": 0.005, "exit_setup": 10}).
+                Keys absent from the dict fall back to scene config, then
+                global exec_params, then class defaults. Never written back
+                to exec_params.json — 2026-08-30 拍板.
 
     Returns:
         dict with status=started and run_id. The backtest runs in a
@@ -221,7 +229,7 @@ def run_backtest(
         syms = list(symbols) if symbols else ([symbol] if symbol else None)
         threading.Thread(
             target=_auto_backtest_driver,
-            args=(run_id, scene, syms, start, end, initial_quote, batches, slippage, fixed_amount),
+            args=(run_id, scene, syms, start, end, initial_quote, batches, slippage, fixed_amount, overrides),
             daemon=True,
         ).start()
     else:
