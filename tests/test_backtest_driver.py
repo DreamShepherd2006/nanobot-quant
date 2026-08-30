@@ -243,6 +243,62 @@ def test_fixed_amount_override(tmp_path):
     assert cfg["start_ts"] and cfg["end_ts"]
 
 
+# ── 参数覆盖 overrides（2026-08-30 拍板：仅本次回测生效、不回写实盘）────────
+
+
+def test_overrides_merged_into_merged_params():
+    """overrides 合并进 _merged_params（覆盖 > 场景配置）。"""
+    driver = BacktestDriver(
+        scene="mid", params=_params(), fetcher=_FakeFetcher(_rising_closes(200)),
+        overrides={"exit_setup": 12, "sell_only_profit_high": 0.005,
+                   "td_sell_all": True, "min_hold_bars": 30, "stop_loss_pct": 0.05},
+    )
+    assert driver._merged_params["exit_setup"] == 12
+    assert driver._merged_params["sell_only_profit_high"] == 0.005
+    assert driver._merged_params["td_sell_all"] is True
+    assert driver._merged_params["min_hold_bars"] == 30
+    assert driver._merged_params["stop_loss_pct"] == 0.05
+    # 未覆盖键回退场景配置
+    assert driver._merged_params["entry_setup"] == 9
+    assert driver._merged_params["td_fixed_amount"] == 4.0
+
+
+def test_overrides_none_and_empty_filtered():
+    """None 值过滤，不影响场景配置。"""
+    driver = BacktestDriver(
+        scene="mid", params=_params(), fetcher=_FakeFetcher(_rising_closes(200)),
+        overrides={"exit_setup": None, "sell_only_profit_high": None,
+                   "exit_order": "lifo"},
+    )
+    assert "exit_setup" not in driver.overrides
+    assert "sell_only_profit_high" not in driver.overrides
+    assert driver._merged_params["exit_setup"] == 9  # 场景值保留
+    assert driver._merged_params["exit_order"] == "lifo"
+
+
+def test_overrides_reach_strategy_parameters(tmp_path):
+    """覆盖值进入策略构造参数（_build_strategy 读 _merged_params），
+    并出现在结果的实际生效配置中（回测页展示用）。"""
+    driver = BacktestDriver(
+        scene="mid", params=_params(), fetcher=_FakeFetcher(_rising_closes(200)),
+        overrides={"exit_order": "lifo", "min_hold_bars": 25,
+                   "stop_loss_pct": 0.03, "take_profit_pct": 0.05,
+                   "td_start_slot": 2, "min_account_value": 5},
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    s = driver.strategy
+    assert s.parameters["exit_order"] == "lifo"
+    assert s.parameters["min_hold_bars"] == 25
+    assert s.parameters["stop_loss_pct"] == 0.03
+    assert s.parameters["take_profit_pct"] == 0.05
+    assert s.parameters["td_start_slot"] == 2
+    assert s.parameters["min_account_value"] == 5
+    cfg = out["backtest_config"]
+    assert cfg["min_hold_bars"] == 25
+    assert cfg["exit_order"] == "lifo"
+
+
 def test_insufficient_history_fail_closed(tmp_path):
     """数据不足 min_history（120）→ 明确报错（不静默空跑）。"""
     driver = BacktestDriver(

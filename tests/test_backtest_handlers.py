@@ -122,3 +122,68 @@ def test_start_dispatch_driver_engine(client, monkeypatch):
     assert started["batches"] == 2
     # 诊断日志覆盖请求摘要
     assert any("📈 回测启动" in line for line in gk._log_calls)
+    # 诊断日志覆盖请求摘要
+    assert any("📈 回测启动" in line for line in gk._log_calls)
+
+
+def test_coerce_overrides():
+    """覆盖参数归一化：int/float/bool 按字段转换；空串/None 忽略。"""
+    assert bh._coerce_overrides(
+        {
+            "entry_setup": "10",
+            "sell_only_profit_high": "0.005",
+            "momentum_exit": "on",
+            "td_sell_all": False,
+            "exit_order": "lifo",
+            "stop_loss_pct": "",
+            "exit_setup": None,
+        }
+    ) == {
+        "entry_setup": 10,
+        "sell_only_profit_high": 0.005,
+        "momentum_exit": True,
+        "td_sell_all": False,
+        "exit_order": "lifo",
+    }
+    assert bh._coerce_overrides(None) == {}
+    assert bh._coerce_overrides({"exit_setup": "null", "min_hold_bars": ""}) == {}
+    with pytest.raises(ValueError):
+        bh._coerce_overrides({"entry_setup": "abc"})
+
+
+def test_start_passes_overrides(client, monkeypatch):
+    """回测启动请求携带 overrides → run_backtest 原样透传（仅本次回测）。"""
+    client, gk = client
+    started = {}
+
+    def _fake_run_backtest(**kw):
+        started.update(kw)
+        return {"status": "started", "run_id": "test-run-ov"}
+
+    monkeypatch.setattr(
+        "nanobot_quant.tools.tools_backtest.run_backtest", _fake_run_backtest
+    )
+
+    r = client.post(
+        "/config/backtest/start",
+        json={
+            "scene": "high",
+            "symbols": ["ARB"],
+            "initial_quote": 60,
+            "batches": 3,
+            "fixed_amount": 4,
+            "overrides": {
+                "exit_setup": 12,
+                "sell_only_profit_high": "0.005",
+                "momentum_exit": "on",
+                "td_sell_all": "off",
+            },
+        },
+    )
+    assert r.status_code == 200
+    assert started["overrides"] == {
+        "exit_setup": 12,
+        "sell_only_profit_high": 0.005,
+        "momentum_exit": True,
+        "td_sell_all": False,
+    }

@@ -119,6 +119,39 @@ def _render_page(scenes: dict, symbols: list[str]) -> str:
     )
 
 
+_OV_INT = {
+    "entry_setup", "entry_countdown", "cd_entry_setup_gap",
+    "exit_setup", "exit_countdown", "min_hold_bars",
+    "cd_stall_n", "td_start_slot",
+}
+_OV_FLOAT = {
+    "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
+    "stop_loss_pct", "take_profit_pct", "min_account_value",
+}
+_OV_BOOL = {"momentum_exit", "td_sell_all", "cd_exit_all"}
+
+
+def _coerce_overrides(raw) -> dict:
+    """回测覆盖参数归一化（空串/None 忽略；int/float/bool 按字段转换）。
+    仅作用于本次回测，绝不回写 exec_params（2026-08-30 拍板）。"""
+    out = {}
+    for k, v in (raw or {}).items():
+        if v is None or v == "" or v == "null":
+            continue
+        try:
+            if k in _OV_INT:
+                out[k] = int(v)
+            elif k in _OV_FLOAT:
+                out[k] = float(v)
+            elif k in _OV_BOOL:
+                out[k] = v is True or str(v).lower() in ("1", "true", "on", "yes")
+            else:
+                out[k] = v  # exit_order 等字符串透传
+        except (TypeError, ValueError):
+            raise ValueError(f"回测覆盖参数 {k}={v!r} 非法")
+    return out
+
+
 def register_backtest_routes(app, gatekeeper) -> None:
     """Register backtest page routes on the FastAPI app.
 
@@ -152,11 +185,16 @@ def register_backtest_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
         scene = data.get("scene") or "mid"
         symbols = data.get("symbols") or []
+        try:
+            overrides = _coerce_overrides(data.get("overrides"))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         gatekeeper._log(
             f"[BACKTEST-PAGE] 启动请求 scene={scene} symbols={symbols} "
             f"range={data.get('start') or '拉满'}→{data.get('end') or '现在'} "
             f"initial_quote={data.get('initial_quote')} batches={data.get('batches')} "
-            f"slippage={data.get('slippage')} fixed_amount={data.get('fixed_amount')}"
+            f"slippage={data.get('slippage')} fixed_amount={data.get('fixed_amount')} "
+            f"overrides={overrides}"
         )
         if not symbols:
             return JSONResponse({"ok": False, "error": "至少选择一个标的"}, status_code=400)
@@ -175,6 +213,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 fixed_amount=float(data["fixed_amount"])
                 if data.get("fixed_amount")
                 else None,
+                overrides=overrides,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")

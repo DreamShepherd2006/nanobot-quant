@@ -105,6 +105,7 @@ class BacktestDriver:
         batches: Optional[int] = None,
         slippage: Optional[float] = None,
         fixed_amount: Optional[float] = None,
+        overrides: Optional[dict[str, Any]] = None,
         fetcher: Optional[Callable] = None,
         ledger_dir: Optional[Path | str] = None,
         progress_path: Optional[Path | str] = None,
@@ -144,7 +145,14 @@ class BacktestDriver:
         # 回测覆盖参数（覆盖 > 场景 > 类默认）。_activate_scene 每 bar 从
         # rt.params 重读 td_fixed_amount，仅注入 strategy.parameters 会被
         # 每 bar 覆盖回场景值（2026-08-28 实测：页面填 10 成交仍 4U）。
+        # 回测覆盖参数（覆盖 > 场景 > 全局/类默认）。_activate_scene 每 bar 从
+        # rt.params 重读 td_fixed_amount，仅注入 strategy.parameters 会被
+        # 每 bar 覆盖回场景值（2026-08-28 实测：页面填 10 成交仍 4U）。
         self._merged_params = dict(self.scene_cfg)
+        self.overrides = {
+            k: v for k, v in (overrides or {}).items() if v is not None
+        }
+        self._merged_params.update(self.overrides)
         if self.fixed_amount is not None:
             self._merged_params["td_fixed_amount"] = self.fixed_amount
         self.initial_quote = float(initial_quote)
@@ -200,14 +208,15 @@ class BacktestDriver:
         }
 
     def _min_hold_bars_value(self) -> int:
-        """回测生效的 min_hold_bars：回测表单显式覆盖优先；缺省回退 exec_params
-        全局（2026-08-29 修复：此前只读表单、恒默认 10，改全局对回测无效）。"""
-        return int(
-            self.params.get(
-                "min_hold_bars", self._exec_params.get("min_hold_bars", 10)
-            )
-            or 0
-        )
+        """回测生效的 min_hold_bars：回测覆盖参数优先（overrides > 场景配置，
+        None 视为未设置）；缺省回退表单/exec_params 全局（2026-08-29 修复：
+        此前只读表单、恒默认 10，改全局对回测无效）。"""
+        v = self._merged_params.get("min_hold_bars")
+        if v is None:
+            v = self.params.get("min_hold_bars")
+        if v is None:
+            v = self._exec_params.get("min_hold_bars", 10)
+        return int(v or 0)
 
     def _build_strategy(self, main_broker: BacktestBroker) -> Any:
         """复用 td_live 的 parameters 构造语义（live_mode=False）。"""
@@ -232,14 +241,22 @@ class BacktestDriver:
                     self._merged_params.get("td_fixed_amount", 10.0)
                 ),
                 "sleeptime": str(self.scene_cfg.get("sleeptime", "15m")),
-                "max_position_pct": self.params["max_position_pct"],
-                "max_drawdown_pct": self.params["max_drawdown_pct"],
-                "stop_loss_pct": self.params["stop_loss_pct"],
-                "exit_order": self.scene_cfg.get("exit_order", "fifo"),
-                "take_profit_pct": self.scene_cfg.get("take_profit_pct", 0.0),
-                "td_start_slot": int(self.scene_cfg.get("td_start_slot", 1)),
+                "max_position_pct": self._merged_params.get(
+                    "max_position_pct", self.params["max_position_pct"]
+                ),
+                "max_drawdown_pct": self._merged_params.get(
+                    "max_drawdown_pct", self.params["max_drawdown_pct"]
+                ),
+                "stop_loss_pct": self._merged_params.get(
+                    "stop_loss_pct", self.params["stop_loss_pct"]
+                ),
+                "exit_order": self._merged_params.get("exit_order", "fifo"),
+                "take_profit_pct": self._merged_params.get("take_profit_pct", 0.0),
+                "td_start_slot": int(
+                    self._merged_params.get("td_start_slot", 1)
+                ),
                 "min_account_value": float(
-                    self.scene_cfg.get("min_account_value", 0)
+                    self._merged_params.get("min_account_value", 0)
                 ),
                 "fee_rate": self.fee_rate,
                 "min_history": self.min_history,
