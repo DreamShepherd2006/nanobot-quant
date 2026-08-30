@@ -422,13 +422,14 @@ function opensBox(slots) {
   for (const [sym, info] of Object.entries(slots || {})) {
     const finalPx = info.final_price;
     for (const o of info.open || []) {
+      const s = typeof o === "number" ? { slot: o } : o;
       const pnl =
-        o.entry_price && finalPx ? (finalPx - o.entry_price) / o.entry_price : null;
+        s.entry_price && finalPx ? (finalPx - s.entry_price) / s.entry_price : null;
       rows.push(`<tr>
         <td>${escapeHtml(sym)}</td>
-        <td>${o.slot}</td>
-        <td>${fmtN(o.qty, 6)}</td>
-        <td>${fmtN(o.entry_price, 4)}</td>
+        <td>${s.slot}</td>
+        <td>${fmtN(s.qty, 6)}</td>
+        <td>${fmtN(s.entry_price, 4)}</td>
         <td>${fmtN(finalPx, 4)}</td>
         <td class="${pnl !== null && pnl < 0 ? "roi-neg" : "roi-pos"}">${pnl === null ? "—" : (pnl * 100).toFixed(2) + "%"}</td>
       </tr>`);
