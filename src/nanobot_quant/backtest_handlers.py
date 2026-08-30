@@ -50,8 +50,41 @@ async def _body(request: Request) -> dict | None:
 
 # ── Data helpers ─────────────────────────────────────────────────────────
 
+#: 回测覆盖字段 → 全局回退来源。
+#: (来源, 键, 默认值)：
+#:   "td"    = load_td_params 全局 TD 参数（entry/exit 阈值，策略选择页设置）
+#:   "flat"  = exec_params 平铺全局键（min_hold_bars/stop_loss_pct/take_profit_pct）
+#:   "scene" = 场景默认值（DEFAULT_SCENES，策略类默认回退）
+_OV_FIELDS: dict[str, tuple] = {
+    "entry_setup": ("td", "entry_setup", 9),
+    "entry_countdown": ("td", "entry_countdown", 13),
+    "cd_entry_setup_gap": ("scene", None, 5),
+    "exit_setup": ("td", "exit_setup", 9),
+    "exit_countdown": ("td", "exit_countdown", 13),
+    "min_hold_bars": ("flat", "min_hold_bars", 10),
+    "exit_order": ("scene", None, "fifo"),
+    "stop_loss_pct": ("flat", "stop_loss_pct", 0.10),
+    "take_profit_pct": ("flat", "take_profit_pct", 0.0),
+    "sell_only_profit_high": ("scene", None, 0.0),
+    "sell_only_profit_low": ("scene", None, 0.002),
+    "momentum_exit": ("scene", None, True),
+    "cd_stall_n": ("scene", None, 3),
+    "td_sell_all": ("scene", None, False),
+    "cd_exit_min_profit": ("scene", None, 0.0),
+    "cd_exit_all": ("scene", None, True),
+    "td_start_slot": ("scene", None, 1),
+    "min_account_value": ("scene", None, 0),
+}
+
+
 def _scenes() -> dict:
-    """exec_params scenes (high/mid/low) with enabled flags + defaults."""
+    """exec_params scenes (high/mid/low) 完整配置 + 每键实际生效值。
+
+    返回结构：{name: {enabled, sleeptime, symbols, batches, sub_accounts,
+    <全部场景参数字段>, "_effective": {key: 生效值}}}——_effective 为
+    场景值回退全局（td_params/平铺/默认）后的最终生效值，供回测页覆盖
+    输入框 placeholder 显示「对应场景值」，方便对比。
+    """
     try:
         from nanobot_quant.exec_params import load_exec_params
 
@@ -59,16 +92,34 @@ def _scenes() -> dict:
     except Exception:  # noqa: BLE001 — page must render even when config broke
         params = {}
     scenes = params.get("scenes") or {}
+    try:
+        from nanobot_quant.td_params import load_td_params
+
+        td = load_td_params("td_sequential") or {}
+    except Exception:  # noqa: BLE001
+        td = {}
     result: dict[str, dict] = {}
     for name in ("high", "mid", "low"):
         cfg = scenes.get(name) or {}
-        result[name] = {
-            "enabled": bool(cfg.get("enabled", False)),
-            "sleeptime": str(cfg.get("sleeptime", "")),
-            "symbols": list(cfg.get("symbols") or []),
-            "batches": int(cfg.get("batches") or 0),
-            "sub_accounts": list(cfg.get("sub_accounts") or []),
-        }
+        entry = dict(cfg)
+        entry.setdefault("enabled", False)
+        entry.setdefault("sleeptime", "")
+        entry.setdefault("symbols", [])
+        entry.setdefault("batches", 0)
+        entry.setdefault("sub_accounts", [])
+        eff: dict = {}
+        for key, (src, src_key, default) in _OV_FIELDS.items():
+            v = entry.get(key)
+            if v is None or v == "":
+                if src == "td":
+                    v = td.get(src_key, default)
+                elif src == "flat":
+                    v = params.get(src_key, default)
+                else:
+                    v = default
+            eff[key] = v
+        entry["_effective"] = eff
+        result[name] = entry
     return result
 
 

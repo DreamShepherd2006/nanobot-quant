@@ -234,27 +234,32 @@ const OV_KEYS = ["entry_setup","entry_countdown","cd_entry_setup_gap",
   "momentum_exit","td_sell_all","cd_exit_all"];
 
 function sceneValue(scene, key) {
-  const v = (SCENES[scene] || {})[key];
-  return (v === null || v === undefined || v === "") ? null : v;
+  const cfg = SCENES[scene] || {};
+  const v = cfg[key];
+  if (v !== null && v !== undefined && v !== "") return { v: v, src: "场景" };
+  const eff = (cfg._effective || {})[key];
+  return { v: eff, src: "全局" };
 }
 function ovDisplay(v) {
-  if (v === null) return "回退全局";
+  if (v === null || v === undefined) return "默认";
   if (typeof v === "boolean") return v ? "开" : "关";
   return String(v);
 }
 
-// 覆盖输入框 placeholder / select 首项显示对应场景配置值，方便对比覆盖前后
+// 覆盖输入框 placeholder / select 首项显示对应场景配置值（场景级 → 回退全局生效值），方便对比覆盖前后
 function updateOverridesPlaceholders() {
   const scene = $("scene").value;
   OV_KEYS.forEach(k => {
     const el = $(k);
     if (!el) return;
-    const v = sceneValue(scene, k);
+    const r = sceneValue(scene, k);
     if (el.tagName === "SELECT") {
       const opt = el.options[0];
-      if (opt) opt.text = v === null ? "（跟随场景 · 回退全局）" : `（跟随场景 · ${ovDisplay(v)}）`;
+      if (opt) opt.text = r.src === "场景"
+        ? `（跟随场景 · ${ovDisplay(r.v)}）`
+        : `（跟随场景 · 回退全局 · ${ovDisplay(r.v)}）`;
     } else {
-      el.placeholder = ovDisplay(v);
+      el.placeholder = r.src === "场景" ? ovDisplay(r.v) : `回退全局 · ${ovDisplay(r.v)}`;
     }
   });
 }
