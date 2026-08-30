@@ -416,6 +416,30 @@ function skipBox(skips) {
   return `<div class="bt-params"><div class="bt-params-title">🚦 SKIP 统计（回测期累计）</div><table class="bt-params-table">${rows}</table></div>`;
 }
 
+// 📦 期末未平仓（open 槽位 = 回测结束时仍持有，按最后 bar 收盘价折算）
+function opensBox(slots) {
+  const rows = [];
+  for (const [sym, info] of Object.entries(slots || {})) {
+    const finalPx = info.final_price;
+    for (const o of info.open || []) {
+      const pnl =
+        o.entry_price && finalPx ? (finalPx - o.entry_price) / o.entry_price : null;
+      rows.push(`<tr>
+        <td>${escapeHtml(sym)}</td>
+        <td>${o.slot}</td>
+        <td>${fmtN(o.qty, 6)}</td>
+        <td>${fmtN(o.entry_price, 4)}</td>
+        <td>${fmtN(finalPx, 4)}</td>
+        <td class="${pnl !== null && pnl < 0 ? "roi-neg" : "roi-pos"}">${pnl === null ? "—" : (pnl * 100).toFixed(2) + "%"}</td>
+      </tr>`);
+    }
+  }
+  if (!rows.length) return "";
+  return `<div class="block"><div class="bt">📦 期末未平仓（按最后 bar 收盘价折算）</div>
+    <table class="tbl"><thead><tr><th>标的</th><th>slot</th><th>数量</th><th>成本价</th><th>期末价</th><th>浮盈</th></tr></thead>
+    <tbody>${rows.join("")}</tbody></table></div>`;
+}
+
 function renderResult(res, runId) {
   const box = $("result");
   if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
@@ -441,6 +465,7 @@ function renderResult(res, runId) {
     </div>
     ${capitalBox(res.capital_stats)}
     ${skipBox(res.skip_counts)}
+    ${opensBox(res.slots)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;

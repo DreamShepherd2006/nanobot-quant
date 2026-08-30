@@ -546,15 +546,29 @@ class BacktestDriver:
         # 成交记录（_tracked 是累计列表，结束时统计一次）
         fills = sum(len(b._tracked) for b in slot_brokers.values())
 
-        # 每标的批次状态摘要（open 槽位 = 未平仓）
+        # 每标的批次状态摘要（open 槽位 = 未平仓，含数量/成本价；期末价 = 最后 bar 收盘价）
+        frames = getattr(self.data_source, "_frames", {})
+        last_close: dict[str, float] = {}
+        for sym in self.symbols:
+            df = frames.get(sym)
+            if df is not None and not df.empty and "close" in df.columns:
+                last_close[sym] = float(df["close"].iloc[-1])
         slots_summary: dict[str, Any] = {}
         for sym, bm in batch_managers.items():
             open_slots = [
-                s["slot"] for s in bm.slots if s["status"] == "open"
+                {
+                    "slot": s["slot"],
+                    "qty": (s.get("lot") or {}).get("qty"),
+                    "entry_price": (s.get("lot") or {}).get("entry_price"),
+                    "account_id": s.get("account_id"),
+                }
+                for s in bm.slots
+                if s["status"] == "open"
             ]
             slots_summary[sym] = {
                 "slots": len(bm.slots),
                 "open": open_slots,
+                "final_price": last_close.get(sym),
                 "ledger": str(bm.path),
             }
 
