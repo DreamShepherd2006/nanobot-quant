@@ -21,7 +21,7 @@ from nanobot_quant.td_table_handlers import (
     signal_stats,
     td_table_page,
 )
-from tests.test_td_sequential_cycle import _falling_df as _cycle_fall  # noqa: F401
+from test_td_sequential_cycle import _falling_df as _cycle_fall  # noqa: F401
 
 
 def _seq_df() -> pd.DataFrame:
