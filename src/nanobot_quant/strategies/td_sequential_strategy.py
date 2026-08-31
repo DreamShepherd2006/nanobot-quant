@@ -913,21 +913,26 @@ class TdSequentialStrategy(Strategy):
         # 40-60 次 stderr flush/轮，HF 容器日志管道背压是 calc 段耗时大头
         # （TIMING 实测无信号轮 calc≈11s）。信息全保留：K 线契约（got/final/
         # min/drop）+ 尾 3 根 close（CDN 精度排查，逗号分隔一行）。
-        print(
-            f"[TD] BARS | symbol={self.symbol} got={_got} "
-            f"final={len(df)} min={self._min_history} drop={int(drop_in_progress)}",
-            file=sys.stderr, flush=True,
-        )
-        close_col = "close" if "close" in df.columns else (
-            "Close" if "Close" in df.columns else None)
-        if close_col:
-            tail = ", ".join(
-                f"{_ts}:{_row[close_col]}" for _ts, _row in df.tail(3).iterrows()
-            )
+        # 2026-08-31：加 live_mode 守卫——回测逐 bar 重放 10 标的 × 1441 bar
+        # ≈ 2.9 万行 stderr，管道缓冲满后 print(flush=True) 阻塞回测线程
+        # （8/28 裁决第一组 8h 卡在 19.5% 实证）。回测结果走 JSON，无需逐
+        # bar 日志；实盘（live_mode=True）保持原样。
+        if self.parameters.get("live_mode"):
             print(
-                f"[TD] BARS | symbol={self.symbol} tail={tail}",
+                f"[TD] BARS | symbol={self.symbol} got={_got} "
+                f"final={len(df)} min={self._min_history} drop={int(drop_in_progress)}",
                 file=sys.stderr, flush=True,
             )
+            close_col = "close" if "close" in df.columns else (
+                "Close" if "Close" in df.columns else None)
+            if close_col:
+                tail = ", ".join(
+                    f"{_ts}:{_row[close_col]}" for _ts, _row in df.tail(3).iterrows()
+                )
+                print(
+                    f"[TD] BARS | symbol={self.symbol} tail={tail}",
+                    file=sys.stderr, flush=True,
+                )
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {
@@ -1403,11 +1408,14 @@ class TdSequentialStrategy(Strategy):
                 return
 
         # ── No signal this bar ──
-        print(
-            f"[TD] HOLD | symbol={self.symbol} price={price:.4f} setup_buy={setup_buy} "
-            f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}",
-            file=sys.stderr, flush=True,
-        )
+        # 2026-08-31：回测（live_mode=False）不打印——与 [TD] BARS 同源
+        # stderr 背压问题；回测每 bar 每标的 1 行 HOLD ≈ 1.4 万行。
+        if self.parameters.get("live_mode"):
+            print(
+                f"[TD] HOLD | symbol={self.symbol} price={price:.4f} setup_buy={setup_buy} "
+                f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}",
+                file=sys.stderr, flush=True,
+            )
 
     # ── 分批平仓（批次=子钱包，第一版）──────────────────────────────
     def _handle_batch_exits(
