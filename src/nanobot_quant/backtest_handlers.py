@@ -74,6 +74,10 @@ _OV_FIELDS: dict[str, tuple] = {
     "cd_exit_all": ("scene", None, True),
     "td_start_slot": ("scene", None, 1),
     "min_account_value": ("scene", None, 0),
+    # 贝叶斯闸门（2026-08-31，回测侧）：flat 全局（exec_params）。
+    # 默认关 → 回测与原版完全一致；阈值 0.45=red-only / 0.20=yellow+red。
+    "gate_enabled": ("flat", "gate_enabled", False),
+    "gate_red_min": ("flat", "gate_red_min", 0.45),
 }
 
 

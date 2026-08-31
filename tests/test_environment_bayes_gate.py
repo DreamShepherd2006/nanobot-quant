@@ -207,3 +207,53 @@ def test_gate_config_roundtrip():
     cfg2 = GateConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
     assert cfg2.prob == cfg.prob
     assert cfg2.lookup == cfg.lookup
+
+
+# ── 策略级闸门（2026-08-31，回测侧默认关）──────────────────────────────
+
+def _make_gate_strategy(gate_enabled=True, red_min=0.45, timestep="1m"):
+    """绕过 __init__ 构造策略实例，只测 _gate_blocked_for 判定路径。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+    s = TdSequentialStrategy.__new__(TdSequentialStrategy)
+    s.parameters = {"gate_enabled": gate_enabled, "gate_red_min": red_min}
+    s._timestep = timestep
+    s._skip_counts = {}
+    s._current_bar_time = pd.Timestamp("2026-08-31 14:00")  # UTC naive（周一 22:00 北京=盘中）
+    return s
+
+
+def _gate_df(n=200, trend=0.002, seed=1):
+    """1m K 线：趋势 + 噪声 → ATR 平稳。len=n ≥ lookback+1 保证 F1 出值。"""
+    rng = np.random.default_rng(seed)
+    close = 100 + np.arange(n) * trend + np.cumsum(rng.normal(0, 0.004, n))
+    high = close + np.abs(rng.normal(0, 0.004, n))
+    low = close - np.abs(rng.normal(0, 0.004, n))
+    idx = pd.date_range("2026-08-01", periods=n, freq="min")
+    return pd.DataFrame({"Open": close, "High": high, "Low": low, "Close": close}, index=idx)
+
+
+def test_gate_disabled_never_blocks():
+    """默认关（gate_enabled=False）→ 恒不拦（回测与原版一致，实盘零影响）。"""
+    s = _make_gate_strategy(gate_enabled=False)
+    assert s._gate_blocked_for(_gate_df()) is False
+    assert s._skip_counts == {}
+
+
+def test_gate_blocks_high_risk():
+    """开 + 高危 F1（Q4 高波动）→ 拦截（skip 计数由调用方 _evaluate_symbol 负责）。"""
+    s = _make_gate_strategy(gate_enabled=True, red_min=0.45)
+    rng = np.random.default_rng(9)
+    df = _gate_df(n=300)
+    # 尾部注入剧烈波动 → F1 高位（ATR 扩张）
+    tail = df.iloc[-40:].copy()
+    tail["High"] += rng.uniform(0.05, 0.15, len(tail))
+    tail["Low"] -= rng.uniform(0.05, 0.15, len(tail))
+    df = pd.concat([df.iloc[:-40], tail])
+    assert s._gate_blocked_for(df) is True, "高危 F1 应被拦"
+
+
+def test_gate_na_fail_open():
+    """窗口不足（1m < 181 根）→ F1 NaN → 不拦（fail-open）+ gate_na 计数。"""
+    s = _make_gate_strategy(gate_enabled=True)
+    assert s._gate_blocked_for(_gate_df(n=120)) is False
+    assert s._skip_counts.get("gate_na", 0) == 1

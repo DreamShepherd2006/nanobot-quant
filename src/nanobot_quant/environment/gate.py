@@ -55,6 +55,31 @@ class GateConfig:
         return cfg
 
 
+_default_gate = None
+
+
+def load_default_gate():
+    """加载包内 f1_session_gate.json（随 wheel 分发，importlib.resources）。
+
+    模型文件路径 = nanobot_quant/environment/f1_session_gate.json（
+    pyproject package-data 已含 environment/*.json）。首次调用缓存。
+    """
+    global _default_gate
+    if _default_gate is None:
+        from nanobot_quant.environment.bayes import NaiveBayesGate
+        import json
+        try:
+            import importlib.resources as ilr
+            res = ilr.files("nanobot_quant.environment").joinpath("f1_session_gate.json")
+            with res.open("r", encoding="utf-8") as f:
+                _default_gate = NaiveBayesGate.from_dict(json.load(f))
+        except Exception:
+            import os
+            p = os.path.join(os.path.dirname(__file__), "f1_session_gate.json")
+            _default_gate = NaiveBayesGate.load(p)
+    return _default_gate
+
+
 def zone_from_prob(p: Optional[float], cfg: GateConfig | None = None) -> str:
     """贝叶斯后验三区（生产主模式）。概率缺失 → 保守返回 red（fail-closed）。"""
     cfg = cfg or GateConfig()

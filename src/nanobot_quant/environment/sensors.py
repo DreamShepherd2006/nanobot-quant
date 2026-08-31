@@ -20,7 +20,39 @@ import pandas as pd
 # 默认参数（与实验扫描一致，ATR 用 Wilder 平滑 ewm(alpha=1/n)）
 EMA_N = 20
 ATR_N = 20
-F1_LOOKBACK = 12  # 15m × 12 = 3h
+F1_LOOKBACK = 12  # 15m × 12 = 3h（训练默认周期）
+
+#: 周期名（策略 timestep/sleeptime 风格）→ 秒数。回测/实盘场景周期全集。
+BAR_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1H": 3600, "2H": 7200, "4H": 14400, "1D": 86400,
+    "3D": 259200, "7D": 604800,
+}
+
+_BAR_SECONDS_LOWER = {k.lower(): v for k, v in BAR_SECONDS.items()}
+
+#: F1 的 3h 语义窗口（训练：1H 数据 lookback=3 → 3h）。
+F1_WINDOW_SECONDS = 3 * 3600
+
+
+def f1_lookback_for(timestep: str | None) -> int:
+    """按周期把 F1 lookback 换算成 3h 语义（1m→180、15m→12、1H→3）。
+
+    周期 > 3h 时 clamp 到 1（F1 = ATR[t]/ATR[t-1]），避免 lookback=0。
+    """
+    if not timestep:
+        return F1_LOOKBACK
+    t = str(timestep).strip().lower()
+    # 兼容 lumibot 风格（minute/15min/hour/day）与项目风格（1m/15m/1H）
+    aliases = {
+        "minute": "1m", "5min": "5m", "15min": "15m", "30min": "30m",
+        "hour": "1H", "4hour": "4H", "day": "1D", "week": "7D",
+    }
+    t = aliases.get(t, t).lower()
+    secs = _BAR_SECONDS_LOWER.get(t)
+    if not secs:
+        return F1_LOOKBACK
+    return max(1, round(F1_WINDOW_SECONDS / secs))
 
 
 def _norm_columns(df: pd.DataFrame) -> pd.DataFrame:
