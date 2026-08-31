@@ -37,6 +37,8 @@ from nanobot_quant.exec_params import load_exec_params
 from nanobot_quant.gate_credentials import gate_pair, load_tokens_json, okx_ticker
 from nanobot_quant.onchainos_cli import resolve_token, token_json_path
 from nanobot_quant.strategies.registry import get_strategy, load_selected, resolve_engine_cls
+from nanobot_quant.strategies.td_trend import MIN_BARS as _TREND_MIN_BARS
+from nanobot_quant.strategies.td_trend import compute_trend_state
 from nanobot_quant.td_params import load_td_params
 
 _TEMPLATE_PATH = Path(__file__).with_name("td_table_page.html")
@@ -494,8 +496,6 @@ def td_table_page(request: Request) -> HTMLResponse:
 
     banner = ""
     content = ""
-    banner = ""
-    content = ""
     frag = q.get("frag") == "1"
     if tab == "history":
         content = _render_history(ticker, bar, start, end, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source)
@@ -524,9 +524,49 @@ def td_table_page(request: Request) -> HTMLResponse:
     page = page.replace("{start}", _esc(start))
     page = page.replace("{end}", _esc(end))
     page = page.replace("{form}", _form(tab, ticker, bar, limit, start, end, source))
+    page = page.replace("{trend}", _render_trend_block(ticker, source))
     page = page.replace("{banner}", banner)
     page = page.replace("{content}", content)
     return HTMLResponse(page)
+
+
+def _render_trend_block(ticker: str, source: str) -> str:
+    """大周期趋势状态区块（只读展示，不参与交易；Step 3 接入单向闸门）。
+
+    按 exec_params.trend_period（默认 1H）拉 K 线 → compute_trend_state。
+    取数失败/数据不足 → 显示 —，不影响页面主体。仅 snapshot/history tab 渲染。
+    """
+    try:
+        from nanobot_quant.exec_params import load_exec_params
+
+        trend_period = str(load_exec_params().get("trend_period", "1H") or "1H")
+        ds_name = _PAGE_SOURCE_TO_SOURCE.get(source, "onchainos")
+        df = get_data_source(ds_name).fetch_kline(ticker, bar=trend_period, limit=120)
+        if df is None or len(df) < _TREND_MIN_BARS:
+            return _trend_html(trend_period, "数据不足", "K 线 < 30 根")
+        st = compute_trend_state(df)
+        detail = f"setup_buy={st['setup_buy']} · setup_sell={st['setup_sell']}"
+        return _trend_html(trend_period, st["label"], detail)
+    except Exception:
+        return _trend_html("1H", "—", "")
+
+
+def _trend_html(period: str, label: str, detail: str) -> str:
+    color = {
+        "跌势": "#c0392b",
+        "涨势": "#1e8e3e",
+        "涨势末端": "#b8860b",
+        "弹簧": "#666666",
+    }.get(label, "#666666")
+    return (
+        f'<div class="trend" style="padding:8px 14px;border-radius:8px;margin-bottom:10px;'
+        f'font-size:13px;background:#f7f7f8;border:1px solid #e2e2e6;">'
+        f'📈 大周期趋势（<b>{_esc(period)}</b>）：'
+        f'<span style="color:{color};font-weight:600;">{_esc(label)}</span>'
+        f' <span style="color:#888;">{_esc(detail)}</span>'
+        f'<span style="color:#aaa;margin-left:8px;">（只读展示 · 单向闸门接入前不参与交易）</span>'
+        f'</div>'
+    )
 
 
 def _live_refresh_s() -> int:

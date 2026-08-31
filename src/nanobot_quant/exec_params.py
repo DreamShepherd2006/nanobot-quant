@@ -181,6 +181,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
     "kline_concurrency": 4,     # int 1-20 — TD 每轮并发拉取各标的 K 线的线程数（1=串行；标的池大时加大提速）
     "min_hold_bars": 10,        # int 0-300 — 买入后 N 根 bar 内 TD SELL（高9/cd13）不触发（0=关闭；止损/止盈不受限，2026-08-28）
+    "trend_period": "1H",      # enum — 大周期趋势过滤周期（TD 趋势状态按该周期 K 线计算；默认 1H，可改 15m/4H/1D 等）
     # ── ⑤ UI ───────────────────────────────────────────────────────────
     "td_ui_refresh_s": 10,    # int 3-300 — /config/td-table 实时监控 tab 自动刷新间隔（秒）
     "position_display_min_usd": 1.0,  # float 0-100 — 持仓小节显示阈值（<$X 不显示，0=全部；2026-08-26）
@@ -305,6 +306,13 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "td", "min": 0, "max": 300, "step": 1, "std": 10, "integer": True,
         "label": "最短持有期（bar）",
         "hint": "买入后 N 根 bar 内 TD SELL（高9/cd13）不触发——避免震荡市双向 countdown 刚买就卖（UNI 49 秒案例）；止损/止盈不受限（风控优先）；0=关闭；场景卡片内留空 = 跟随全局值（2026-08-28）",
+    },
+    "trend_period": {
+        "group": "td", "type": "enum", "enum": list(PERIODS),
+        "enum_labels": dict(DISPLAY_NAMES), "std": "1H",
+        "period_field": True,
+        "label": "趋势过滤周期",
+        "hint": "TD 趋势状态（涨势/跌势/弹簧）按该周期 K 线计算，用于大周期方向过滤（单向闸门，Step 3 接入交易；当前仅展示，默认 1H）。15m 更灵敏、4H/1D 更钝；只读展示阶段零交易影响",
     },
     # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {
