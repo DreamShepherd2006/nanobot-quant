@@ -7,9 +7,7 @@ import pytest
 
 from nanobot_quant.environment.bayes import NaiveBayesGate, make_h0_label, session_code
 from nanobot_quant.environment.gate import (
-    DEFAULT_LOOKUP_CFG,
     GateConfig,
-    zone_from_lookup,
     zone_from_prob,
 )
 
@@ -79,6 +77,82 @@ def test_session_code():
     assert list(code) == [0, 1, 2, 1]
 
 
+def test_laplace_smoothing_no_zero_likelihood():
+    """① 拉普拉斯平滑：构造训练集某特征桶在 H0/H1 下零计数，
+    拟合后似然表不得出现零概率（防后验 0/1 崩溃）。"""
+    rng = np.random.default_rng(7)
+    n = 2000
+    f1 = rng.lognormal(0, 0.3, n)
+    sess = np.where(rng.random(n) < 0.9, 2, 0)   # 盘前盘后(1) 几乎缺失
+    prob = np.clip(0.3 + 0.6 * (f1 - 1.2), 0.01, 0.99)
+    h0 = (rng.random(n) < prob).astype(int)
+    df = pd.DataFrame({"F1": f1, "SESSION": sess, "h0": h0})
+    gate = NaiveBayesGate().fit(df, features=["F1", "SESSION"], discrete_features=["SESSION"])
+    for feat in ["F1", "SESSION"]:
+        assert not (gate.like[feat] == 0).any(), f"{feat} 似然表存在零概率"
+    # 从未出现的组合（盘前盘后）→ 后验必须有定义（非 0 非 1）
+    p = gate.predict({"F1": 1.0, "SESSION": 1})
+    assert 0 < p < 1
+
+
+def test_missing_cell_fallback_marginal():
+    """② 缺失格子回退：联合格子缺失时后验由边际似然乘积给出，
+    等价于回退到边缘（时段/F1）后验，不会崩为 0 或 1。"""
+    rng = np.random.default_rng(13)
+    n = 3000
+    f1 = rng.lognormal(0, 0.4, n)
+    sess = rng.integers(0, 3, n)
+    base = {0: 0.2, 1: 0.45, 2: 0.6}
+    prob = np.clip(0.4 + 0.5 * (f1 - 1.2) + np.array([base[s] for s in sess]) - 0.42, 0.02, 0.98)
+    h0 = (rng.random(n) < prob).astype(int)
+    df = pd.DataFrame({"F1": f1, "SESSION": sess, "h0": h0})
+    gate = NaiveBayesGate().fit(df, features=["F1", "SESSION"], discrete_features=["SESSION"])
+    p_combined = gate.predict({"F1": 0.7, "SESSION": 2})   # F1Q0 × 盘中（低 F1 盘中样本可能稀缺）
+    p_session_only = _marginal_posterior(gate, "SESSION", 2)
+    p_f1_only = _marginal_posterior(gate, "F1", gate.bucket_index("F1", 0.7))
+    # 组合后验应在两个边缘后验之间（朴素贝叶斯插值），且非极端
+    assert 0 < p_combined < 1
+    assert min(p_session_only, p_f1_only) - 0.15 <= p_combined <= max(p_session_only, p_f1_only) + 0.15
+
+
+def _marginal_posterior(gate, feat: str, bucket: int) -> float:
+    p0, p1 = gate.prior_h0, 1 - gate.prior_h0
+    if feat == "F1":
+        p0 *= gate.like["F1"][bucket, 0]
+        p1 *= gate.like["F1"][bucket, 1]
+    else:
+        p0 *= gate.like["SESSION"][bucket, 0]
+        p1 *= gate.like["SESSION"][bucket, 1]
+    return p0 / (p0 + p1)
+
+
+def test_posterior_monotone_in_f1():
+    """③ 后验单调性：模型后验对连续特征 F1 严格单调（非联合查表）。"""
+    rng = np.random.default_rng(17)
+    n = 4000
+    f1 = rng.lognormal(0, 0.5, n)
+    sess = rng.integers(0, 3, n)
+    prob = np.clip(0.35 + 0.7 * (f1 - 1.2) + np.array([{0: 0.2, 1: 0.45, 2: 0.6}[s] for s in sess]) - 0.42, 0.01, 0.99)
+    h0 = (rng.random(n) < prob).astype(int)
+    df = pd.DataFrame({"F1": f1, "SESSION": sess, "h0": h0})
+    gate = NaiveBayesGate().fit(df, features=["F1", "SESSION"], discrete_features=["SESSION"])
+    mids = [0.8, 0.95, 1.1, 1.3, 1.6]
+    for s in range(3):
+        ps = [gate.predict({"F1": m, "SESSION": s}) for m in mids]
+        assert ps == sorted(ps), f"时段 {s} 后验非单调: {ps}"
+
+
+def test_gate_zone_monotone_and_fail_closed():
+    """红黄绿映射：后验阈值单调分离；缺失输入 fail-closed red。"""
+    from nanobot_quant.environment.gate import zone_from_prob, GateConfig
+    cfg = GateConfig()   # yellow_min=0.20, red_min=0.45
+    assert zone_from_prob(0.10, cfg) == "green"
+    assert zone_from_prob(0.30, cfg) == "yellow"
+    assert zone_from_prob(0.60, cfg) == "red"
+    assert zone_from_prob(None, cfg) == "red"
+    assert zone_from_prob(float("nan"), cfg) == "red"
+
+
 def test_fit_requires_enough_samples():
     with pytest.raises(ValueError):
         NaiveBayesGate().fit(make_training_df(50))
@@ -120,29 +194,16 @@ def test_make_h0_label():
     assert h0.iloc[35] == 1.0
 
 
-def test_zone_lookup_basic():
-    cfg = GateConfig()
-    assert zone_from_lookup(0.5, 1.0, cfg) == "green"
-    assert zone_from_lookup(1.8, 1.0, cfg) == "yellow"
-    assert zone_from_lookup(2.5, 1.0, cfg) == "red"
-    assert zone_from_lookup(0.5, 1.4, cfg) == "yellow"
-    assert zone_from_lookup(0.5, 2.0, cfg) == "red"
-
-
-def test_zone_lookup_fail_closed():
-    assert zone_from_lookup(None, 1.0) == "red"
-    assert zone_from_lookup(0.5, float("nan")) == "red"
-
-
 def test_zone_prob_basic():
-    cfg = GateConfig()
-    assert zone_from_prob(0.20, cfg) == "green"
-    assert zone_from_prob(0.45, cfg) == "yellow"
-    assert zone_from_prob(0.80, cfg) == "red"
+    cfg = GateConfig()   # yellow_min=0.20, red_min=0.45（融合模型样本外校准）
+    assert zone_from_prob(0.10, cfg) == "green"
+    assert zone_from_prob(0.30, cfg) == "yellow"
+    assert zone_from_prob(0.60, cfg) == "red"
     assert zone_from_prob(None, cfg) == "red"
 
 
 def test_gate_config_roundtrip():
     cfg = GateConfig()
     cfg2 = GateConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
-    assert cfg2.lookup == DEFAULT_LOOKUP_CFG
+    assert cfg2.prob == cfg.prob
+    assert cfg2.lookup == cfg.lookup

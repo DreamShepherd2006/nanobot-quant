@@ -99,16 +99,17 @@ class NaiveBayesGate:
         self.prior_h0 = n_h0 / len(d)
         for feat in self.features:
             if feat in self.discrete_features:
-                # 离散特征：值为 0..k-1，每值一桶
+                # 离散特征：每个唯一值一桶，用「值在升序唯一列表中的位置」作桶索引
+                # （值域可稀疏，如只有 0/2——位置索引 0/1，绝不用值本身作索引）
                 vals = sorted(d[feat].unique())
-                edges = list(range(len(vals) + 1))
-                self.feature_edges[feat] = edges
-                nb = len(edges) - 1
+                self.feature_edges[feat] = vals
+                nb = len(vals)
                 tbl = np.zeros((nb, 2))
+                pos = {int(v): i for i, v in enumerate(vals)}
                 for v in vals:
                     sel = d[d[feat] == v]
-                    tbl[int(v), 0] = sel["h0"].sum()
-                    tbl[int(v), 1] = len(sel) - sel["h0"].sum()
+                    tbl[pos[int(v)], 0] = sel["h0"].sum()
+                    tbl[pos[int(v)], 1] = len(sel) - sel["h0"].sum()
                 tbl += 1.0  # 拉普拉斯平滑（防 0 概率）
                 tbl[:, 0] /= tbl[:, 0].sum()
                 tbl[:, 1] /= tbl[:, 1].sum()
@@ -135,17 +136,27 @@ class NaiveBayesGate:
 
     # ── 预测 ──
     def bucket_index(self, feat: str, value: float) -> int:
-        edges = self.feature_edges[feat]
-        nb = len(edges) - 1
+        vals = self.feature_edges[feat]
         if feat in self.discrete_features:
-            v = int(value)
-            return max(0, min(v, nb - 1))
-        if value <= edges[0]:
+            # 离散：值在升序唯一列表中的位置；未知值钳制到最近邻
+            try:
+                return [int(v) for v in vals].index(int(value))
+            except ValueError:
+                if value <= vals[0]:
+                    return 0
+                if value >= vals[-1]:
+                    return len(vals) - 1
+                for i in range(1, len(vals)):
+                    if vals[i - 1] < value < vals[i]:
+                        return i - 1 if value - vals[i - 1] <= vals[i] - value else i
+                return len(vals) - 1
+        nb = len(vals) - 1
+        if value <= vals[0]:
             return 0
-        if value >= edges[-1]:
+        if value >= vals[-1]:
             return nb - 1
         for b in range(nb):
-            if edges[b] <= value < edges[b + 1]:
+            if vals[b] <= value < vals[b + 1]:
                 return b
         return nb - 1
 
