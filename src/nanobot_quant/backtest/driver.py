@@ -252,6 +252,21 @@ class BacktestDriver:
                 ),
                 "exit_order": self._merged_params.get("exit_order", "fifo"),
                 "take_profit_pct": self._merged_params.get("take_profit_pct", 0.0),
+                # 贝叶斯闸门（2026-08-31，回测侧）：WebUI 回测页覆盖参数优先，
+                # 缺省回退 exec_params 平铺开关（/config/exec 持久化，默认 False=
+                # 回测与原版一致）；td_live 不注入 → 实盘恒 False（实盘接入待
+                # 回测裁决后讨论）。
+                "gate_enabled": bool(
+                    self._merged_params.get(
+                        "gate_enabled", self.params.get("gate_enabled", False)
+                    )
+                ),
+                "gate_red_min": float(
+                    self._merged_params.get(
+                        "gate_red_min", self.params.get("gate_red_min", 0.45)
+                    )
+                    or 0.45
+                ),
                 "td_start_slot": int(
                     self._merged_params.get("td_start_slot", 1)
                 ),
@@ -680,6 +695,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="批次/slot 数（覆盖场景配置）")
     ap.add_argument("--slippage", type=float, default=None,
                     help="滑点（小数，默认 0）")
+    ap.add_argument("--gate-enabled", action="store_true", default=None,
+                    help="接入贝叶斯闸门（回测 BUY 后验≥阈值禁买；默认跟随 exec_params/关闭）")
+    ap.add_argument("--gate-red-min", type=float, default=None,
+                    help="闸门禁买阈值（0.05-0.9，默认 0.45=red-only；0.20=yellow+red）")
     ap.add_argument("--output", default=None, help="结果 JSON 落盘路径（可选）")
     args = ap.parse_args(argv)
 
@@ -687,14 +706,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.symbols:
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
 
+    overrides = {}
+    if args.batches is not None:
+        overrides["batches"] = args.batches
+    if args.slippage is not None:
+        overrides["slippage"] = args.slippage
+    if args.gate_enabled is not None:
+        overrides["gate_enabled"] = True
+    if args.gate_red_min is not None:
+        overrides["gate_red_min"] = args.gate_red_min
+
     driver = BacktestDriver(
         scene=args.scene,
         symbols=symbols,
         start_ts=_parse_ts(args.start),
         end_ts=_parse_ts(args.end),
         initial_quote=args.initial_quote,
-        batches=args.batches,
-        slippage=args.slippage,
+        overrides=overrides or None,
     )
     result = driver.run()
     print(json.dumps(result, ensure_ascii=False, indent=2))

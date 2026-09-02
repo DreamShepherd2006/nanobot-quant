@@ -913,21 +913,26 @@ class TdSequentialStrategy(Strategy):
         # 40-60 次 stderr flush/轮，HF 容器日志管道背压是 calc 段耗时大头
         # （TIMING 实测无信号轮 calc≈11s）。信息全保留：K 线契约（got/final/
         # min/drop）+ 尾 3 根 close（CDN 精度排查，逗号分隔一行）。
-        print(
-            f"[TD] BARS | symbol={self.symbol} got={_got} "
-            f"final={len(df)} min={self._min_history} drop={int(drop_in_progress)}",
-            file=sys.stderr, flush=True,
-        )
-        close_col = "close" if "close" in df.columns else (
-            "Close" if "Close" in df.columns else None)
-        if close_col:
-            tail = ", ".join(
-                f"{_ts}:{_row[close_col]}" for _ts, _row in df.tail(3).iterrows()
-            )
+        # 2026-08-31：加 live_mode 守卫——回测逐 bar 重放 10 标的 × 1441 bar
+        # ≈ 2.9 万行 stderr，管道缓冲满后 print(flush=True) 阻塞回测线程
+        # （8/28 裁决第一组 8h 卡在 19.5% 实证）。回测结果走 JSON，无需逐
+        # bar 日志；实盘（live_mode=True）保持原样。
+        if self.parameters.get("live_mode"):
             print(
-                f"[TD] BARS | symbol={self.symbol} tail={tail}",
+                f"[TD] BARS | symbol={self.symbol} got={_got} "
+                f"final={len(df)} min={self._min_history} drop={int(drop_in_progress)}",
                 file=sys.stderr, flush=True,
             )
+            close_col = "close" if "close" in df.columns else (
+                "Close" if "Close" in df.columns else None)
+            if close_col:
+                tail = ", ".join(
+                    f"{_ts}:{_row[close_col]}" for _ts, _row in df.tail(3).iterrows()
+                )
+                print(
+                    f"[TD] BARS | symbol={self.symbol} tail={tail}",
+                    file=sys.stderr, flush=True,
+                )
 
         # ── 2. Ensure OHLCV columns ──
         col_map = {
@@ -1121,6 +1126,20 @@ class TdSequentialStrategy(Strategy):
         tdst_filter = bool(self._td_params.get("tdst_filter", False))
         support = signal.get("tdst_support")
 
+        # ── 贝叶斯闸门（2026-08-31，回测侧，默认关）──
+        # gate_enabled 由回测 driver 注入 parameters（WebUI 开关）；td_live
+        # 不注入 → 实盘恒 False。负反馈只拦 BUY，SELL/止损/止盈不碰。
+        gate_blocked = False
+        if self.parameters.get("gate_enabled", False):
+            gate_blocked = self._gate_blocked_for(df)
+            if gate_blocked:
+                self._bump_skip("gate_blocked")
+                print(
+                    f"[TD] GATE BLOCK | symbol={self.symbol} 贝叶斯闸门拦截"
+                    f"（F1×时段后验 ≥ 阈值禁买）",
+                    file=sys.stderr, flush=True,
+                )
+
         # ── BUY signal: setup_buy >= entry_setup, score above threshold, slot available ──
         batch_manager = getattr(self, "batch_manager", None)
         batch_mode = batch_manager is not None
@@ -1181,6 +1200,10 @@ class TdSequentialStrategy(Strategy):
             # 未重置，或 cd_triggered 且 cd_buy 仍在触发区——cd 13 补买拦截）
             # → 不 BUY；reset=True（计数变小）→ 新周期允许
             and not (cycle_blocked)
+            # 贝叶斯闸门（2026-08-31，回测侧，默认关）：gate_enabled 由回测
+            # driver 注入 parameters（WebUI 开关）；td_live 不注入 → 实盘恒 False。
+            # 负反馈只拦不买；SELL/止损/止盈不碰。
+            and not (gate_blocked)
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
@@ -1385,11 +1408,14 @@ class TdSequentialStrategy(Strategy):
                 return
 
         # ── No signal this bar ──
-        print(
-            f"[TD] HOLD | symbol={self.symbol} price={price:.4f} setup_buy={setup_buy} "
-            f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}",
-            file=sys.stderr, flush=True,
-        )
+        # 2026-08-31：回测（live_mode=False）不打印——与 [TD] BARS 同源
+        # stderr 背压问题；回测每 bar 每标的 1 行 HOLD ≈ 1.4 万行。
+        if self.parameters.get("live_mode"):
+            print(
+                f"[TD] HOLD | symbol={self.symbol} price={price:.4f} setup_buy={setup_buy} "
+                f"setup_sell={setup_sell} cd_sell={cd_sell} score={score:.1f}",
+                file=sys.stderr, flush=True,
+            )
 
     # ── 分批平仓（批次=子钱包，第一版）──────────────────────────────
     def _handle_batch_exits(
@@ -1535,6 +1561,47 @@ class TdSequentialStrategy(Strategy):
                     self.logger.info(
                         f"TD CD EXIT SKIP | symbol={self.symbol} 无 open 批次（cd_sell={cd_sell}）"
                     )
+
+    def _gate_blocked_for(self, df) -> bool:
+        """贝叶斯闸门（2026-08-31，回测侧）：F1（3h lookback）× SESSION → P(被套)。
+
+        gate_enabled 由回测 driver 注入 parameters（WebUI 开关）；td_live
+        不注入 → 实盘恒 False。负反馈只拦 BUY；SELL/止损/止盈不碰。
+
+        F1 数据不足（NaN，如 1m 窗口 < 181 根）→ fail-open 不拦 + gate_na
+        计数（诊断；用户拍板「数据不足不作惩罚」）。与 gate.zone_from_prob
+        的 NaN→red 语义不同——zone 的 fail-closed 留给有值但高危的场景。
+        """
+        if not self.parameters.get("gate_enabled", False):
+            return False
+        try:
+            from nanobot_quant.environment.sensors import compute_f1, f1_lookback_for, ATR_N
+            from nanobot_quant.environment.bayes import session_code
+            from nanobot_quant.environment.gate import load_default_gate
+            import numpy as np
+        except ImportError:
+            return False
+        lookback = f1_lookback_for(self._timestep)
+        # 注意：compute_f1 第二位置参数是 atr_n（默认 20），lookback 必须
+        # 显式按关键字传——传错位置会把 3h lookback 当成 ATR 周期（曾致
+        # 窗口不足时 F1 非 NaN 且语义错误，2026-08-31）
+        f1 = compute_f1(df, atr_n=ATR_N, lookback=lookback)
+        if f1 is None or len(f1) == 0:
+            self._bump_skip("gate_na")
+            return False
+        v = float(f1.iloc[-1])
+        if not np.isfinite(v):
+            self._bump_skip("gate_na")
+            return False
+        ts = getattr(self, "_current_bar_time", None)
+        if ts is None:
+            self._bump_skip("gate_na")
+            return False
+        sess = int(session_code(pd.DatetimeIndex([pd.Timestamp(ts).tz_localize("UTC")]))[0])
+        gate = load_default_gate()
+        post = gate.predict({"F1": v, "SESSION": sess})
+        red_min = float(self.parameters.get("gate_red_min", 0.45) or 0.45)
+        return post >= red_min
 
     def _bump_skip(self, key: str) -> None:
         """SKIP 拦截计数（跨 bar/标的累计）。"""

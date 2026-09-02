@@ -135,6 +135,8 @@
       <div class="ov-item"><label for="momentum_exit">高9动能判断</label><select id="momentum_exit"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="td_sell_all">高9全平</label><select id="td_sell_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="cd_exit_all">cd13全平</label><select id="cd_exit_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
+      <div class="ov-item"><label for="gate_enabled">贝叶斯闸门</label><select id="gate_enabled"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
+      <div class="ov-item"><label for="gate_red_min">闸门禁买阈值</label><input type="number" id="gate_red_min" min="0.05" max="0.9" step="0.05" placeholder="0.45"></div>
     </div>
   </details>
   <div class="actions">
@@ -231,7 +233,8 @@ const OV_KEYS = ["entry_setup","entry_countdown","cd_entry_setup_gap",
   "exit_setup","exit_countdown","min_hold_bars",
   "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
   "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
-  "momentum_exit","td_sell_all","cd_exit_all"];
+  "momentum_exit","td_sell_all","cd_exit_all",
+  "gate_enabled","gate_red_min"];
 
 function sceneValue(scene, key) {
   const cfg = SCENES[scene] || {};
@@ -275,12 +278,13 @@ function collectOverrides() {
   const numKeys = ["entry_setup","entry_countdown","cd_entry_setup_gap",
     "exit_setup","exit_countdown","min_hold_bars",
     "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
-    "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value"];
+    "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
+    "gate_red_min"];
   numKeys.forEach(id => {
     const v = $(id).value;
     if (v !== "") overrides[id] = parseFloat(v);
   });
-  ["momentum_exit","td_sell_all","cd_exit_all"].forEach(id => {
+  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled"].forEach(id => {
     const v = $(id).value;
     if (v !== "") overrides[id] = v === "on";
   });
@@ -407,6 +411,8 @@ const SKIP_LABELS = {
   cd_exit_min_hold: "cd13 min_hold 拦",
   cd_exit_no_open: "cd13 无持仓",
   batch_wait: "周期门控/波锁等待",
+  gate_blocked: "贝叶斯闸门拦截",
+  gate_na: "闸门数据不足(NA)",
 };
 function skipBox(skips) {
   if (!skips || !Object.keys(skips).length) return "";
