@@ -117,6 +117,7 @@
   <details open class="ov-block">
     <summary>⚙️ 参数覆盖（留空 = 跟随场景配置 · 仅本次回测生效，不回写实盘）</summary>
     <div class="ov-grid">
+      <div class="ov-item"><label for="sleeptime">周期</label><select id="sleeptime"><option value="">（跟随场景）</option></select><span class="f-hint">回测专用周期，不影响实盘</span></div>
       <div class="ov-item"><label for="entry_setup">入场 Setup 阈值</label><input type="number" id="entry_setup" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="entry_countdown">入场 Countdown 阈值</label><input type="number" id="entry_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="cd_entry_setup_gap">CD 入场时效门槛(bar)</label><input type="number" id="cd_entry_setup_gap" min="0" max="300" step="1" placeholder="场景值"></div>
@@ -159,6 +160,7 @@
 <script>
 const SCENES = __SCENES__;
 const SYMBOLS = __SYMBOLS__;
+const PERIODS = __PERIODS__;
 
 // datetime-local（浏览器本地时区）→ UTC ISO。回测区间按 UTC 语义，
 // 避免服务器时区与用户本地时区不一致导致区间错位（2026-08-28 实测）。
@@ -229,7 +231,7 @@ function initForm() {
 }
 
 // 覆盖字段 → 场景配置键（与 collectOverrides 的字段一一对应）
-const OV_KEYS = ["entry_setup","entry_countdown","cd_entry_setup_gap",
+const OV_KEYS = ["sleeptime","entry_setup","entry_countdown","cd_entry_setup_gap",
   "exit_setup","exit_countdown","min_hold_bars",
   "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
   "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
@@ -290,6 +292,8 @@ function collectOverrides() {
   });
   const eo = $("exit_order").value;
   if (eo !== "") overrides.exit_order = eo;
+  const st = $("sleeptime").value;
+  if (st !== "") overrides.sleeptime = st;
   return overrides;
 }
 
@@ -551,7 +555,20 @@ async function loadRun(runId) {
   }
 }
 
+// 周期下拉选项（权威来源 = data_sources.periods.PERIODS，随 __PERIODS__ 注入）
+function fillPeriodOptions() {
+  const sel = $("sleeptime");
+  if (!sel || sel.dataset.filled) return;
+  PERIODS.forEach(p => {
+    const o = document.createElement("option");
+    o.value = p; o.textContent = p;
+    sel.appendChild(o);
+  });
+  sel.dataset.filled = "1";
+}
+
 initForm();
+fillPeriodOptions();
 loadRuns();
 
 // 成交明细行（实盘交易记录口径：时间/场景/标的/方向/数量/策略价/成交价/滑点/slot/状态/原因）
