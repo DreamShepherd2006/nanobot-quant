@@ -159,7 +159,11 @@ class BacktestDriver:
         self.start_ts = start_ts
         self.end_ts = end_ts
 
-        # 3. 时间粒度（场景周期 → K 线粒度）
+        # 3. 时间粒度（场景周期 → K 线粒度；回测覆盖 sleeptime 优先——
+        #    2026-09-03：仅本次回测生效，不回写实盘 exec_params）
+        _period_ov = self.overrides.get("sleeptime")
+        if _period_ov:
+            self.scene_cfg["sleeptime"] = str(_period_ov)
         self.timestep = _timestep_for(self.scene_cfg.get("sleeptime", "15m"))
 
         # 4. TD 窗口（min_history）：td_bars（默认 120）——数据不足全程 SKIP

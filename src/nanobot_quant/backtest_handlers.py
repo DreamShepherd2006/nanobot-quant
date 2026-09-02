@@ -20,6 +20,8 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
+from nanobot_quant.data_sources.periods import PERIODS
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 _PAGE_HTML: str = ""
@@ -56,6 +58,8 @@ async def _body(request: Request) -> dict | None:
 #:   "flat"  = exec_params 平铺全局键（min_hold_bars/stop_loss_pct/take_profit_pct）
 #:   "scene" = 场景默认值（DEFAULT_SCENES，策略类默认回退）
 _OV_FIELDS: dict[str, tuple] = {
+    # 周期（场景字段 sleeptime 即 K 线粒度；留空 = 跟随场景，覆盖仅本次回测）
+    "sleeptime": ("scene", "sleeptime", "15m"),
     "entry_setup": ("td", "entry_setup", 9),
     "entry_countdown": ("td", "entry_countdown", 13),
     "cd_entry_setup_gap": ("scene", None, 5),
@@ -168,9 +172,9 @@ def _recent_runs(limit: int = 20) -> list[dict]:
 
 def _render_page(scenes: dict, symbols: list[str]) -> str:
     return (
-        _PAGE_HTML.replace("__SCENES__", json.dumps(scenes, ensure_ascii=False)).replace(
-            "__SYMBOLS__", json.dumps(symbols, ensure_ascii=False)
-        )
+        _PAGE_HTML.replace("__SCENES__", json.dumps(scenes, ensure_ascii=False))
+        .replace("__SYMBOLS__", json.dumps(symbols, ensure_ascii=False))
+        .replace("__PERIODS__", json.dumps(list(PERIODS), ensure_ascii=False))
     )
 
 
