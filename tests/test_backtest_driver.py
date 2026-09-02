@@ -194,6 +194,23 @@ def test_scene_missing_fail_closed():
         BacktestDriver(scene="nope", params=_params())
 
 
+def test_scene_period_override(tmp_path):
+    """回测覆盖周期（overrides.sleeptime）改变数据粒度与场景副本，
+    不留覆盖时跟随场景周期；非法周期 fail-closed（2026-09-03）。"""
+    # 覆盖周期：仅本次回测生效（driver.scene_cfg 是 exec_params scenes 的副本，
+    # 修改不落盘；实盘 exec_params 不变）
+    driver = BacktestDriver(scene="mid", params=_params(), overrides={"sleeptime": "5m"})
+    assert driver.timestep == "5m"
+    assert driver.scene_cfg["sleeptime"] == "5m"
+    # 不留覆盖 → 场景周期（_params() 的 mid 场景为 15m）
+    d2 = BacktestDriver(scene="mid", params=_params())
+    assert d2.timestep == "15m"
+    assert d2.scene_cfg["sleeptime"] == "15m"
+    # 非法周期 → ValueError（_timestep_for fail-closed）
+    with pytest.raises(ValueError, match="周期"):
+        BacktestDriver(scene="mid", params=_params(), overrides={"sleeptime": "foo"})
+
+
 def test_symbols_and_batches_override(tmp_path):
     """CLI 覆盖：symbols/batches 覆盖场景配置，不影响实盘文件。"""
     driver = BacktestDriver(
