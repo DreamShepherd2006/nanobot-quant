@@ -37,10 +37,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=40]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@6f946c7f \
+RUN echo "[bust=46]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-legion.git@9a3d396f \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @6f946c7f (upstream staging — PR #49 回测页路由+业务入口, bust=40)"
+    && echo "✅ nanobot-legion @9a3d396f (upstream staging — PR #50 OKX 期权链路由挂载+业务入口, bust=46)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
@@ -73,11 +73,11 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=335]" && pip install --break-system-packages \
+RUN echo "[bust=340]" && pip install --break-system-packages \
         'mcp<2' \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@f6e89c7 \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@af90be5 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @f6e89c7 (upstream main — PR #293 OKX CEX 凭证子账户级+只读通道, bust=335; mcp<2 pin — mcp 2.x FastMCP 改名不兼容) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @af90be5 (upstream main — PR #295 OKX 期权链页批次 B, bust=340; mcp<2 pin) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
