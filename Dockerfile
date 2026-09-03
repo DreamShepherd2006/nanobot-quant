@@ -77,7 +77,7 @@ RUN echo "[bust=340]" && pip install --break-system-packages \
         'mcp<2' \
         git+https://github.com/DreamShepherd2006/nanobot-quant.git@af90be5 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @f6e89c7 (upstream main — PR #293 OKX CEX 凭证子账户级+只读通道, bust=335; mcp<2 pin — mcp 2.x FastMCP 改名不兼容) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @af90be5 (upstream main — PR #295 OKX 期权链页批次 B, bust=340; mcp<2 pin) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
