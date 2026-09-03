@@ -164,7 +164,8 @@ def _fields_for(current: dict) -> list:
     """
     max_subs = _parse_max_subs(current.get(_MAX_KEY)) or _DEFAULT_MAX_SUBS
     fields: list = [
-        FieldSpec(_MAX_KEY, "子账号上限", type="text", placeholder="默认 10"),
+        FieldSpec(_MAX_KEY, "子账号上限", type="text", placeholder="默认 10",
+                  required=False),
     ]
     for i in range(max_subs):
         name = _strip(current.get(f"sub_{i}_name"))
@@ -174,13 +175,15 @@ def _fields_for(current: dict) -> list:
         group = f"🤖 子账号 {i + 1}"
         fields += [
             FieldSpec(f"sub_{i}_name", "别名", type="text", group=group,
-                      placeholder="OKX 子账户名（可留空）"),
+                      placeholder="OKX 子账户名（可留空）", required=False),
             FieldSpec(f"sub_{i}_uid", "UID", type="text", group=group,
-                      placeholder="子账户 UID（18 位数字）"),
-            FieldSpec(f"sub_{i}_api_key", "API Key", group=group,
+                      placeholder="子账户 UID（18 位数字）", required=False),
+            FieldSpec(f"sub_{i}_api_key", "API Key", group=group, required=False,
                       placeholder="该子账户的 API Key，留空=保留已存"),
-            FieldSpec(f"sub_{i}_secret_key", "Secret Key", group=group),
-            FieldSpec(f"sub_{i}_passphrase", "Passphrase", group=group),
+            FieldSpec(f"sub_{i}_secret_key", "Secret Key", group=group,
+                      required=False),
+            FieldSpec(f"sub_{i}_passphrase", "Passphrase", group=group,
+                      required=False),
         ]
     return fields
 
@@ -243,7 +246,7 @@ OKX_CEX_SPEC = CredentialSpec(
     icon="🔑",
     fields=[
         FieldSpec("max_sub_accounts", "子账号上限", type="text",
-                  placeholder="默认 10"),
+                  placeholder="默认 10", required=False),
     ],
     docs_url="https://www.okx.com/account/my-api",
     normalize=_normalize_okx_cex_form,
