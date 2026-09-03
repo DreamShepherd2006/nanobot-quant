@@ -26,6 +26,10 @@ try:
 except ImportError:
     pass
 try:
+    from . import okx_cex_spec  # noqa: F401
+except ImportError:
+    pass
+try:
     from . import mcp_spec  # noqa: F401
 except ImportError:
     pass
