@@ -1,115 +1,40 @@
-"""OKX v5 signed REST client — private account APIs (options trading line).
+"""OKX CEX 私有账户只读 API — 期权线批次 A（基于官方 python-okx SDK）。
 
-Lightweight hand-rolled signing (no official SDK dependency), following the
-project convention for OKX/Gate REST adapters (``okx_cex_data.py`` uses plain
-REST for public market data; this module adds the private signed layer on top).
+批次 A 原为手写 HMAC 签名客户端；2026-09-04 按用户偏好（交易所接入优先
+官方 SDK，见 :mod:`okx_sdk`）整体迁移到官方 ``okx==1.0.9`` 的
+``Account`` API。对外函数签名与返回形状保持不变，调用方零改动。
 
-Signature rule (OKX v5):
-    timestamp = ISO-8601 UTC with millisecond precision + ``Z``
-    sign      = base64( HMAC_SHA256(secret, timestamp + method + requestPath + body) )
-    requestPath includes the query string (e.g. ``/api/v5/account/positions?instType=OPTION``)
-Headers: ``OK-ACCESS-KEY`` / ``OK-ACCESS-SIGN`` / ``OK-ACCESS-TIMESTAMP`` /
-         ``OK-ACCESS-PASSPHRASE``
-
-Only **read-only** endpoints are exposed in this batch (account config /
-balance / positions / trade-fee). Order placement lands in a later batch and
-will reuse :func:`okx_request`.
+只读端点（config / balance / positions / trade-fee）；卖 put 下单在批次 C
+经官方 ``Trade`` API 加入。
 """
 
 from __future__ import annotations
 
-import base64
-import datetime
-import hashlib
-import hmac
 from typing import Optional
 
-import requests
-
+from nanobot_quant import okx_sdk
+from nanobot_quant.okx_sdk import OkxSdkError
 from .okx_cex_credentials import get_okx_cex_credentials
-
-_BASE_URL = "https://www.okx.com"
-_TIMEOUT = 15
 
 #: instType / instFamily used by the options line (BTC-USD & ETH-USD are the
 #: only option families OKX lists; cf. options research notes 2026-09-03).
 OPTION_FAMILIES = ("BTC-USD", "ETH-USD")
 
 
-# ── signing helpers ──────────────────────────────────────────────
+def _account(creds: Optional[dict] = None):
+    """按（可选的调用方覆盖）凭证取 SDK Account 实例。
 
-def _timestamp() -> str:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-
-def _sign(secret: str, ts: str, method: str, path: str, body: str) -> str:
-    msg = ts + method + path + body
-    digest = hmac.new(secret.encode(), msg.encode(), hashlib.sha256).digest()
-    return base64.b64encode(digest).decode()
-
-
-def _headers(creds: dict, method: str, path: str, body: str = "") -> dict:
-    ts = _timestamp()
-    return {
-        "OK-ACCESS-KEY": creds["api_key"],
-        "OK-ACCESS-SIGN": _sign(creds["secret_key"], ts, method, path, body),
-        "OK-ACCESS-TIMESTAMP": ts,
-        "OK-ACCESS-PASSPHRASE": creds["passphrase"],
-        "Content-Type": "application/json",
-        "User-Agent": "nanobot-quant/0.1",
-    }
-
-
-# ── core request ─────────────────────────────────────────────────
-
-def okx_request(
-    method: str,
-    path: str,
-    creds: Optional[dict] = None,
-    body: Optional[dict] = None,
-    timeout: int = _TIMEOUT,
-) -> dict:
-    """Signed request to the OKX v5 private API.
-
-    Returns the JSON ``data`` payload when ``code == "0"``; raises
-    ``RuntimeError`` on API error codes and on transport/HTTP errors.
+    creds=None → 默认取 okx_cex 凭证存储的首个完整子账户（主行）。
     """
     creds = get_okx_cex_credentials(creds)
-    body_str = ""
-    if body:
-        body_str = _json_dumps(body)
-    headers = _headers(creds, method, path, body_str)
-    url = _BASE_URL + path
-    try:
-        resp = requests.request(
-            method, url, headers=headers, data=body_str or None, timeout=timeout
-        )
-    except requests.RequestException as exc:  # network errors
-        raise RuntimeError(f"OKX request failed: {exc}") from exc
-    if resp.status_code >= 400:
-        raise RuntimeError(f"OKX HTTP {resp.status_code}: {resp.text[:300]}")
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise RuntimeError(f"OKX non-JSON response: {resp.text[:200]}") from exc
-    code = payload.get("code")
-    if code != "0":
-        raise RuntimeError(f"OKX {code} {payload.get('msg', '')}".strip())
-    return payload.get("data")
-
-
-def _json_dumps(body: dict) -> str:
-    import json
-
-    return json.dumps(body)
+    return okx_sdk.account_for(creds)
 
 
 # ── read-only account endpoints ──────────────────────────────────
 
 def get_account_config(creds: Optional[dict] = None) -> dict:
     """GET /api/v5/account/config — account level / permissions / uid."""
-    data = okx_request("GET", "/api/v5/account/config", creds=creds)
+    data = okx_sdk.check(_account(creds).get_config())
     return (data or [{}])[0]
 
 
@@ -118,7 +43,7 @@ def get_balance(creds: Optional[dict] = None) -> dict:
 
     Returns ``{"total_eq": float, "details": [{"ccy", "cash", "avail", "frozen", "eq"}, ...]}``
     """
-    data = okx_request("GET", "/api/v5/account/balance", creds=creds)
+    data = okx_sdk.check(_account(creds).get_balance())
     row = (data or [{}])[0]
     details = []
     for d in row.get("details") or []:
@@ -138,9 +63,7 @@ def get_positions(
     inst_type: str = "OPTION", creds: Optional[dict] = None
 ) -> list:
     """GET /api/v5/account/positions — current positions (default options)."""
-    data = okx_request(
-        "GET", f"/api/v5/account/positions?instType={inst_type}", creds=creds
-    )
+    data = okx_sdk.check(_account(creds).get_positions(instType=inst_type))
     return data if isinstance(data, list) else []
 
 
@@ -148,11 +71,8 @@ def get_trade_fee(
     inst_family: str = "BTC-USD", creds: Optional[dict] = None
 ) -> dict:
     """GET /api/v5/account/trade-fee — maker/taker fee rate for a family."""
-    data = okx_request(
-        "GET",
-        f"/api/v5/account/trade-fee?instType=OPTION&instFamily={inst_family}",
-        creds=creds,
-    )
+    data = okx_sdk.check(_account(creds).get_trade_fee(
+        instType="OPTION", instFamily=inst_family))
     return (data or [{}])[0]
 
 

@@ -9,6 +9,7 @@ description = "AI 量化交易 Squad agent 部署层"
 requires-python = ">=3.12"
 dependencies = [
     "gate-api==7.2.123",
+    "okx==1.0.9",
 ]
 
 [tool.setuptools]

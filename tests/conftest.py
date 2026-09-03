@@ -373,6 +373,75 @@ except ImportError:
         setattr(_gate, _name, _obj)
     sys.modules.setdefault("gate_api", _gate)
 
+try:
+    import okx  # noqa: F401
+except ImportError:
+    # okx_sdk (期权线统一接入层) imports okx.{public,market,account} at
+    # module level. The CI/test container does not install the official
+    # python-okx SDK, so inject minimal stubs: classes carry the real
+    # 1.0.9 constructor signatures + API_URL attribute; method bodies are
+    # never exercised (tests monkeypatch okx_sdk.public/market/account_for).
+    _okx = types.ModuleType("okx")
+
+    class _Public:
+        API_URL = "https://www.okx.com"
+
+        def __init__(self, flag="0", **kwargs):
+            self.flag = flag
+
+        def get_instruments(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+        def get_opt_summary(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+    class _Market:
+        API_URL = "https://www.okx.com"
+
+        def __init__(self, flag="0", **kwargs):
+            self.flag = flag
+
+        def get_ticker(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+        def get_tickers(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+        def get_history_candles(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+    class _Account:
+        API_URL = "https://www.okx.com"
+
+        def __init__(self, key="", secret="", passphrase="", flag="0", **kwargs):
+            self.key = key
+            self.secret = secret
+            self.passphrase = passphrase
+            self.flag = flag
+
+        def get_config(self):
+            return {"code": "0", "data": [], "msg": ""}
+
+        def get_balance(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+        def get_positions(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+        def get_trade_fee(self, **kwargs):
+            return {"code": "0", "data": [], "msg": ""}
+
+    _pub_mod = types.ModuleType("okx.public")
+    _pub_mod.Public = _Public
+    _mkt_mod = types.ModuleType("okx.market")
+    _mkt_mod.Market = _Market
+    _acc_mod = types.ModuleType("okx.account")
+    _acc_mod.Account = _Account
+    sys.modules.setdefault("okx", _okx)
+    sys.modules.setdefault("okx.public", _pub_mod)
+    sys.modules.setdefault("okx.market", _mkt_mod)
+    sys.modules.setdefault("okx.account", _acc_mod)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_batches_path(tmp_path, monkeypatch):
