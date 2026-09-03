@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📈 OKX 期权链 — 业务管理</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:1080px; margin:0 auto; }
+  h1 { font-size:1.4em; margin-bottom:4px; }
+  .subtitle { color:#888; font-size:.86em; margin-bottom:14px; }
+  .card { background:#fff; border-radius:8px; padding:16px; margin-bottom:14px; border:1px solid #e0e0e0; }
+  .card h3 { font-size:1em; margin-bottom:8px; color:#444; }
+  .ctl { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .ctl label { font-size:.86em; color:#555; font-weight:600; }
+  select, input { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
+  input { width:86px; text-align:right; }
+  button { padding:7px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
+  .btn-primary { background:#1565c0; color:#fff; }
+  .btn-primary:hover { background:#0d47a1; }
+  .btn-primary:disabled { background:#90caf9; cursor:not-allowed; }
+  .banner { border-radius:6px; padding:10px 14px; margin:10px 0; font-size:.88em; display:none; }
+  .banner.err { display:block; background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; }
+  .banner.loading { display:block; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; }
+  .summary { display:flex; gap:18px; flex-wrap:wrap; font-size:.9em; }
+  .summary .k { color:#888; font-size:.78em; }
+  .summary .v { font-weight:700; font-size:1.15em; }
+  .grp { margin-top:14px; }
+  .grp-title { font-weight:700; font-size:.95em; margin:6px 0; display:flex; align-items:center; gap:10px; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:.76em; background:#eef2f7; color:#555; }
+  table { width:100%; border-collapse:collapse; font-size:.82em; }
+  th, td { padding:4px 6px; border-bottom:1px solid #f0f0f0; text-align:right; white-space:nowrap; }
+  th { background:#fafafa; color:#555; font-weight:600; }
+  th:first-child, td:first-child { text-align:left; position:sticky; left:0; background:#fff; }
+  thead th { position:sticky; top:0; z-index:1; }
+  .sec { text-align:center; font-weight:700; }
+  .sec.call { color:#2e7d32; }
+  .sec.put { color:#c62828; }
+  td.na, td .na { color:#ccc; }
+  .apr { font-weight:700; color:#1565c0; }
+  .apr.hi { color:#e65100; }
+  .note { color:#aaa; font-size:.78em; margin-top:10px; line-height:1.5; }
+  .empty { color:#aaa; font-size:.88em; padding:10px 0; }
+  .hint { color:#888; font-size:.8em; margin-left:6px; }
+</style>
+</head>
+<body>
+<h1>📈 OKX 期权链</h1>
+<div class="subtitle">卖 put 定价辅助（批次 B · 只读）— 数据源 OKX 公共端点。链 + IV + 现货 HV；下单能力在批次 C 交付。</div>
+
+<div class="card">
+  <div class="ctl">
+    <label>标的</label>
+    <select id="family">
+      <option value="BTC-USD">BTC-USD</option>
+      <option value="ETH-USD">ETH-USD</option>
+    </select>
+    <label>到期</label>
+    <select id="expiry">
+      <option value="">近 3 个到期（默认）</option>
+    </select>
+    <label>HV 窗口</label>
+    <select id="hvDays">
+      <option value="30" selected>30 天</option>
+      <option value="7">7 天</option>
+      <option value="14">14 天</option>
+      <option value="60">60 天</option>
+      <option value="90">90 天</option>
+    </select>
+    <label>strike 范围</label>
+    <select id="range">
+      <option value="20" selected>现价 ±20%</option>
+      <option value="10">±10%</option>
+      <option value="30">±30%</option>
+      <option value="50">±50%</option>
+      <option value="">全部</option>
+    </select>
+    <button class="btn-primary" id="loadBtn">🔄 刷新</button>
+    <span class="hint" id="updated"></span>
+  </div>
+  <div class="banner err" id="errBanner"></div>
+  <div class="banner loading" id="loadingBanner">⏳ 拉取 OKX 期权链…</div>
+</div>
+
+<div class="card" id="summaryCard" style="display:none">
+  <h3>市场概览</h3>
+  <div class="summary" id="summary"></div>
+</div>
+
+<div class="card" id="chainCard" style="display:none">
+  <div id="groups"></div>
+  <div class="note" id="priceNote"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const famSel = $("family"), expSel = $("expiry"), hvSel = $("hvDays"),
+      rngSel = $("range"), btn = $("loadBtn");
+
+function fmt(v, d) { return (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(d); }
+function pct(v) { return v === null || v === undefined ? "—" : fmt(v, 2) + "%"; }
+function bidAsk(b, a) {
+  if (b === null && a === null) return '<span class="na">—</span>';
+  return fmt(b, 4) + " / " + fmt(a, 4);
+}
+
+async function loadExpiries() {
+  const fam = famSel.value;
+  expSel.innerHTML = '<option value="">近 3 个到期（默认）</option>';
+  try {
+    const r = await fetch("/config/okx-options/expiries?family=" + fam);
+    const j = await r.json();
+    if (j.ok && j.expiries) {
+      for (const e of j.expiries) {
+        const opt = document.createElement("option");
+        opt.value = e.exp_ms;
+        opt.textContent = e.date + "（" + e.days + " 天后）";
+        expSel.appendChild(opt);
+      }
+    }
+  } catch (e) { /* 到期列表失败不阻塞主加载 */ }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function render(data) {
+  const spot = data.spot, hv = data.hv || {};
+  $("summaryCard").style.display = "";
+  const spotUsd = spot ? "$" + Number(spot).toLocaleString("en-US", {maximumFractionDigits: 0}) : "—";
+  const hvHtml = hv.hv_pct !== null && hv.hv_pct !== undefined
+      ? fmt(hv.hv_pct, 1) + "%（年化 · " + hv.days + " 个日收益）" : "—";
+  $("summary").innerHTML =
+    '<div><div class="k">现货（' + esc(data.spot_inst) + '）</div><div class="v">' + spotUsd + '</div></div>' +
+    '<div><div class="k">现货 ' + esc(hv.days) + 'D HV（年化）</div><div class="v">' + hvHtml + '</div></div>' +
+    '<div><div class="k">每张面值</div><div class="v">' + fmt(data.lot_coin, 4) + ' ' + esc(data.family.split("-")[0]) + '</div></div>';
+  const wrap = $("groups");
+  if (!data.groups || !data.groups.length) {
+    wrap.innerHTML = '<div class="empty">该选择下无合约（或均无报价）</div>';
+    $("chainCard").style.display = "";
+    $("priceNote").textContent = data.price_note || "";
+    return;
+  }
+  let html = "";
+  for (const g of data.groups) {
+    html += '<div class="grp"><div class="grp-title">📅 ' + g.date +
+            ' <span class="tag">' + g.days + ' 天后到期</span> <span class="tag">' +
+            g.rows.length + ' 档</span></div>';
+    html += '<div style="overflow-x:auto"><table><thead><tr>' +
+      '<th>Strike</th>' +
+      '<th colspan="3" class="sec call">Call</th>' +
+      '<th colspan="3" class="sec put">Put（卖 put 视角）</th>' +
+      '<th class="sec put">权利金/张</th><th class="sec put">年化</th>' +
+      '</tr><tr>' +
+      '<th></th>' +
+      '<th>bid/ask</th><th>IV</th><th>Δ</th>' +
+      '<th>bid/ask</th><th>IV</th><th>Δ</th>' +
+      '<th>USD</th><th>率</th>' +
+      '</tr></thead><tbody>';
+    for (const r of g.rows) {
+      const c = r.C, p = r.P;
+      html += '<tr><td>' + Number(r.strike).toLocaleString("en-US") + '</td>' +
+        '<td>' + bidAsk(c.bid, c.ask) + '</td><td>' + pct(c.iv) + '</td><td>' + fmt(c.delta, 3) + '</td>' +
+        '<td>' + bidAsk(p.bid, p.ask) + '</td><td>' + pct(p.iv) + '</td><td>' + fmt(p.delta, 3) + '</td>' +
+        '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
+        '<td>' + (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+  }
+  wrap.innerHTML = html;
+  $("chainCard").style.display = "";
+  $("priceNote").textContent = data.price_note || "";
+}
+
+async function load() {
+  btn.disabled = true;
+  $("errBanner").style.display = "none";
+  $("loadingBanner").style.display = "block";
+  $("chainCard").style.display = "none";
+  const fam = famSel.value, exp = expSel.value,
+        hv = hvSel.value, rng = rngSel.value;
+  let url = "/config/okx-options/chain?family=" + fam + "&hv_days=" + hv;
+  if (exp) url += "&expiries=" + exp;
+  if (rng !== "") url += "&range=" + rng;
+  try {
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || ("HTTP " + r.status));
+    render(j.data);
+    $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", {hour12: false});
+  } catch (e) {
+    $("errBanner").textContent = "❌ " + e.message;
+    $("errBanner").style.display = "block";
+  } finally {
+    $("loadingBanner").style.display = "none";
+    btn.disabled = false;
+  }
+}
+
+famSel.addEventListener("change", () => { loadExpiries(); load(); });
+expSel.addEventListener("change", load);
+hvSel.addEventListener("change", load);
+rngSel.addEventListener("change", load);
+btn.addEventListener("click", load);
+loadExpiries();
+load();
+</script>
+</body>
+</html>
