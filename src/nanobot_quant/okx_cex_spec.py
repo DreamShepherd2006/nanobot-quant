@@ -156,9 +156,16 @@ def _denormalize_okx_cex_form(data: dict) -> dict:
 # ── Dynamic field builder & form toolbar ─────────────────────────
 
 def _fields_for(current: dict) -> list:
-    """Render existing sub-account rows as editable groups."""
+    """Render the sub-account limit field + one row per stored sub-account.
+
+    Rows are only rendered when they already have a name/uid (never secrets —
+    secret-style fields round-trip as blank + fallback-on-save). Unconfigured
+    rows are added client-side via the 「➕ 添加子账号」button.
+    """
     max_subs = _parse_max_subs(current.get(_MAX_KEY)) or _DEFAULT_MAX_SUBS
-    fields: list = []
+    fields: list = [
+        FieldSpec(_MAX_KEY, "子账号上限", type="text", placeholder="默认 10"),
+    ]
     for i in range(max_subs):
         name = _strip(current.get(f"sub_{i}_name"))
         uid = _strip(current.get(f"sub_{i}_uid"))

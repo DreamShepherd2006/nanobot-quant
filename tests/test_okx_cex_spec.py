@@ -139,6 +139,7 @@ def test_fields_for_emits_rows_until_first_empty():
             "sub_1_name": "bot2", "sub_1_uid": "222"}
     fields = m._fields_for(flat)
     names = [f.name for f in fields]
+    assert names[0] == "max_sub_accounts"  # limit field always rendered
     assert "sub_0_uid" in names
     assert "sub_1_passphrase" in names
     assert "sub_2_uid" not in names  # stops after first empty row
@@ -148,6 +149,7 @@ def test_fields_for_row_includes_all_five_fields():
     flat = {"max_sub_accounts": "5", "sub_0_name": "bot1", "sub_0_uid": "111"}
     fields = m._fields_for(flat)
     assert [f.name for f in fields] == [
+        "max_sub_accounts",
         "sub_0_name", "sub_0_uid", "sub_0_api_key",
         "sub_0_secret_key", "sub_0_passphrase",
     ]
