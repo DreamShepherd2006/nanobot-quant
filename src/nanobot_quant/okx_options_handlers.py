@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant import okx_options_data as od
-from nanobot_quant.okx_options_data import OkxOptionsError
+from nanobot_quant.okx_sdk import OkxSdkError
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -66,7 +66,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
         try:
             exps = await asyncio.to_thread(od.list_expiries, family)
-        except OkxOptionsError as e:
+        except OkxSdkError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "expiries": exps})
 
@@ -100,7 +100,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             chain = await asyncio.to_thread(
                 od.fetch_chain, family, expiries=expiries,
                 spot_pct_range=spot_pct_range, hv_days=hv_days)
-        except OkxOptionsError as e:
+        except OkxSdkError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "data": chain})
 
