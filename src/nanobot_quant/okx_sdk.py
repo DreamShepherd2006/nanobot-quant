@@ -103,9 +103,21 @@ def trade_for(creds: dict) -> Trade:
 
 
 def check(payload: dict):
-    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。"""
-    code = payload.get("code")
+    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。
+
+    OKX 下单类端点顶层 code=1（All operations failed）时真实原因在各订单的
+    ``data[0].sCode/sMsg``（如保证金不足/市价单限制），一并拼进错误消息，
+    避免页面只显示笼统的 "All operations failed"。
+    """
+    code = str(payload.get("code"))
     if code != "0":
-        msg = payload.get("msg", "")
-        raise OkxSdkError(f"OKX {code} {msg}".strip())
+        data = payload.get("data")
+        detail = ""
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            sc = str(data[0].get("sCode") or "").strip()
+            sm = str(data[0].get("sMsg") or "").strip()
+            if sc or sm:
+                detail = f" → {sc} {sm}".rstrip()
+        msg = str(payload.get("msg") or "").strip()
+        raise OkxSdkError(f"OKX {code} {msg}{detail}".strip())
     return payload.get("data")
