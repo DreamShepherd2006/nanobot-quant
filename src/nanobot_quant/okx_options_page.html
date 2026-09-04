@@ -147,12 +147,12 @@
     <div class="row" id="mRowType">
       <label>订单类型</label>
       <select id="mOrdType">
-        <option value="limit">限价（limit）</option>
-        <option value="market">市价（market）</option>
+        <option value="limit">限价（limit，px=盘口价立即成交）</option>
+        <option value="ioc">IOC（px=保底价扫单，吃不完撤）</option>
+        <option value="fok">FOK（px=保底价，全成或撤）</option>
         <option value="post_only">只做 maker（post_only）</option>
-        <option value="fok">FOK</option>
-        <option value="ioc">IOC</option>
       </select>
+      <span class="hint" id="mTypeHint">OKX 期权无纯市价单（50016）；想立即成交选 IOC 并填保底价，或限价填盘口 bid</span>
     </div>
     <div class="row" id="mRowPx" style="display:none">
       <label>限价 px</label><input type="number" id="mPx" step="any" placeholder="USD / 1 名义币">
@@ -494,7 +494,8 @@ function openCover(instId) {
 }
 $("mCancel").addEventListener("click", modalClose);
 $("mOrdType").addEventListener("change", () => {
-  $("mRowPx").style.display = ($("mOrdType").value === "market") ? "none" : "";
+  // 期权无纯市价单：px 行恒显示（limit/ioc/fok/post_only 均需价格）
+  $("mRowPx").style.display = "";
   $("mGo").textContent = modalMode === "sell" ? "确认卖出" : "确认平仓";
 });
 overlay.addEventListener("click", e => { if (e.target === overlay) modalClose(); });

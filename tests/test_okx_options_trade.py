@@ -100,10 +100,10 @@ def test_preview_open_put_limit():
     assert p["ref"]["ask"] == 110.0
 
 
-def test_preview_open_put_market_uses_ask():
-    p = ot.preview_open_put("BTC-USD_UM-260904-80000-P", 2, "market")
-    assert p["est_premium_usd"] == pytest.approx(110.0 * 0.01 * 2)
-    assert p["px"] == 110.0
+def test_preview_open_put_rejects_market():
+    # OKX 期权无纯市价单（实测 50016 instId and ordType don't match）
+    with pytest.raises(OkxSdkError, match="市价"):
+        ot.preview_open_put("BTC-USD_UM-260904-80000-P", 2, "market")
 
 
 def test_preview_rejects_call_and_bad_type():

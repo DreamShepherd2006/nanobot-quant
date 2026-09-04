@@ -169,11 +169,13 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
         raise OkxSdkError(f"{inst_id} 面值解析失败")
     q = ticker_quote(inst_id)
     ord_type = (ord_type or "limit").lower()
-    if ord_type not in ("limit", "market", "post_only", "fok", "ioc"):
-        raise OkxSdkError(f"不支持的订单类型 {ord_type}（limit/market/post_only/fok/ioc）")
-    if ord_type == "limit" and px is None:
-        raise OkxSdkError("限价单需提供价格 px")
-    ref_px = px if ord_type == "limit" else (q["ask"] or q["last"] or 0.0)
+    if ord_type not in ("limit", "post_only", "fok", "ioc"):
+        raise OkxSdkError(
+            f"不支持的订单类型 {ord_type}：OKX 期权不支持市价单（50016），"
+            "仅限价/IOC/FOK/post_only（需带价格）")
+    if px is None:
+        raise OkxSdkError("期权限价类订单需提供价格 px")
+    ref_px = px
     prem = ref_px * lot * sz
     collat = spec["strike"] * lot * sz
     exp_iso = _exp_str(spec["exp_ms"])
@@ -249,11 +251,14 @@ def _place(creds: dict, *, inst_id: str, side: str, sz: int,
         "sz": str(int(sz)),
         "tag": tag,
     }
-    if ord_type != "market":
-        if px is None:
-            raise OkxSdkError("该订单类型需提供 px")
-        # 原样透传用户价格（BTC tick=1、SOL/XAU tick=0.1），合法性交给 OKX 校验
-        params["px"] = str(px)
+    if ord_type not in ("limit", "post_only", "fok", "ioc"):
+        raise OkxSdkError(
+            f"期权不支持 ordType={ord_type}（OKX 50016，无纯市价单）——"
+            "用 limit（px=盘口价立即成交）或 IOC（px=保底价扫单）")
+    if px is None:
+        raise OkxSdkError("该订单类型需提供 px")
+    # 原样透传用户价格（BTC tick=1、SOL/XAU tick=0.1），合法性交给 OKX 校验
+    params["px"] = str(px)
     data = okx_sdk.check(okx_sdk.trade_for(creds).set_order(**params))
     row = data[0] if isinstance(data, list) and data else {}
     s_code = row.get("sCode")
@@ -296,7 +301,7 @@ def open_put(account: str, *, inst_id: str, sz: int,
         kind="open_put", account=account or a["label"], inst_id=inst_id,
         strike=spec["strike"], exp_ms=spec["exp_ms"], lot=spec["lot"],
         family=spec["inst_family"], side="sell", ord_type=ord_type,
-        px=px if ord_type == "limit" else (q["ask"] or 0.0),
+        px=px,
         sz=int(sz), status="pending", ref_bid=q["bid"], ref_ask=q["ask"],
     )
     try:
@@ -347,7 +352,7 @@ def close_put(account: str, *, inst_id: str, sz: int,
         kind="close_put", account=account or a["label"], inst_id=inst_id,
         strike=open_entry.get("strike"), exp_ms=open_entry.get("exp_ms"),
         lot=open_entry.get("lot"), family=open_entry.get("family"),
-        side="buy", ord_type=ord_type, px=px if ord_type == "limit" else (q["ask"] or 0.0),
+        side="buy", ord_type=ord_type, px=px,
         sz=int(sz), status="pending", open_id=open_entry["id"],
         ref_bid=q["bid"], ref_ask=q["ask"],
     )
