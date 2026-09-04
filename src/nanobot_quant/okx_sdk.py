@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import functools
+import types
+
 from okx._client import ResponseStatusError
 from okx.account import Account
 from okx.market import Market
@@ -26,14 +29,47 @@ Market.API_URL = _OKX_BASE
 Account.API_URL = _OKX_BASE
 Trade.API_URL = _OKX_BASE
 
+
+class OkxSdkError(RuntimeError):
+    """OKX API 错误（code != 0 / HTTP 层 4xx），携带可读信息。"""
+
+
+def _guard_okx_methods(cls: type) -> None:
+    """包装 python-okx 类的公开方法：HTTP 层 :class:`ResponseStatusError` →
+    :class:`OkxSdkError`。
+
+    参数非法等会由 send_request 直接抛 ``ResponseStatusError``（如 400/50015、
+    401/50123），发生在调用表达式求值阶段——``check()`` 包不住。统一在方法
+    层转成业务异常，handler 只须 catch OkxSdkError 即可在页面显示 OKX 错误码，
+    而不是 500。
+    """
+    for name in dir(cls):
+        if name.startswith("_"):
+            continue
+        attr = getattr(cls, name)
+        if not isinstance(attr, types.FunctionType):
+            continue
+        if getattr(attr, "_okx_guarded", False):
+            continue
+
+        @functools.wraps(attr)
+        def _w(*args, _fn=attr, **kw):
+            try:
+                return _fn(*args, **kw)
+            except ResponseStatusError as e:
+                raise OkxSdkError(str(e)) from e
+
+        _w._okx_guarded = True
+        setattr(cls, name, _w)
+
+
+for _cls in (Public, Market, Account, Trade):
+    _guard_okx_methods(_cls)
+
 _public = Public(flag="0")   # 公共数据（instruments/opt-summary）
 _market = Market(flag="0")   # 行情（tickers/candles）
 _accounts: dict[tuple, Account] = {}
 _trades: dict[tuple, Trade] = {}
-
-
-class OkxSdkError(RuntimeError):
-    """OKX API 错误（code != 0），携带可读信息。"""
 
 
 def public() -> Public:
@@ -67,14 +103,8 @@ def trade_for(creds: dict) -> Trade:
 
 
 def check(payload: dict):
-    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。
-
-    HTTP 层异常（如参数非法返回 400/50015）统一包装，避免裸抛 500。
-    """
-    try:
-        code = payload.get("code")
-    except ResponseStatusError as e:  # pragma: no cover - 由 send_request 直接抛
-        raise OkxSdkError(str(e)) from e
+    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。"""
+    code = payload.get("code")
     if code != "0":
         msg = payload.get("msg", "")
         raise OkxSdkError(f"OKX {code} {msg}".strip())
