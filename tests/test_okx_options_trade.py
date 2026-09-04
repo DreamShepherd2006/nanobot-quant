@@ -142,6 +142,7 @@ def test_place_close_put_buy(_mock_sdk, _patch_entry):
     call = _mock_sdk.calls[-1]
     assert call["side"] == "buy"
     assert call["instId"] == "BTC-USD_UM-260904-80000-P"
+    assert call["tdMode"] == "isolated"  # 平仓须匹配持仓 mgnMode（cash → 51000）
     assert call["tag"] == ot.TAG_CLOSE
     assert e["status"] == "closed"
     # 盈亏 = (开 110 − 平 108) × 0.01 × 1 = 0.02

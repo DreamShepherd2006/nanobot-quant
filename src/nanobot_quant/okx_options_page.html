@@ -460,6 +460,7 @@ function openSell(expMs, strike) {
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
   $("mPx").value = "";
+  $("mTypeHint").textContent = "OKX 期权无纯市价单（50016）；卖 put 立即成交：限价 px=盘口 bid，或 IOC 保底价 ≤bid（如 0.01）扫单";
   $("mPxHint").textContent = "卖 put 参考表格 bid 列（你的卖出价=bid）；立即成交限价填 bid，或 IOC 保底价填 ≤bid（如 0.01）扫单";
   modalOpen("卖 put：" + instId);
   $("mPreviewBtn").style.display = ""; $("mGo").style.display = "none";
@@ -472,6 +473,8 @@ function openClose(instId) {
   $("mRowSz").style.display = ""; $("mRowType").style.display = ""; $("mRowPx").style.display = "";
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
+  $("mTypeHint").textContent = "买回平仓吃 ask：限价 px ≥当前 ask 立即成交，或 IOC 保底价往高填（如 0.5）扫单";
+  $("mPxHint").textContent = "买回参考表格 ask 列（你的买回价=ask）；tdMode=isolated（平仓匹配开仓逐仓，cash 平仓报 51000）";
   modalOpen("平仓：" + instId);
   $("mPreviewBtn").style.display = "none"; $("mGo").style.display = "";
   $("mGo").textContent = "确认平仓";

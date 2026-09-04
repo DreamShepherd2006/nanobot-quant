@@ -37,6 +37,10 @@ from .okx_sdk import OkxSdkError
 #: ≥ Σ(strike×面值) 现金（不设杠杆，平台不冻结全额，见页面提示）。
 SELL_TDMODE = "isolated"
 BUY_TDMODE = "cash"
+#: 平仓/减仓单的 tdMode 必须与持仓保证金模式一致（OKX 规则：不匹配 →
+#: 51000 Parameter tdMode error）。本仓开在 isolated（SELL_TDMODE），
+#: 买回平仓同样 isolated；cash 仅用于无平仓对象的纯买入开仓。
+CLOSE_TDMODE = "isolated"
 #: 订单来源标签（OKX tag：纯字母数字、<=16 位）
 TAG_OPEN = "nbputo1"
 TAG_CLOSE = "nbputc1"
@@ -248,10 +252,13 @@ def _entry_account(account: str) -> dict:
 
 
 def _place(creds: dict, *, inst_id: str, side: str, sz: int,
-           ord_type: str, px: Optional[float], tag: str) -> dict:
-    """OKX 下单统一入口。side=sell（卖 put）→ isolated 逐仓；
-    side=buy（买回平仓）→ cash。"""
-    td_mode = BUY_TDMODE if side == "buy" else SELL_TDMODE
+           ord_type: str, px: Optional[float], tag: str,
+           td_mode: Optional[str] = None) -> dict:
+    """OKX 下单统一入口。td_mode 缺省按 side 分流：sell（卖 put 开仓）→
+    isolated 逐仓；buy → cash（纯买开仓）。平仓单必须显式传 CLOSE_TDMODE
+    （跟随持仓保证金模式），cash 平 isolated 仓位会报 51000。"""
+    if td_mode is None:
+        td_mode = BUY_TDMODE if side == "buy" else SELL_TDMODE
     params = {
         "instId": inst_id,
         "tdMode": td_mode,
@@ -367,7 +374,8 @@ def close_put(account: str, *, inst_id: str, sz: int,
     )
     try:
         res = _place(a["creds"], inst_id=inst_id, side="buy", sz=int(sz),
-                     ord_type=ord_type, px=px, tag=TAG_CLOSE)
+                     ord_type=ord_type, px=px, tag=TAG_CLOSE,
+                     td_mode=CLOSE_TDMODE)
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
