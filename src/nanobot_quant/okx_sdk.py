@@ -11,9 +11,14 @@
 
 from __future__ import annotations
 
+import functools
+import types
+
+from okx._client import ResponseStatusError
 from okx.account import Account
 from okx.market import Market
 from okx.public import Public
+from okx.trade import Trade
 
 _OKX_BASE = "https://www.okx.com"
 
@@ -22,14 +27,49 @@ _OKX_BASE = "https://www.okx.com"
 Public.API_URL = _OKX_BASE
 Market.API_URL = _OKX_BASE
 Account.API_URL = _OKX_BASE
+Trade.API_URL = _OKX_BASE
+
+
+class OkxSdkError(RuntimeError):
+    """OKX API 错误（code != 0 / HTTP 层 4xx），携带可读信息。"""
+
+
+def _guard_okx_methods(cls: type) -> None:
+    """包装 python-okx 类的公开方法：HTTP 层 :class:`ResponseStatusError` →
+    :class:`OkxSdkError`。
+
+    参数非法等会由 send_request 直接抛 ``ResponseStatusError``（如 400/50015、
+    401/50123），发生在调用表达式求值阶段——``check()`` 包不住。统一在方法
+    层转成业务异常，handler 只须 catch OkxSdkError 即可在页面显示 OKX 错误码，
+    而不是 500。
+    """
+    for name in dir(cls):
+        if name.startswith("_"):
+            continue
+        attr = getattr(cls, name)
+        if not isinstance(attr, types.FunctionType):
+            continue
+        if getattr(attr, "_okx_guarded", False):
+            continue
+
+        @functools.wraps(attr)
+        def _w(*args, _fn=attr, **kw):
+            try:
+                return _fn(*args, **kw)
+            except ResponseStatusError as e:
+                raise OkxSdkError(str(e)) from e
+
+        _w._okx_guarded = True
+        setattr(cls, name, _w)
+
+
+for _cls in (Public, Market, Account, Trade):
+    _guard_okx_methods(_cls)
 
 _public = Public(flag="0")   # 公共数据（instruments/opt-summary）
 _market = Market(flag="0")   # 行情（tickers/candles）
 _accounts: dict[tuple, Account] = {}
-
-
-class OkxSdkError(RuntimeError):
-    """OKX API 错误（code != 0），携带可读信息。"""
+_trades: dict[tuple, Trade] = {}
 
 
 def public() -> Public:
@@ -51,10 +91,33 @@ def account_for(creds: dict) -> Account:
     return acc
 
 
+def trade_for(creds: dict) -> Trade:
+    """按凭证三元组缓存的 Trade 实例（下单/撤单/查单）。"""
+    key = (creds.get("api_key"), creds.get("secret_key"), creds.get("passphrase"))
+    tr = _trades.get(key)
+    if tr is None:
+        tr = Trade(key=creds.get("api_key", ""), secret=creds.get("secret_key", ""),
+                    passphrase=creds.get("passphrase", ""), flag="0")
+        _trades[key] = tr
+    return tr
+
+
 def check(payload: dict):
-    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。"""
-    code = payload.get("code")
+    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。
+
+    OKX 下单类端点顶层 code=1（All operations failed）时真实原因在各订单的
+    ``data[0].sCode/sMsg``（如保证金不足/市价单限制），一并拼进错误消息，
+    避免页面只显示笼统的 "All operations failed"。
+    """
+    code = str(payload.get("code"))
     if code != "0":
-        msg = payload.get("msg", "")
-        raise OkxSdkError(f"OKX {code} {msg}".strip())
+        data = payload.get("data")
+        detail = ""
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            sc = str(data[0].get("sCode") or "").strip()
+            sm = str(data[0].get("sMsg") or "").strip()
+            if sc or sm:
+                detail = f" → {sc} {sm}".rstrip()
+        msg = str(payload.get("msg") or "").strip()
+        raise OkxSdkError(f"OKX {code} {msg}{detail}".strip())
     return payload.get("data")
