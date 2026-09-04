@@ -338,7 +338,7 @@ async function loadPositions() {
         '<b>💰 ' + esc(bal.account || "") + '</b>' +
         '<span>总权益 <b style="font-size:1.1em">' + usd(bal.total_eq_usd) + '</b></span>' +
         (cash ? '<span>USDC 可用 <b>' + fmt(cash.avail_bal, 2) + '</b> / 冻结 ' + fmt(cash.frozen_bal, 2) + '</span>' : "") +
-        '<span class="hint">卖 put 现金担保会冻结可用余额；正式冻结额以 OKX 为准</span></div>' +
+        '<span class="hint">卖 put 全仓保证金冻结（额≈权利金+风险附加，页面有强平价）；等效现金担保 = 账户自留 ≥ strike×面值，不设杠杆</span></div>' +
         '<div style="overflow-x:auto"><table><thead><tr><th>币种</th><th>现金</th><th>可用</th>' +
         '<th>冻结</th><th>权益</th><th>权益(USD)</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6" class="empty">暂无资产 — 子账号未入金，入金后自动显示（USDC 结算/担保）</td></tr>') + '</tbody></table></div></div>';
     }
@@ -455,7 +455,7 @@ function openSell(expMs, strike) {
   modalMode = "sell"; modalInst = instId;
   const lot = chainData.lot_coin || 0;
   $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 put（收权利金）<br>每张面值 ' + fmt(lot, 4) +
-    ' ' + esc(chainData.family.split("-")[0]) + ' · 现金担保(简化) = strike × 面值 × 张数';
+    ' ' + esc(chainData.family.split("-")[0]) + ' · 等效现金担保 = 账户自留 ≥ strike×面值×张数';
   $("mRowSz").style.display = ""; $("mRowType").style.display = ""; $("mRowPx").style.display = "";
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
@@ -518,8 +518,8 @@ async function doPreview(mode) {
     $("mPreview").innerHTML =
       "<b>权利金/张(USD)：</b>" + usd(p.est_premium_usd ? p.est_premium_usd / (f.sz || 1) : null) +
       "（合计 " + usd(p.est_premium_usd) + "）<br>" +
-      "<b>现金担保(简化)：</b><span class='warn'>" + usd(p.collateral_est_usd) + "</span> 正式冻结以 OKX 为准<br>" +
-      "<b>订单：</b>sell · tdMode=cash · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
+      "<b>等效现金担保(自留)：</b><span class='warn'>" + usd(p.collateral_est_usd) + "</span> 平台以全仓(cross)冻结，额≈权利金+风险附加<br>" +
+      "<b>订单：</b>sell · tdMode=cross · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
       "<br><span style='color:#888'>参考盘口 ask=" + fmt(p.ref.ask, 2) + " bid=" + fmt(p.ref.bid, 2) + "</span>";
     stageInfo = null;
     $("mGo").style.display = "";
@@ -535,7 +535,7 @@ async function doStageSell() {
   try {
     const j = await jpost("/config/okx-options/sell/start", f);
     stageInfo = j.stage;
-    $("mPreview").innerHTML += "<br>⚠️ 确认令牌已生成（30 秒内有效）。点击「② 最终确认卖出」真实下单（不可撤回，卖 put 将占用现金担保）。";
+    $("mPreview").innerHTML += "<br>⚠️ 确认令牌已生成（30 秒内有效）。点击「② 最终确认卖出」真实下单（不可撤回，全仓保证金卖 put，请确保账户自留足额现金）。";
     $("mGo").textContent = "② 最终确认卖出";
     $("mGo").onclick = () => doSellConfirm();
   } catch (e) {
