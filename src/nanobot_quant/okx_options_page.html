@@ -349,7 +349,7 @@ async function loadPositions() {
         '<b>💰 ' + esc(bal.account || "") + '</b>' +
         '<span>总权益 <b style="font-size:1.1em">' + usd(bal.total_eq_usd) + '</b></span>' +
         (cash ? '<span>USDC 可用 <b>' + fmt(cash.avail_bal, 2) + '</b> / 冻结 ' + fmt(cash.frozen_bal, 2) + '</span>' : "") +
-        '<span class="hint">逐仓(isolated)：每笔卖 put 独立保证金与强平边界，多笔共存互不拖累（无需每笔开子账号）；等效现金担保 = 账户自留 ≥ Σ(strike×面值)，不设杠杆</span></div>' +
+        '<span class="hint">逐仓(isolated)：每笔卖 put 独立保证金与强平边界，多笔共存互不拖累（无需每笔开子账号）；成交后自动追加至担保目标（全损×比例，见「⚙️ 担保设置」）</span></div>' +
         '<div style="overflow-x:auto"><table><thead><tr><th>币种</th><th>现金</th><th>可用</th>' +
         '<th>冻结</th><th>权益</th><th>权益(USD)</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6" class="empty">暂无资产 — 子账号未入金，入金后自动显示（USDC 结算/担保）</td></tr>') + '</tbody></table></div></div>';
     }
@@ -466,7 +466,7 @@ function openSell(expMs, strike) {
   modalMode = "sell"; modalInst = instId;
   const lot = chainData.lot_coin || 0;
   $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 put（收权利金）<br>每张面值 ' + fmt(lot, 4) +
-    ' ' + esc(chainData.family.split("-")[0]) + ' · 逐仓(isolated) · 等效现金担保 = 账户自留 ≥ Σ strike×面值×张数';
+    ' ' + esc(chainData.family.split("-")[0]) + ' · 逐仓(isolated) · 成交后自动追加至担保目标（比例见「⚙️ 担保设置」）';
   $("mRowSz").style.display = ""; $("mRowType").style.display = ""; $("mRowPx").style.display = "";
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
