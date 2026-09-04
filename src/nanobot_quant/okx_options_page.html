@@ -324,8 +324,25 @@ async function loadPositions() {
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
     let html = "";
-    const puts = j.positions || [], open = j.ledger_open || [];
-    if (!puts.length && !open.length) html = '<div class="empty">无期权持仓 / 无 open 台账（尚未卖出 put）</div>';
+    const puts = j.positions || [], open = j.ledger_open || [], bal = j.balance || {};
+    // 子账号资产卡（只读）
+    const det = bal.details || [];
+    if (bal && Object.keys(bal).length) {
+      const cash = det.find(d => d.ccy === "USDC") || det.find(d => d.ccy === "USD") || null;
+      const rows = det.slice(0, 8).map(d =>
+        '<tr><td>' + esc(d.ccy) + '</td><td>' + fmt(d.cash_bal, 2) + '</td><td>' +
+        fmt(d.avail_bal, 2) + '</td><td>' + fmt(d.frozen_bal, 2) + '</td><td>' +
+        fmt(d.eq, 4) + '</td><td>' + usd(d.eq_usd) + '</td></tr>').join("");
+      html += '<div class="card" style="padding:12px 14px;margin-bottom:10px">' +
+        '<div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
+        '<b>💰 ' + esc(bal.account || "") + '</b>' +
+        '<span>总权益 <b style="font-size:1.1em">' + usd(bal.total_eq_usd) + '</b></span>' +
+        (cash ? '<span>USDC 可用 <b>' + fmt(cash.avail_bal, 2) + '</b> / 冻结 ' + fmt(cash.frozen_bal, 2) + '</span>' : "") +
+        '<span class="hint">卖 put 现金担保会冻结可用余额；正式冻结额以 OKX 为准</span></div>' +
+        '<div style="overflow-x:auto"><table><thead><tr><th>币种</th><th>现金</th><th>可用</th>' +
+        '<th>冻结</th><th>权益</th><th>权益(USD)</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+    }
+    if (!puts.length && !open.length) html += '<div class="empty">无期权持仓 / 无 open 台账（尚未卖出 put）</div>';
     if (puts.length) {
       html += '<div class="grp-title">OKX 实时仓位</div><div style="overflow-x:auto"><table><thead><tr>' +
         '<th>合约</th><th>方向</th><th>张数</th><th>开仓均价</th><th>标记价</th><th>未实现盈亏</th><th>杠杆</th><th>到期</th><th></th></tr></thead><tbody>';

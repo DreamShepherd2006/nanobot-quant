@@ -181,10 +181,12 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         account = request.query_params.get("account") or ""
         try:
             puts = await asyncio.to_thread(ot.open_puts, account)
+            bal = await asyncio.to_thread(ot.account_balance, account)
             open_rows = [e for e in ot.load_ledger()
                          if e.get("kind") == "open_put"
                          and e.get("status") in ("open", "pending")]
-            return JSONResponse({"ok": True, "positions": puts, "ledger_open": open_rows})
+            return JSONResponse({"ok": True, "positions": puts,
+                                 "balance": bal, "ledger_open": open_rows})
         except (OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
 

@@ -412,6 +412,36 @@ def _settle_cover_entry(creds: dict, entry: dict) -> dict:
 
 # ── 持仓 / 到期监控（只读）──────────────────────────────────
 
+def account_balance(account: str = "") -> dict:
+    """子账号资产（只读）：details 按币种 + 总权益 totalEq(USD)。
+
+    字段（v5 account/balance）：ccy/cashBal/availBal/frozenBal/eq/eqUsd。
+    cashBal=现金（含挂单冻结）、availBal=可下新单、frozenBal=冻结（挂单/保证金占用）、
+    eq=币种总权益。期权卖方现金担保占用反映在 availBal 减少。
+    """
+    a = _entry_account(account)
+    rows = okx_sdk.check(okx_sdk.account_for(a["creds"]).get_balance())
+    d = rows[0] if isinstance(rows, list) and rows else {}
+    details = d.get("details") or []
+    out = []
+    for r in details if isinstance(details, list) else []:
+        ccy = r.get("ccy", "")
+        eq = _f(r.get("eq"))
+        if eq > 0 or _f(r.get("cashBal")) > 0:
+            out.append({
+                "ccy": ccy,
+                "cash_bal": _f(r.get("cashBal")),
+                "avail_bal": _f(r.get("availBal")),
+                "frozen_bal": _f(r.get("frozenBal")),
+                "eq": eq,
+                "eq_usd": _f(r.get("eqUsd")),
+                "update_ms": int(r.get("uTime") or 0),
+            })
+    out.sort(key=lambda x: x["eq_usd"], reverse=True)
+    return {"total_eq_usd": _f(d.get("totalEq")), "details": out,
+            "account": account or a["label"]}
+
+
 def open_puts(account: str = "") -> list[dict]:
     """OKX 当前期权净仓（只读）。无凭证/无仓位 → []；失败抛错由调用方处理。"""
     a = _entry_account(account)
