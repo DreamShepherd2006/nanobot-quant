@@ -350,6 +350,9 @@ async function loadPositions() {
         '账户配置：期权 ' + opTxt + ' · 模式 ' + (acctMap[cfg.acct_lv] || cfg.acct_lv) +
         (cfg.pos_mode ? '（' + cfg.pos_mode + '）' : '') +
         (cfg.settle_ccy ? ' · 结算 ' + cfg.settle_ccy : '') +
+        ' · Key 权限 ' + esc(cfg.perm || '') +
+        (cfg.perm && cfg.perm.indexOf('trade') >= 0 ? '' :
+          '<b style="color:#c62828">（缺 trade → API 下单会被 50123 拒，请在 OKX 后台重建带交易权限的 key）</b>') +
         ' · UID ' + esc(cfg.uid) +
         '<span class="hint">（/account/config 实时 · opAuth 未开通时卖 put 会被 51147 拒绝）</span></div>';
     }
