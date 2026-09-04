@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -109,10 +110,22 @@ def find_entry(pred: Callable[[dict], bool]) -> Optional[dict]:
 
 # ── instrument / 盘口辅助 ──────────────────────────────────────
 
+def inst_family_of(inst_id: str) -> str:
+    """从 instId 解析 instFamily（如 SOL-USD_UM-260905-101-P → SOL-USD_UM）。
+
+    OKX OPTION instId = {instFamily}-{yyMMdd}-{strike}-{C/P}；instFamily
+    本身含连字符（SOL-USD_UM），故从尾部日期段反向切分。
+    """
+    m = re.search(r"-\d{6}-\d+(?:\.\d+)?-[CP]$", inst_id or "")
+    return inst_id[: m.start()] if m else (inst_id or "")
+
+
 def resolve_instrument(inst_id: str) -> dict:
     """单只期权合约规格（instId → stk/expTime/ctVal/ctMult/lot/optType/uly）。"""
+    fam = inst_family_of(inst_id)
+    # OPTION 查询必须带 instFamily/uly（官方 50015 约束），即使给了 instId
     rows = okx_sdk.check(okx_sdk.public().get_instruments(
-        instType="OPTION", instId=inst_id))
+        instType="OPTION", instFamily=fam, instId=inst_id))
     if not rows:
         raise OkxSdkError(f"OKX 查无期权合约 {inst_id}")
     r = rows[0]

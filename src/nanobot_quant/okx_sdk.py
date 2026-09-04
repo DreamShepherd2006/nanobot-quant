@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from okx._client import ResponseStatusError
 from okx.account import Account
 from okx.market import Market
 from okx.public import Public
@@ -66,8 +67,14 @@ def trade_for(creds: dict) -> Trade:
 
 
 def check(payload: dict):
-    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。"""
-    code = payload.get("code")
+    """校验 OKX 响应信封，code=0 返回 data，否则抛 :class:`OkxSdkError`。
+
+    HTTP 层异常（如参数非法返回 400/50015）统一包装，避免裸抛 500。
+    """
+    try:
+        code = payload.get("code")
+    except ResponseStatusError as e:  # pragma: no cover - 由 send_request 直接抛
+        raise OkxSdkError(str(e)) from e
     if code != "0":
         msg = payload.get("msg", "")
         raise OkxSdkError(f"OKX {code} {msg}".strip())
