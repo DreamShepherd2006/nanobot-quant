@@ -525,9 +525,15 @@ def open_puts(account: str = "") -> list[dict]:
 
 def _normalize_position(r: dict) -> dict:
     inst = r.get("instId", "")
+    ps = r.get("posSide")
+    if ps in ("long", "short"):
+        side = ps
+    else:
+        # net_mode（跨币种保证金）下 posSide=net，空头由 pos 符号表达
+        side = "short" if _f(r.get("pos")) < 0 else "long"
     return {
         "inst_id": inst,
-        "side": r.get("posSide") or ("short" if _f(r.get("pos")) < 0 else "long"),
+        "side": side,
         "pos": abs(_f(r.get("pos"))),
         "avg_px": _f(r.get("avgPx")),
         "mark_px": _f(r.get("markPx")),

@@ -248,3 +248,18 @@ def test_account_config_option_authorized(_patch_entry):
     assert c["op_auth"] == 1
     assert c["acct_lv"] == "3"
     assert c["settle_ccy"] == "USDC"
+
+
+# ── 持仓方向归一化（平仓按钮依赖 side）──────────────
+
+def test_normalize_position_net_mode_sign():
+    # net_mode（跨币种保证金）：posSide=net，空头由 pos 负号表达 → side=short（前端显示平仓按钮）
+    p = ot._normalize_position({"instId": "SOL-USD_UM-260905-99-P", "posSide": "net",
+                                "pos": "-1", "avgPx": "0.11", "markPx": "0.18"})
+    assert p["side"] == "short" and p["pos"] == 1.0
+    p2 = ot._normalize_position({"instId": "SOL-USD_UM-260905-99-C", "posSide": "net",
+                                 "pos": "1", "avgPx": "0.2"})
+    assert p2["side"] == "long"
+    # 明确 long/short posSide 直通（简单/单币种模式）
+    p3 = ot._normalize_position({"instId": "X", "posSide": "short", "pos": "-2"})
+    assert p3["side"] == "short" and p3["pos"] == 2.0
