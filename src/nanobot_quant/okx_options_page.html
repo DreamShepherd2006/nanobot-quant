@@ -152,7 +152,7 @@
         <option value="fok">FOK（px=保底价，全成或撤）</option>
         <option value="post_only">只做 maker（post_only）</option>
       </select>
-      <span class="hint" id="mTypeHint">OKX 期权无纯市价单（50016）；想立即成交选 IOC 并填保底价，或限价填盘口 bid</span>
+      <span class="hint" id="mTypeHint">OKX 期权无纯市价单（50016）；卖 put 立即成交：限价 px=盘口 bid，或 IOC 保底价 ≤bid（如 0.01）扫单</span>
     </div>
     <div class="row" id="mRowPx" style="display:none">
       <label>限价 px</label><input type="number" id="mPx" step="any" placeholder="USD / 1 名义币">
@@ -278,7 +278,7 @@ function renderChain(data) {
       '</tr></thead><tbody>';
     for (const r of g.rows) {
       const c = r.C, p = r.P;
-      const sellBtn = (p.inst_id && p.ask !== null)
+      const sellBtn = (p.inst_id && p.bid !== null)
         ? '<a class="act put-sell" onclick="openSell(' + g.exp_ms + ',' + r.strike + ')">卖 put</a>'
         : '<span class="na">—</span>';
       html += '<tr><td>' + Number(r.strike).toLocaleString("en-US") + '</td>' +
@@ -460,7 +460,7 @@ function openSell(expMs, strike) {
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
   $("mPx").value = "";
-  $("mPxHint").textContent = "可参考表格 ask 列（USD / 1 名义币）";
+  $("mPxHint").textContent = "卖 put 参考表格 bid 列（你的卖出价=bid）；立即成交限价填 bid，或 IOC 保底价填 ≤bid（如 0.01）扫单";
   modalOpen("卖 put：" + instId);
   $("mPreviewBtn").style.display = ""; $("mGo").style.display = "none";
   $("mPreviewBtn").onclick = () => doPreview("sell");
