@@ -6,7 +6,7 @@
 <title>📈 OKX 期权链 — 业务管理</title>
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
-  body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:1080px; margin:0 auto; }
+  body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:1120px; margin:0 auto; }
   h1 { font-size:1.4em; margin-bottom:4px; }
   .subtitle { color:#888; font-size:.86em; margin-bottom:14px; }
   .card { background:#fff; border-radius:8px; padding:16px; margin-bottom:14px; border:1px solid #e0e0e0; }
@@ -14,25 +14,34 @@
   .ctl { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .ctl label { font-size:.86em; color:#555; font-weight:600; }
   select, input { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
-  input { width:86px; text-align:right; }
+  input { width:110px; text-align:right; }
   button { padding:7px 16px; border:none; border-radius:6px; font-size:.9em; cursor:pointer; font-weight:500; }
   .btn-primary { background:#1565c0; color:#fff; }
   .btn-primary:hover { background:#0d47a1; }
   .btn-primary:disabled { background:#90caf9; cursor:not-allowed; }
-  .banner { border-radius:6px; padding:10px 14px; margin:10px 0; font-size:.88em; display:none; }
+  .btn-warn { background:#c62828; color:#fff; }
+  .btn-warn:hover { background:#8e0000; }
+  .btn-warn:disabled { background:#ef9a9a; cursor:not-allowed; }
+  .btn-ghost { background:#f0f0f0; color:#333; }
+  .tabs { display:flex; gap:4px; margin-bottom:12px; flex-wrap:wrap; align-items:center; }
+  .tab { padding:7px 18px; border-radius:8px 8px 0 0; background:#e8e8e8; cursor:pointer; font-size:.92em; border:none; }
+  .tab.on { background:#1565c0; color:#fff; }
+  .banner { border-radius:6px; padding:10px 14px; margin:8px 0; font-size:.88em; display:none; }
   .banner.err { display:block; background:#fce4ec; border:1px solid #ef9a9a; color:#c62828; }
   .banner.loading { display:block; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; }
+  .banner.ok { display:block; background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; }
+  .banner.warn { display:block; background:#fff8e1; border:1px solid #ffe082; color:#e65100; }
   .summary { display:flex; gap:18px; flex-wrap:wrap; font-size:.9em; }
   .summary .k { color:#888; font-size:.78em; }
   .summary .v { font-weight:700; font-size:1.15em; }
   .grp { margin-top:14px; }
   .grp-title { font-weight:700; font-size:.95em; margin:6px 0; display:flex; align-items:center; gap:10px; }
   .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:.76em; background:#eef2f7; color:#555; }
+  .tag.red { background:#fdecea; color:#c62828; }
   table { width:100%; border-collapse:collapse; font-size:.82em; }
   th, td { padding:4px 6px; border-bottom:1px solid #f0f0f0; text-align:right; white-space:nowrap; }
   th { background:#fafafa; color:#555; font-weight:600; }
-  th:first-child, td:first-child { text-align:left; position:sticky; left:0; background:#fff; }
-  thead th { position:sticky; top:0; z-index:1; }
+  th:first-child, td:first-child { text-align:left; }
   .sec { text-align:center; font-weight:700; }
   .sec.call { color:#2e7d32; }
   .sec.put { color:#c62828; }
@@ -42,14 +51,37 @@
   .note { color:#aaa; font-size:.78em; margin-top:10px; line-height:1.5; }
   .empty { color:#aaa; font-size:.88em; padding:10px 0; }
   .hint { color:#888; font-size:.8em; margin-left:6px; }
+  .act { color:#1565c0; cursor:pointer; font-weight:600; }
+  .act.put-sell { color:#c62828; }
+  .mono { font-family:ui-monospace,Menlo,Consolas,monospace; }
+  /* modal */
+  .overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:50; }
+  .overlay.on { display:flex; }
+  .modal { background:#fff; border-radius:10px; width:min(560px,94vw); max-height:88vh; overflow:auto; padding:18px 20px; }
+  .modal h3 { margin-bottom:10px; }
+  .modal .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap:wrap; }
+  .modal .row label { width:110px; font-size:.86em; color:#555; font-weight:600; }
+  .modal .row .val { font-size:.9em; font-weight:600; }
+  .kv { background:#f7f9fb; border-radius:6px; padding:10px 12px; font-size:.86em; line-height:1.7; margin:8px 0; }
+  .kv b { color:#444; }
+  .kv .warn { color:#e65100; font-weight:600; }
 </style>
 </head>
 <body>
 <h1>📈 OKX 期权链</h1>
-<div class="subtitle">卖 put 定价辅助（批次 B · 只读）— OKX U 本位线性期权（USDSⓈ-M），美元结算。链 + IV + 现货 HV；下单能力在批次 C 交付。</div>
+<div class="subtitle">卖 put 定价辅助（批次 B）+ 卖 put 执行（批次 C）— OKX U 本位线性期权（USDSⓈ-M），美元现金结算。链 + IV + HV；行内卖 put / 持仓监控 / 到期补买闭环。</div>
 
 <div class="card">
-  <div class="ctl">
+  <div class="tabs">
+    <button class="tab on" data-tab="chain">🔗 期权链</button>
+    <button class="tab" data-tab="pos">📦 持仓</button>
+    <button class="tab" data-tab="led">🧾 台账</button>
+    <span style="flex:1"></span>
+    <label>子账号</label>
+    <select id="account"><option value="">加载中…</option></select>
+  </div>
+
+  <div class="ctl" id="chainCtl">
     <label>标的</label>
     <select id="family">
       <option value="BTC-USD_UM">BTC-USD_UM</option>
@@ -58,9 +90,7 @@
       <option value="XAU-USD_UM">XAU-USD_UM</option>
     </select>
     <label>到期</label>
-    <select id="expiry">
-      <option value="">近 3 个到期（默认）</option>
-    </select>
+    <select id="expiry"><option value="">近 3 个到期（默认）</option></select>
     <label>HV 窗口</label>
     <select id="hvDays">
       <option value="30" selected>30 天</option>
@@ -82,6 +112,7 @@
   </div>
   <div class="banner err" id="errBanner"></div>
   <div class="banner loading" id="loadingBanner">⏳ 拉取 OKX 期权链…</div>
+  <div class="banner warn" id="reminderBanner"></div>
 </div>
 
 <div class="card" id="summaryCard" style="display:none">
@@ -94,18 +125,105 @@
   <div class="note" id="priceNote"></div>
 </div>
 
+<div class="card" id="posCard" style="display:none">
+  <h3>📦 OKX 期权持仓（只读）+ 本地台账 open</h3>
+  <div id="posBody"><div class="empty">加载中…</div></div>
+  <div class="note">持仓来自 OKX 实时仓位；本地台账 open 行跨重启保留。到期 ITM 现金结算自动入账（结算参考 = 到期日 08:00 UTC 后 30 分钟 TWAP）；账面确认后可在台账/到期提醒用「补买」闭环持有现货。</div>
+</div>
+
+<div class="card" id="ledCard" style="display:none">
+  <h3>🧾 卖 put 台账</h3>
+  <div id="ledBody"><div class="empty">加载中…</div></div>
+</div>
+
+<!-- 卖 put / 平仓 / 补买 模态 -->
+<div class="overlay" id="modalOverlay">
+  <div class="modal">
+    <h3 id="mTitle">操作</h3>
+    <div class="kv" id="mSpec"></div>
+    <div class="row" id="mRowSz" style="display:none">
+      <label>张数 sz</label><input type="number" id="mSz" min="1" step="1" value="1">
+    </div>
+    <div class="row" id="mRowType">
+      <label>订单类型</label>
+      <select id="mOrdType">
+        <option value="limit">限价（limit）</option>
+        <option value="market">市价（market）</option>
+        <option value="post_only">只做 maker（post_only）</option>
+        <option value="fok">FOK</option>
+        <option value="ioc">IOC</option>
+      </select>
+    </div>
+    <div class="row" id="mRowPx" style="display:none">
+      <label>限价 px</label><input type="number" id="mPx" step="any" placeholder="USD / 1 名义币">
+      <span class="hint" id="mPxHint"></span>
+    </div>
+    <div class="row" id="mRowAmt" style="display:none">
+      <label>补买金额(USD)</label><input type="number" id="mAmt" step="any" min="0" placeholder="quote_amt（或下方数量二选一）">
+    </div>
+    <div class="row" id="mRowQty" style="display:none">
+      <label>补买数量(币)</label><input type="number" id="mQty" step="any" min="0" placeholder="base_qty">
+    </div>
+    <div class="kv" id="mPreview">点击「生成预览」查看预估权利金与担保。</div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px">
+      <button class="btn-ghost" id="mCancel">取消</button>
+      <button class="btn-primary" id="mPreviewBtn" style="display:none">生成预览</button>
+      <button class="btn-warn" id="mGo" style="display:none">确认卖出</button>
+    </div>
+    <div class="banner err" id="mErr" style="margin-top:8px"></div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const famSel = $("family"), expSel = $("expiry"), hvSel = $("hvDays"),
-      rngSel = $("range"), btn = $("loadBtn");
+      rngSel = $("range"), btn = $("loadBtn"), accSel = $("account");
+let chainData = null;   // 最近一次链数据（渲染卖 put 用）
+let stageInfo = null;   // {tx_id, action, payload}
 
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function fmt(v, d) { return (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(d); }
 function pct(v) { return v === null || v === undefined ? "—" : fmt(v, 2) + "%"; }
 function bidAsk(b, a) {
   if (b === null && a === null) return '<span class="na">—</span>';
   return fmt(b, 4) + " / " + fmt(a, 4);
 }
+function usd(v) { return (v === null || v === undefined) ? "—" : "$" + fmt(v, 2); }
+function locDate(expMs) {
+  try { return new Date(expMs).toISOString().slice(0, 10); } catch (e) { return "—"; }
+}
+function showErr(msg) { const b = $("errBanner"); b.textContent = "❌ " + msg; b.style.display = "block"; }
+function hideErr() { $("errBanner").style.display = "none"; }
+async function jpost(url, body) {
+  const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
 
+// ── 子账号 ──────────────────────────────────────────────
+async function loadAccounts() {
+  try {
+    const r = await fetch("/config/okx-options/accounts");
+    const j = await r.json();
+    accSel.innerHTML = "";
+    if (j.ok && j.accounts && j.accounts.length) {
+      const cfg = j.accounts.filter(a => a.configured);
+      const list = (cfg.length ? cfg : j.accounts);
+      for (const a of list) {
+        const opt = document.createElement("option");
+        opt.value = a.uid || a.name || "";
+        opt.textContent = (a.name || "?") + (a.uid ? " · " + a.uid : "") + (a.configured ? "" : "（未配齐）");
+        accSel.appendChild(opt);
+      }
+      if (!cfg.length) accSel.innerHTML = '<option value="">无完整凭证的子账号</option>';
+    } else {
+      accSel.innerHTML = '<option value="">未配置 OKX CEX 凭证</option>';
+    }
+  } catch (e) { accSel.innerHTML = '<option value="">凭证读取失败</option>'; }
+}
+
+// ── 链 ─────────────────────────────────────────────────
 async function loadExpiries() {
   const fam = famSel.value;
   expSel.innerHTML = '<option value="">近 3 个到期（默认）</option>';
@@ -120,19 +238,18 @@ async function loadExpiries() {
         expSel.appendChild(opt);
       }
     }
-  } catch (e) { /* 到期列表失败不阻塞主加载 */ }
+  } catch (e) { /* 不阻塞 */ }
 }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function cellHtml(side) {
+  return '<td>' + bidAsk(side.bid, side.ask) + '</td><td>' + pct(side.iv) + '</td><td>' + fmt(side.delta, 3) + '</td>';
 }
-
-function render(data) {
+function renderChain(data) {
+  chainData = data;
   const spot = data.spot, hv = data.hv || {};
   $("summaryCard").style.display = "";
   const spotUsd = spot ? "$" + Number(spot).toLocaleString("en-US", {maximumFractionDigits: 0}) : "—";
-  const hvHtml = hv.hv_pct !== null && hv.hv_pct !== undefined
-      ? fmt(hv.hv_pct, 1) + "%（年化 · " + hv.days + " 个日收益）" : "—";
+  const hvHtml = hv.hv_pct !== null && hv.hv_pct !== undefined ? fmt(hv.hv_pct, 1) + "%（年化 · " + hv.days + " 个日收益）" : "—";
   $("summary").innerHTML =
     '<div><div class="k">现货（' + esc(data.spot_inst) + '）</div><div class="v">' + spotUsd + '</div></div>' +
     '<div><div class="k">现货 ' + esc(hv.days) + 'D HV（年化）</div><div class="v">' + hvHtml + '</div></div>' +
@@ -153,21 +270,23 @@ function render(data) {
       '<th>Strike</th>' +
       '<th colspan="3" class="sec call">Call</th>' +
       '<th colspan="3" class="sec put">Put（卖 put 视角）</th>' +
-      '<th class="sec put">权利金/张</th><th class="sec put">年化</th>' +
+      '<th class="sec put">权利金/张</th><th class="sec put">年化</th><th></th>' +
       '</tr><tr>' +
-      '<th></th>' +
+      '<th></th><th>bid/ask</th><th>IV</th><th>Δ</th>' +
       '<th>bid/ask</th><th>IV</th><th>Δ</th>' +
-      '<th>bid/ask</th><th>IV</th><th>Δ</th>' +
-      '<th>USD</th><th>率</th>' +
+      '<th>USD</th><th>率</th><th></th>' +
       '</tr></thead><tbody>';
     for (const r of g.rows) {
       const c = r.C, p = r.P;
+      const sellBtn = (p.inst_id && p.ask !== null)
+        ? '<a class="act put-sell" onclick="openSell(' + g.exp_ms + ',' + r.strike + ')">卖 put</a>'
+        : '<span class="na">—</span>';
       html += '<tr><td>' + Number(r.strike).toLocaleString("en-US") + '</td>' +
-        '<td>' + bidAsk(c.bid, c.ask) + '</td><td>' + pct(c.iv) + '</td><td>' + fmt(c.delta, 3) + '</td>' +
-        '<td>' + bidAsk(p.bid, p.ask) + '</td><td>' + pct(p.iv) + '</td><td>' + fmt(p.delta, 3) + '</td>' +
+        cellHtml(c) +
+        cellHtml(p) +
         '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
         '<td>' + (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
-        '</tr>';
+        '<td>' + sellBtn + '</td></tr>';
     }
     html += '</tbody></table></div></div>';
   }
@@ -176,13 +295,13 @@ function render(data) {
   $("priceNote").textContent = data.price_note || "";
 }
 
-async function load() {
+async function loadChain() {
   btn.disabled = true;
-  $("errBanner").style.display = "none";
+  hideErr();
+  $("loadingBanner").textContent = "⏳ 拉取 OKX 期权链…";
   $("loadingBanner").style.display = "block";
   $("chainCard").style.display = "none";
-  const fam = famSel.value, exp = expSel.value,
-        hv = hvSel.value, rng = rngSel.value;
+  const fam = famSel.value, exp = expSel.value, hv = hvSel.value, rng = rngSel.value;
   let url = "/config/okx-options/chain?family=" + fam + "&hv_days=" + hv;
   if (exp) url += "&expiries=" + exp;
   if (rng !== "") url += "&range=" + rng;
@@ -190,24 +309,263 @@ async function load() {
     const r = await fetch(url);
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || ("HTTP " + r.status));
-    render(j.data);
+    renderChain(j.data);
     $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", {hour12: false});
-  } catch (e) {
-    $("errBanner").textContent = "❌ " + e.message;
-    $("errBanner").style.display = "block";
-  } finally {
-    $("loadingBanner").style.display = "none";
-    btn.disabled = false;
+  } catch (e) { showErr(e.message); } finally {
+    $("loadingBanner").style.display = "none"; btn.disabled = false;
   }
 }
 
-famSel.addEventListener("change", () => { loadExpiries(); load(); });
-expSel.addEventListener("change", load);
-hvSel.addEventListener("change", load);
-rngSel.addEventListener("change", load);
-btn.addEventListener("click", load);
+// ── 持仓 / 台账 / 到期提醒 ──────────────────────────────
+async function loadPositions() {
+  $("posBody").innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await fetch("/config/okx-options/positions?account=" + encodeURIComponent(accSel.value));
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    let html = "";
+    const puts = j.positions || [], open = j.ledger_open || [];
+    if (!puts.length && !open.length) html = '<div class="empty">无期权持仓 / 无 open 台账（尚未卖出 put）</div>';
+    if (puts.length) {
+      html += '<div class="grp-title">OKX 实时仓位</div><div style="overflow-x:auto"><table><thead><tr>' +
+        '<th>合约</th><th>方向</th><th>张数</th><th>开仓均价</th><th>标记价</th><th>未实现盈亏</th><th>杠杆</th><th>到期</th><th></th></tr></thead><tbody>';
+      for (const p of puts) {
+        const action = (p.side === "short" && p.inst_id.endsWith("-P"))
+          ? '<a class="act" onclick="openClose(\'' + esc(p.inst_id) + '\')">平仓</a>' : '<span class="na">—</span>';
+        html += '<tr><td class="mono">' + esc(p.inst_id) + '</td><td>' + esc(p.side) + '</td><td>' + fmt(p.pos, 4) +
+          '</td><td>' + fmt(p.avg_px, 2) + '</td><td>' + fmt(p.mark_px, 2) + '</td><td>' + usd(p.upl) +
+          '</td><td>' + esc(p.lever) + '</td><td>' + locDate(p.exp_ms) + '</td><td>' + action + '</td></tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+    if (open.length) {
+      html += '<div class="grp-title" style="margin-top:14px">本地台账 open（跨重启保留）</div><table><thead><tr>' +
+        '<th>合约</th><th>strike</th><th>到期</th><th>张数</th><th>开仓价(限)</th><th>权利金(USD)</th><th>状态</th></tr></thead><tbody>';
+      for (const e of open) {
+        html += '<tr><td class="mono">' + esc(e.inst_id) + '</td><td>' + fmt(e.strike, 0) + '</td><td>' + locDate(e.exp_ms) +
+          '</td><td>' + esc(e.sz) + '</td><td>' + fmt(e.px, 2) + '</td><td>' + usd(e.premium_usd) + '</td><td>' + esc(e.status) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+    $("posBody").innerHTML = html;
+  } catch (e) { $("posBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
+}
+
+async function loadLedger() {
+  $("ledBody").innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await fetch("/config/okx-options/ledger");
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    const rows = j.ledger || [];
+    if (!rows.length) { $("ledBody").innerHTML = '<div class="empty">台账为空（尚未卖 put）</div>'; return; }
+    let html = '<table><thead><tr><th>时间(UTC)</th><th>动作</th><th>合约</th><th>方向</th><th>类型</th>' +
+      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th></tr></thead><tbody>';
+    for (const e of rows) {
+      const kind = {open_put: "卖 put 开仓", close_put: "买回平仓", spot_cover: "现货补买", expiry_settle: "到期结算"}[e.kind] || e.kind;
+      html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
+        esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
+        '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
+        '</td><td>' + usd(e.premium_usd) + '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
+        '</td><td>' + esc(e.account || "") + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    $("ledBody").innerHTML = html;
+  } catch (e) { $("ledBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
+}
+
+async function loadReminder() {
+  const rb = $("reminderBanner");
+  try {
+    const r = await fetch("/config/okx-options/reminder");
+    const j = await r.json();
+    if (!j.ok || !j.reminders || !j.reminders.length) { rb.style.display = "none"; return; }
+    const items = j.reminders.map(x =>
+      (x.expired ? "⏰ 已到期待确认" : "⏰ 到期临近") + " " + esc(x.inst_id) + " · " + fmt(x.sz, 0) + " 张 · 到期 " + locDate(x.exp_ms) +
+      ' <a class="act" onclick="openCover(\'' + esc(x.inst_id) + '\')">补买</a>');
+    rb.innerHTML = items.join("<br>");
+    rb.style.display = "block";
+  } catch (e) { /* 静默 */ }
+}
+
+// ── tab 切换 ────────────────────────────────────────────
+let curTab = "chain";
+function switchTab(tab) {
+  curTab = tab;
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  $("chainCtl").style.display = (tab === "chain") ? "" : "none";
+  $("summaryCard").style.display = (tab === "chain" && chainData) ? "" : "none";
+  $("chainCard").style.display = (tab === "chain") ? $("chainCard").style.display : "none";
+  $("posCard").style.display = (tab === "pos") ? "" : "none";
+  $("ledCard").style.display = (tab === "led") ? "" : "none";
+  if (tab === "pos") loadPositions();
+  if (tab === "led") loadLedger();
+}
+document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+// ── 模态（卖 put / 平仓 / 补买）───────────────────────
+const overlay = $("modalOverlay");
+let modalMode = null;      // sell | close | cover
+let modalInst = null;      // 期权 inst_id 或 spot_inst
+let modalPayload = null;   // preview/sell/close 上下文
+function modalOpen(title) { $("mTitle").textContent = title; $("mErr").style.display = "none"; $("mPreview").innerHTML = "点击「生成预览」查看预估权利金与担保。"; stageInfo = null; overlay.classList.add("on"); }
+function modalClose() { overlay.classList.remove("on"); stageInfo = null; }
+
+function openSell(expMs, strike) {
+  if (!chainData) return;
+  let instId = null;
+  for (const g of chainData.groups) {
+    if (g.exp_ms !== expMs) continue;
+    for (const r of g.rows) {
+      if (r.strike === strike && r.P && r.P.inst_id) instId = r.P.inst_id;
+    }
+  }
+  if (!instId) { showErr("找不到该档 put 合约"); return; }
+  modalMode = "sell"; modalInst = instId;
+  const lot = chainData.lot_coin || 0;
+  $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 put（收权利金）<br>每张面值 ' + fmt(lot, 4) +
+    ' ' + esc(chainData.family.split("-")[0]) + ' · 现金担保(简化) = strike × 面值 × 张数';
+  $("mRowSz").style.display = ""; $("mRowType").style.display = ""; $("mRowPx").style.display = "";
+  $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
+  $("mSz").value = "1";
+  $("mPx").value = "";
+  $("mPxHint").textContent = "可参考表格 ask 列（USD / 1 名义币）";
+  modalOpen("卖 put：" + instId);
+  $("mPreviewBtn").style.display = ""; $("mGo").style.display = "none";
+  $("mPreviewBtn").onclick = () => doPreview("sell");
+  $("mGo").onclick = () => doSellConfirm();
+}
+function openClose(instId) {
+  modalMode = "close"; modalInst = instId;
+  $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 买回平仓（支付权利金）<br>净盈亏 = (开仓价 − 买回价) × 面值 × 张数";
+  $("mRowSz").style.display = ""; $("mRowType").style.display = ""; $("mRowPx").style.display = "";
+  $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
+  $("mSz").value = "1";
+  modalOpen("平仓：" + instId);
+  $("mPreviewBtn").style.display = "none"; $("mGo").style.display = "";
+  $("mGo").textContent = "确认平仓";
+  $("mGo").onclick = () => doClose();
+}
+function openCover(instId) {
+  modalMode = "cover"; modalInst = instId;
+  const fam = (instId || "").split("-").slice(0, 2).join("-"); // 如 BTC-USD
+  let spot = fam + "-USDC";
+  if (fam === "XAU-USD") { spot = ""; $("mSpec").innerHTML = "<b>XAU-USD_UM</b> 无现货盘——到期 ITM 直接现金结算亏损，无法现货补买（补买仅 BTC/ETH/SOL）。"; }
+  else $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 到期 ITM 现金结算后的现货补买 → 现货对 <b>" + esc(spot) + "</b>（市价单）";
+  $("mRowSz").style.display = "none"; $("mRowType").style.display = "none"; $("mRowPx").style.display = "none";
+  $("mRowAmt").style.display = ""; $("mRowQty").style.display = "";
+  $("mAmt").value = ""; $("mQty").value = "";
+  modalOpen("到期补买");
+  if (!spot) { $("mGo").style.display = "none"; return; }
+  $("mGo").style.display = ""; $("mGo").textContent = "确认补买";
+  $("mPreviewBtn").style.display = "none";
+  $("mGo").onclick = () => doCover(spot);
+}
+$("mCancel").addEventListener("click", modalClose);
+$("mOrdType").addEventListener("change", () => {
+  $("mRowPx").style.display = ($("mOrdType").value === "market") ? "none" : "";
+  $("mGo").textContent = modalMode === "sell" ? "确认卖出" : "确认平仓";
+});
+overlay.addEventListener("click", e => { if (e.target === overlay) modalClose(); });
+
+function formVal() {
+  return {
+    account: accSel.value || "",
+    inst_id: modalMode === "cover" ? modalInst : modalInst,
+    sz: parseInt($("mSz").value, 10) || 1,
+    ord_type: $("mOrdType").value || "limit",
+    px: parseFloat($("mPx").value) || null,
+  };
+}
+
+async function doPreview(mode) {
+  const f = formVal();
+  try {
+    const j = await jpost("/config/okx-options/preview", f);
+    const p = j;
+    $("mPreview").innerHTML =
+      "<b>权利金/张(USD)：</b>" + usd(p.est_premium_usd ? p.est_premium_usd / (f.sz || 1) : null) +
+      "（合计 " + usd(p.est_premium_usd) + "）<br>" +
+      "<b>现金担保(简化)：</b><span class='warn'>" + usd(p.collateral_est_usd) + "</span> 正式冻结以 OKX 为准<br>" +
+      "<b>订单：</b>sell · tdMode=cash · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
+      "<br><span style='color:#888'>参考盘口 ask=" + fmt(p.ref.ask, 2) + " bid=" + fmt(p.ref.bid, 2) + "</span>";
+    stageInfo = null;
+    $("mGo").style.display = "";
+    $("mGo").disabled = false;
+    $("mGo").textContent = "① 生成确认令牌";
+    $("mGo").onclick = () => doStageSell();
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+async function doStageSell() {
+  const f = formVal();
+  try {
+    const j = await jpost("/config/okx-options/sell/start", f);
+    stageInfo = j.stage;
+    $("mPreview").innerHTML += "<br>⚠️ 确认令牌已生成（30 秒内有效）。点击「② 最终确认卖出」真实下单（不可撤回，卖 put 将占用现金担保）。";
+    $("mGo").textContent = "② 最终确认卖出";
+    $("mGo").onclick = () => doSellConfirm();
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+async function doSellConfirm() {
+  if (!stageInfo) return;
+  try {
+    $("mGo").disabled = true;
+    const j = await jpost("/config/okx-options/sell/confirm", {tx_id: stageInfo.tx_id});
+    $("mPreview").innerHTML = "✅ 卖 put 已提交：状态 " + esc(j.entry.status) +
+      "（ord_id " + esc(j.entry.ord_id || "—") + "）<br>后台已在轮询成交，切「持仓/台账」页查看。";
+    $("mGo").style.display = "none"; stageInfo = null;
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block"; $("mGo").disabled = false;
+  }
+}
+async function doClose() {
+  const f = formVal();
+  try {
+    const s = await jpost("/config/okx-options/close/start", f);
+    const ok = confirm("确认买回平仓 " + esc(f.inst_id) + " × " + f.sz + " 张？\n（支付权利金；30 秒内有效）");
+    if (!ok) return;
+    const j = await jpost("/config/okx-options/close/confirm", {tx_id: s.stage.tx_id});
+    $("mPreview").innerHTML = "✅ 平仓已提交：状态 " + esc(j.entry.status);
+    $("mGo").style.display = "none";
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+async function doCover(spot) {
+  const qty = parseFloat($("mQty").value), amt = parseFloat($("mAmt").value);
+  if ((!qty || qty <= 0) && (!amt || amt <= 0)) {
+    const b = $("mErr"); b.textContent = "❌ 需填写补买金额或数量"; b.style.display = "block"; return;
+  }
+  const f = {account: accSel.value || "", spot_inst: spot};
+  if (qty && qty > 0) f.base_qty = qty;
+  else f.quote_amt = amt;
+  try {
+    const s = await jpost("/config/okx-options/cover/start", f);
+    const ok = confirm("确认现货补买 " + spot + (qty && qty > 0 ? " × " + qty : " 金额 $" + amt) + "？\n（市价单，30 秒内有效）");
+    if (!ok) return;
+    const j = await jpost("/config/okx-options/cover/confirm", {tx_id: s.stage.tx_id});
+    $("mPreview").innerHTML = "✅ 补买已提交：状态 " + esc(j.entry.status);
+    $("mGo").style.display = "none";
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+
+// ── 事件绑定 / 启动 ───────────────────────────────────
+famSel.addEventListener("change", () => { loadExpiries(); loadChain(); });
+expSel.addEventListener("change", loadChain);
+hvSel.addEventListener("change", loadChain);
+rngSel.addEventListener("change", loadChain);
+btn.addEventListener("click", loadChain);
+accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions(); });
+loadAccounts();
 loadExpiries();
-load();
+loadChain();
+loadReminder();
 </script>
 </body>
 </html>

@@ -14,6 +14,7 @@ from __future__ import annotations
 from okx.account import Account
 from okx.market import Market
 from okx.public import Public
+from okx.trade import Trade
 
 _OKX_BASE = "https://www.okx.com"
 
@@ -22,10 +23,12 @@ _OKX_BASE = "https://www.okx.com"
 Public.API_URL = _OKX_BASE
 Market.API_URL = _OKX_BASE
 Account.API_URL = _OKX_BASE
+Trade.API_URL = _OKX_BASE
 
 _public = Public(flag="0")   # 公共数据（instruments/opt-summary）
 _market = Market(flag="0")   # 行情（tickers/candles）
 _accounts: dict[tuple, Account] = {}
+_trades: dict[tuple, Trade] = {}
 
 
 class OkxSdkError(RuntimeError):
@@ -49,6 +52,17 @@ def account_for(creds: dict) -> Account:
                        passphrase=creds.get("passphrase", ""), flag="0")
         _accounts[key] = acc
     return acc
+
+
+def trade_for(creds: dict) -> Trade:
+    """按凭证三元组缓存的 Trade 实例（下单/撤单/查单）。"""
+    key = (creds.get("api_key"), creds.get("secret_key"), creds.get("passphrase"))
+    tr = _trades.get(key)
+    if tr is None:
+        tr = Trade(key=creds.get("api_key", ""), secret=creds.get("secret_key", ""),
+                    passphrase=creds.get("passphrase", ""), flag="0")
+        _trades[key] = tr
+    return tr
 
 
 def check(payload: dict):
