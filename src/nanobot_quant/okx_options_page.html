@@ -340,7 +340,7 @@ async function loadPositions() {
         (cash ? '<span>USDC 可用 <b>' + fmt(cash.avail_bal, 2) + '</b> / 冻结 ' + fmt(cash.frozen_bal, 2) + '</span>' : "") +
         '<span class="hint">卖 put 现金担保会冻结可用余额；正式冻结额以 OKX 为准</span></div>' +
         '<div style="overflow-x:auto"><table><thead><tr><th>币种</th><th>现金</th><th>可用</th>' +
-        '<th>冻结</th><th>权益</th><th>权益(USD)</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+        '<th>冻结</th><th>权益</th><th>权益(USD)</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6" class="empty">暂无资产 — 子账号未入金，入金后自动显示（USDC 结算/担保）</td></tr>') + '</tbody></table></div></div>';
     }
     if (!puts.length && !open.length) html += '<div class="empty">无期权持仓 / 无 open 台账（尚未卖出 put）</div>';
     if (puts.length) {

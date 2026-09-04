@@ -438,8 +438,9 @@ def account_balance(account: str = "") -> dict:
                 "update_ms": int(r.get("uTime") or 0),
             })
     out.sort(key=lambda x: x["eq_usd"], reverse=True)
+    name = a["creds"].get("name") or a["label"] or ""
     return {"total_eq_usd": _f(d.get("totalEq")), "details": out,
-            "account": account or a["label"]}
+            "account": name, "account_uid": str(a["creds"].get("uid") or account)}
 
 
 def open_puts(account: str = "") -> list[dict]:
