@@ -115,6 +115,17 @@
   <div class="banner warn" id="reminderBanner"></div>
 </div>
 
+<div class="card" id="paramCard">
+  <div class="ctl">
+    <label>⚙️ 担保设置（逐仓自动追加）</label>
+    <input type="number" id="mCollRatio" min="0" max="200" step="5" value="100" title="全损担保的百分比">
+    <span class="hint">%（100 = 全损现金担保）</span>
+    <button class="btn-ghost" id="saveParamsBtn">保存</button>
+    <span class="hint" id="paramHint"></span>
+  </div>
+  <div class="note">卖 put 成交后自动把该仓保证金追加至「strike×面值×张数 × 比例」（100% = 全损担保：浮亏上限 &lt; 保证金 → 数学上无强平路径，可扛到到期；追加资金平仓/到期后自动释放）。0% = 关闭自动追加（仅平台默认 IM 冻结，浮亏可能击穿提前强平）。范围 0–200%。</div>
+</div>
+
 <div class="card" id="summaryCard" style="display:none">
   <h3>市场概览</h3>
   <div class="summary" id="summary"></div>
@@ -518,10 +529,12 @@ async function doPreview(mode) {
   try {
     const j = await jpost("/config/okx-options/preview", f);
     const p = j;
+    const ratioTxt = p.collateral_ratio_pct === 0
+      ? "<b>自动担保：</b><span class='warn'>已关闭（比例 0%，仅平台 IM 冻结）</span>"
+      : "<b>自动担保目标（全损×" + esc(p.collateral_ratio_pct) + "%）：</b><span class='warn'>" + usd(p.collateral_target_usd) + "</span>（全损 " + usd(p.collateral_est_usd) + "；成交后自动追加至目标，需账户可用 ≥ 追加额）";
     $("mPreview").innerHTML =
       "<b>权利金/张(USD)：</b>" + usd(p.est_premium_usd ? p.est_premium_usd / (f.sz || 1) : null) +
-      "（合计 " + usd(p.est_premium_usd) + "）<br>" +
-      "<b>等效现金担保(自留)：</b><span class='warn'>" + usd(p.collateral_est_usd) + "</span> 逐仓冻结额按 OKX 公式（≈权利金+风险附加）<br>" +
+      "（合计 " + usd(p.est_premium_usd) + "）<br>" + ratioTxt + "<br>" +
       "<b>订单：</b>sell · tdMode=isolated · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
       "<br><span style='color:#888'>参考盘口 ask=" + fmt(p.ref.ask, 2) + " bid=" + fmt(p.ref.bid, 2) + "</span>";
     stageInfo = null;
@@ -590,6 +603,30 @@ async function doCover(spot) {
   }
 }
 
+// ── 担保设置 ─────────────────────────────────────────────
+async function loadParams() {
+  try {
+    const r = await fetch("/config/okx-options/params");
+    const j = await r.json();
+    if (j.ok && j.params) {
+      $("mCollRatio").value = j.params.collateral_ratio_pct ?? 100;
+      $("paramHint").textContent = "当前自动追加目标 = 全损 × " + (j.params.collateral_ratio_pct ?? 100) + "%" +
+        ((j.params.collateral_ratio_pct ?? 100) === 0 ? "（已关闭）" : "");
+    }
+  } catch (e) { $("paramHint").textContent = "读取失败"; }
+}
+async function saveParams() {
+  const ratio = parseInt($("mCollRatio").value, 10);
+  if (isNaN(ratio) || ratio < 0 || ratio > 200) { showErr("担保比例须为整数（0–200）"); return; }
+  try {
+    const j = await jpost("/config/okx-options/params", {collateral_ratio_pct: ratio});
+    $("paramHint").textContent = "已保存：自动追加目标 = 全损 × " + (j.params.collateral_ratio_pct ?? ratio) + "%";
+    $("mCollRatio").value = j.params.collateral_ratio_pct;
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+
 // ── 事件绑定 / 启动 ───────────────────────────────────
 famSel.addEventListener("change", () => { loadExpiries(); loadChain(); });
 expSel.addEventListener("change", loadChain);
@@ -597,10 +634,12 @@ hvSel.addEventListener("change", loadChain);
 rngSel.addEventListener("change", loadChain);
 btn.addEventListener("click", loadChain);
 accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions(); });
+$("saveParamsBtn").addEventListener("click", saveParams);
 loadAccounts();
 loadExpiries();
 loadChain();
 loadReminder();
+loadParams();
 </script>
 </body>
 </html>

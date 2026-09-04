@@ -54,7 +54,27 @@ class _FakeTrade:
 
 
 class _FakeAccount:
-    def get_positions(self, **kw):
+    def __init__(self):
+        self.margin = 0.0          # 该仓当前保证金（get_positions 返回，0 → imr fallback）
+        self.margin_calls = []     # set_margin_balance 调用记录
+        self.margin_fail = None    # 非空时 set_margin_balance 抛 RuntimeError
+
+    def get_positions(self, instType=None, instId=None, **kw):
+        if instId:
+            if self.margin > 0:
+                return {"code": "0", "data": [{"instId": instId,
+                        "mgnMode": "isolated", "margin": str(self.margin)}]}
+            return {"code": "0", "data": [{"instId": instId,
+                    "mgnMode": "isolated", "margin": "", "imr": "0.05"}]}
+        return {"code": "0", "data": []}
+
+    def set_margin_balance(self, instId=None, posSide=None, type=None,
+                           amt=None, **kw):
+        if self.margin_fail:
+            raise RuntimeError(self.margin_fail)
+        self.margin_calls.append({"instId": instId, "posSide": posSide,
+                                  "type": type, "amt": amt})
+        self.margin += float(amt)
         return {"code": "0", "data": []}
 
     def get_balance(self, ccy=""):
@@ -71,11 +91,14 @@ class _FakeAccount:
 @pytest.fixture(autouse=True)
 def _mock_sdk(monkeypatch, tmp_path):
     fake_trade = _FakeTrade()
+    fake_account = _FakeAccount()
     monkeypatch.setattr(ot.okx_sdk, "public", lambda: _FakeInst())
     monkeypatch.setattr(ot.okx_sdk, "market", lambda: _FakeMarket())
     monkeypatch.setattr(ot.okx_sdk, "trade_for", lambda creds: fake_trade)
-    monkeypatch.setattr(ot.okx_sdk, "account_for", lambda creds: _FakeAccount())
+    monkeypatch.setattr(ot.okx_sdk, "account_for", lambda creds: fake_account)
     monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    monkeypatch.setattr(ot, "params_path", lambda: tmp_path / "okx_options_params.json")
+    fake_trade.account = fake_account
     return fake_trade
 
 
@@ -280,3 +303,104 @@ def test_parse_exp_um_suffix():
     assert ot._parse_exp("BAD") is None
     assert ot._parse_exp("SOL-USD_UM-ABCDE-99-P") is None
     assert ot._parse_strike("SOL-USD_UM-260905-99-P") == 99.0
+
+
+# ── 逐仓现金担保（走 A：成交后自动追加保证金至全损上限）────────
+
+def _open_put(_mock_sdk, inst_id="SOL-USD_UM-260905-99-P", px=0.11):
+    # _FakeInst 里 ctVal=1 ctMult=0.01 → lot=0.01；用 BTC-USD_UM 系列保持与既有测试一致
+    inst = "BTC-USD_UM-260904-80000-P" if inst_id.startswith("BTC") else inst_id
+    return ot.open_put("bot1", inst_id=inst, sz=1, ord_type="limit", px=px)
+
+
+def test_open_put_auto_adds_collateral(_mock_sdk, _patch_entry):
+    # 成交后自动把保证金追加至全损上限 strike×lot×sz（0 保证金时按 imr fallback）
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    acc = _mock_sdk.account
+    assert e["status"] == "open"
+    assert e["collateral_usd"] == pytest.approx(80000.0 * 0.01 * 1)
+    # 追加调用：type=add、posSide=net（net_mode 逐仓）、amt = target − imr(0.05)
+    call = acc.margin_calls[-1]
+    assert call["type"] == "add"
+    assert call["posSide"] == ot.POS_SIDE
+    assert call["amt"] == pytest.approx(str(80000.0 * 0.01 - 0.05), abs=0.011)
+    assert acc.margin_calls[0]["instId"] == "BTC-USD_UM-260904-80000-P"
+    assert e["margin_added"] == pytest.approx(800.0 - 0.05, abs=0.011)
+    assert "追加" in e["margin_note"] or e["margin_note"] == "ok（现金担保已追加）"
+
+
+def test_collateral_skip_when_sufficient(_mock_sdk, _patch_entry):
+    # 仓位已有保证金 ≥ 全损上限 → 不追加
+    _mock_sdk.account.margin = 900.0  # > 800 目标
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert _mock_sdk.account.margin_calls == []
+    assert e["margin_added"] == 0.0
+    assert e["margin_note"] == "ok（已达标）"
+
+
+def test_collateral_fail_keeps_open(_mock_sdk, _patch_entry):
+    # 追加失败不阻断——仓位已成交保持 open，note 记录提醒
+    _mock_sdk.account.margin_fail = "资金不足"
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert e["status"] == "open"
+    assert e["margin_added"] is None
+    assert "追加失败" in e["margin_note"]
+
+
+def test_position_margin_imr_fallback(_mock_sdk, _patch_entry):
+    # positions.margin 为空 → 回退 imr；有 margin 直接用
+    mgn, mode = ot._position_margin(
+        {"api_key": "k"}, "BTC-USD_UM-260904-80000-P")
+    assert mgn == pytest.approx(0.05)  # imr fallback
+    assert mode == "isolated"
+    _mock_sdk.account.margin = 1.26
+    mgn2, _ = ot._position_margin(
+        {"api_key": "k"}, "BTC-USD_UM-260904-80000-P")
+    assert mgn2 == pytest.approx(1.26)
+
+
+# ── 担保比例（WebUI 参数：全损×ratio%，0=关闭）──────────────
+
+def test_collateral_ratio_applied(_mock_sdk, _patch_entry):
+    # ratio=50 → 自动追加目标 = 全损 × 0.5（800×0.5 − imr 0.05）
+    ot.save_option_params(collateral_ratio_pct=50)
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    call = _mock_sdk.account.margin_calls[-1]
+    assert e["collateral_usd"] == pytest.approx(400.0)
+    assert call["amt"] == pytest.approx(str(400.0 - 0.05), abs=0.011)
+
+
+def test_collateral_ratio_zero_disabled(_mock_sdk, _patch_entry):
+    # ratio=0 → 关闭自动追加：不调 margin-balance，note 提示
+    ot.save_option_params(collateral_ratio_pct=0)
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert _mock_sdk.account.margin_calls == []
+    assert e["status"] == "open"
+    assert e["margin_added"] is None
+    assert "关闭" in e["margin_note"]
+
+
+def test_preview_reports_ratio_target(_mock_sdk, _patch_entry):
+    ot.save_option_params(collateral_ratio_pct=120)
+    p = ot.preview_open_put("BTC-USD_UM-260904-80000-P", 1, "limit", 110.0)
+    assert p["collateral_ratio_pct"] == 120
+    assert p["collateral_est_usd"] == pytest.approx(800.0)
+    assert p["collateral_target_usd"] == pytest.approx(960.0)
+
+
+def test_save_params_clamp_and_default(_mock_sdk, _patch_entry):
+    d = ot.save_option_params(collateral_ratio_pct=999)
+    assert d["collateral_ratio_pct"] == 200
+    d2 = ot.save_option_params(collateral_ratio_pct=-3)
+    assert d2["collateral_ratio_pct"] == 0
+    # 损坏文件 → 默认 100
+    ot.params_path().write_text("{bad json", "utf-8")
+    assert ot.collateral_ratio_pct() == ot.DEFAULT_COLLATERAL_RATIO_PCT
+    # 默认（无文件）
+    ot.params_path().unlink(missing_ok=True)
+    assert ot.collateral_ratio_pct() == ot.DEFAULT_COLLATERAL_RATIO_PCT
