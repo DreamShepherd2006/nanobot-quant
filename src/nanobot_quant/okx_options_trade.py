@@ -10,10 +10,8 @@
 口径（批次 B/C 定稿，官方 docs + 实测 2026-09-04）：
 - U 本位线性：bidPx/askPx = USD/1 单位名义币，每张面值 lot = ctVal×ctMult
   （BTC 0.01 / ETH 0.01 / SOL 0.1 / XAU 0.01），每张权利金(USD) = px × lot
-- 卖 put 等效现金担保（自留口径）= strike × lot × sz（账户自留现金，不设杠杆）；
-  平台以全仓(cross)保证金冻结（跨币种保证金模式 acctLv=3，settleCcy=USDC；
-  实测网页卖 put + 官方 skill 确认：seller=cross/isolated、cash 仅限买方，
-  tdMode=cash 卖 put 不可用）
+- 卖 put 逐仓（isolated）模式，每张独立保证金/强平边界（多笔低9 卖 put 同账号
+  并存互不拖累）；等效现金担保（自留口径）= Σ(strike × lot × sz)（账户现金，不设杠杆）
 - 到期结算：欧式、现金结算（settle = 到期日 08:00 UTC 后 30 分钟 TWAP，官方口径）；
   OKX 到期自动结算入账，本模块不重复算钱，到期后经台账标 ``settled`` 并引导核对账单
 """
@@ -31,12 +29,13 @@ from typing import Callable, Optional
 from . import okx_sdk
 from .okx_sdk import OkxSdkError
 
-#: OKX 期权保证金模式（2026-09-04 实测网页卖 put + 官方 agent-skills 确认）：
+#: OKX 期权保证金模式（2026-09-04 实测网页 + 官方 agent-skills 确认）：
 #: 买方(side=buy，买回平仓)=cash（付全权利金，无杠杆）；
-#: 卖方(side=sell，卖 put 开仓)=cross 全仓保证金——OKX 无 cash 卖（官方规则
-#: seller=cross/isolated，cash 仅限买方）。等效现金担保靠账户自留
-#: ≥ strike×面值 现金实现（页面明示），不设杠杆、不动用其余资金。
-SELL_TDMODE = "cross"
+#: 卖方(side=sell，卖 put)=isolated 逐仓——TD 低9 多笔卖 put 在同一
+#: 子账号并存，逐仓给每张独立保证金与强平边界（亏穿只平该张，不拖累
+#: 同账号其他仓位），无需每笔开子账号。等效现金担保 = 账户自留
+#: ≥ Σ(strike×面值) 现金（不设杠杆，平台不冻结全额，见页面提示）。
+SELL_TDMODE = "isolated"
 BUY_TDMODE = "cash"
 #: 订单来源标签（OKX tag：纯字母数字、<=16 位）
 TAG_OPEN = "nbputo1"
@@ -163,9 +162,9 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
                      px: Optional[float] = None) -> dict:
     """卖 put 订单预览（纯计算，不下单）。
 
-    输出含：合约规格、参考盘口、订单参数（side=sell tdMode=cross 全仓）、
+    输出含：合约规格、参考盘口、订单参数（side=sell tdMode=isolated 逐仓）、
     预计权利金 = px×lot×sz（limit）或 ask×lot×sz（market 参考）、
-    等效现金担保（简化口径 strike×面值）与提示。
+    等效现金担保（自留口径 Σ strike×面值）与提示。
     """
     spec = resolve_instrument(inst_id)
     if spec["opt_type"] != "P":
@@ -202,8 +201,9 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
     "est_premium_usd": round(prem, 4),
     "collateral_est_usd": round(collat, 2),
     "note": ("U 本位线性：盘口=USD/1 名义币，权利金(USD)=px×每张面值；"
-             "卖方以全仓(cross)保证金冻结（≈权利金+风险附加，页面显示强平价），"
-             "等效现金担保 = 账户自留 ≥ strike×面值 现金（不设杠杆）；"
+             "卖方以逐仓(isolated)冻结——每张独立保证金/强平边界，多笔卖 put"
+             "共存互不拖累（TD 低9 分批同账号操作，无需多子账号）；"
+             "等效现金担保 = 账户自留 ≥ Σ(strike×面值) 现金（不设杠杆）；"
              "欧式现金结算，不可提前行权。"),
     }
 
@@ -249,7 +249,7 @@ def _entry_account(account: str) -> dict:
 
 def _place(creds: dict, *, inst_id: str, side: str, sz: int,
            ord_type: str, px: Optional[float], tag: str) -> dict:
-    """OKX 下单统一入口。side=sell（卖 put）→ cross 全仓保证金；
+    """OKX 下单统一入口。side=sell（卖 put）→ isolated 逐仓；
     side=buy（买回平仓）→ cash。"""
     td_mode = BUY_TDMODE if side == "buy" else SELL_TDMODE
     params = {

@@ -96,7 +96,7 @@ def test_preview_open_put_limit():
     assert p["lot"] == pytest.approx(0.01)          # ctVal 1 × ctMult 0.01
     assert p["est_premium_usd"] == pytest.approx(110.0 * 0.01)   # px × lot
     assert p["collateral_est_usd"] == pytest.approx(80000 * 0.01)  # strike × lot
-    assert p["td_mode"] == "cross"
+    assert p["td_mode"] == "isolated"
     assert p["ref"]["ask"] == 110.0
 
 
@@ -123,7 +123,7 @@ def test_place_sell_put_params(_mock_sdk, _patch_entry):
     call = _mock_sdk.calls[-1]
     assert call["instId"] == "BTC-USD_UM-260904-80000-P"
     assert call["side"] == "sell"
-    assert call["tdMode"] == "cross"
+    assert call["tdMode"] == "isolated"
     assert call["ordType"] == "limit"
     assert call["sz"] == "1"
     assert call["px"] == "110.0"
