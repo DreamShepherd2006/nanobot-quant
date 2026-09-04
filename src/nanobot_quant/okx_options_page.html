@@ -342,6 +342,17 @@ async function loadPositions() {
         '<div style="overflow-x:auto"><table><thead><tr><th>币种</th><th>现金</th><th>可用</th>' +
         '<th>冻结</th><th>权益</th><th>权益(USD)</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6" class="empty">暂无资产 — 子账号未入金，入金后自动显示（USDC 结算/担保）</td></tr>') + '</tbody></table></div></div>';
     }
+    const cfg = j.config || null;
+    if (cfg && cfg.uid) {
+      const acctMap = { "1": "简单", "2": "单币种保证金", "3": "跨币种保证金" };
+      const opTxt = cfg.op_auth == 1 ? '<b style="color:#2e7d32">已开通 ✓</b>' : '<b style="color:#c62828">未开通 ✗</b>';
+      html += '<div class="card" style="padding:8px 14px;margin-bottom:10px;font-size:0.92em">' +
+        '账户配置：期权 ' + opTxt + ' · 模式 ' + (acctMap[cfg.acct_lv] || cfg.acct_lv) +
+        (cfg.pos_mode ? '（' + cfg.pos_mode + '）' : '') +
+        (cfg.settle_ccy ? ' · 结算 ' + cfg.settle_ccy : '') +
+        ' · UID ' + esc(cfg.uid) +
+        '<span class="hint">（/account/config 实时 · opAuth 未开通时卖 put 会被 51147 拒绝）</span></div>';
+    }
     if (!puts.length && !open.length) html += '<div class="empty">无期权持仓 / 无 open 台账（尚未卖出 put）</div>';
     if (puts.length) {
       html += '<div class="grp-title">OKX 实时仓位</div><div style="overflow-x:auto"><table><thead><tr>' +

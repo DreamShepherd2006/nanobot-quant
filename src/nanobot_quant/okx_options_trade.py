@@ -412,6 +412,25 @@ def _settle_cover_entry(creds: dict, entry: dict) -> dict:
 
 # ── 持仓 / 到期监控（只读）──────────────────────────────────
 
+def account_config(account: str = "") -> dict:
+    """子账号账户配置（只读）：期权开通/保证金模式/结算币种/权限。
+
+    v5 /account/config → data[0]：opAuth(0 未开通/1 已开通)、acctLv(3=跨币种)、
+    posMode(net_mode/long_short_mode)、settleCcy、perm。
+    """
+    a = _entry_account(account)
+    rows = okx_sdk.check(okx_sdk.account_for(a["creds"]).get_config())
+    d = rows[0] if isinstance(rows, list) and rows else {}
+    return {
+        "uid": str(d.get("uid") or a["creds"].get("uid") or ""),
+        "acct_lv": str(d.get("acctLv") or ""),
+        "pos_mode": str(d.get("posMode") or ""),
+        "op_auth": int(d.get("opAuth") or 0),
+        "settle_ccy": str(d.get("settleCcy") or ""),
+        "perm": str(d.get("perm") or ""),
+    }
+
+
 def account_balance(account: str = "") -> dict:
     """子账号资产（只读）：details 按币种 + 总权益 totalEq(USD)。
 
