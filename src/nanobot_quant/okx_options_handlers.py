@@ -61,7 +61,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         if not ok:
             return JSONResponse({"ok": False, "error": err},
                                 status_code=403 if "Commander" in err else 401)
-        family = (request.query_params.get("family") or "BTC-USD").upper()
+        family = (request.query_params.get("family") or "BTC-USD_UM").upper()
         if family not in od.FAMILIES:
             return JSONResponse({"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
         try:
@@ -76,7 +76,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": err},
                                 status_code=403 if "Commander" in err else 401)
         q = request.query_params
-        family = (q.get("family") or "BTC-USD").upper()
+        family = (q.get("family") or "BTC-USD_UM").upper()
         if family not in od.FAMILIES:
             return JSONResponse({"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
         try:

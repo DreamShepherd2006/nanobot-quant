@@ -46,14 +46,16 @@
 </head>
 <body>
 <h1>📈 OKX 期权链</h1>
-<div class="subtitle">卖 put 定价辅助（批次 B · 只读）— 数据源 OKX 公共端点。链 + IV + 现货 HV；下单能力在批次 C 交付。</div>
+<div class="subtitle">卖 put 定价辅助（批次 B · 只读）— OKX U 本位线性期权（USDSⓈ-M），美元结算。链 + IV + 现货 HV；下单能力在批次 C 交付。</div>
 
 <div class="card">
   <div class="ctl">
     <label>标的</label>
     <select id="family">
-      <option value="BTC-USD">BTC-USD</option>
-      <option value="ETH-USD">ETH-USD</option>
+      <option value="BTC-USD_UM">BTC-USD_UM</option>
+      <option value="ETH-USD_UM">ETH-USD_UM</option>
+      <option value="SOL-USD_UM">SOL-USD_UM</option>
+      <option value="XAU-USD_UM">XAU-USD_UM</option>
     </select>
     <label>到期</label>
     <select id="expiry">

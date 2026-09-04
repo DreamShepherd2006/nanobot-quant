@@ -1,18 +1,19 @@
-"""OKX CEX 期权链数据模块（只读，公共端点，免 key）— 期权线批次 B。
+"""OKX U 本位期权链数据模块（USDSⓈ-M 线性期权，只读，公共端点，免 key）— 期权线批次 B。
 
 基于官方 python-okx SDK（见 :mod:`okx_sdk`）：
 - 链结构：Public.get_instruments(instType="OPTION", instFamily=...)
-  （strike 字段 ``stk``；每张面值 = ctVal × ctMult；到期 expTime 毫秒）
+  （strike 字段 ``stk``；每张名义面值 = ctVal × ctMult；到期 expTime 毫秒）
 - IV 与希腊值：Public.get_opt_summary(instFamily=...)（markVol/delta 等）
 - 盘口：Market.get_tickers(instType="OPTION")（bidPx/askPx）
 - 现货 HV：Market.get_history_candles(instId=BTC-USDT, bar=1D)
 
-价格口径（OKX 币本位反向期权，实证推导）：
-- 每张面值币数 = float(ctVal) × float(ctMult)（BTC-USD = 1 × 0.01 = 0.01 BTC）
-- 权利金报价单位为「面值比例」（如 ask=0.0046 → 0.46%）
-- 每张权利金(币) = askPx × 面值币数；USD 折算 × 现货价
-- cash-secured 行权担保 USD = strike × 面值币数 × 现货价（简化口径，
-  正式保证金以 OKX 计算为准——C 期下单对接实证）
+价格口径（OKX U 本位线性期权，2026-09-04 实测）：
+- 家族 instFamily = BTC-USD_UM / ETH-USD_UM（带 _UM 后缀；USDT/USDC 家族格式不存在）
+- ctType=linear、settleCcy=USD（美元结算，稳定币担保）；ctVal=1 × ctMult=0.01 = 0.01 BTC 名义/张
+- 盘口 bidPx/askPx 单位 = USD / 1 单位名义币（如 BTC-USD_UM ATM put ask≈890 → 每张 ≈ 890×0.01 = $8.9）
+- 每张权利金 USD = askPx × lot（直接美元，不再 ×现货价——币本位才需 ×spot）
+- 面值比例 % = askPx / 现货价 × 100（权利金占 1 名义币现货价值比，与币本位 prem_pct 同语义）
+- cash-secured 名义担保 = strike × lot × 张数（USD；正式保证金以 OKX 计算为准——C 期对接实证）
 """
 
 from __future__ import annotations
@@ -29,8 +30,19 @@ from nanobot_quant.okx_sdk import OkxSdkError
 _CACHE_TTL = 8.0
 _cache: dict[str, tuple[float, Any]] = {}
 
-_SPOT = {"BTC-USD": "BTC-USDT", "ETH-USD": "ETH-USDT"}
-FAMILIES = ("BTC-USD", "ETH-USD")
+# 参考价来源：现货盘（_SPOT）或指数盘（_INDEX，无现货盘的家族如 XAU）
+_SPOT = {"BTC-USD_UM": "BTC-USDT", "ETH-USD_UM": "ETH-USDT", "SOL-USD_UM": "SOL-USDT"}
+_INDEX = {"XAU-USD_UM": "XAU-USD"}
+FAMILIES = ("BTC-USD_UM", "ETH-USD_UM", "SOL-USD_UM", "XAU-USD_UM")
+
+
+def _ref_inst(family: str) -> tuple[str | None, str]:
+    """返回 (参考价 instId, 类型 spot|index)；未知家族 → (None, '')."""
+    if family in _SPOT:
+        return _SPOT[family], "spot"
+    if family in _INDEX:
+        return _INDEX[family], "index"
+    return None, ""
 
 
 def _cached(key: str, producer):
@@ -64,18 +76,38 @@ def _opt_summary(family: str) -> dict[str, dict]:
 
 
 def _spot_price(family: str) -> float | None:
+    ref, kind = _ref_inst(family)
+    if not ref:
+        return None
+
     def _load():
-        rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=_SPOT[family]))
+        if kind == "index":
+            # XAU 等无现货盘的家族：直接取指数价（idxPx）；okx 1.0.9 方法名复数 get_index_tickers
+            idx = okx_sdk.check(okx_sdk.market().get_index_tickers(instId=ref))
+            try:
+                return float(idx[0]["idxPx"]) if idx and idx[0].get("idxPx") else None
+            except (TypeError, ValueError, IndexError):
+                return None
+        rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=ref))
         try:
             return float(rows[0]["last"]) if rows and rows[0].get("last") else None
         except (TypeError, ValueError, IndexError):
             return None
+
     return _cached(f"spot:{family}", _load)
 
 
 def _spot_hv(family: str, days: int = 30) -> dict:
-    """现货日线年化历史波动率（对数收益标准差 × sqrt(365)）。"""
-    inst = _SPOT[family]
+    """现货日线年化历史波动率（对数收益标准差 × sqrt(365)）。
+
+    仅现货盘家族可算（需日线成交价）；无现货盘（index 参考，如 XAU）→ hv_pct=None。
+    """
+    ref, kind = _ref_inst(family)
+    if not ref:
+        return {"hv_pct": None, "days": 0, "inst": None}
+    if kind != "spot":
+        return {"hv_pct": None, "days": 0, "inst": ref, "note": "无现货盘（指数参考价）"}
+    inst = ref
     limit = min(max(days + 5, 20), 300)
 
     def _load():
@@ -185,12 +217,12 @@ def fetch_chain(family: str, expiries: list[int] | None = None,
                     cell["iv"] = iv * 100 if iv is not None else None
                     cell["delta"] = _f(os_.get("delta"))
                     if side == "P" and cell["ask"] is not None and lot and spot:
-                        ask_pct = cell["ask"]
-                        prem_coin = ask_pct * lot
-                        cell["prem_usd"] = prem_coin * spot
-                        cell["prem_pct"] = ask_pct * 100.0
+                        ask = cell["ask"]
+                        # U 本位线性：bidPx/askPx = USD/1 名义币 → 每张 = ask × lot（直接 USD）
+                        cell["prem_usd"] = ask * lot
+                        cell["prem_pct"] = ask / spot * 100.0
                         exp_days = max((exp - now) / 86400000.0, 1 / 365.0)
-                        cell["apr_pct"] = ask_pct * 100.0 * 365.0 / exp_days
+                        cell["apr_pct"] = cell["prem_pct"] * 365.0 / exp_days
                 row[side] = cell
             rows.append(row)
         if rows:
@@ -200,16 +232,18 @@ def fetch_chain(family: str, expiries: list[int] | None = None,
                 "rows": rows, "contracts": len(contracts),
             })
 
+    ref, kind = _ref_inst(family)
+    spot_inst_label = ref if kind == "spot" else f"{ref} (index)" if ref else family
     return {
         "family": family,
         "spot": spot,
-        "spot_inst": _SPOT[family],
+        "spot_inst": spot_inst_label,
         "lot_coin": lot,
         "hv": hv,
         "groups": groups,
         "chosen": chosen,
         "expiries": exp_set,
-        "price_note": "权利金报价=面值比例（BTC-USD 每张面值 0.01 BTC）；"
-                      "年化=面值比例×365/剩余天数；行权担保=strike×面值×现货价（简化口径，"
-                      "正式保证金以 OKX 计算为准）",
+        "price_note": "U 本位线性期权（USDSⓈ-M）：盘口 = USD/1 名义币；每张权利金(USD) = ask × 每张面值；"
+                      f"面值比例 = ask ÷ 现货参考价；现金担保 = strike × 每张面值 × 张数 "
+                      "（简化口径，正式保证金以 OKX 计算为准）",
     }
