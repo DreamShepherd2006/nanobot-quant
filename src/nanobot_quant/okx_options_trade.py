@@ -565,10 +565,15 @@ def _parse_strike(inst_id: str) -> Optional[float]:
 
 
 def _parse_exp(inst_id: str) -> Optional[int]:
+    # instId 格式：FAMILY-QUOTE[_UM]-YYMMDD-STRIKE-C/P（如 SOL-USD_UM-260905-99-P）
+    # 日期段是倒数第 3 段（从右数：type、strike、date）——不能用固定 index，
+    # family/quote 可能含连字符与 _UM 后缀导致错位（曾取 parts[1] 把
+    # USD_UM 当日期解析失败 → 1970-01-01）。
     parts = inst_id.split("-")
-    if len(parts) >= 3:
+    if len(parts) >= 4:
+        dseg = parts[-3]
         try:
-            y, m, d = 2000 + int(parts[1][:2]), int(parts[1][2:4]), int(parts[1][4:6])
+            y, m, d = 2000 + int(dseg[:2]), int(dseg[2:4]), int(dseg[4:6])
             return int(datetime(y, m, d, tzinfo=timezone.utc).timestamp() * 1000)
         except ValueError:
             return None

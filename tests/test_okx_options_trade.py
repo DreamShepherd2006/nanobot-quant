@@ -6,6 +6,7 @@ mock 对象替代 okx_sdk.public/market/trade_for/account_for 与凭证存储，
 """
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -264,3 +265,18 @@ def test_normalize_position_net_mode_sign():
     # 明确 long/short posSide 直通（简单/单币种模式）
     p3 = ot._normalize_position({"instId": "X", "posSide": "short", "pos": "-2"})
     assert p3["side"] == "short" and p3["pos"] == 2.0
+
+
+# ── instId 到期/行权解析（持仓卡片展示）────────────
+
+def test_parse_exp_um_suffix():
+    # U 本位 _UM 后缀：SOL-USD_UM-260905-99-P → 2026-09-05（曾取 parts[1]=USD_UM 失败 → 1970-01-01）
+    e = ot._parse_exp("SOL-USD_UM-260905-99-P")
+    assert e is not None and e == int(datetime(2026, 9, 5, tzinfo=timezone.utc).timestamp() * 1000)
+    # 无 _UM 后缀（币本位参考格式）同样按倒数第 3 段
+    e2 = ot._parse_exp("BTC-USD-260904-80000-C")
+    assert e2 == int(datetime(2026, 9, 4, tzinfo=timezone.utc).timestamp() * 1000)
+    # 畸形段 → None（不落 1970）
+    assert ot._parse_exp("BAD") is None
+    assert ot._parse_exp("SOL-USD_UM-ABCDE-99-P") is None
+    assert ot._parse_strike("SOL-USD_UM-260905-99-P") == 99.0
