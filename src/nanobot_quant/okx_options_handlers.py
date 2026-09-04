@@ -206,6 +206,31 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return _deny(err)
         return JSONResponse({"ok": True, "reminders": ot.expiry_reminder()})
 
+    # ── 担保设置（逐仓自动追加比例，option_params.json）────────
+
+    async def _params_get(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        return JSONResponse({"ok": True, "params": ot.load_option_params()})
+
+    async def _params_save(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        raw = body.get("collateral_ratio_pct")
+        try:
+            ratio = int(raw)
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "担保比例必须为整数（0–200）"})
+        if not 0 <= ratio <= 200:
+            return JSONResponse({"ok": False, "error": "担保比例须在 0–200 之间"})
+        return JSONResponse({"ok": True, "params": ot.save_option_params(
+            collateral_ratio_pct=ratio)})
+
     # ── 批次 C：下单（预览 → start → confirm 两步确认）─────────
 
     async def _preview(request: Request):
@@ -361,6 +386,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])
     app.add_api_route("/config/okx-options/reminder", _reminder, methods=["GET"])
+    app.add_api_route("/config/okx-options/params", _params_get, methods=["GET"])
+    app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/confirm", _sell_confirm, methods=["POST"])

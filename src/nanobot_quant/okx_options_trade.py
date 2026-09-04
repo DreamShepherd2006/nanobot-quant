@@ -37,6 +37,8 @@ from .okx_sdk import OkxSdkError
 #: ≥ Σ(strike×面值) 现金（不设杠杆，平台不冻结全额，见页面提示）。
 SELL_TDMODE = "isolated"
 BUY_TDMODE = "cash"
+#: 跨币种保证金（acctLv=3 net_mode）下逐仓期权仓的 posSide 标识为 net
+POS_SIDE = "net"
 #: 平仓/减仓单的 tdMode 必须与持仓保证金模式一致（OKX 规则：不匹配 →
 #: 51000 Parameter tdMode error）。本仓开在 isolated（SELL_TDMODE），
 #: 买回平仓同样 isolated；cash 仅用于无平仓对象的纯买入开仓。
@@ -79,6 +81,50 @@ def save_ledger(entries: list[dict]) -> None:
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), "utf-8")
     tmp.replace(p)
+
+
+# ── 期权参数（WebUI 担保设置，独立于现货 exec_params）───────────
+
+_PARAMS_NAME = "okx_options_params.json"
+DEFAULT_COLLATERAL_RATIO_PCT = 100
+
+
+def params_path() -> Path:
+    return _storage_dir() / _PARAMS_NAME
+
+
+def load_option_params() -> dict:
+    p = params_path()
+    if not p.exists():
+        return {"collateral_ratio_pct": DEFAULT_COLLATERAL_RATIO_PCT}
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_option_params(**fields) -> dict:
+    d = load_option_params()
+    d.update(fields)
+    ratio = d.get("collateral_ratio_pct", DEFAULT_COLLATERAL_RATIO_PCT)
+    try:
+        ratio = int(ratio)
+    except (TypeError, ValueError):
+        ratio = DEFAULT_COLLATERAL_RATIO_PCT
+    d["collateral_ratio_pct"] = min(max(ratio, 0), 200)
+    p = params_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(p)
+    return d
+
+
+def collateral_ratio_pct() -> int:
+    """逐仓自动追加担保比例：全损(strike×面值×张数)的百分比，0 = 关闭自动追加。"""
+    return load_option_params().get(
+        "collateral_ratio_pct", DEFAULT_COLLATERAL_RATIO_PCT)
 
 
 def _new_id() -> str:
@@ -187,6 +233,7 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
     ref_px = px
     prem = ref_px * lot * sz
     collat = spec["strike"] * lot * sz
+    ratio = collateral_ratio_pct()
     exp_iso = _exp_str(spec["exp_ms"])
     return {
         "ok": True,
@@ -201,14 +248,19 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
         "ord_type": ord_type,
         "px": ref_px,
         "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]},
-    "td_mode": SELL_TDMODE,
-    "est_premium_usd": round(prem, 4),
-    "collateral_est_usd": round(collat, 2),
-    "note": ("U 本位线性：盘口=USD/1 名义币，权利金(USD)=px×每张面值；"
-             "卖方以逐仓(isolated)冻结——每张独立保证金/强平边界，多笔卖 put"
-             "共存互不拖累（TD 低9 分批同账号操作，无需多子账号）；"
-             "等效现金担保 = 账户自留 ≥ Σ(strike×面值) 现金（不设杠杆）；"
-             "欧式现金结算，不可提前行权。"),
+        "td_mode": SELL_TDMODE,
+        "est_premium_usd": round(prem, 4),
+        "collateral_est_usd": round(collat, 2),
+        "collateral_target_usd": round(collat * ratio / 100.0, 2),
+        "collateral_ratio_pct": ratio,
+        "note": ("U 本位线性：盘口=USD/1 名义币，权利金(USD)=px×每张面值；"
+                 "卖方以逐仓(isolated)冻结——每张独立保证金/强平边界，多笔卖 put"
+                 "共存互不拖累（TD 低9 分批同账号操作，无需多子账号）；"
+                 f"成交后自动把该仓保证金追加至担保目标（全损×{ratio}%≈"
+                 f"collateral_target_usd），实现等效现金担保——浮亏上限 < 保证金则"
+                 "数学上无强平路径，可扛到到期；0% = 关闭自动追加（仅平台默认 IM"
+                 "冻结，浮亏可能击穿提前强平）；追加资金在平仓/到期后自动释放；"
+                 "账户可用余额须≥追加额。欧式现金结算，不可提前行权。"),
     }
 
 
@@ -334,7 +386,11 @@ def open_put(account: str, *, inst_id: str, sz: int,
 
 
 def _settle_open_entry(creds: dict, entry: dict) -> dict:
-    """短轮询（约 10×0.5s）等成交，回填 avg px/权利金/状态。"""
+    """短轮询（约 10×0.5s）等成交，回填 avg px/权利金/状态。
+
+    filled → open 时自动触发 _ensure_collateral：把逐仓保证金追加至
+    全损担保（走 A——见 _ensure_collateral 文档）。
+    """
     if not entry.get("ord_id"):
         return entry
     for _ in range(10):
@@ -342,16 +398,78 @@ def _settle_open_entry(creds: dict, entry: dict) -> dict:
         if o["status"] == "filled":
             px = o["avg_px"] or entry.get("px") or 0.0
             filled_sz = o["acc_fill_sz"] or entry.get("sz") or 0
-            return update_ledger(
+            upd = update_ledger(
                 lambda x: x["id"] == entry["id"], status="open",
                 filled_px=px, filled_sz=filled_sz, fee=o["fee"],
                 premium_usd=round(px * entry["lot"] * filled_sz, 4),
-            ) or entry
+            )
+            if upd:
+                upd = _ensure_collateral(creds, upd) or upd
+            return upd or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
                                  status="cancelled") or entry
         time.sleep(0.5)
     return entry  # 仍 pending，等页面刷新再轮询
+
+
+def _position_margin(creds: dict, inst_id: str) -> tuple[float, str]:
+    """该逐仓期权仓当前保证金（USDC）。margin 字段为空/0 时回退 imr。"""
+    rows = okx_sdk.check(okx_sdk.account_for(creds).get_positions(
+        instType="OPTION", instId=inst_id))
+    r = rows[0] if isinstance(rows, list) and rows else {}
+    mgn = _f(r.get("margin"))
+    if mgn <= 0:
+        mgn = _f(r.get("imr"))
+    return mgn, r.get("mgnMode") or ""
+
+
+def _ensure_collateral(creds: dict, entry: dict) -> Optional[dict]:
+    """逐仓现金担保（走 A）：成交后将仓位保证金追加至全损上限。
+
+    背景：isolated 单笔默认仅冻结约 IM（~12% 名义，99-P 实测 1.26 vs 名义
+    9.9），标的大幅波动浮亏可击穿单笔保证金 → 提前强平；账户旁的自留现金
+    （隔离在外）救不了这笔。把保证金追加至 strike×面值×张数 × 担保比例
+    （collateral_ratio_pct，WebUI 可配，默认 100 = 全损上限）后，浮亏上限
+    < 保证金 → 数学上无强平路径，可扛到到期按结算了结
+    （接货/现金结算），多笔之间仍逐仓隔离互不拖累。
+
+    追加的保证金在平仓/到期后自动释放回账户余额。追加失败不阻断——仓位已
+    成交保持 open，台账记 margin_note 供页面提醒补担保。
+    """
+    strike = _f(entry.get("strike"))
+    lot = _f(entry.get("lot"))
+    filled = _f(entry.get("filled_sz")) or _f(entry.get("sz")) or 0
+    ratio = collateral_ratio_pct()
+    if ratio <= 0:
+        # 自动担保已关闭：仅平台默认 IM 冻结（浮亏可能击穿提前强平，语义自知）
+        return update_ledger(
+            lambda x: x["id"] == entry["id"],
+            collateral_usd=None, margin_added=None,
+            margin_note="自动担保已关闭（比例 0%，仅平台 IM 冻结）")
+    target = round(strike * lot * filled * ratio / 100.0, 2)
+    if target <= 0:
+        return None
+    cur, _mgn_mode = _position_margin(creds, entry["inst_id"])
+    amt = round(target - cur, 2)
+    if amt <= 0.01:
+        return update_ledger(
+            lambda x: x["id"] == entry["id"],
+            collateral_usd=target, margin_added=0.0,
+            margin_note="ok（已达标）")
+    try:
+        okx_sdk.check(okx_sdk.account_for(creds).set_margin_balance(
+            instId=entry["inst_id"], posSide=POS_SIDE, type="add",
+            amt=str(amt)))
+    except Exception as e:  # noqa: BLE001 —— 追加失败不阻断开仓（仓位已成交）
+        return update_ledger(
+            lambda x: x["id"] == entry["id"],
+            collateral_usd=target, margin_added=None,
+            margin_note=f"追加失败（仓位已开，担保未到位）: {e}")
+    return update_ledger(
+        lambda x: x["id"] == entry["id"],
+        collateral_usd=target, margin_added=amt,
+        margin_note="ok（现金担保已追加）")
 
 
 def close_put(account: str, *, inst_id: str, sz: int,
