@@ -56,6 +56,16 @@ class _FakeAccount:
     def get_positions(self, **kw):
         return {"code": "0", "data": []}
 
+    def get_balance(self, ccy=""):
+        return {"code": "0", "data": [{"totalEq": "67.44", "details": [
+            {"ccy": "XCRCL", "cashBal": "0.66", "availBal": "0.66",
+             "frozenBal": "0", "eq": "0.6603", "eqUsd": "67.44", "uTime": "0"}]}]}
+
+    def get_config(self):
+        return {"code": "0", "data": [{"uid": "881574754615066858", "acctLv": "3",
+                                       "posMode": "net_mode", "opAuth": "1",
+                                       "settleCcy": "USDC", "perm": "read_only,trade"}]}
+
 
 @pytest.fixture(autouse=True)
 def _mock_sdk(monkeypatch, tmp_path):
@@ -72,7 +82,8 @@ def _mock_sdk(monkeypatch, tmp_path):
 def _patch_entry(monkeypatch):
     monkeypatch.setattr(ot, "_entry_account", lambda account: {
         "creds": {"api_key": "k", "secret_key": "s", "passphrase": "p"},
-        "label": account or "bot1"})
+        "label": account or "bot1", "name": "DreamShepherdbot1",
+        "uid": account or "881574754615066858"})
 
 
 # ── preview ───────────────────────────────────────────────
@@ -219,3 +230,21 @@ def test_expiry_reminder(tmp_path, monkeypatch):
     ot.add_ledger(kind="open_put", inst_id="C", status="closed", exp_ms=soon, sz=1)
     r = ot.expiry_reminder()
     assert len(r) == 1 and r[0]["inst_id"] == "A"
+
+
+# ── balance / config（资产卡 + 账户配置条）──────────────
+
+def test_account_balance_normalized(_patch_entry):
+    b = ot.account_balance("881574754615066858")
+    assert b["total_eq_usd"] == pytest.approx(67.44)
+    assert b["details"][0]["ccy"] == "XCRCL"
+    assert b["details"][0]["avail_bal"] == pytest.approx(0.66)
+    assert b["account"] == "DreamShepherdbot1"
+    assert b["account_uid"] == "881574754615066858"
+
+
+def test_account_config_option_authorized(_patch_entry):
+    c = ot.account_config("881574754615066858")
+    assert c["op_auth"] == 1
+    assert c["acct_lv"] == "3"
+    assert c["settle_ccy"] == "USDC"

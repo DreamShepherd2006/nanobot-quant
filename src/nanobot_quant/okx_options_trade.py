@@ -196,11 +196,33 @@ def _exp_str(exp_ms: int) -> str:
 # ── 下单（真实操作，两步确认由 handler 层执行）──────────────
 
 def _entry_account(account: str) -> dict:
-    """account = 子账号 name 或 uid。"""
-    from .okx_cex_credentials import get_okx_cex_credentials
+    """account = 子账号 name 或 uid。返回 creds + 匹配条目的 name/uid/label。
+
+    单独再查一次存储以拿到 name/uid 元数据——get_okx_cex_credentials 只返回
+    三要素（api_key/secret_key/passphrase），不含账号身份字段。
+    """
+    from .okx_cex_credentials import (
+        get_okx_cex_credentials, load_okx_cex_credentials, normalize_stored,
+        _REQUIRED,
+    )
 
     creds = get_okx_cex_credentials(account=account or None)
-    return {"creds": creds, "label": account or creds.get("name", "")}
+    name, uid = "", ""
+    try:
+        stored = normalize_stored(load_okx_cex_credentials() or {})
+        subs = stored.get("sub_accounts") or []
+        for s in subs:
+            hit = (account and (s.get("uid") == account or s.get("name") == account)) or (
+                not account and all(s.get(k) for k in _REQUIRED))
+            if hit:
+                name = s.get("name") or ""
+                uid = s.get("uid") or ""
+                if account:
+                    break
+    except Exception:
+        pass
+    return {"creds": creds, "label": name or account or "",
+            "name": name, "uid": uid or account or ""}
 
 
 def _place(creds: dict, *, inst_id: str, side: str, sz: int,
@@ -422,7 +444,7 @@ def account_config(account: str = "") -> dict:
     rows = okx_sdk.check(okx_sdk.account_for(a["creds"]).get_config())
     d = rows[0] if isinstance(rows, list) and rows else {}
     return {
-        "uid": str(d.get("uid") or a["creds"].get("uid") or ""),
+        "uid": str(d.get("uid") or a["uid"] or ""),
         "acct_lv": str(d.get("acctLv") or ""),
         "pos_mode": str(d.get("posMode") or ""),
         "op_auth": int(d.get("opAuth") or 0),
@@ -457,9 +479,8 @@ def account_balance(account: str = "") -> dict:
                 "update_ms": int(r.get("uTime") or 0),
             })
     out.sort(key=lambda x: x["eq_usd"], reverse=True)
-    name = a["creds"].get("name") or a["label"] or ""
     return {"total_eq_usd": _f(d.get("totalEq")), "details": out,
-            "account": name, "account_uid": str(a["creds"].get("uid") or account)}
+            "account": a["name"] or a["label"], "account_uid": a["uid"]}
 
 
 def open_puts(account: str = "") -> list[dict]:
