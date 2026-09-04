@@ -354,6 +354,64 @@ def poll_order(creds: dict, inst_id: str, ord_id: str) -> dict:
     }
 
 
+def cancel_order(account: str, *, inst_id: str, ord_id: str) -> dict:
+    """撤销未成交委托（单步，撤单不产生资金流）。
+
+    先 get_order 查状态：filled → 返回 status=filled（无法撤，提示刷新）；
+    已 cancelled → 幂等（顺带把台账条目对齐）。live/partially_filled →
+    set_cancel_order 撤销。撤单成功后按 ord_id 把对应台账条目置 cancelled
+    （保留记录）。平仓单（close_put）撤销时对应 open_put 行保持 open——
+    持仓未动、仍受到期监控。
+    """
+    a = _entry_account(account)
+    creds = a["creds"]
+    o = poll_order(creds, inst_id, ord_id)
+    if o["status"] == "filled":
+        return {"status": "filled", "message": "订单已成交，无需撤销",
+                "ord_id": ord_id}
+    if o["status"] == "cancelled":
+        update_ledger(lambda x: x.get("ord_id") == ord_id, status="cancelled")
+        return {"status": "cancelled", "message": "订单已是撤销状态",
+                "ord_id": ord_id}
+    rows = okx_sdk.check(okx_sdk.trade_for(creds).set_cancel_order(
+        instId=inst_id, ordId=ord_id))
+    row = rows[0] if isinstance(rows, list) and rows else {}
+    s_code = row.get("sCode")
+    if s_code not in (None, "", "0"):
+        raise OkxSdkError(f"OKX {s_code} {row.get('sMsg', '')}".strip())
+    update_ledger(lambda x: x.get("ord_id") == ord_id, status="cancelled",
+                  cancel_ts=_utc_now())
+    return {"status": "cancelled", "message": "已撤销", "ord_id": ord_id}
+
+
+def pending_orders(account: str = "", inst_family: str = "") -> list[dict]:
+    """子账号当前未成交委托（只读，含官方后台手动挂的单）。
+
+    OKX /trade/orders-pending 要求 instId / instFamily / uly 至少一个——
+    本实现按 instFamily 拉取该家族全部未成交委托；family 缺失时显式报错
+    （不静默回退）。归一化输出 inst_id/ord_id/px/sz/side/ord_type/ts_ms。
+    """
+    if not inst_family:
+        raise OkxSdkError("pending_orders 需 inst_family（OKX 不支持无 family 全量拉取）")
+    a = _entry_account(account)
+    rows = okx_sdk.check(okx_sdk.trade_for(a["creds"]).get_orders_pending(
+        instType="OPTION", instFamily=inst_family))
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        out.append({
+            "inst_id": r.get("instId", ""),
+            "ord_id": r.get("ordId", ""),
+            "px": _f(r.get("px")),
+            "sz": _f(r.get("sz")),
+            "side": r.get("side", ""),
+            "ord_type": r.get("ordType", ""),
+            "td_mode": r.get("tdMode", ""),
+            "ts_ms": int(r.get("cTime") or 0) or None,
+        })
+    out.sort(key=lambda x: x["ts_ms"] or 0)
+    return out
+
+
 def open_put(account: str, *, inst_id: str, sz: int,
              ord_type: str = "limit", px: Optional[float] = None) -> dict:
     """卖 put 开仓（真实下单）。成功后写入台账（pending → 轮询 filled）。"""

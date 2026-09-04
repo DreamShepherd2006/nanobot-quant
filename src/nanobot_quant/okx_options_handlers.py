@@ -206,6 +206,40 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return _deny(err)
         return JSONResponse({"ok": True, "reminders": ot.expiry_reminder()})
 
+    # ── 撤单 / 当前委托（单步，撤单无资金流）────────────
+
+    async def _pending(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        account = request.query_params.get("account") or ""
+        inst_family = request.query_params.get("inst_family") or ""
+        try:
+            rows = await asyncio.to_thread(
+                ot.pending_orders, account, inst_family)
+            return JSONResponse({"ok": True, "pending": rows})
+        except (okx_sdk.OkxSdkError, RuntimeError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
+    async def _cancel(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        inst_id = (body or {}).get("inst_id") or ""
+        ord_id = (body or {}).get("ord_id") or ""
+        account = (body or {}).get("account") or ""
+        if not inst_id or not ord_id:
+            return JSONResponse({"ok": False, "error": "缺少 inst_id / ord_id"})
+        try:
+            res = await asyncio.to_thread(
+                ot.cancel_order, account, inst_id=inst_id, ord_id=ord_id)
+            return JSONResponse({"ok": True, **res})
+        except (okx_sdk.OkxSdkError, RuntimeError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
     # ── 担保设置（逐仓自动追加比例，option_params.json）────────
 
     async def _params_get(request: Request):
@@ -386,6 +420,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])
     app.add_api_route("/config/okx-options/reminder", _reminder, methods=["GET"])
+    app.add_api_route("/config/okx-options/pending", _pending, methods=["GET"])
+    app.add_api_route("/config/okx-options/cancel", _cancel, methods=["POST"])
     app.add_api_route("/config/okx-options/params", _params_get, methods=["GET"])
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])

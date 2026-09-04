@@ -389,6 +389,24 @@ async function loadPositions() {
       }
       html += '</tbody></table>';
     }
+    // ⏳ 当前委托（未成交挂单，含官方后台手动挂的单）——查询失败静默降级
+    try {
+      const fam = (chainData && chainData.family) || famSel.value || "";
+      if (fam) {
+        const pr = await fetch("/config/okx-options/pending?account=" + encodeURIComponent(accSel.value) + "&inst_family=" + encodeURIComponent(fam));
+        const pj = await pr.json();
+        if (pj.ok && pj.pending && pj.pending.length) {
+          html += '<div class="grp-title" style="margin-top:14px">⏳ 当前委托（未成交 · ' + esc(fam) + '）</div><table><thead><tr>' +
+            '<th>合约</th><th>方向</th><th>类型</th><th>价格</th><th>张数</th><th>模式</th><th></th></tr></thead><tbody>';
+          for (const p of pj.pending) {
+            html += '<tr><td class="mono">' + esc(p.inst_id) + '</td><td>' + esc(p.side) + '</td><td>' + esc(p.ord_type) +
+              '</td><td>' + fmt(p.px, 4) + '</td><td>' + fmt(p.sz, 4) + '</td><td>' + esc(p.td_mode) +
+              '</td><td><a class="act" onclick="cancelOrder(\'' + esc(p.inst_id) + '\',\'' + esc(String(p.ord_id)) + '\')">撤单</a></td></tr>';
+          }
+          html += '</tbody></table>';
+        }
+      }
+    } catch (e) { /* 静默：委托区暂不可用不影响主卡 */ }
     $("posBody").innerHTML = html;
   } catch (e) { $("posBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
 }
@@ -402,18 +420,39 @@ async function loadLedger() {
     const rows = j.ledger || [];
     if (!rows.length) { $("ledBody").innerHTML = '<div class="empty">台账为空（尚未卖 put）</div>'; return; }
     let html = '<table><thead><tr><th>时间(UTC)</th><th>动作</th><th>合约</th><th>方向</th><th>类型</th>' +
-      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th></tr></thead><tbody>';
+      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
     for (const e of rows) {
       const kind = {open_put: "卖 put 开仓", close_put: "买回平仓", spot_cover: "现货补买", expiry_settle: "到期结算"}[e.kind] || e.kind;
+      const act = (e.status === "pending" && e.ord_id)
+        ? '<a class="act" onclick="cancelOrder(\'' + esc(e.inst_id || "") + '\',\'' + esc(String(e.ord_id)) + '\')">撤单</a>'
+        : "";
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
         '</td><td>' + usd(e.premium_usd) + '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
-        '</td><td>' + esc(e.account || "") + '</td></tr>';
+        '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
     }
     html += '</tbody></table>';
     $("ledBody").innerHTML = html;
   } catch (e) { $("ledBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
+}
+
+async function cancelOrder(instId, ordId) {
+  if (!confirm("撤单：" + instId + "（ord_id " + ordId + "）？\n未成交委托将取消。若为平仓单，对应卖 put 持仓继续裸奔（仍受到期监控，可重新发起平仓）。")) return;
+  try {
+    const r = await fetch("/config/okx-options/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: accSel.value, inst_id: instId, ord_id: ordId }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    if (j.status === "filled") {
+      alert("订单已成交（无需撤销）——刷新持仓页查看成交结果。");
+    } else {
+      alert("✅ 已撤销" + (j.message ? "（" + j.message + "）" : ""));
+    }
+  } catch (e) { alert("撤单失败：" + e.message); }
+  if (curTab === "led") loadLedger(); else if (curTab === "pos") loadPositions();
 }
 
 async function loadReminder() {
