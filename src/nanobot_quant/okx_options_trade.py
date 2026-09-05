@@ -30,11 +30,10 @@ from . import okx_sdk
 from .okx_sdk import OkxSdkError
 
 #: OKX 期权保证金模式（2026-09-04 实测网页 + 官方 agent-skills 确认）：
-#: 买方(side=buy，买回平仓)=cash（付全权利金，无杠杆）；
-#: 卖方(side=sell，卖 put)=isolated 逐仓——TD 低9 多笔卖 put 在同一
-#: 子账号并存，逐仓给每张独立保证金与强平边界（亏穿只平该张，不拖累
-#: 同账号其他仓位），无需每笔开子账号。等效现金担保 = 账户自留
-#: ≥ Σ(strike×面值) 现金（不设杠杆，平台不冻结全额，见页面提示）。
+#: 纯买方开仓(cash)付全权利金无杠杆；我们只卖 put（side=sell）= isolated
+#: 逐仓——TD 低9 多笔卖 put 在同一子账号并存，逐仓给每张独立保证金与
+#: 强平边界（亏穿只平该张，不拖累同账号其他仓位），无需每笔开子账号。
+#: 等效现金担保 = 账户自留 ≥ Σ(strike×面值) 现金（不设杠杆，平台不冻结全额）。
 SELL_TDMODE = "isolated"
 BUY_TDMODE = "cash"
 #: 跨币种保证金（acctLv=3 net_mode）下逐仓期权仓的 posSide 标识为 net
@@ -43,6 +42,37 @@ POS_SIDE = "net"
 #: 51000 Parameter tdMode error）。本仓开在 isolated（SELL_TDMODE），
 #: 买回平仓同样 isolated；cash 仅用于无平仓对象的纯买入开仓。
 CLOSE_TDMODE = "isolated"
+
+#: OKX 期权无市价单（官方 docs："For OPTION, market order is not supported yet"——
+#: 成交价无法预知、保证金无法预冻结；实测 isolated buy market 亦 50016）。
+#: px 必须客户端自定价——建议价规则（页面预填与自动化共用同一规则）：
+#: 卖 put（开仓）：IOC px = bid × 0.5 保护线——正常盘口 px<bid 吃单成交在最优买价，
+#:   盘口闪崩至 bid×0.5 以下自动拒单（防贱卖）；低比例非目标价而是「最差接受线」。
+#: 买回（平仓）：IOC px = ask——精确吃当前卖一；ask 波动升高自动撤、下轮重试不追价。
+SELL_PX_BID_RATIO = 0.5
+
+
+def suggest_sell_px(bid: Optional[float]) -> Optional[float]:
+    """卖 put 开仓建议 px（IOC 保底线 = bid×0.5）。
+
+    px 只是保护线不是目标价：正常盘口 IOC 扫单仍按最优买价（bid）成交，
+    仅当盘口崩至 bid×0.5 以下时自动撤单。bid 缺失/非正 → None
+    （自动化调用方须 fail-closed 不下单）。页面预填与此同规则（toFixed(2)）。
+    """
+    if not bid or bid <= 0:
+        return None
+    return round(bid * SELL_PX_BID_RATIO, 2)
+
+
+def suggest_close_px(ask: Optional[float]) -> Optional[float]:
+    """买回平仓建议 px = 当前 ask（吃买一，不留缓冲）。
+
+    px 是最高接受价：填 ask 精确吃当前卖一；ask 升高 IOC 自动撤单、
+    下轮重试（薄盘口不追价，重试成本低）。ask 缺失/非正 → None。
+    """
+    if not ask or ask <= 0:
+        return None
+    return round(ask, 2)
 #: 订单来源标签（OKX tag：纯字母数字、<=16 位）
 TAG_OPEN = "nbputo1"
 TAG_CLOSE = "nbputc1"

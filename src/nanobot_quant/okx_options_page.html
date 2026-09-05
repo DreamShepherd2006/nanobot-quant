@@ -503,10 +503,11 @@ function modalClose() { overlay.classList.remove("on"); stageInfo = null; }
 function openSell(expMs, strike) {
   if (!chainData) return;
   let instId = null;
+  let putRow = null;
   for (const g of chainData.groups) {
     if (g.exp_ms !== expMs) continue;
     for (const r of g.rows) {
-      if (r.strike === strike && r.P && r.P.inst_id) instId = r.P.inst_id;
+      if (r.strike === strike && r.P && r.P.inst_id) { instId = r.P.inst_id; putRow = r.P; }
     }
   }
   if (!instId) { showErr("找不到该档 put 合约"); return; }
@@ -518,12 +519,30 @@ function openSell(expMs, strike) {
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
   $("mPx").value = "";
-  $("mTypeHint").textContent = "OKX 期权无纯市价单（50016）；卖 put 立即成交：限价 px=盘口 bid，或 IOC 保底价 ≤bid（如 0.01）扫单";
-  $("mPxHint").textContent = "卖 put 参考表格 bid 列（你的卖出价=bid）；立即成交限价填 bid，或 IOC 保底价填 ≤bid（如 0.01）扫单";
+  // 自动定价预填：IOC 保底线 px = 当前 bid×0.5（对应后端 suggest_sell_px，防闪崩半价以下拒单）
+  $("mOrdType").value = "ioc";
+  const bidP = putRow && putRow.bid != null && putRow.bid > 0 ? putRow.bid : null;
+  if (bidP != null) {
+    $("mPx").value = (bidP * 0.5).toFixed(2);
+    $("mTypeHint").textContent = "自动预填 IOC 保底 px = 当前 bid×0.5（=" + (bidP * 0.5).toFixed(2) + ", 可改）；正常盘口仍按最优买价成交，盘口崩至保底以下自动拒单";
+    $("mPxHint").textContent = "想立即成交可切限价并填 bid（=表格 bid 列）；IOC 保底越低越易成交，成交价由盘口决定、px 只是保护线";
+  } else {
+    $("mTypeHint").textContent = "该档当前无 bid（无买盘）——卖 put 可能无法成交；换近实值档或稍后重试";
+    $("mPxHint").textContent = "";
+  }
   modalOpen("卖 put：" + instId);
   $("mPreviewBtn").style.display = ""; $("mGo").style.display = "none";
   $("mPreviewBtn").onclick = () => doPreview("sell");
   $("mGo").onclick = () => doSellConfirm();
+}
+function findPutByInstId(instId) {
+  if (!chainData || !instId) return null;
+  for (const g of chainData.groups) {
+    for (const r of g.rows) {
+      if (r.P && r.P.inst_id === instId) return r.P;
+    }
+  }
+  return null;
 }
 function openClose(instId) {
   modalMode = "close"; modalInst = instId;
@@ -531,8 +550,18 @@ function openClose(instId) {
   $("mRowSz").style.display = ""; $("mRowType").style.display = ""; $("mRowPx").style.display = "";
   $("mRowAmt").style.display = "none"; $("mRowQty").style.display = "none";
   $("mSz").value = "1";
-  $("mTypeHint").textContent = "买回平仓吃 ask：限价 px ≥当前 ask 立即成交，或 IOC 保底价往高填（如 0.5）扫单";
-  $("mPxHint").textContent = "买回参考表格 ask 列（你的买回价=ask）；tdMode=isolated（平仓匹配开仓逐仓，cash 平仓报 51000）";
+  // 自动定价预填：买回 IOC px = 当前 ask（吃买一不留缓冲；对应后端 suggest_close_px——ask 升高自动撤、下轮重试不追价）
+  $("mOrdType").value = "ioc";
+  const askP = findPutByInstId(instId)?.ask ?? null;
+  if (askP != null && askP > 0) {
+    $("mPx").value = askP.toFixed(2);
+    $("mTypeHint").textContent = "自动预填 IOC px = 当前 ask（=" + askP.toFixed(2) + ", 可改）；吃当前卖一成交，ask 升高自动撤单不追价、下轮重试";
+    $("mPxHint").textContent = "px 是最高接受价：填 ask 精确吃买一；薄盘口想扫深档可往高填（追价有滑点风险）";
+  } else {
+    $("mPx").value = "";
+    $("mTypeHint").textContent = "该合约当前无 ask（无卖盘）——平仓可能无法成交，稍后重试";
+    $("mPxHint").textContent = "";
+  }
   modalOpen("平仓：" + instId);
   $("mPreviewBtn").style.display = "none"; $("mGo").style.display = "";
   $("mGo").textContent = "确认平仓";

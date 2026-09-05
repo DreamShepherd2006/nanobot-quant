@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 import pytest
 
 from nanobot_quant import okx_options_trade as ot
+from nanobot_quant.okx_options_trade import (
+    suggest_close_px,
+    suggest_sell_px,
+)
 from nanobot_quant.okx_sdk import OkxSdkError
 
 
@@ -529,3 +533,22 @@ def test_pending_orders_requires_family(_mock_sdk, _patch_entry):
         assert False, "应抛 OkxSdkError"
     except OkxSdkError as e:
         assert "inst_family" in str(e)
+
+
+def test_suggest_sell_px_bid_half_protection():
+    # 卖 put IOC 保底 = bid×0.5（保护线：正常盘口吃 bid 成交、闪崩半价下拒单）
+    assert suggest_sell_px(0.30) == 0.15
+    assert suggest_sell_px(0.02) == 0.01
+    assert suggest_sell_px(1.04) == 0.52
+    assert suggest_sell_px(None) is None
+    assert suggest_sell_px(0) is None
+    assert suggest_sell_px(-0.1) is None
+
+
+def test_suggest_close_px_ask_no_buffer():
+    # 买回 px = ask（吃买一不留缓冲；ask 升高自动撤不追价）
+    assert suggest_close_px(0.33) == 0.33
+    assert suggest_close_px(0.41) == 0.41
+    assert suggest_close_px(None) is None
+    assert suggest_close_px(0) is None
+    assert suggest_close_px(-0.1) is None
