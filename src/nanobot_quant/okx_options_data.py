@@ -78,6 +78,9 @@ def get_ticker_bid_ask(inst_id: str) -> dict:
     if not tk:
         return {"found": False, "bid": None, "ask": None}
     return {"found": True, "bid": _f(tk.get("bidPx")), "ask": _f(tk.get("askPx"))}
+
+
+def _opt_summary(family: str) -> dict[str, dict]:
     def _load():
         rows = okx_sdk.check(okx_sdk.public().get_opt_summary(instFamily=family))
         return {r["instId"]: r for r in rows}
