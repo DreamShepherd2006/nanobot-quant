@@ -168,6 +168,20 @@ def register_okx_options_routes(app, gatekeeper) -> None:
 
     # ── 批次 C：账户 / 持仓 / 台账 / 提醒（只读）────────────────
 
+    async def _ticker(request: Request):
+        # 单合约实时盘口（平仓/卖 put 弹窗 px 预填，免先刷新期权链）
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        inst = (request.query_params.get("inst_id") or "").strip().upper()
+        if not inst:
+            return JSONResponse({"ok": False, "error": "inst_id 必填"})
+        try:
+            data = await asyncio.to_thread(od.get_ticker_bid_ask, inst)
+        except OkxSdkError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "data": data})
+
     async def _accounts(request: Request):
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -416,6 +430,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options", _page, methods=["GET"])
     app.add_api_route("/config/okx-options/expiries", _expiries, methods=["GET"])
     app.add_api_route("/config/okx-options/chain", _chain, methods=["GET"])
+    app.add_api_route("/config/okx-options/ticker", _ticker, methods=["GET"])
     app.add_api_route("/config/okx-options/accounts", _accounts, methods=["GET"])
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])
