@@ -176,6 +176,7 @@
       <label>补买数量(币)</label><input type="number" id="mQty" step="any" min="0" placeholder="base_qty">
     </div>
     <div class="kv" id="mPreview">点击「生成预览」查看预估权利金与担保。</div>
+    <div class="kv" id="mSim" style="display:none"></div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px">
       <button class="btn-ghost" id="mCancel">取消</button>
       <button class="btn-primary" id="mPreviewBtn" style="display:none">生成预览</button>
@@ -497,7 +498,7 @@ const overlay = $("modalOverlay");
 let modalMode = null;      // sell | close | cover
 let modalInst = null;      // 期权 inst_id 或 spot_inst
 let modalPayload = null;   // preview/sell/close 上下文
-function modalOpen(title) { $("mTitle").textContent = title; $("mErr").style.display = "none"; $("mPreview").innerHTML = "点击「生成预览」查看预估权利金与担保。"; stageInfo = null; overlay.classList.add("on"); }
+function modalOpen(title) { $("mTitle").textContent = title; $("mErr").style.display = "none"; $("mPreview").innerHTML = "点击「生成预览」查看预估权利金与担保。"; $("mSim").style.display = "none"; stageInfo = null; overlay.classList.add("on"); }
 function modalClose() { overlay.classList.remove("on"); stageInfo = null; }
 
 function openSell(expMs, strike) {
@@ -572,6 +573,7 @@ function openClose(instId) {
   $("mOrdType").value = "ioc";
   modalOpen("平仓：" + instId);
   prefillClosePx(instId);  // 实时盘口预填（async，持仓/台账 tab 直接平仓无需先刷链）
+  renderSim("buy");       // 盘口吃单模拟（默认 1 张；sz 联动刷新）
   $("mPreviewBtn").style.display = "none"; $("mGo").style.display = "";
   $("mGo").textContent = "确认平仓";
   $("mGo").onclick = () => doClose();
@@ -592,6 +594,11 @@ function openCover(instId) {
   $("mGo").onclick = () => doCover(spot);
 }
 $("mCancel").addEventListener("click", modalClose);
+$("mSz").addEventListener("input", () => {
+  // 张数联动盘口模拟（C22a）：平仓直接刷新模拟；卖 put 重跑预览（含模拟）
+  if (modalMode === "close") { renderSim("buy"); }
+  else if (modalMode === "sell") { doPreview("sell"); }
+});
 $("mOrdType").addEventListener("change", () => {
   // 期权无纯市价单：px 行恒显示（limit/ioc/fok/post_only 均需价格）
   $("mRowPx").style.display = "";
@@ -609,6 +616,36 @@ function formVal() {
   };
 }
 
+async function renderSim(side) {
+  const el = $("mSim");
+  if (modalMode === "cover" || !modalInst) { el.style.display = "none"; return; }
+  const sz = parseInt($("mSz").value, 10) || 1;
+  el.style.display = "";
+  el.innerHTML = "📊 盘口模拟（" + sz + " 张）…";
+  try {
+    const r = await (await fetch("/config/okx-options/sim?inst_id=" + encodeURIComponent(modalInst) +
+      "&side=" + side + "&sz=" + sz)).json();
+    el.innerHTML = r.ok && r.sim ? simHtml(r.sim) : '<span class="na">盘口不可用，稍后重试</span>';
+  } catch (e) { el.style.display = "none"; }
+}
+function simHtml(sim) {
+  if (!sim || !sim.ok) return '<span class="na">盘口暂不可用</span>';
+  const best = fmt(sim.best_px, 4), avg = fmt(sim.avg_px, 4);
+  const dip = sim.dip_pct != null ? fmt(sim.dip_pct, 2) + "%" : "—";
+  const warn = sim.levels_used > 1 || (sim.dip_pct != null && sim.dip_pct > 0.3);
+  let h = "<b>📊 盘口模拟（按当前" + (sim.side === "sell" ? "买盘" : "卖盘") + "逐档吃）：</b>" +
+    "吃 <b>" + sim.levels_used + "</b> 档 · 预计成交均价 <b>" + avg + "</b>" +
+    "（最优 " + best + "，折让 " + dip + "）· 权利金滑点约 $" + fmt(sim.slip_usd, 4);
+  if (!sim.full) {
+    h += "<br><span class='warn'>⚠️ 盘口仅可吃 " + fmt(sim.filled, 2) + " 张，缺 " + fmt(sim.missing, 2) +
+      " 张——IOC 将部分成交后撤余量（缺口按未成交处理，换近实值档或减张）</span>";
+  } else if (warn) {
+    h += "<br><span class='warn'>⚠️ 吃穿 " + sim.levels_used + " 档（均价低于最优 " + dip + "）——" +
+      "薄盘口大单的滑点成本，可减张或拆单</span>";
+  }
+  return h;
+}
+
 async function doPreview(mode) {
   const f = formVal();
   try {
@@ -622,6 +659,9 @@ async function doPreview(mode) {
       "（合计 " + usd(p.est_premium_usd) + "）<br>" + ratioTxt + "<br>" +
       "<b>订单：</b>sell · tdMode=isolated · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
       "<br><span style='color:#888'>参考盘口 ask=" + fmt(p.ref.ask, 2) + " bid=" + fmt(p.ref.bid, 2) + "</span>";
+    const simEl = $("mSim");
+    simEl.style.display = "";
+    simEl.innerHTML = p.sim ? simHtml(p.sim) : '<span class="na">盘口暂不可用，稍后重试</span>';
     stageInfo = null;
     $("mGo").style.display = "";
     $("mGo").disabled = false;
