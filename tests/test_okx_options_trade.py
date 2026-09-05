@@ -307,6 +307,16 @@ def test_normalize_position_net_mode_sign():
     # 明确 long/short posSide 直通（简单/单币种模式）
     p3 = ot._normalize_position({"instId": "X", "posSide": "short", "pos": "-2"})
     assert p3["side"] == "short" and p3["pos"] == 2.0
+    # 保证金：margin 0/空回退 imr；强平价空/-- → None（足额担保时 OKX 无强平价）
+    p4 = ot._normalize_position({"instId": "X", "posSide": "short", "pos": "-2",
+                                 "margin": "", "imr": "1.5", "liqPx": "--"})
+    assert p4["margin_usd"] == pytest.approx(1.5) and p4["liq_px"] is None
+    p5 = ot._normalize_position({"instId": "X", "posSide": "long", "pos": "1",
+                                 "margin": "3.2", "liqPx": "88.5"})
+    assert p5["margin_usd"] == pytest.approx(3.2) and p5["liq_px"] == pytest.approx(88.5)
+    p6 = ot._normalize_position({"instId": "X", "posSide": "long", "pos": "1",
+                                 "margin": "0", "imr": "0", "liqPx": "abc"})
+    assert p6["margin_usd"] == 0.0 and p6["liq_px"] is None
 
 
 # ── instId 到期/行权解析（持仓卡片展示）────────────

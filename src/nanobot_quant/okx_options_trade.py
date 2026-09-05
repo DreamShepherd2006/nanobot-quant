@@ -725,6 +725,9 @@ def _normalize_position(r: dict) -> dict:
         "upl_ratio": _f(r.get("uplRatio")),
         "mgn_mode": r.get("mgnMode", ""),
         "lever": r.get("lever", ""),
+        # 逐仓实际冻结保证金（margin 0/空时回退 imr）；足额担保时 OKX 无强平价（--）
+        "margin_usd": round(_f(r.get("margin")) or _f(r.get("imr")), 2),
+        "liq_px": _norm_liq(r.get("liqPx")),
         "exp_ms": _parse_exp(inst),
         "strike": _parse_strike(inst),
     }
@@ -810,3 +813,16 @@ def _f(v) -> float:
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _norm_liq(v) -> Optional[float]:
+    """强平价 liqPx 归一化：空 / "--" / 非数字 → None（OKX 足额担保时无强平价）。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s in ("", "--", "-"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
