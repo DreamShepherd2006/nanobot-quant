@@ -370,22 +370,29 @@ async function loadPositions() {
     if (!puts.length && !open.length) html += '<div class="empty">无期权持仓 / 无 open 台账（尚未卖出 put）</div>';
     if (puts.length) {
       html += '<div class="grp-title">OKX 实时仓位</div><div style="overflow-x:auto"><table><thead><tr>' +
-        '<th>合约</th><th>方向</th><th>张数</th><th>开仓均价</th><th>标记价</th><th>未实现盈亏</th><th>杠杆</th><th>到期</th><th></th></tr></thead><tbody>';
+        '<th>合约</th><th>方向</th><th>张数</th><th>开仓均价</th><th>标记价</th><th>未实现盈亏</th><th>保证金(USDC)</th><th>强平价</th><th>到期</th><th></th></tr></thead><tbody>';
       for (const p of puts) {
         const action = (p.side === "short" && p.inst_id.endsWith("-P"))
           ? '<a class="act" onclick="openClose(\'' + esc(p.inst_id) + '\')">平仓</a>' : '<span class="na">—</span>';
+        const mgn = p.margin_usd ? fmt(p.margin_usd, 2) : '<span class="na">—</span>';
+        const liq = p.liq_px ? fmt(p.liq_px, 4) : '<span class="na">—</span>';
         html += '<tr><td class="mono">' + esc(p.inst_id) + '</td><td>' + esc(p.side) + '</td><td>' + fmt(p.pos, 4) +
           '</td><td>' + fmt(p.avg_px, 2) + '</td><td>' + fmt(p.mark_px, 2) + '</td><td>' + usd(p.upl) +
-          '</td><td>' + esc(p.lever) + '</td><td>' + locDate(p.exp_ms) + '</td><td>' + action + '</td></tr>';
+          '</td><td>' + mgn + '</td><td>' + liq + '</td><td>' + locDate(p.exp_ms) + '</td><td>' + action + '</td></tr>';
       }
       html += '</tbody></table></div>';
     }
     if (open.length) {
       html += '<div class="grp-title" style="margin-top:14px">本地台账 open（跨重启保留）</div><table><thead><tr>' +
-        '<th>合约</th><th>strike</th><th>到期</th><th>张数</th><th>开仓价(限)</th><th>权利金(USD)</th><th>状态</th></tr></thead><tbody>';
+        '<th>合约</th><th>strike</th><th>到期</th><th>张数</th><th>开仓价(限)</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>状态</th></tr></thead><tbody>';
       for (const e of open) {
-        html += '<tr><td class="mono">' + esc(e.inst_id) + '</td><td>' + fmt(e.strike, 0) + '</td><td>' + locDate(e.exp_ms) +
-          '</td><td>' + esc(e.sz) + '</td><td>' + fmt(e.px, 2) + '</td><td>' + usd(e.premium_usd) + '</td><td>' + esc(e.status) + '</td></tr>';
+        const coll = e.collateral_usd ? usd(e.collateral_usd)
+          : (e.margin_note && String(e.margin_note).indexOf("已关闭") >= 0 ? "关闭" : '<span class="na">—</span>');
+        const warn = e.margin_note && String(e.margin_note).indexOf("追加失败") >= 0;
+        html += '<tr title="' + esc(e.margin_note || "") + '"><td class="mono">' + esc(e.inst_id) + '</td><td>' + fmt(e.strike, 0) + '</td><td>' + locDate(e.exp_ms) +
+          '</td><td>' + esc(e.sz) + '</td><td>' + fmt(e.px, 2) + '</td><td>' + usd(e.premium_usd) + '</td><td>' +
+          coll + (warn ? ' <span style="color:#c62828" title="担保未到位：追加失败，仓位裸奔中">⚠</span>' : '') +
+          '</td><td>' + esc(e.status) + '</td></tr>';
       }
       html += '</tbody></table>';
     }
@@ -420,7 +427,7 @@ async function loadLedger() {
     const rows = j.ledger || [];
     if (!rows.length) { $("ledBody").innerHTML = '<div class="empty">台账为空（尚未卖 put）</div>'; return; }
     let html = '<table><thead><tr><th>时间(UTC)</th><th>动作</th><th>合约</th><th>方向</th><th>类型</th>' +
-      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
+      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
     for (const e of rows) {
       const kind = {open_put: "卖 put 开仓", close_put: "买回平仓", spot_cover: "现货补买", expiry_settle: "到期结算"}[e.kind] || e.kind;
       const act = (e.status === "pending" && e.ord_id)
@@ -429,7 +436,8 @@ async function loadLedger() {
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
-        '</td><td>' + usd(e.premium_usd) + '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
+        '</td><td>' + usd(e.premium_usd) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : '<span class="na">—</span>') +
+        '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
         '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
     }
     html += '</tbody></table>';
