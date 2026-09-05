@@ -68,7 +68,16 @@ def _tickers() -> dict[str, dict]:
     return _cached("tickers:OPTION", _load)
 
 
-def _opt_summary(family: str) -> dict[str, dict]:
+def get_ticker_bid_ask(inst_id: str) -> dict:
+    """单合约实时盘口（bid/ask，USD / 1 名义币）。
+
+    供平仓/卖 put 弹窗预填 px——不依赖期权链 tab 是否刷过（持仓 tab
+    直接平仓时无需先回链页刷新）。走 _tickers() 8s 缓存与链页同源。
+    """
+    tk = _tickers().get(inst_id.upper())
+    if not tk:
+        return {"found": False, "bid": None, "ask": None}
+    return {"found": True, "bid": _f(tk.get("bidPx")), "ask": _f(tk.get("askPx"))}
     def _load():
         rows = okx_sdk.check(okx_sdk.public().get_opt_summary(instFamily=family))
         return {r["instId"]: r for r in rows}
