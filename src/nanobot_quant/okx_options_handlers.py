@@ -32,6 +32,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant import okx_options_data as od
 from nanobot_quant import okx_options_trade as ot
+from nanobot_quant.data_sources.periods import PERIODS
 from nanobot_quant.okx_cex_credentials import list_sub_accounts
 from nanobot_quant.okx_sdk import OkxSdkError
 
@@ -110,7 +111,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     """
     global _PAGE_HTML
     if not _PAGE_HTML:
-        _PAGE_HTML = _load_template("okx_options_page.html")
+        _PAGE_HTML = _load_template("okx_options_page.html").replace(
+            "__PERIODS__", json.dumps(list(PERIODS)))
 
     async def _page(request: Request):
         err, ok = _authorized(request, gatekeeper)
@@ -200,6 +202,21 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         except (OkxSdkError, RuntimeError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "sim": sim})
+
+    async def _lifecycle(request: Request):
+        # 单合约生命周期：mark 价从上市到现在 + 同时刻标的参考价（表格，无图）
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        inst = (request.query_params.get("inst_id") or "").strip().upper()
+        bar = (request.query_params.get("bar") or "15m").strip()
+        if not inst:
+            return JSONResponse({"ok": False, "error": "inst_id 必填"})
+        try:
+            data = await asyncio.to_thread(od.fetch_lifecycle, inst, bar)
+        except (OkxSdkError, RuntimeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "data": data})
 
     async def _accounts(request: Request):
         err, ok = _authorized(request, gatekeeper)
@@ -451,6 +468,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/chain", _chain, methods=["GET"])
     app.add_api_route("/config/okx-options/ticker", _ticker, methods=["GET"])
     app.add_api_route("/config/okx-options/sim", _sim, methods=["GET"])
+    app.add_api_route("/config/okx-options/lifecycle", _lifecycle, methods=["GET"])
     app.add_api_route("/config/okx-options/accounts", _accounts, methods=["GET"])
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])
