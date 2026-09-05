@@ -40,6 +40,9 @@ class _FakeTrade:
     def __init__(self):
         self.calls = []
         self.last_px = None
+        # ord_id → state；get_order 缺省 "filled"（兼容既有 settle 测试）
+        self.order_states = {}
+        self.cancel_calls = []
 
     def set_order(self, **params):
         self.calls.append(params)
@@ -47,10 +50,26 @@ class _FakeTrade:
         return {"code": "0", "data": [{"ordId": f"ord-{len(self.calls)}", "clOrdId": ""}]}
 
     def get_order(self, instId=None, ordId=None, **kw):
-        # 模拟限价单全部以限价成交：avg = 该单 px
+        # 缺省 filled（既有 settle 测试依赖），撤单测试经 order_states 设 live/canceled
+        state = self.order_states.get(ordId, "filled")
         return {"code": "0", "data": [{"instId": instId, "ordId": ordId,
-                                       "state": "filled", "avgPx": str(self.last_px),
+                                       "state": state, "avgPx": str(self.last_px),
                                        "accFillSz": "1", "fee": "-0.02"}]}
+
+    def set_cancel_order(self, instId=None, ordId=None, **kw):
+        self.cancel_calls.append({"instId": instId, "ordId": ordId})
+        self.order_states[ordId] = "canceled"
+        return {"code": "0", "data": [{"sCode": "0", "sMsg": "", "ordId": ordId}]}
+
+    def get_orders_pending(self, instType="", instFamily="", **kw):
+        rows = []
+        for ord_id, st in self.order_states.items():
+            if st in ("live", "partially_filled"):
+                rows.append({"instId": f"{instFamily}-260905-100-P", "ordId": ord_id,
+                             "px": "0.15", "sz": "1", "side": "buy",
+                             "ordType": "limit", "tdMode": "isolated",
+                             "cTime": "1757000000000"})
+        return {"code": "0", "data": rows}
 
 
 class _FakeAccount:
@@ -404,3 +423,99 @@ def test_save_params_clamp_and_default(_mock_sdk, _patch_entry):
     # 默认（无文件）
     ot.params_path().unlink(missing_ok=True)
     assert ot.collateral_ratio_pct() == ot.DEFAULT_COLLATERAL_RATIO_PCT
+
+
+# ── 撤单 / 当前委托（批次：feat/options-cancel）────────────────
+
+def test_cancel_live_order_updates_ledger(_mock_sdk, _patch_entry):
+    """live 挂单撤销成功 → 台账对应条目置 cancelled + cancel_ts。"""
+    fake = _mock_sdk
+    fake.order_states["ord-100"] = "live"
+    ot.add_ledger(kind="close_put", account="bot1", inst_id="SOL-USD_UM-260905-100-P",
+                  ord_id="ord-100", status="pending", side="buy", ord_type="limit",
+                  px=0.3, sz=1)
+    res = ot.cancel_order("bot1", inst_id="SOL-USD_UM-260905-100-P", ord_id="ord-100")
+    assert res["status"] == "cancelled"
+    assert fake.cancel_calls and fake.cancel_calls[0]["ordId"] == "ord-100"
+    ent = ot.find_entry(lambda x: x.get("ord_id") == "ord-100")
+    assert ent["status"] == "cancelled" and ent.get("cancel_ts")
+
+
+def test_cancel_already_filled_leaves_ledger(_mock_sdk, _patch_entry):
+    """订单已成交时拒绝撤销（提示刷新），台账 pending 条目不动。"""
+    fake = _mock_sdk
+    fake.order_states["ord-101"] = "filled"
+    ot.add_ledger(kind="close_put", account="bot1", inst_id="SOL-USD_UM-260905-100-P",
+                  ord_id="ord-101", status="pending", side="buy", ord_type="limit",
+                  px=0.3, sz=1)
+    res = ot.cancel_order("bot1", inst_id="SOL-USD_UM-260905-100-P", ord_id="ord-101")
+    assert res["status"] == "filled"
+    assert not fake.cancel_calls
+    assert ot.find_entry(lambda x: x.get("ord_id") == "ord-101")["status"] == "pending"
+
+
+def test_cancel_idempotent_when_already_cancelled(_mock_sdk, _patch_entry):
+    """OKX 侧已 cancelled → 幂等返回 cancelled 并对齐台账。"""
+    fake = _mock_sdk
+    fake.order_states["ord-102"] = "canceled"
+    ot.add_ledger(kind="open_put", account="bot1", inst_id="SOL-USD_UM-260905-100-P",
+                  ord_id="ord-102", status="pending", side="sell", ord_type="limit",
+                  px=0.15, sz=1)
+    res = ot.cancel_order("bot1", inst_id="SOL-USD_UM-260905-100-P", ord_id="ord-102")
+    assert res["status"] == "cancelled"
+    assert ot.find_entry(lambda x: x.get("ord_id") == "ord-102")["status"] == "cancelled"
+
+
+def test_cancel_close_put_keeps_open_row(_mock_sdk, _patch_entry):
+    """撤销平仓挂单 → 平仓条目 cancelled，但 open_put 持仓行保持 open。"""
+    fake = _mock_sdk
+    fake.order_states["ord-103"] = "live"
+    ot.add_ledger(kind="open_put", account="bot1", inst_id="SOL-USD_UM-260905-100-P",
+                  ord_id="ord-200", status="open", side="sell", ord_type="limit",
+                  px=0.15, sz=1, strike=100, exp_ms=1760000000000, premium_usd=0.015)
+    ot.add_ledger(kind="close_put", account="bot1", inst_id="SOL-USD_UM-260905-100-P",
+                  ord_id="ord-103", status="pending", side="buy", ord_type="limit",
+                  px=0.3, sz=1)
+    ot.cancel_order("bot1", inst_id="SOL-USD_UM-260905-100-P", ord_id="ord-103")
+    assert ot.find_entry(lambda x: x.get("ord_id") == "ord-103")["status"] == "cancelled"
+    assert ot.find_entry(lambda x: x.get("ord_id") == "ord-200")["status"] == "open"
+
+
+def test_cancel_okx_error_keeps_ledger(_mock_sdk, _patch_entry, monkeypatch):
+    """OKX 撤单返回业务错误（如 51400）→ 抛 OkxSdkError、台账不动。"""
+    fake = _mock_sdk
+    fake.order_states["ord-104"] = "live"
+
+    def _boom(instId=None, ordId=None, **kw):
+        return {"code": "0", "data": [{"sCode": "51400", "sMsg": "Order does not exist"}]}
+    monkeypatch.setattr(fake, "set_cancel_order", _boom)
+    ot.add_ledger(kind="open_put", account="bot1", inst_id="SOL-USD_UM-260905-100-P",
+                  ord_id="ord-104", status="pending", side="sell", ord_type="limit",
+                  px=0.15, sz=1)
+    try:
+        ot.cancel_order("bot1", inst_id="SOL-USD_UM-260905-100-P", ord_id="ord-104")
+        assert False, "应抛 OkxSdkError"
+    except OkxSdkError as e:
+        assert "51400" in str(e)
+    assert ot.find_entry(lambda x: x.get("ord_id") == "ord-104")["status"] == "pending"
+
+
+def test_pending_orders_normalized_sorted(_mock_sdk, _patch_entry):
+    """pending_orders 归一化并按时间排序（含官方手动挂单）。"""
+    fake = _mock_sdk
+    fake.order_states["ord-105"] = "live"
+    fake.order_states["ord-106"] = "live"
+    rows = ot.pending_orders("bot1", inst_family="SOL-USD_UM")
+    assert len(rows) == 2
+    r = rows[0]
+    assert r["inst_id"].endswith("-100-P") and r["ord_id"] in ("ord-105", "ord-106")
+    assert r["px"] == 0.15 and r["sz"] == 1 and r["side"] == "buy"
+    assert r["ts_ms"] == 1757000000000
+
+
+def test_pending_orders_requires_family(_mock_sdk, _patch_entry):
+    try:
+        ot.pending_orders("bot1", inst_family="")
+        assert False, "应抛 OkxSdkError"
+    except OkxSdkError as e:
+        assert "inst_family" in str(e)
