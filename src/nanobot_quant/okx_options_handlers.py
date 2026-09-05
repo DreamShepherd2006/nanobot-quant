@@ -182,6 +182,25 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "data": data})
 
+    async def _sim(request: Request):
+        # 盘口吃单模拟（C22a）：sell=卖 put 吃买盘 / buy=平仓吃卖盘
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        inst = (request.query_params.get("inst_id") or "").strip().upper()
+        side = (request.query_params.get("side") or "sell").lower()
+        try:
+            sz = int(request.query_params.get("sz") or 1)
+        except ValueError:
+            sz = 1
+        if not inst:
+            return JSONResponse({"ok": False, "error": "inst_id 必填"})
+        try:
+            sim = await asyncio.to_thread(ot.simulate_fill, inst, side, sz)
+        except (OkxSdkError, RuntimeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "sim": sim})
+
     async def _accounts(request: Request):
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -431,6 +450,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/expiries", _expiries, methods=["GET"])
     app.add_api_route("/config/okx-options/chain", _chain, methods=["GET"])
     app.add_api_route("/config/okx-options/ticker", _ticker, methods=["GET"])
+    app.add_api_route("/config/okx-options/sim", _sim, methods=["GET"])
     app.add_api_route("/config/okx-options/accounts", _accounts, methods=["GET"])
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])

@@ -39,6 +39,10 @@ class _FakeMarket:
             "instId": instId, "bidPx": "100.0", "askPx": "110.0", "last": "105.0",
         }]}
 
+    def get_books(self, instId=None, sz=None, **kw):
+        # 无盘口（空档）——preview 的 simulate_fill 走 None 容错路径
+        return {"code": "0", "data": [{"bids": [], "asks": [], "ts": "0"}]}
+
 
 class _FakeTrade:
     def __init__(self):

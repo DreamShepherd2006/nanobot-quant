@@ -238,6 +238,77 @@ def ticker_quote(inst_id: str) -> dict:
     }
 
 
+def order_book(inst_id: str, levels: int = 5) -> dict:
+    """多档盘口（USD/1 名义币；size 单位=张；bids 降序 / asks 升序）。
+
+    C22a 盘口深度模拟数据源：卖 put 吃买盘(bids)、买回平仓吃卖盘(asks)。
+    期权 books 公共端点与现货同构——level = [price, size, ...]。
+    """
+    rows = okx_sdk.check(okx_sdk.market().get_books(instId=inst_id, sz=str(levels)))
+    book = rows[0] if rows else {}
+    bids, asks = [], []
+    for lv in book.get("bids") or []:
+        if len(lv) >= 2:
+            px, amt = _f(lv[0]), _f(lv[1])
+            if px and amt and px > 0 and amt > 0:
+                bids.append([px, amt])
+    for lv in book.get("asks") or []:
+        if len(lv) >= 2:
+            px, amt = _f(lv[0]), _f(lv[1])
+            if px and amt and px > 0 and amt > 0:
+                asks.append([px, amt])
+    bids.sort(key=lambda x: -x[0])
+    asks.sort(key=lambda x: x[0])
+    return {"bids": bids, "asks": asks, "ts": book.get("ts")}
+
+
+def simulate_fill(inst_id: str, side: str, sz_qty: int, levels: int = 5) -> Optional[dict]:
+    """盘口吃单模拟（C22a 报价模拟；与 IOC/限价扫单同向吃档）。
+
+    side="sell"（卖 put 开仓）→ 吃买盘 bids（最优价起向下）；
+    side="buy"（买回平仓）→ 吃卖盘 asks（最优价起向上）。
+    按 sz_qty 张逐档累计，输出吃穿档数 / 加权均价 / 相对最优价折让%
+    与权利金滑点 USD——回答「现在按盘口市价这单会以什么价成交」。
+
+    盘口不可用 / 无对手档 → 返回 None（调用方容错，不阻塞下单）。
+    盘口总量 < sz_qty → full=False + missing（IOC 部分成交后撤余量）。
+    """
+    side = (side or "sell").lower()
+    if side not in ("sell", "buy"):
+        raise OkxSdkError(f"side 仅支持 sell/buy，收到 {side}")
+    want = float(int(sz_qty) or 0)
+    if want <= 0:
+        raise OkxSdkError("张数必须为正整数")
+    try:
+        book = order_book(inst_id, levels)
+    except OkxSdkError:
+        return None
+    legs = book["bids"] if side == "sell" else book["asks"]
+    if not legs:
+        return None
+    lot = resolve_instrument(inst_id)["lot"]
+    best = legs[0][0]
+    got, cost, used = 0.0, 0.0, 0
+    for px, amt in legs:
+        if want <= 0:
+            break
+        take = min(want, amt)
+        got += take
+        cost += take * px
+        want -= take
+        used += 1
+    avg = cost / got if got > 0 else None
+    dip = (best - avg) / best * 100.0 if avg else None
+    return {
+        "ok": True, "side": side, "qty": int(sz_qty), "best_px": best,
+        "avg_px": round(avg, 4) if avg is not None else None,
+        "levels_used": used, "filled": round(got, 4), "full": want <= 0,
+        "missing": round(want, 4) if want > 0 else 0,
+        "dip_pct": round(dip, 3) if dip is not None else None,
+        "slip_usd": round((best - avg) * lot * got, 6) if avg else None,
+    }
+
+
 def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
                      px: Optional[float] = None) -> dict:
     """卖 put 订单预览（纯计算，不下单）。
@@ -264,6 +335,10 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
     prem = ref_px * lot * sz
     collat = spec["strike"] * lot * sz
     ratio = collateral_ratio_pct()
+    try:
+        sim = simulate_fill(inst_id, "sell", int(sz))
+    except (OkxSdkError, RuntimeError, ValueError):
+        sim = None
     exp_iso = _exp_str(spec["exp_ms"])
     return {
         "ok": True,
@@ -291,6 +366,7 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
                  "数学上无强平路径，可扛到到期；0% = 关闭自动追加（仅平台默认 IM"
                  "冻结，浮亏可能击穿提前强平）；追加资金在平仓/到期后自动释放；"
                  "账户可用余额须≥追加额。欧式现金结算，不可提前行权。"),
+        "sim": sim,
     }
 
 
