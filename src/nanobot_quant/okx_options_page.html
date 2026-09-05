@@ -186,6 +186,24 @@
   </div>
 </div>
 
+<!-- 生命周期表格（mark 价 vs 标的参考价，无图） -->
+<div class="overlay" id="lcOverlay">
+  <div class="modal" style="width:min(960px,94vw);max-width:960px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0" id="lcTitle">生命周期</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label class="hint" for="lcBar">粒度</label>
+        <select id="lcBar" onchange="loadLifecycle()"></select>
+        <button class="btn-ghost" onclick="closeLifecycle()">关闭</button>
+      </div>
+    </div>
+    <div class="hint" id="lcMeta" style="margin:6px 0"></div>
+    <div class="banner err" id="lcErr" style="display:none"></div>
+    <div class="banner loading" id="lcLoading" style="display:none">⏳ 拉取生命周期 mark K 线…</div>
+    <div id="lcBody" style="max-height:62vh;overflow:auto;margin-top:8px"></div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const famSel = $("family"), expSel = $("expiry"), hvSel = $("hvDays"),
@@ -293,12 +311,15 @@ function renderChain(data) {
       const sellBtn = (p.inst_id && p.bid !== null)
         ? '<a class="act put-sell" onclick="openSell(' + g.exp_ms + ',' + r.strike + ')">卖 put</a>'
         : '<span class="na">—</span>';
+      const lcBtn = p.inst_id
+        ? '<a class="act" title="生命周期：mark 价 vs 标的价" onclick="openLifecycle(\'' + p.inst_id + '\')">📊</a>'
+        : '';
       html += '<tr><td>' + Number(r.strike).toLocaleString("en-US") + '</td>' +
         cellHtml(c) +
         cellHtml(p) +
         '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
         '<td>' + (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
-        '<td>' + sellBtn + '</td></tr>';
+        '<td>' + lcBtn + ' ' + sellBtn + '</td></tr>';
     }
     html += '</tbody></table></div></div>';
   }
@@ -326,6 +347,77 @@ async function loadChain() {
   } catch (e) { showErr(e.message); } finally {
     $("loadingBanner").style.display = "none"; btn.disabled = false;
   }
+}
+
+// ── 生命周期（单合约 mark 价 vs 标的参考价 表格，无图）──────────
+// 周期与 K 线体系完全对齐：16 统一周期随 __PERIODS__ 注入（同回测页模式）
+const PERIODS = __PERIODS__;
+let lcInst = "";
+let lcBarFilled = false;
+function fillLifecyclePeriods() {
+  const sel = $("lcBar");
+  if (!sel || lcBarFilled) return;
+  PERIODS.forEach(p => {
+    const o = document.createElement("option");
+    o.value = p; o.textContent = p;
+    sel.appendChild(o);
+  });
+  sel.value = "15m";
+  lcBarFilled = true;
+}
+function openLifecycle(instId) {
+  lcInst = instId;
+  fillLifecyclePeriods();
+  $("lcOverlay").classList.add("on");
+  loadLifecycle();
+}
+function closeLifecycle() {
+  $("lcOverlay").classList.remove("on");
+  lcInst = "";
+}
+function fmtDT(ms, offH) {
+  try { return new Date(ms + offH * 3600000).toISOString().slice(0, 16).replace("T", " "); }
+  catch (e) { return "—"; }
+}
+async function loadLifecycle() {
+  if (!lcInst) return;
+  const bar = $("lcBar").value;
+  $("lcBody").innerHTML = "";
+  $("lcErr").style.display = "none";
+  $("lcLoading").style.display = "block";
+  try {
+    const r = await fetch("/config/okx-options/lifecycle?inst_id=" + encodeURIComponent(lcInst) + "&bar=" + bar);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || ("HTTP " + r.status));
+    renderLifecycle(j.data);
+  } catch (e) {
+    $("lcErr").textContent = "❌ " + e.message;
+    $("lcErr").style.display = "block";
+  } finally { $("lcLoading").style.display = "none"; }
+}
+function renderLifecycle(d) {
+  const rowN = (d.rows || []).length;
+  $("lcTitle").textContent = (d.opt_type === "P" ? "Put" : "Call") + " · strike " +
+    Number(d.strike).toLocaleString("en-US") + " · 到期 " + (d.exp_ms ? locDate(d.exp_ms) : "—");
+  const refName = d.ref_inst || "—";
+  $("lcMeta").textContent = d.inst_id + "（" + d.bar + " · 上市 " + (d.list_ms ? locDate(d.list_ms) : "—") +
+    "）｜参考价 " + refName + "｜共 " + rowN + " 根" +
+    (d.truncated ? "（数据量截断，选更粗粒度看全生命周期）" : "");
+  const rows = (d.rows || []).slice().reverse();   // 最新在上，与页面其余表格一致
+  let html = '<div style="overflow-x:auto"><table><thead><tr>' +
+    '<th>时间（北京）</th><th>UTC</th><th>mark 权利金<br>(USD/1 名义币)</th>' +
+    '<th>每张权利金<br>(USD)</th><th>标的 ' + esc(refName) + '</th></tr></thead><tbody>';
+  const lot = d.lot_coin || 0;
+  for (const r0 of rows) {
+    const mark = r0.mark_px, ref = r0.ref_px;
+    const prem = (mark !== null && mark !== undefined && lot) ? mark * lot : null;
+    html += '<tr><td>' + fmtDT(r0.ts, 8) + '</td><td class="mono">' + fmtDT(r0.ts, 0) + '</td>' +
+      '<td>' + (mark === null || mark === undefined ? '<span class="na">—</span>' : fmt(mark, 4)) + '</td>' +
+      '<td>' + (prem === null ? '<span class="na">—</span>' : usd(prem)) + '</td>' +
+      '<td>' + (ref === null || ref === undefined ? '<span class="na">—</span>' : fmt(ref, 2)) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+  $("lcBody").innerHTML = html;
 }
 
 // ── 持仓 / 台账 / 到期提醒 ──────────────────────────────

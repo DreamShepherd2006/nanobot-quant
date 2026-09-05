@@ -24,6 +24,7 @@ def _inst(strike: int, typ: str, exp: int, family="BTC-USD_UM"):
         "instFamily": family, "state": "live", "optType": typ,
         "ctType": "linear", "stk": str(strike), "expTime": str(exp),
         "ctVal": "1", "ctMult": "0.01", "uly": "BTC-USD",
+        "listTime": str(exp - 36 * 3600_000),
     }
 
 
@@ -68,6 +69,13 @@ class _FakePublic:
         return {"code": "0", "data": list(_summary_dict().values()), "msg": ""}
 
 
+# mark 价生命周期假数据：305 根 5m（ts = _NOW 往前 305×5m ≈ 25.4h），分两页返回
+_MARK_ROWS = [
+    [str(_NOW - i * 300_000), "0.2", "0.3", "0.1", str(round(0.05 + i * 0.001, 4)), "0"]
+    for i in range(305)
+]
+
+
 class _FakeMarket:
     def get_ticker(self, instId="", **kw):
         return {"code": "0", "data": [{"instId": instId, "last": "81000"}], "msg": ""}
@@ -78,14 +86,30 @@ class _FakeMarket:
     def get_index_tickers(self, instId="", **kw):
         return {"code": "0", "data": [{"instId": instId, "idxPx": "4473.25"}], "msg": ""}
 
-    def get_history_candles(self, instId="", **kw):
+    def _candles(self, rows, after=""):
+        if after:
+            a = int(after)
+            rows = [r for r in rows if int(r[0]) < a]
+        return rows[:300]
+
+    def get_mark_price_candles(self, instId="", after="", before="", bar="", limit=""):
+        return {"code": "0", "data": self._candles(_MARK_ROWS, after), "msg": ""}
+
+    def get_history_mark_price_candles(self, instId="", after="", before="", bar="", limit=""):
+        # 生命周期短合约：近期段已翻到 listTime、无更早历史 → 返回空（正常结束）
+        return {"code": "0", "data": [], "msg": ""}
+
+    def get_history_index_candles(self, instId="", after="", before="", bar="", limit=""):
+        return {"code": "0", "data": [], "msg": ""}
+
+    def get_history_candles(self, instId="", after="", before="", bar="", limit=""):
         # 收盘 100 → 110 → 100 → 110 → 121（返回按 ts 降序）
         rows = []
         ts = _NOW
         for c in (121, 110, 100, 110, 100):
             rows.append([str(ts), "", "", "", str(c), "", "", ""])
             ts -= 86_400_000
-        return {"code": "0", "data": rows, "msg": ""}
+        return {"code": "0", "data": self._candles(rows, after), "msg": ""}
 
 
 @pytest.fixture
@@ -164,4 +188,37 @@ def test_xau_index_reference_and_no_hv(fake_sdk):
     # 盘口/权利金换算与 BTC 家族共用同一公式（prem_usd = ask × lot，见 test_put_premium_apr_and_iv）；
     # XAU 无现货盘仅影响参考价来源与 HV，不影响 prem 口径
     assert chain["groups"][0]["rows"]
+
+
+# ── 生命周期（mark 价 + 标的参考价对齐）───────────────────────
+
+def test_fetch_lifecycle_pages_join_and_order(fake_sdk):
+    """305 根 5m 分两页（300+5）合并完整、升序；现货日线 join 对齐（仅 _NOW 根）；
+    ref 缺失容忍；prem 口径 = mark × lot。"""
+    inst_id = f"BTC-USD_UM-{_D1}-80000-P"
+    d = od.fetch_lifecycle(inst_id, "5m")
+    assert d["inst_id"] == inst_id
+    assert d["opt_type"] == "P"
+    assert d["lot_coin"] == 0.01
+    assert d["family"] == "BTC-USD_UM"
+    assert d["ref_inst"] == "BTC-USDT"
+    assert d["ref_kind"] == "spot"
+    assert len(d["rows"]) == 305          # 两页合并、去重完整（无空洞/重复）
+    times = [r["ts"] for r in d["rows"]]
+    assert times == sorted(times)          # 升序（最新在最后）
+    assert d["rows"][0]["mark_px"] is not None
+    # 现货日线仅 ts=_NOW 一根与 5m 轴对齐（其余行 ref=None 容忍，不报错）
+    assert d["rows"][-1]["ts"] == _NOW
+    assert d["rows"][-1]["ref_px"] == 121.0
+    assert d["rows"][-1]["mark_px"] == pytest.approx(0.05, abs=1e-6)
+
+
+def test_fetch_lifecycle_rejects_bad_input(fake_sdk):
+    inst_id = f"BTC-USD_UM-{_D1}-80000-P"
+    with pytest.raises(od.OkxSdkError, match="粒度"):
+        od.fetch_lifecycle(inst_id, "7m")
+    with pytest.raises(od.OkxSdkError, match="未知标的家族"):
+        od.fetch_lifecycle("XRP-USD_UM-260906-101-P", "5m")
+    with pytest.raises(od.OkxSdkError, match="不存在"):
+        od.fetch_lifecycle(f"BTC-USD_UM-{_D1}-99999-P", "5m")
 

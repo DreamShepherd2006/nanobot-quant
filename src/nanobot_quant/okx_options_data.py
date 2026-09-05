@@ -163,6 +163,137 @@ def _expiry_info(exp_ms: int, now_ms: int) -> dict:
     return {"exp_ms": exp_ms, "date": exp_dt.strftime("%Y-%m-%d"), "days": days}
 
 
+# ── 生命周期：单期权合约从上市到现在的 mark 价 + 同时刻参考价 ────────
+
+# 周期与 K 线体系完全对齐（td-table/回测/调度同源 16 统一周期）。
+# OKX mark-price-candles 原生 bar 实测缺 8H/7D/30D（51000）；
+# 7D→1W、30D→1M 语义等价映射（PERIODS 注释：30D=日历月近似=OKX 1M），
+# 8H 无法映射 → 请求时显式报错。
+from nanobot_quant.data_sources.periods import PERIODS as _PERIODS
+
+LIFECYCLE_BARS: tuple[str, ...] = _PERIODS
+_OKX_BAR_MAP = {"7D": "1W", "30D": "1M"}
+_OKX_BAR_UNAVAILABLE = {"8H": "OKX 期权市场无 8H 周期（可用 6H 或 12H）"}
+_LC_MAX_PAGES = 20    # 每页 ≤300 根 → 生命周期视图最多 ~6000 根，超出截断标记
+# 典型生命周期根数：3 天合约 1m≈4300 / 3m≈1450 / 5m≈870 / 15m≈290——细粒度全生命周期可拿
+
+
+def _family_of(inst_id: str) -> str:
+    """SOL-USD_UM-260906-101-P → SOL-USD_UM（尾部固定 3 段 = exp/strike/type）。"""
+    return inst_id.rsplit("-", 3)[0]
+
+
+def _find_inst(inst_id: str) -> dict:
+    """在家族 instruments（含已到期）中定位单合约；未知家族/合约报错。"""
+    family = _family_of(inst_id)
+    if family not in FAMILIES:
+        raise OkxSdkError(f"未知标的家族 {family}，可选 {FAMILIES}")
+    for i in _instruments(family):
+        if i.get("instId") == inst_id:
+            return i
+    raise OkxSdkError(f"合约不存在或已被移除: {inst_id}")
+
+
+def _mark_candle_pages(inst_id: str, bar: str) -> tuple[dict[int, float], bool]:
+    """某期权合约 mark 价全生命周期（ts → close，升序合并）。
+
+    OKX 分页语义：after=<ts> 返回更早数据（与多数交易所相反，官方 CLI 文档钉死）。
+    先翻 mark-price-candles 近期段，**段空 ≠ 尽头**（mark-price-candles 深度浅，
+    实测 1m 粒度只回溯 ~24h）——必须自动接 history-mark 段继续往前翻，直至
+    history 段也空（= 真到 listTime）。总页数上限防异常 → truncated 标记。
+    去重 key=ts，先收集者优先。
+    """
+    out: dict[int, float] = {}
+    truncated = False
+    total_pages = 0
+    for method in ("get_mark_price_candles", "get_history_mark_price_candles"):
+        fn = getattr(okx_sdk.market(), method)
+        after = str(min(out)) if out else ""
+        while total_pages < _LC_MAX_PAGES:
+            payload = fn(instId=inst_id, bar=bar, after=after, limit="300")
+            batch = okx_sdk.check(payload) or []
+            if not batch:
+                break
+            for r in batch:
+                ts = int(r[0])
+                out.setdefault(ts, float(r[4]))
+            after = str(min(out))
+            total_pages += 1
+        if total_pages >= _LC_MAX_PAGES:
+            truncated = True
+            break
+        if method == "get_history_mark_price_candles":
+            break            # history 段翻空 = 真到 listTime，结束
+    return out, truncated
+
+
+def _ref_prices(ref_inst: str, kind: str, bar: str, need_oldest: int) -> dict[int, float]:
+    """参考价（现货或 index）同粒度 K 线，覆盖到期权最早 bar。"""
+    fn = (okx_sdk.market().get_history_index_candles if kind == "index"
+          else okx_sdk.market().get_history_candles)
+    out: dict[int, float] = {}
+    after = ""
+    for _ in range(_LC_MAX_PAGES):
+        payload = fn(instId=ref_inst, bar=bar, after=after, limit="300")
+        batch = okx_sdk.check(payload) or []
+        if not batch:
+            break
+        for r in batch:
+            ts = int(r[0])
+            out.setdefault(ts, float(r[4]))
+        oldest = min(out)
+        if oldest <= need_oldest:
+            break
+        after = str(oldest)
+    return out
+
+
+def fetch_lifecycle(inst_id: str, bar: str = "15m") -> dict:
+    """某期权合约从上市（listTime）到现在的 mark 价 + 同时刻标的参考价。
+
+    数据源：mark-price-candles（+ history 段接续）——mark 价由交易所模型持续
+    计算、无成交时段也连续，是「设立→行权」价值曲线的正确载体（成交 K 线只
+    覆盖有成交的时段，9/3 上市合约 9/4 前可能全空白）。参考价（现货/USDC 或
+    index）同粒度按 bar 起点 ts 对齐，可直接观察 put 权利金与标的价的负相关。
+
+    returns: {"inst_id", "family", "strike", "opt_type", "exp_ms", "list_ms",
+              "lot_coin", "ref_inst", "ref_kind", "bar",
+              "rows": [{"ts", "mark_px", "ref_px"} 升序], "truncated"}
+    """
+    inst_id = inst_id.strip().upper()
+    if bar not in LIFECYCLE_BARS:
+        raise OkxSdkError(f"不支持粒度 {bar}，可选 {LIFECYCLE_BARS}")
+    if bar in _OKX_BAR_UNAVAILABLE:
+        raise OkxSdkError(_OKX_BAR_UNAVAILABLE[bar])
+    okx_bar = _OKX_BAR_MAP.get(bar, bar)
+    inst = _find_inst(inst_id)
+    family = inst.get("instFamily") or _family_of(inst_id)
+    mark_rows, truncated = _mark_candle_pages(inst_id, okx_bar)
+    if not mark_rows:
+        raise OkxSdkError(f"合约 {inst_id} 暂无 mark K 线数据")
+
+    times = sorted(mark_rows)
+    ref_inst, kind = _ref_inst(family)
+    ref_map: dict[int, float] = {}
+    if ref_inst:
+        ref_map = _ref_prices(ref_inst, kind, okx_bar, times[0])
+    return {
+        "inst_id": inst_id,
+        "family": family,
+        "strike": float(inst.get("stk") or 0),
+        "opt_type": inst.get("optType"),
+        "exp_ms": int(inst.get("expTime") or 0),
+        "list_ms": int(inst.get("listTime") or 0),
+        "lot_coin": _lot_coin(inst),
+        "ref_inst": ref_inst or None,
+        "ref_kind": kind or None,
+        "bar": bar,
+        "rows": [{"ts": ts, "mark_px": mark_rows[ts], "ref_px": ref_map.get(ts)}
+                  for ts in times],
+        "truncated": truncated,
+    }
+
+
 # ── 公开入口（同步；调用方在 async handler 内经 asyncio.to_thread）─────
 
 def list_expiries(family: str) -> list[dict]:
