@@ -546,6 +546,8 @@ async function loadLedger() {
         act = '<a class="act" onclick="cancelOrder(\'' + esc(e.inst_id || "") + '\',\'' + esc(String(e.ord_id)) + '\')">撤单</a>';
       } else if (e.kind === "open_put" && e.status === "open") {
         act = '<a class="act" onclick="manualCloseLedger(\'' + esc(e.id) + '\')">手动关账</a>';
+      } else if (e.kind === "open_put" && e.status === "closed_manual") {
+        act = '<a class="act" onclick="reopenLedger(\'' + esc(e.id) + '\')">撤销关账</a>';
       }
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
@@ -570,6 +572,20 @@ async function manualCloseLedger(id) {
     if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
     alert("✅ 已手动关账（closed_manual）");
   } catch (e) { alert("手动关账失败：" + e.message); }
+  if (curTab === "led") loadLedger(); else if (curTab === "pos") loadPositions();
+}
+
+async function reopenLedger(id) {
+  if (!confirm("撤销手动关账：台账行（#" + id + "）恢复到 open？\n用于误点"手动关账"后的恢复——回到 open 即交回到期巡检/settle 自动判定。")) return;
+  try {
+    const r = await fetch("/config/okx-options/ledger/reopen", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    alert("✅ 已撤销关账，回到 open");
+  } catch (e) { alert("撤销关账失败：" + e.message); }
   if (curTab === "led") loadLedger(); else if (curTab === "pos") loadPositions();
 }
 

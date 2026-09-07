@@ -714,3 +714,29 @@ def test_manual_close_rejects_non_open(_mock_sdk):
     # 未知 id
     assert ot.manual_close_entry("deadbeef") is None
 
+
+def test_reopen_closed_manual(_mock_sdk):
+    # 撤销手动关账：closed_manual → open（交回 settle 管辖）
+    e = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260907-106-P",
+                      side="sell", sz=1, px=0.46, account="A")
+    ot.manual_close_entry(e["id"])
+    got = ot.reopen_entry(e["id"])
+    assert got is not None
+    assert got["status"] == "open"
+    assert "已撤销手动关账" in got.get("note", "")
+    # 再关账后可再撤销（循环可用）
+    ot.manual_close_entry(e["id"])
+    assert ot.reopen_entry(e["id"])["status"] == "open"
+
+
+def test_reopen_rejects_non_closed_manual(_mock_sdk):
+    # 仅 closed_manual 可撤销；open / settled 不可
+    o = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260911-95-P",
+                      side="sell", sz=1, account="A")
+    assert ot.reopen_entry(o["id"]) is None
+    s = ot.add_ledger(kind="open_put", status="settled_otm", inst_id="SOL-USD_UM-260911-95-P",
+                      side="sell", sz=1, account="A")
+    assert ot.reopen_entry(s["id"]) is None
+    # 未知 id
+    assert ot.reopen_entry("deadbeef") is None
+

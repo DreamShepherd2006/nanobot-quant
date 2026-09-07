@@ -1039,4 +1039,21 @@ def manual_close_entry(entry_id: str, note: str = "") -> Optional[dict]:
     return e
 
 
+def reopen_entry(entry_id: str) -> Optional[dict]:
+    """撤销手动关账：closed_manual → open（误关账恢复，交回到期巡检/settle 管辖）。
+
+    仅 kind=open_put 且 status=closed_manual 可撤销；settled/closed 是资金流终态
+    （到期结算/买回平仓后仓位已了结），不可逆。恢复后保留原 note 并追加撤销标记，
+    close_ts 残留无碍（open 行渲染不显示）。
+    """
+    cur = find_entry(lambda x: x.get("kind") == "open_put"
+                     and x.get("status") == "closed_manual" and x.get("id") == entry_id)
+    if cur is None:
+        return None
+    note = (cur.get("note") or "") + " | 已撤销手动关账（回到 open）"
+    return update_ledger(lambda x: x.get("id") == entry_id
+                         and x.get("status") == "closed_manual",
+                         status="open", note=note)
+
+
 # ── instrument / 盘口辅助 ──────────────────────────────────────
