@@ -386,6 +386,33 @@ def register_okx_options_routes(app, gatekeeper) -> None:
                                  "error": "未找到该 closed_manual 卖 put 行（仅手动关账行可撤销）"})
         return JSONResponse({"ok": True, "entry": e})
 
+    async def _cover_prefill(request: Request):
+        # 到期 ITM 补买预填：数量 = 面值(lot)×张数、价格默认 = 现货现价（可改）
+        inst_id = request.query_params.get("inst_id") or ""
+        try:
+            sz = max(int(request.query_params.get("sz") or "1"), 1)
+        except ValueError:
+            sz = 1
+        if not inst_id:
+            return JSONResponse({"ok": False, "error": "缺少 inst_id"})
+        fam = (inst_id or "").split("-")[0] + "-USD"
+        try:
+            spot = await asyncio.to_thread(od.spot_price, fam)
+        except (okx_sdk.OkxSdkError, RuntimeError):
+            spot = None
+        ent = await asyncio.to_thread(
+            ot.find_entry, lambda x: x.get("kind") == "open_put"
+            and x.get("inst_id") == inst_id
+            and x.get("status") == ot.STATUS_SETTLED_ITM)
+        try:
+            pre = await asyncio.to_thread(ot.cover_prefill_defaults,
+                                          inst_id, sz, spot, ent)
+        except (okx_sdk.OkxSdkError, RuntimeError) as e2:
+            return JSONResponse({"ok": False, "error": str(e2)})
+        pre.update({"inst_id": inst_id, "sz": sz,
+                    "amount": round((pre["qty"] or 0) * (pre["px"] or 0), 2)})
+        return JSONResponse({"ok": True, **pre})
+
     # ── 担保设置（逐仓自动追加比例，option_params.json）────────
 
     async def _params_get(request: Request):
@@ -584,3 +611,4 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/close/confirm", _close_confirm, methods=["POST"])
     app.add_api_route("/config/okx-options/cover/start", _cover_start, methods=["POST"])
     app.add_api_route("/config/okx-options/cover/confirm", _cover_confirm, methods=["POST"])
+    app.add_api_route("/config/okx-options/cover-prefill", _cover_prefill, methods=["GET"])

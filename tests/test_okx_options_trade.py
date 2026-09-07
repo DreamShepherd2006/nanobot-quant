@@ -740,3 +740,40 @@ def test_reopen_rejects_non_closed_manual(_mock_sdk):
     # 未知 id
     assert ot.reopen_entry("deadbeef") is None
 
+
+# ── 到期 ITM 补买预填（cover_prefill_defaults）────────────
+
+def test_cover_prefill_defaults_qty_and_px(monkeypatch):
+    monkeypatch.setattr(ot, "resolve_instrument",
+                        lambda iid: {"lot": 0.1, "inst_id": iid})
+    # 数量 = 面值×张数；价格默认现货现价
+    d = ot.cover_prefill_defaults("SOL-USD_UM-260907-106-P", 1,
+                                  spot_px=104.5, entry={"settle_px": 104.44})
+    assert d["qty"] == 0.1
+    assert d["px"] == 104.5
+    assert d["px_src"] == "spot"
+    # 2 张
+    d2 = ot.cover_prefill_defaults("SOL-USD_UM-260907-106-P", 2,
+                                   spot_px=104.5, entry={})
+    assert d2["qty"] == 0.2
+
+
+def test_cover_prefill_fallback_settle_then_strike(monkeypatch):
+    monkeypatch.setattr(ot, "resolve_instrument",
+                        lambda iid: {"lot": 0.01, "inst_id": iid})
+    # 现货取价失败 → 结算价 → 行权价
+    d = ot.cover_prefill_defaults("BTC-USD_UM-260912-60000-P", 1,
+                                  spot_px=None,
+                                  entry={"settle_px": 59200.0, "strike": 60000})
+    assert d["px"] == 59200.0
+    assert d["px_src"] == "settle"
+    d2 = ot.cover_prefill_defaults("BTC-USD_UM-260912-60000-P", 1,
+                                   spot_px=None, entry={"strike": 60000})
+    assert d2["px"] == 60000.0
+    assert d2["px_src"] == "strike"
+    # 无任何价格 → px None（页面提示手填）
+    d3 = ot.cover_prefill_defaults("BTC-USD_UM-260912-60000-P", 1,
+                                   spot_px=None, entry=None)
+    assert d3["px"] is None
+    assert d3["px_src"] is None
+

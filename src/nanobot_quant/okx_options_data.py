@@ -109,6 +109,11 @@ def _spot_price(family: str) -> float | None:
     return _cached(f"spot:{family}", _load)
 
 
+def spot_price(family: str) -> float | None:
+    """现货现价（公开包装，链页与补买预填共用，带缓存）。"""
+    return _spot_price(family)
+
+
 def _spot_hv(family: str, days: int = 30) -> dict:
     """现货日线年化历史波动率（对数收益标准差 × sqrt(365)）。
 

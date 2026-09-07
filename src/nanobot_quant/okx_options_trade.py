@@ -227,6 +227,27 @@ def resolve_instrument(inst_id: str) -> dict:
     }
 
 
+def cover_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
+                           entry: Optional[dict] = None) -> dict:
+    """到期 ITM 补买预填：数量 = 面值(lot)×张数；价格默认 = 现货现价
+    （fallback：结算价 → 行权价，全部可在页面修改）。
+    """
+    lot = 0.0
+    try:
+        inst = resolve_instrument(inst_id)
+        lot = float(inst.get("lot") or 0.0)
+    except Exception:
+        lot = 0.0
+    px, src = spot_px, "spot"
+    if not px and entry:
+        if entry.get("settle_px"):
+            px, src = entry.get("settle_px"), "settle"
+        elif entry.get("strike"):
+            px, src = entry.get("strike"), "strike"
+    return {"qty": round(lot * sz, 6) if lot else 0.0,
+            "px": px, "px_src": src if px else None}
+
+
 def ticker_quote(inst_id: str) -> dict:
     """当前盘口/最新（bidPx/askPx/last —— USD/1 名义币）。"""
     rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=inst_id))

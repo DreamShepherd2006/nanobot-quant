@@ -615,7 +615,7 @@ async function loadReminder() {
     if (!j.ok || !j.reminders || !j.reminders.length) { rb.style.display = "none"; return; }
     const items = j.reminders.map(x =>
       (x.expired ? "⏰ 已到期待确认" : "⏰ 到期临近") + " " + esc(x.inst_id) + " · " + fmt(x.sz, 0) + " 张 · 到期 " + locDate(x.exp_ms) +
-      ' <a class="act" onclick="openCover(\'' + esc(x.inst_id) + '\')">补买</a>');
+      ' <a class="act" onclick="openCover(\'' + esc(x.inst_id) + '\',\'' + esc(x.sz ?? 1) + '\')">补买</a>');
     rb.innerHTML = items.join("<br>");
     rb.style.display = "block";
   } catch (e) { /* 静默 */ }
@@ -722,7 +722,7 @@ function openClose(instId) {
   $("mGo").textContent = "确认平仓";
   $("mGo").onclick = () => doClose();
 }
-function openCover(instId) {
+function openCover(instId, szArg) {
   modalMode = "cover"; modalInst = instId;
   const fam = (instId || "").split("-").slice(0, 2).join("-"); // 如 BTC-USD
   let spot = fam + "-USDC";
@@ -736,6 +736,20 @@ function openCover(instId) {
   $("mGo").style.display = ""; $("mGo").textContent = "确认补买";
   $("mPreviewBtn").style.display = "none";
   $("mGo").onclick = () => doCover(spot);
+  prefillCover(instId, szArg, spot);  // 预填：数量=面值×张数、金额=数量×现货现价（可改）
+}
+async function prefillCover(instId, szArg, spot) {
+  try {
+    const j = await (await fetch("/config/okx-options/cover-prefill?inst_id=" +
+      encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1"))).json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + j.status);
+    const srcTxt = {spot: "现货现价", settle: "结算价", strike: "行权价"}[j.px_src] || "";
+    if (j.qty) { $("mQty").value = j.qty; $("mAmt").value = (j.amount || j.qty * j.px).toFixed(2); }
+    $("mSpec").innerHTML += "<div class=\"hint\">预填：数量 = 行权面值 × 张数（" + j.qty + "）；金额 = 数量 × " + srcTxt + " " +
+      (j.px != null ? fmt(j.px, 2) : "（取价失败，请手填）") + " —— 均可修改，改数量/金额任填其一。</div>";
+  } catch (e) {
+    $("mSpec").innerHTML += "<div class=\"hint\">自动预填失败（" + esc(e.message) + "）——请手填数量或金额。</div>";
+  }
 }
 $("mCancel").addEventListener("click", modalClose);
 $("mSz").addEventListener("input", () => {
@@ -748,6 +762,8 @@ $("mOrdType").addEventListener("change", () => {
   $("mRowPx").style.display = "";
   $("mGo").textContent = modalMode === "sell" ? "确认卖出" : "确认平仓";
 });
+$("mAmt").addEventListener("input", () => { if (modalMode === "cover" && $("mAmt").value) $("mQty").value = ""; });
+$("mQty").addEventListener("input", () => { if (modalMode === "cover" && $("mQty").value) $("mAmt").value = ""; });
 overlay.addEventListener("click", e => { if (e.target === overlay) modalClose(); });
 
 function formVal() {
@@ -903,7 +919,7 @@ function renderLiveEvents(evs) {
   if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div>'; return; }
   box.innerHTML = "<div class='note' style='margin:6px 0'>📋 最近判定（到期处理区）：</div>" + evs.map(e => {
     const pnl = e.settle_pnl != null ? usd(Math.abs(e.settle_pnl)) : "—";
-    const cover = e.status === "settled_itm" ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\')">补买</a>' : "";
+    const cover = e.status === "settled_itm" ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\',\'' + esc(e.sz ?? 1) + '\')">补买</a>' : "";
     return "<div style='padding:3px 0'>" + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " + (ST_LABEL[e.status] || esc(e.status)) +
       (e.settle_px != null ? " · 结算价 " + esc(String(e.settle_px)) : "") +
       (e.status === "settled_itm" ? " · 赔付 " + pnl : "") +
