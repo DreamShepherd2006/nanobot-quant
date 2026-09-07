@@ -126,6 +126,20 @@
   <div class="note">卖 put 成交后自动把该仓保证金追加至「strike×面值×张数 × 比例」（100% = 全损担保：浮亏上限 &lt; 保证金 → 数学上无强平路径，可扛到到期；追加资金平仓/到期后自动释放）。0% = 关闭自动追加（仅平台默认 IM 冻结，浮亏可能击穿提前强平）。范围 0–200%。</div>
 </div>
 
+<div class="card" id="liveCard">
+  <div class="ctl">
+    <label>🟤 到期巡检（自动判定）</label>
+    <input type="checkbox" id="liveEnabled" title="常驻巡检已到期 open put：OTM 自动关账 / ITM 记赔付；AI 不自行开启">
+    <span class="hint">开启</span>
+    <input type="number" id="liveInterval" min="10" max="3600" step="10" value="60" style="width:90px" title="巡检周期（秒）">
+    <span class="hint">秒/轮</span>
+    <button class="btn-ghost" id="saveLiveBtn">保存</button>
+    <span class="hint" id="liveStatus"></span>
+  </div>
+  <div class="note" id="liveNote">常驻巡检到期 open put：到期后查 OKX 交割账单自动判定——<b>到期作废(OTM)</b> 自动关账（结算价≥行权价）、<b>到期被行权(ITM)</b> 记赔付待补买（两步确认）、账单未出保持 open 下轮重试、判定矛盾挂「待核对」人工看。判定事件逐笔落盘（跨重启保留）。</div>
+  <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
+</div>
+
 <div class="card" id="summaryCard" style="display:none">
   <h3>市场概览</h3>
   <div class="summary" id="summary"></div>
@@ -582,6 +596,7 @@ function switchTab(tab) {
   $("ledCard").style.display = (tab === "led") ? "" : "none";
   if (tab === "pos") loadPositions();
   if (tab === "led") loadLedger();
+  loadLive();  // 巡检状态/最近判定随 tab 切换刷新（轻量 GET）
 }
 document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
@@ -844,6 +859,55 @@ async function saveParams() {
   }
 }
 
+// ── 到期巡检（S3 daemon 状态 / 最近判定事件）──────────
+const ST_LABEL = {settled_otm: "作废·OTM", settled_itm: "被行权·ITM", settled_review: "待核对"};
+function renderLiveEvents(evs) {
+  const box = $("liveEvents");
+  if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div>'; return; }
+  box.innerHTML = "<div class='note' style='margin:6px 0'>📋 最近判定（到期处理区）：</div>" + evs.map(e => {
+    const pnl = e.settle_pnl != null ? usd(Math.abs(e.settle_pnl)) : "—";
+    const cover = e.status === "settled_itm" ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\')">补买</a>' : "";
+    return "<div style='padding:3px 0'>" + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " + (ST_LABEL[e.status] || esc(e.status)) +
+      (e.settle_px != null ? " · 结算价 " + esc(String(e.settle_px)) : "") +
+      (e.status === "settled_itm" ? " · 赔付 " + pnl : "") +
+      " · " + locDate(Date.parse(e.ts)) + cover + "</div>";
+  }).join("");
+}
+async function loadLive() {
+  try {
+    const j = await (await fetch("/config/okx-options/live")).json();
+    if (!j.ok) return;
+    const lv = j.live, cfg = lv.config;
+    $("liveEnabled").checked = !!cfg.enabled;
+    $("liveInterval").value = cfg.interval_s;
+    const st = [];
+    st.push(lv.running ? "🟢 巡检中" : "⚪ 已停止");
+    if (lv.last_run) st.push("上次 " + locDate(Date.parse(lv.last_run)));
+    st.push("累计判定 " + lv.total_settled + " 笔");
+    $("liveStatus").innerHTML = st.join(" · ");
+    renderLiveEvents(j.events || []);
+    if (lv.last_error) {
+      const w = document.createElement("div");
+      w.className = "banner warn"; w.style.marginTop = "6px"; w.textContent = "⚠ 最近巡检错误：" + lv.last_error;
+      const old = $("liveCard").querySelector(".banner.warn");
+      if (!old) $("liveCard").appendChild(w);
+      else old.textContent = w.textContent;
+    }
+  } catch (e) { /* 静默 */ }
+}
+async function saveLive() {
+  const enabled = $("liveEnabled").checked;
+  const interval_s = parseInt($("liveInterval").value, 10);
+  if (isNaN(interval_s) || interval_s < 10 || interval_s > 3600) { showErr("巡检周期须为 10–3600 秒"); return; }
+  try {
+    const j = await jpost("/config/okx-options/live", {enabled, interval_s});
+    $("liveStatus").textContent = j.ok ? (enabled ? "已保存 · 巡检启动中" : "已保存 · 巡检已停止") : "保存失败";
+    loadLive();
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+
 // ── 事件绑定 / 启动 ───────────────────────────────────
 famSel.addEventListener("change", () => { loadExpiries(); loadChain(); });
 expSel.addEventListener("change", loadChain);
@@ -852,11 +916,13 @@ rngSel.addEventListener("change", loadChain);
 btn.addEventListener("click", loadChain);
 accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions(); });
 $("saveParamsBtn").addEventListener("click", saveParams);
+$("saveLiveBtn").addEventListener("click", saveLive);
 loadAccounts();
 loadExpiries();
 loadChain();
 loadReminder();
 loadParams();
+loadLive();
 </script>
 </body>
 </html>

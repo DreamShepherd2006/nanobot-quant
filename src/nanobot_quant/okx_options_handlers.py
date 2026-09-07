@@ -31,6 +31,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant import okx_options_data as od
+from nanobot_quant import okx_options_live as ol
 from nanobot_quant import okx_options_trade as ot
 from nanobot_quant.data_sources.periods import PERIODS
 from nanobot_quant.okx_cex_credentials import list_sub_accounts
@@ -262,10 +263,52 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         return JSONResponse({"ok": True, "ledger": rows})
 
     async def _reminder(request: Request):
+        # 先跑一轮到期判定再出提醒，消除「提醒先于 settle 返回」的页面加载竞态
+        # （settle 幂等：仅已到期仍 open 的行查账单；失败不阻塞提醒，错误单列返回）
         err, ok = _authorized(request, gatekeeper)
         if not ok:
             return _deny(err)
-        return JSONResponse({"ok": True, "reminders": ot.expiry_reminder()})
+        settled_error = ""
+        try:
+            await asyncio.to_thread(ot.settle_expired_puts)
+        except (OkxSdkError, RuntimeError) as se:
+            settled_error = str(se)
+        resp = {"ok": True, "reminders": ot.expiry_reminder()}
+        if settled_error:
+            resp["settled_error"] = settled_error
+        return JSONResponse(resp)
+
+    # ── S3：到期巡检 daemon（option_params.json live 字段）────────
+
+    async def _live_get(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        return JSONResponse({"ok": True, "live": ol.live_state(),
+                             "events": ol.load_events(30)})
+
+    async def _live_set(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        b = body or {}
+        try:
+            enabled = None if b.get("enabled") is None else bool(b["enabled"])
+            interval_s = None if b.get("interval_s") is None else int(b["interval_s"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False,
+                                 "error": "enabled 需布尔、interval_s 需整数"})
+        if interval_s is not None and not (ol.MIN_INTERVAL_S <= interval_s
+                                           <= ol.MAX_INTERVAL_S):
+            return JSONResponse({"ok": False,
+                                 "error": f"interval_s 范围 {ol.MIN_INTERVAL_S}–"
+                                          f"{ol.MAX_INTERVAL_S} 秒"})
+        ol.save_live_config(enabled=enabled, interval_s=interval_s)
+        state = await asyncio.to_thread(ol.sync)
+        return JSONResponse({"ok": True, "live": state})
 
     # ── 撤单 / 当前委托（单步，撤单无资金流）────────────
 
@@ -488,6 +531,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/cancel", _cancel, methods=["POST"])
     app.add_api_route("/config/okx-options/params", _params_get, methods=["GET"])
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
+    app.add_api_route("/config/okx-options/live", _live_get, methods=["GET"])
+    app.add_api_route("/config/okx-options/live", _live_set, methods=["POST"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/confirm", _sell_confirm, methods=["POST"])
