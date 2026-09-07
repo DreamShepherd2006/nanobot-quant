@@ -247,10 +247,8 @@ def test_spot_cover_quote_amt(_mock_sdk, _patch_entry):
     assert call["sz"] == "50.00"
     assert call["tgtCcy"] == "quote_ccy"
     assert call["tag"] == ot.TAG_COVER
-    # USD 现货对经 send_request 透传（set_order 未封装 tradeQuoteCcy）+ 显式 USDC 结算
-    assert call["path"] == "/api/v5/trade/order"
-    assert call["method"] == "POST"
-    assert call["tradeQuoteCcy"] == "USDC"
+    # 当前 Crypto-USD 产品默认 USDC 结算，不传 tradeQuoteCcy（迁移后才需要）
+    assert "tradeQuoteCcy" not in call
     assert e["status"] == "filled"
 
 
@@ -258,7 +256,7 @@ def test_spot_cover_base_qty(_mock_sdk, _patch_entry):
     ot.spot_cover("bot1", spot_inst="SOL-USD", base_qty=0.01)
     call = _mock_sdk.calls[-1]
     assert call["tgtCcy"] == "base_ccy"
-    assert call["tradeQuoteCcy"] == "USDC"
+    assert "tradeQuoteCcy" not in call
     assert call["sz"] == "0.01"
 
 

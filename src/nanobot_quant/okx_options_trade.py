@@ -744,18 +744,12 @@ def spot_cover(account: str, *, spot_inst: str,
         "instId": spot_inst, "tdMode": "cash", "side": "buy",
         "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
     }
-    # USD 现货对（币种-USD，官网显示币种/USDⓈ）支持统一 USD 订单簿多 quote 结算：
-    # 显式选 USDC（账户 USDC 余额来自期权结算）。注意 SOL-USDC 对 2026-09-23 才
-    # 开放交易（现在下单 51155），当前活跃对是 SOL-USD；9/30 USD 对下架后
-    # 补买现货对须切回 -USDC（届时 SOL-USDC 已承接）。
-    api = okx_sdk.trade_for(a["creds"])
+    # 当前 Crypto-USD 现货产品（官网显示 币种/USDⓈ）默认即 USDC 结算，无需 tradeQuoteCcy
+    # （该参数是 2026-09-23 USD→USDC 交易对迁移后的 API 参数，现在传入触发 51000
+    # 参数校验错误；迁移后 Crypto-USDC 产品若仍想用 USD 结算才须显式
+    # tradeQuoteCcy=USD，届时 python-okx set_order 未封装需经 send_request 透传）。
     try:
-        if spot_inst.endswith("-USD"):
-            # python-okx 1.0.9 的 set_order 未封装 tradeQuoteCcy → send_request 透传原始参数
-            params["tradeQuoteCcy"] = "USDC"
-            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
-        else:
-            data = okx_sdk.check(api.set_order(**params))
+        data = okx_sdk.check(okx_sdk.trade_for(a["creds"]).set_order(**params))
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
