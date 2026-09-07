@@ -230,15 +230,26 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return _deny(err)
         account = request.query_params.get("account") or ""
         try:
+            # 页面打开顺带触发到期判定（幂等：仅已到期仍 open 的行查账单；
+            # 判定失败不阻塞持仓展示，错误单列返回）
+            settled_error = ""
+            try:
+                settled = await asyncio.to_thread(ot.settle_expired_puts)
+            except (OkxSdkError, RuntimeError) as se:
+                settled = []
+                settled_error = str(se)
             puts = await asyncio.to_thread(ot.open_puts, account)
             bal = await asyncio.to_thread(ot.account_balance, account)
             cfg = await asyncio.to_thread(ot.account_config, account)
             open_rows = [e for e in ot.load_ledger()
                          if e.get("kind") == "open_put"
-                         and e.get("status") in ("open", "pending")]
-            return JSONResponse({"ok": True, "positions": puts,
-                                 "balance": bal, "config": cfg,
-                                 "ledger_open": open_rows})
+                         and e.get("status") in ("open", "pending", ot.STATUS_SETTLED_REVIEW)]
+            resp = {"ok": True, "positions": puts,
+                    "balance": bal, "config": cfg,
+                    "ledger_open": open_rows, "settled": settled}
+            if settled_error:
+                resp["settled_error"] = settled_error
+            return JSONResponse(resp)
         except (OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
 

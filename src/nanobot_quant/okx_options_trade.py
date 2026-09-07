@@ -883,6 +883,94 @@ def expiry_reminder(account: str = "", hours: int = 72) -> list[dict]:
     return out
 
 
+
+# ── 到期结算判定（C23，2026-09-07）─────────────────────────
+
+# OKX 账单 type/subType 官方枚举（python-okx Account.get_bills docstring 权威表；
+# 用户 OKX 后台中文样本：101-P「账单主类型=交割 / 子类型=到期作废」）。对卖 put：
+#   type=3 交割 + subType=172 到期作废   → OTM（结算价 ≥ strike，put 无价值，保证金释放）
+#   type=3 交割 + subType=171 到期被行权 → ITM（结算价 < strike，现金赔付）
+_BILL_TYPE_DELIVERY = "3"
+_BILL_SUBTYPE_WORTHLESS = "172"   # 到期作废（OTM）
+_BILL_SUBTYPE_EXERCISED = "171"   # 到期被行权（ITM）
+
+STATUS_SETTLED_OTM = "settled_otm"
+STATUS_SETTLED_ITM = "settled_itm"
+STATUS_SETTLED_REVIEW = "settled_review"
+
+
+def settle_expired_puts(now_ms=None) -> list:
+    """台账已到期仍 open 的 put → 查 OKX 交割账单判定 作废/被行权 → 更新台账。
+
+    判定信号（不做单信号赌博）——每笔结算行交叉校验：
+      subType=172（到期作废）且 px(结算价) ≥ strike → settled_otm
+      subType=171（到期被行权）且 px < strike        → settled_itm
+      subType 与 px 矛盾 / 其他交割 subType（170 等） → settled_review（fail-closed）
+      账单未出（OKX 结算后 ~27s 出现）/ 查不到         → 保持 open，下轮重试
+    返回本次判定列表 [{id, inst_id, status, settle_px, settle_pnl, note}]。
+    """
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    settled = []
+    for e in load_ledger():
+        if e.get("kind") != "open_put" or e.get("status") != "open":
+            continue
+        exp_ms = int(e.get("exp_ms") or 0)
+        if not exp_ms or exp_ms > now_ms:
+            continue  # 未到期
+        inst_id = e.get("inst_id") or ""
+        row = _find_delivery_bill(e.get("account") or "", inst_id, exp_ms, now_ms)
+        if row is None:
+            continue  # 账单未出/延迟 → 保持 open，下轮重试
+        sub = row.get("subType")
+        px = _f(row.get("px"))          # 账单「成交价」= OKX 结算价（101-P: 105.0）
+        pnl = _f(row.get("pnl"))
+        strike = float(e.get("strike") or 0)
+        result = _classify_settlement(sub, px, strike)
+        fields = {
+            "status": result["status"],
+            "settle_subtype": sub,
+            "settle_px": px,
+            "settle_pnl": round(pnl, 6),
+            "settle_ts": _utc_now(),
+        }
+        if result["status"] == STATUS_SETTLED_REVIEW:
+            fields["note"] = result["note"]
+        if update_ledger(lambda x: x["id"] == e["id"], **fields) is not None:
+            settled.append({"id": e["id"], "inst_id": inst_id,
+                            "status": result["status"], "settle_px": px,
+                            "settle_pnl": round(pnl, 6),
+                            "note": result.get("note", "")})
+    return settled
+
+
+def _find_delivery_bill(account: str, inst_id: str, begin_ms: int,
+                        end_ms: int):
+    """查该 put 在 [expiry, now] 窗口的交割账单行（type=3，按 instId 匹配）。"""
+    a = _entry_account(account)
+    rows = okx_sdk.check(okx_sdk.account_for(a["creds"]).get_bills(
+        instType="OPTION", type=_BILL_TYPE_DELIVERY,
+        begin=str(begin_ms), end=str(end_ms), limit="100"))
+    hits = [r for r in (rows if isinstance(rows, list) else [])
+            if r.get("instId") == inst_id
+            and r.get("type") == _BILL_TYPE_DELIVERY]
+    return hits[0] if hits else None
+
+
+def _classify_settlement(sub: str, px: float, strike: float) -> dict:
+    """账单行 subType + 结算价交叉判定 OTM/ITM（矛盾 → review，不猜）。"""
+    if sub == _BILL_SUBTYPE_WORTHLESS:            # 172 到期作废
+        if px >= strike:
+            return {"status": STATUS_SETTLED_OTM}
+        return {"status": STATUS_SETTLED_REVIEW,
+                "note": "作废行但结算价 {} < strike {}，账单存疑".format(px, strike)}
+    if sub == _BILL_SUBTYPE_EXERCISED:            # 171 到期被行权
+        if px < strike:
+            return {"status": STATUS_SETTLED_ITM}
+        return {"status": STATUS_SETTLED_REVIEW,
+                "note": "被行权行但结算价 {} ≥ strike {}，账单存疑".format(px, strike)}
+    return {"status": STATUS_SETTLED_REVIEW,
+            "note": "交割账单未知 subType={}，请人工核对".format(sub)}
+
 # ── 两步确认（内存 pending action，30s TTL）─────────────────
 
 _pending: dict[str, dict] = {}

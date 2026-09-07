@@ -85,6 +85,26 @@ class _FakeAccount:
         self.margin = 0.0          # 该仓当前保证金（get_positions 返回，0 → imr fallback）
         self.margin_calls = []     # set_margin_balance 调用记录
         self.margin_fail = None    # 非空时 set_margin_balance 抛 RuntimeError
+        self.bills = []            # 预置账单行（OKX 字段：instId/type/subType/px/pnl/ts）
+        self.bills_fail = None     # 非空时 get_bills 抛 RuntimeError
+
+    def get_bills(self, instType=None, type=None, begin=None, end=None,
+                  limit=None, **kw):
+        if self.bills_fail:
+            raise RuntimeError(self.bills_fail)
+        rows = []
+        for b in self.bills:
+            if type and b.get("type") != type:
+                continue
+            if instType and b.get("instType", "OPTION") != instType:
+                continue
+            ts = int(b.get("ts") or 0)
+            if begin and ts < int(begin):
+                continue
+            if end and ts > int(end):
+                continue
+            rows.append(b)
+        return {"code": "0", "data": rows}
 
     def get_positions(self, instType=None, instId=None, **kw):
         if instId:
@@ -556,3 +576,106 @@ def test_suggest_close_px_ask_no_buffer():
     assert suggest_close_px(None) is None
     assert suggest_close_px(0) is None
     assert suggest_close_px(-0.1) is None
+
+
+# ── 到期结算判定（C23）──────────────────────────────────
+
+def _seed_expired_put(inst="SOL-USD_UM-260906-101-P", strike=101.0,
+                      exp_ms=1757145600000, account="bot1", sz=1, lot=0.1):
+    return ot.add_ledger(kind="open_put", status="open", inst_id=inst,
+                         account=account, strike=strike, exp_ms=exp_ms,
+                         sz=sz, lot=lot, px=0.11, premium_usd=0.011,
+                         family="SOL-USD_UM", collateral_usd=10.0977)
+
+
+def _settle_bill(inst, sub, px, pnl="0.0", ts=1757145601000):
+    return {"instId": inst, "type": "3", "subType": sub,
+            "px": px, "pnl": pnl, "ts": ts}
+
+
+def test_settle_otm_worthless_autoclose(_mock_sdk, _patch_entry):
+    # 到期作废（172）且结算价 ≥ strike → settled_otm 自动关账（101-P 场景）
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260906-101-P", "172",
+                                            "105.0", "0.0070")]
+    e = _seed_expired_put()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert len(out) == 1 and out[0]["status"] == ot.STATUS_SETTLED_OTM
+    row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
+    assert row["status"] == ot.STATUS_SETTLED_OTM
+    assert row["settle_px"] == pytest.approx(105.0)
+    assert row["settle_subtype"] == "172"
+    assert row["settle_pnl"] == pytest.approx(0.007, abs=1e-6)
+
+
+def test_settle_itm_exercised(_mock_sdk, _patch_entry):
+    # 到期被行权（171）且结算价 < strike → settled_itm（后续回补流程）
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260906-101-P", "171",
+                                            "99.0", "-0.20")]
+    e = _seed_expired_put()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert len(out) == 1 and out[0]["status"] == ot.STATUS_SETTLED_ITM
+    row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
+    assert row["status"] == ot.STATUS_SETTLED_ITM
+    assert row["settle_px"] == pytest.approx(99.0)
+
+
+def test_settle_keeps_open_when_bill_missing(_mock_sdk, _patch_entry):
+    # 账单未出（OKX 结算后 ~27s 才出现）→ 保持 open，下轮重试
+    _mock_sdk.account.bills = []
+    e = _seed_expired_put()
+    assert ot.settle_expired_puts(now_ms=1757145700000) == []
+    row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
+    assert row["status"] == "open"
+
+
+def test_settle_review_on_subtype_px_contradiction(_mock_sdk, _patch_entry):
+    # 作废行（172）但结算价 < strike → 矛盾 → settled_review（fail-closed 不猜）
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260906-101-P", "172",
+                                            "99.0", "0.0")]
+    e = _seed_expired_put()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert len(out) == 1 and out[0]["status"] == ot.STATUS_SETTLED_REVIEW
+    assert "存疑" in out[0]["note"]
+    row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
+    assert row["status"] == ot.STATUS_SETTLED_REVIEW
+
+
+def test_settle_review_on_unknown_subtype(_mock_sdk, _patch_entry):
+    # 交割行出现未知 subType（如 170 买方行权）→ review 不猜
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260906-101-P", "170",
+                                            "99.0", "0.0")]
+    e = _seed_expired_put()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert out[0]["status"] == ot.STATUS_SETTLED_REVIEW
+    assert "170" in out[0]["note"]
+
+
+def test_settle_skips_unexpired_and_non_open(_mock_sdk, _patch_entry):
+    # 未到期 / 非 open 行不查询不处理
+    _mock_sdk.account.bills = []
+    ot.add_ledger(kind="open_put", status="open", inst_id="X-260999-101-P",
+                  account="bot1", strike=101, exp_ms=1757145600000 + 999_000_000_000,
+                  sz=1, lot=0.1, px=0.11)   # 未来到期
+    ot.add_ledger(kind="open_put", status="closed", inst_id="Y-260906-101-P",
+                  account="bot1", strike=101, exp_ms=1757145600000,
+                  sz=1, lot=0.1, px=0.11)   # 已平仓
+    assert ot.settle_expired_puts(now_ms=1757145700000) == []
+
+
+def test_settle_uses_row_account_creds(_mock_sdk, _patch_entry):
+    # 每行按自身 account 查账单（跨多子账号正确），_entry_account 收到 account 名
+    seen = {}
+    def spy(account):
+        seen["acct"] = account
+        return {"creds": {"api_key": "k", "secret_key": "s", "passphrase": "p"},
+                "label": account, "name": account, "uid": account}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ot, "_entry_account", spy)
+    try:
+        _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260906-101-P",
+                                                "172", "105.0", "0.0")]
+        _seed_expired_put(account="DreamShepherdbot1")
+        ot.settle_expired_puts(now_ms=1757145700000)
+        assert seen.get("acct") == "DreamShepherdbot1"
+    finally:
+        monkeypatch.undo()
