@@ -85,6 +85,19 @@ def load_events(limit: int = 50) -> list[dict]:
             continue
         if len(out) >= limit:
             break
+    # settled_itm 事件 enrich covered：台账存在同现货对（期权基础币 -USD/-USDC）的
+    # filled spot_cover 行 ⇒ 该笔到期已现货补买（前端据此不再显示「补买」入口）。
+    covers: set[str] = set()
+    try:
+        for r in ot.load_ledger():
+            if r.get("kind") == "spot_cover" and r.get("status") == "filled":
+                covers.add(str(r.get("inst_id") or ""))
+    except Exception:
+        covers = set()
+    for ev in out:
+        if ev.get("status") == ot.STATUS_SETTLED_ITM:
+            base = str(ev.get("inst_id") or "").split("-")[0]
+            ev["covered"] = any(c in covers for c in (f"{base}-USD", f"{base}-USDC"))
     return out
 
 

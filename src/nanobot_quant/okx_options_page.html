@@ -920,7 +920,9 @@ function renderLiveEvents(evs) {
   const box = $("liveEvents");
   if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div>'; return; }
   box.innerHTML = "<div class='note' style='margin:6px 0'>📋 最近判定（到期处理区）：</div>" + evs.map(e => {
-    const cover = e.status === "settled_itm" ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\',\'' + esc(e.sz ?? 1) + '\')">补买</a>' : "";
+    const cover = e.status === "settled_itm" && !e.covered
+      ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\',\'' + esc(e.sz ?? 1) + '\')">补买</a>'
+      : (e.status === "settled_itm" ? ' <span style="color:#0a8f4f">已补买</span>' : "");
     let pnlTxt = "";
     if (e.status === "settled_itm") {
       const net = e.settle_pnl != null
