@@ -725,7 +725,8 @@ function openClose(instId) {
 function openCover(instId, szArg) {
   modalMode = "cover"; modalInst = instId;
   const famBase = (instId || "").split("-")[0]; // 基础币：SOL/BTC/ETH/XAU（期权家族 _UM 段不参与）
-  let spot = famBase + "-USDC";
+  // 现货对用 币种-USD（官网 SOL/USDⓈ）：SOL-USDC 2026-09-23 才开放、现在下单 51155 合规拒
+  let spot = famBase + "-USD";
   if (famBase === "XAU") { spot = ""; $("mSpec").innerHTML = "<b>XAU-USD_UM</b> 无现货盘——到期 ITM 直接现金结算亏损，无法现货补买（补买仅 BTC/ETH/SOL）。"; }
   else $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 到期 ITM 现金结算后的现货补买 → 现货对 <b>" + esc(spot) + "</b>（市价单）";
   $("mRowSz").style.display = "none"; $("mRowType").style.display = "none"; $("mRowPx").style.display = "none";

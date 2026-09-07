@@ -744,6 +744,12 @@ def spot_cover(account: str, *, spot_inst: str,
         "instId": spot_inst, "tdMode": "cash", "side": "buy",
         "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
     }
+    # USD 现货对（币种-USD，官网显示币种/USDⓈ）支持统一 USD 订单簿多 quote 结算：
+    # 显式选 USDC（账户 USDC 余额来自期权结算）。注意 SOL-USDC 对 2026-09-23 才
+    # 开放交易（现在下单 51155），当前活跃对是 SOL-USD；9/30 USD 对下架后
+    # 补买现货对须切回 -USDC（届时 SOL-USDC 已承接）。
+    if spot_inst.endswith("-USD"):
+        params["tradeQuoteCcy"] = "USDC"
     try:
         data = okx_sdk.check(okx_sdk.trade_for(a["creds"]).set_order(**params))
     except Exception as e:

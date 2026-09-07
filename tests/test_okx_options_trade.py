@@ -232,22 +232,25 @@ def test_close_put_without_open_rejected(_patch_entry):
 
 
 def test_spot_cover_quote_amt(_mock_sdk, _patch_entry):
-    e = ot.spot_cover("bot1", spot_inst="BTC-USDC", quote_amt=50.0)
+    e = ot.spot_cover("bot1", spot_inst="BTC-USD", quote_amt=50.0)
     call = _mock_sdk.calls[-1]
-    assert call["instId"] == "BTC-USDC"
+    assert call["instId"] == "BTC-USD"
     assert call["side"] == "buy"
     assert call["tdMode"] == "cash"
     assert call["ordType"] == "market"
     assert call["sz"] == "50.00"
     assert call["tgtCcy"] == "quote_ccy"
     assert call["tag"] == ot.TAG_COVER
+    # USD 现货对须显式 tradeQuoteCcy=USDC（统一 USD 订单簿 USDC 结算）
+    assert call["tradeQuoteCcy"] == "USDC"
     assert e["status"] == "filled"
 
 
 def test_spot_cover_base_qty(_mock_sdk, _patch_entry):
-    ot.spot_cover("bot1", spot_inst="BTC-USDC", base_qty=0.01)
+    ot.spot_cover("bot1", spot_inst="SOL-USD", base_qty=0.01)
     call = _mock_sdk.calls[-1]
     assert call["tgtCcy"] == "base_ccy"
+    assert call["tradeQuoteCcy"] == "USDC"
     assert call["sz"] == "0.01"
 
 
