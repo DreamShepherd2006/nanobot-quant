@@ -57,6 +57,12 @@ class _FakeTrade:
         self.last_px = params.get("px", params.get("sz", "1"))
         return {"code": "0", "data": [{"ordId": f"ord-{len(self.calls)}", "clOrdId": ""}]}
 
+    def send_request(self, path, method, **params):
+        # python-okx 未封装参数的透传通道（如现货 USD 对下单 tradeQuoteCcy）
+        self.calls.append({"path": path, "method": method, **params})
+        self.last_px = params.get("px", params.get("sz", "1"))
+        return {"code": "0", "data": [{"ordId": f"ord-{len(self.calls)}", "clOrdId": ""}]}
+
     def get_order(self, instId=None, ordId=None, **kw):
         # 缺省 filled（既有 settle 测试依赖），撤单测试经 order_states 设 live/canceled
         state = self.order_states.get(ordId, "filled")
@@ -241,7 +247,9 @@ def test_spot_cover_quote_amt(_mock_sdk, _patch_entry):
     assert call["sz"] == "50.00"
     assert call["tgtCcy"] == "quote_ccy"
     assert call["tag"] == ot.TAG_COVER
-    # USD 现货对须显式 tradeQuoteCcy=USDC（统一 USD 订单簿 USDC 结算）
+    # USD 现货对经 send_request 透传（set_order 未封装 tradeQuoteCcy）+ 显式 USDC 结算
+    assert call["path"] == "/api/v5/trade/order"
+    assert call["method"] == "POST"
     assert call["tradeQuoteCcy"] == "USDC"
     assert e["status"] == "filled"
 

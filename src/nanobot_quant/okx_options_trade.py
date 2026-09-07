@@ -748,10 +748,14 @@ def spot_cover(account: str, *, spot_inst: str,
     # 显式选 USDC（账户 USDC 余额来自期权结算）。注意 SOL-USDC 对 2026-09-23 才
     # 开放交易（现在下单 51155），当前活跃对是 SOL-USD；9/30 USD 对下架后
     # 补买现货对须切回 -USDC（届时 SOL-USDC 已承接）。
-    if spot_inst.endswith("-USD"):
-        params["tradeQuoteCcy"] = "USDC"
+    api = okx_sdk.trade_for(a["creds"])
     try:
-        data = okx_sdk.check(okx_sdk.trade_for(a["creds"]).set_order(**params))
+        if spot_inst.endswith("-USD"):
+            # python-okx 1.0.9 的 set_order 未封装 tradeQuoteCcy → send_request 透传原始参数
+            params["tradeQuoteCcy"] = "USDC"
+            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
+        else:
+            data = okx_sdk.check(api.set_order(**params))
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
