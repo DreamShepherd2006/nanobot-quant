@@ -395,7 +395,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             sz = 1
         if not inst_id:
             return JSONResponse({"ok": False, "error": "缺少 inst_id"})
-        fam = (inst_id or "").split("-")[0] + "-USD"
+        # instId → 家族全名（含 _UM，_SPOT/_INDEX 表键），现货价取价须匹配
+        fam = od.family_of(inst_id)
         try:
             spot = await asyncio.to_thread(od.spot_price, fam)
         except (okx_sdk.OkxSdkError, RuntimeError):

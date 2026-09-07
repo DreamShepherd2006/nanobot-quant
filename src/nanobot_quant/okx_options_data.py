@@ -87,6 +87,11 @@ def _opt_summary(family: str) -> dict[str, dict]:
     return _cached(f"osum:{family}", _load)
 
 
+def family_of(inst_id: str) -> str:
+    """instId → 家族全名（公开包装）：SOL-USD_UM-260907-106-P → SOL-USD_UM。"""
+    return _family_of(inst_id)
+
+
 def _spot_price(family: str) -> float | None:
     ref, kind = _ref_inst(family)
     if not ref:
