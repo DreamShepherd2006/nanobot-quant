@@ -733,6 +733,7 @@ function openCover(instId, szArg) {
   $("mRowAmt").style.display = ""; $("mRowQty").style.display = "";
   $("mAmt").value = ""; $("mQty").value = "";
   modalOpen("到期补买");
+  $("mPreview").innerHTML = "";   // 补买无权利金预览（预填说明已由 mSpec hint 承担）
   if (!spot) { $("mGo").style.display = "none"; return; }
   $("mGo").style.display = ""; $("mGo").textContent = "确认补买";
   $("mPreviewBtn").style.display = "none";
