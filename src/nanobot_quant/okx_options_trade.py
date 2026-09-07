@@ -744,12 +744,26 @@ def spot_cover(account: str, *, spot_inst: str,
         "instId": spot_inst, "tdMode": "cash", "side": "buy",
         "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
     }
-    # 当前 Crypto-USD 现货产品（官网显示 币种/USDⓈ）默认即 USDC 结算，无需 tradeQuoteCcy
-    # （该参数是 2026-09-23 USD→USDC 交易对迁移后的 API 参数，现在传入触发 51000
-    # 参数校验错误；迁移后 Crypto-USDC 产品若仍想用 USD 结算才须显式
-    # tradeQuoteCcy=USD，届时 python-okx set_order 未封装需经 send_request 透传）。
+    is_usd_pair = spot_inst.endswith("-USD")
+    params = {
+        "instId": spot_inst, "side": "buy",
+        "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
+    }
+    if not is_usd_pair:
+        # 普通现货（币种-USDT 等）才需要 tdMode=cash
+        params["tdMode"] = "cash"
+    api = okx_sdk.trade_for(a["creds"])
     try:
-        data = okx_sdk.check(okx_sdk.trade_for(a["creds"]).set_order(**params))
+        if is_usd_pair:
+            # Crypto-USD（官网 币种/USDⓈ，统一 USD 订单簿）：用 USDC 交易须
+            # tradeQuoteCcy=USDC（changelog 迁移场景）；该类产品不接受 tdMode
+            # 参数（传 tdMode=cash 报 51000）。python-okx set_order 未封装
+            # tradeQuoteCcy → 经 send_request 透传。9/30 后 instId 须切
+            # Crypto-USDC（届时默认 USDC 结算、可不传 tradeQuoteCcy）。
+            params["tradeQuoteCcy"] = "USDC"
+            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
+        else:
+            data = okx_sdk.check(api.set_order(**params))
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
