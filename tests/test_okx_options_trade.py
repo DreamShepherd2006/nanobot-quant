@@ -246,11 +246,12 @@ def test_spot_cover_quote_amt(_mock_sdk, _patch_entry):
     assert call["sz"] == "50.00"
     assert call["tgtCcy"] == "quote_ccy"
     assert call["tag"] == ot.TAG_COVER
-    # Crypto-USD（统一 USD 订单簿）：tradeQuoteCcy=USDC 经 send_request 透传、无 tdMode
+    # Crypto-USD（统一 USD 订单簿）：tdMode=cross（acctLv=3 子账号）+ tradeQuoteCcy=USDC
+    # 经 send_request 透传（set_order 未封装 tradeQuoteCcy）
     assert call["path"] == "/api/v5/trade/order"
     assert call["method"] == "POST"
     assert call["tradeQuoteCcy"] == "USDC"
-    assert "tdMode" not in call
+    assert call["tdMode"] == "cross"
     assert e["status"] == "filled"
 
 
@@ -259,15 +260,15 @@ def test_spot_cover_base_qty(_mock_sdk, _patch_entry):
     call = _mock_sdk.calls[-1]
     assert call["tgtCcy"] == "base_ccy"
     assert call["tradeQuoteCcy"] == "USDC"
-    assert "tdMode" not in call
+    assert call["tdMode"] == "cross"
 
 
 def test_spot_cover_usdt_pair_uses_set_order_with_td_mode(_mock_sdk, _patch_entry):
-    # 普通现货对（USDT 等）走 set_order + tdMode=cash，不传 tradeQuoteCcy
+    # 普通现货对（USDT 等）走 set_order；acctLv=3 子账号同样 tdMode=cross
     ot.spot_cover("bot1", spot_inst="SOL-USDT", quote_amt=10.0)
     call = _mock_sdk.calls[-1]
     assert call["instId"] == "SOL-USDT"
-    assert call["tdMode"] == "cash"
+    assert call["tdMode"] == "cross"
     assert "tradeQuoteCcy" not in call
     assert "path" not in call
     assert call["sz"] == "10.00"

@@ -748,18 +748,18 @@ def spot_cover(account: str, *, spot_inst: str,
     params = {
         "instId": spot_inst, "side": "buy",
         "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
+        # 期权子账号为 acctLv=3（Multi-currency margin）模式：OKX 官方 Jupyter
+        # 教程第 8 节——multi-currency/portfolio margin 模式下现货订单须
+        # tdMode='cross'（cash 仅限 Spot / Spot-and-futures 模式，传 cash 报 51000）
+        "tdMode": "cross",
     }
-    if not is_usd_pair:
-        # 普通现货（币种-USDT 等）才需要 tdMode=cash
-        params["tdMode"] = "cash"
     api = okx_sdk.trade_for(a["creds"])
     try:
         if is_usd_pair:
-            # Crypto-USD（官网 币种/USDⓈ，统一 USD 订单簿）：用 USDC 交易须
-            # tradeQuoteCcy=USDC（changelog 迁移场景）；该类产品不接受 tdMode
-            # 参数（传 tdMode=cash 报 51000）。python-okx set_order 未封装
-            # tradeQuoteCcy → 经 send_request 透传。9/30 后 instId 须切
-            # Crypto-USDC（届时默认 USDC 结算、可不传 tradeQuoteCcy）。
+            # Crypto-USD（官网 币种/USDⓢ，统一 USD 订单簿）：用 USDC 交易须
+            # tradeQuoteCcy=USDC（changelog 迁移场景；FAQ：多稳定币自动内部换算）。
+            # python-okx set_order 未封装 tradeQuoteCcy → 经 send_request 透传。
+            # 9/30 后 instId 须切 Crypto-USDC（届时默认 USDC 结算、可不传 tradeQuoteCcy）。
             params["tradeQuoteCcy"] = "USDC"
             data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
         else:
