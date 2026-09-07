@@ -576,7 +576,7 @@ async function manualCloseLedger(id) {
 }
 
 async function reopenLedger(id) {
-  if (!confirm("撤销手动关账：台账行（#" + id + "）恢复到 open？\n用于误点"手动关账"后的恢复——回到 open 即交回到期巡检/settle 自动判定。")) return;
+  if (!confirm("撤销手动关账：台账行（#" + id + "）恢复到 open？\n用于误点「手动关账」后的恢复——回到 open 即交回到期巡检/settle 自动判定。")) return;
   try {
     const r = await fetch("/config/okx-options/ledger/reopen", {
       method: "POST", headers: { "Content-Type": "application/json" },
