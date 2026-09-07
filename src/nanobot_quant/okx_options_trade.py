@@ -960,12 +960,20 @@ def settle_expired_puts(now_ms=None) -> list:
             "settle_pnl": round(pnl, 6),
             "settle_ts": _utc_now(),
         }
+        # ITM：毛赔付 = (行权价−结算价)×面值×张数（净盈亏 settle_pnl 已含权利金收入）
+        if result["status"] == STATUS_SETTLED_ITM:
+            base = (inst_id or "").split("-")[0]
+            lot = FAMILY_LOT.get(base)
+            sz = int(e.get("sz") or 0)
+            fields["settle_payout"] = (round((strike - px) * lot * sz, 6)
+                                        if lot and sz and px is not None else None)
         if result["status"] == STATUS_SETTLED_REVIEW:
             fields["note"] = result["note"]
         if update_ledger(lambda x: x["id"] == e["id"], **fields) is not None:
             settled.append({"id": e["id"], "inst_id": inst_id,
                             "status": result["status"], "settle_px": px,
                             "settle_pnl": round(pnl, 6),
+                            "settle_payout": fields.get("settle_payout"),
                             "note": result.get("note", "")})
     return settled
 

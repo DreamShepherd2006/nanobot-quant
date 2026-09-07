@@ -617,6 +617,9 @@ def test_settle_itm_exercised(_mock_sdk, _patch_entry):
     row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
     assert row["status"] == ot.STATUS_SETTLED_ITM
     assert row["settle_px"] == pytest.approx(99.0)
+    # ITM 毛赔付 = (行权价−结算价)×面值×张数（面值走家族常量；101-P → SOL 0.1）
+    # 净盈亏 settle_pnl 已含权利金收入，与毛赔付分开存
+    assert row["settle_payout"] == pytest.approx((101 - 99.0) * 0.1 * 1, abs=1e-6)
 
 
 def test_settle_keeps_open_when_bill_missing(_mock_sdk, _patch_entry):
