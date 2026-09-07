@@ -227,17 +227,23 @@ def resolve_instrument(inst_id: str) -> dict:
     }
 
 
+# U 本位线性期权家族固定面值（ctVal=1 × ctMult，官方规格；SOL 0.1 币/张，其余 0.01）。
+# 供到期补买预填等场景：合约到期后 OKX instruments 不再返回规格，面值须本地解析。
+FAMILY_LOT = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XAU": 0.01}
+
+
 def cover_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
                            entry: Optional[dict] = None) -> dict:
     """到期 ITM 补买预填：数量 = 面值(lot)×张数；价格默认 = 现货现价
     （fallback：结算价 → 行权价，全部可在页面修改）。
     """
-    lot = 0.0
-    try:
-        inst = resolve_instrument(inst_id)
-        lot = float(inst.get("lot") or 0.0)
-    except Exception:
-        lot = 0.0
+    lot = FAMILY_LOT.get((inst_id or "").split("-")[0], 0.0)
+    if not lot:
+        try:
+            inst = resolve_instrument(inst_id)
+            lot = float(inst.get("lot") or 0.0)
+        except Exception:
+            lot = 0.0
     px, src = spot_px, "spot"
     if not px and entry:
         if entry.get("settle_px"):

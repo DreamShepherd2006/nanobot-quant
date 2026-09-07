@@ -744,8 +744,9 @@ def test_reopen_rejects_non_closed_manual(_mock_sdk):
 # ── 到期 ITM 补买预填（cover_prefill_defaults）────────────
 
 def test_cover_prefill_defaults_qty_and_px(monkeypatch):
+    # SOL 面值走家族常量（已到期合约 OKX 不再返回规格 → 不依赖 resolve_instrument）
     monkeypatch.setattr(ot, "resolve_instrument",
-                        lambda iid: {"lot": 0.1, "inst_id": iid})
+                        lambda iid: (_ for _ in ()).throw(RuntimeError("expired")))
     # 数量 = 面值×张数；价格默认现货现价
     d = ot.cover_prefill_defaults("SOL-USD_UM-260907-106-P", 1,
                                   spot_px=104.5, entry={"settle_px": 104.44})
