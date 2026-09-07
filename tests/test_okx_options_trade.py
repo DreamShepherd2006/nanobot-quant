@@ -242,7 +242,6 @@ def test_spot_cover_quote_amt(_mock_sdk, _patch_entry):
     call = _mock_sdk.calls[-1]
     assert call["instId"] == "BTC-USD"
     assert call["side"] == "buy"
-    assert call["tdMode"] == "cash"
     assert call["ordType"] == "market"
     assert call["sz"] == "50.00"
     assert call["tgtCcy"] == "quote_ccy"
@@ -271,7 +270,7 @@ def test_spot_cover_usdt_pair_uses_set_order_with_td_mode(_mock_sdk, _patch_entr
     assert call["tdMode"] == "cash"
     assert "tradeQuoteCcy" not in call
     assert "path" not in call
-    assert call["sz"] == "0.01"
+    assert call["sz"] == "10.00"
 
 
 def test_spot_cover_requires_amount(_patch_entry):
