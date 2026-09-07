@@ -679,3 +679,38 @@ def test_settle_uses_row_account_creds(_mock_sdk, _patch_entry):
         assert seen.get("acct") == "DreamShepherdbot1"
     finally:
         monkeypatch.undo()
+
+
+# ── 台账手动关账（closed_manual，系统外平仓收尾）────────────
+
+def test_manual_close_open_put(_mock_sdk):
+    e = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260908-104-P",
+                      side="sell", sz=1, px=0.27, collateral_usd=10.4, account="A")
+    got = ot.manual_close_entry(e["id"])
+    assert got is not None
+    assert got["status"] == "closed_manual"
+    assert got["close_ts"]
+    assert "手动关账" in got.get("note", "")
+    # 已关账行不可再次关账（幂等）
+    assert ot.manual_close_entry(e["id"]) is None
+
+
+def test_manual_close_custom_note(_mock_sdk):
+    e = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260909-100-P",
+                      side="sell", sz=1, account="A")
+    got = ot.manual_close_entry(e["id"], note="OKX 后台手动平仓测试")
+    assert got["status"] == "closed_manual"
+    assert got["note"] == "OKX 后台手动平仓测试"
+
+
+def test_manual_close_rejects_non_open(_mock_sdk):
+    # settled / closed 行不可手动关账
+    s = ot.add_ledger(kind="open_put", status="settled_otm", inst_id="SOL-USD_UM-260910-90-P",
+                      side="sell", sz=1, account="A")
+    assert ot.manual_close_entry(s["id"]) is None
+    c = ot.add_ledger(kind="close_put", status="closed", inst_id="SOL-USD_UM-260910-90-P",
+                      side="buy", sz=1, account="A")
+    assert ot.manual_close_entry(c["id"]) is None
+    # 未知 id
+    assert ot.manual_close_entry("deadbeef") is None
+

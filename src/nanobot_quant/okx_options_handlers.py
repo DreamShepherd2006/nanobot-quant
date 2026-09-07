@@ -344,6 +344,28 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         except (okx_sdk.OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
 
+    async def _ledger_close(request: Request):
+        # 台账手动关账（单步、无资金流）：open 卖 put 行 → closed_manual
+        # （官方后台手动平仓等系统外操作收尾，仅台账标记，不查 OKX）
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        entry_id = (body or {}).get("id") or ""
+        note = (body or {}).get("note") or ""
+        if not entry_id:
+            return JSONResponse({"ok": False, "error": "缺少 id"})
+        try:
+            e = await asyncio.to_thread(ot.manual_close_entry, entry_id, note)
+        except (okx_sdk.OkxSdkError, RuntimeError) as e2:
+            return JSONResponse({"ok": False, "error": str(e2)})
+        if e is None:
+            return JSONResponse({"ok": False,
+                                 "error": "未找到该 open 卖 put 行（可能已关账/结算）"})
+        return JSONResponse({"ok": True, "entry": e})
+
     # ── 担保设置（逐仓自动追加比例，option_params.json）────────
 
     async def _params_get(request: Request):
@@ -526,6 +548,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/accounts", _accounts, methods=["GET"])
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])
+    app.add_api_route("/config/okx-options/ledger/close", _ledger_close, methods=["POST"])
     app.add_api_route("/config/okx-options/reminder", _reminder, methods=["GET"])
     app.add_api_route("/config/okx-options/pending", _pending, methods=["GET"])
     app.add_api_route("/config/okx-options/cancel", _cancel, methods=["POST"])

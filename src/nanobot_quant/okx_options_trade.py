@@ -1020,3 +1020,23 @@ def _norm_liq(v) -> Optional[float]:
         return float(s)
     except ValueError:
         return None
+def manual_close_entry(entry_id: str, note: str = "") -> Optional[dict]:
+    """台账手动关账（单步、无资金流）：把 open 卖 put 行标 closed_manual。
+
+    用途：OKX 官方后台手动平仓等系统外操作收尾——仓位在交易所已消失，
+    但台账状态机只认本系统成交路径，open 行会变 phantom（settle 只处理
+    已到期行、该仓永远查不到交割账单）。手动关账只做台账标记留痕，不查
+    OKX、不回填平仓价/盈亏（外部成交不在本系统内）。
+    仅 kind=open_put 且 status=open 可关；已 settled/closed 行拒绝（幂等）。
+    """
+    default_note = "官方后台平仓（系统外操作），手动关账"
+    e = update_ledger(
+        lambda x: x.get("kind") == "open_put" and x.get("status") == "open"
+                  and x.get("id") == entry_id,
+        status="closed_manual",
+        close_ts=_utc_now(),
+        note=note or default_note)
+    return e
+
+
+# ── instrument / 盘口辅助 ──────────────────────────────────────

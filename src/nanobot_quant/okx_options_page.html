@@ -541,9 +541,12 @@ async function loadLedger() {
       '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
     for (const e of rows) {
       const kind = {open_put: "卖 put 开仓", close_put: "买回平仓", spot_cover: "现货补买", expiry_settle: "到期结算"}[e.kind] || e.kind;
-      const act = (e.status === "pending" && e.ord_id)
-        ? '<a class="act" onclick="cancelOrder(\'' + esc(e.inst_id || "") + '\',\'' + esc(String(e.ord_id)) + '\')">撤单</a>'
-        : "";
+      let act = "";
+      if (e.status === "pending" && e.ord_id) {
+        act = '<a class="act" onclick="cancelOrder(\'' + esc(e.inst_id || "") + '\',\'' + esc(String(e.ord_id)) + '\')">撤单</a>';
+      } else if (e.kind === "open_put" && e.status === "open") {
+        act = '<a class="act" onclick="manualCloseLedger(\'' + esc(e.id) + '\')">手动关账</a>';
+      }
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
@@ -554,6 +557,20 @@ async function loadLedger() {
     html += '</tbody></table>';
     $("ledBody").innerHTML = html;
   } catch (e) { $("ledBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
+}
+
+async function manualCloseLedger(id) {
+  if (!confirm("手动关账：台账 open 卖 put 行（#" + id + "）？\n用于官方后台手动平仓等系统外操作收尾——仅台账标记 closed_manual，不影响 OKX 实际仓位/保证金。")) return;
+  try {
+    const r = await fetch("/config/okx-options/ledger/close", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    alert("✅ 已手动关账（closed_manual）");
+  } catch (e) { alert("手动关账失败：" + e.message); }
+  if (curTab === "led") loadLedger(); else if (curTab === "pos") loadPositions();
 }
 
 async function cancelOrder(instId, ordId) {
