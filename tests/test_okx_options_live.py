@@ -110,6 +110,44 @@ def test_load_events_tail_limit(_iso, monkeypatch):
     assert len(tail) == 2
 
 
+def _settled_itm_one(**kw):
+    d = {"id": "evt-itm", "inst_id": "SOL-USD_UM-260907-106-P",
+         "status": ot.STATUS_SETTLED_ITM, "settle_px": 104.445181,
+         "settle_pnl": -0.0644, "settle_payout": 0.1555, "note": ""}
+    d.update(kw)
+    return d
+
+
+def test_load_events_enrich_covered(_iso, monkeypatch):
+    """settled_itm 判定行 enrich covered：台账存在同现货对 filled spot_cover 即已补买。"""
+    monkeypatch.setattr(ot, "settle_expired_puts", lambda: [_settled_itm_one()])
+    monkeypatch.setattr(ot, "load_ledger", lambda: [
+        {"kind": "spot_cover", "inst_id": "SOL-USD", "status": "filled"}])
+    ol.run_once()
+    evs = ol.load_events(10)
+    assert evs and evs[0]["status"] == ot.STATUS_SETTLED_ITM
+    assert evs[0]["covered"] is True
+
+
+def test_load_events_itm_without_cover_not_covered(_iso, monkeypatch):
+    """无对应现货补买时 settled_itm 行 covered=False（前端保留「补买」入口）。"""
+    monkeypatch.setattr(ot, "settle_expired_puts", lambda: [_settled_itm_one()])
+    monkeypatch.setattr(ot, "load_ledger", lambda: [])
+    ol.run_once()
+    evs = ol.load_events(10)
+    assert evs and evs[0]["status"] == ot.STATUS_SETTLED_ITM
+    assert evs[0].get("covered") is False
+
+
+def test_load_events_otm_untouched(_iso, monkeypatch):
+    """OTM 事件不加 covered 字段（无补买概念）。"""
+    monkeypatch.setattr(ot, "settle_expired_puts",
+                        lambda: [_settled_one(status=ot.STATUS_SETTLED_OTM)])
+    ol.run_once()
+    evs = ol.load_events(10)
+    assert evs and "covered" not in evs[0]
+
+
 # ── 线程生命周期 sync ────────────────────────────────────
 
 def test_sync_start_stop(_iso, monkeypatch):
