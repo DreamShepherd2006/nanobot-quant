@@ -227,6 +227,33 @@ def resolve_instrument(inst_id: str) -> dict:
     }
 
 
+# U 本位线性期权家族固定面值（ctVal=1 × ctMult，官方规格；SOL 0.1 币/张，其余 0.01）。
+# 供到期补买预填等场景：合约到期后 OKX instruments 不再返回规格，面值须本地解析。
+FAMILY_LOT = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XAU": 0.01}
+
+
+def cover_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
+                           entry: Optional[dict] = None) -> dict:
+    """到期 ITM 补买预填：数量 = 面值(lot)×张数；价格默认 = 现货现价
+    （fallback：结算价 → 行权价，全部可在页面修改）。
+    """
+    lot = FAMILY_LOT.get((inst_id or "").split("-")[0], 0.0)
+    if not lot:
+        try:
+            inst = resolve_instrument(inst_id)
+            lot = float(inst.get("lot") or 0.0)
+        except Exception:
+            lot = 0.0
+    px, src = spot_px, "spot"
+    if not px and entry:
+        if entry.get("settle_px"):
+            px, src = entry.get("settle_px"), "settle"
+        elif entry.get("strike"):
+            px, src = entry.get("strike"), "strike"
+    return {"qty": round(lot * sz, 6) if lot else 0.0,
+            "px": px, "px_src": src if px else None}
+
+
 def ticker_quote(inst_id: str) -> dict:
     """当前盘口/最新（bidPx/askPx/last —— USD/1 名义币）。"""
     rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=inst_id))
@@ -717,8 +744,26 @@ def spot_cover(account: str, *, spot_inst: str,
         "instId": spot_inst, "tdMode": "cash", "side": "buy",
         "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
     }
+    is_usd_pair = spot_inst.endswith("-USD")
+    params = {
+        "instId": spot_inst, "side": "buy",
+        "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
+        # 期权子账号为 acctLv=3（Multi-currency margin）模式：OKX 官方 Jupyter
+        # 教程第 8 节——multi-currency/portfolio margin 模式下现货订单须
+        # tdMode='cross'（cash 仅限 Spot / Spot-and-futures 模式，传 cash 报 51000）
+        "tdMode": "cross",
+    }
+    api = okx_sdk.trade_for(a["creds"])
     try:
-        data = okx_sdk.check(okx_sdk.trade_for(a["creds"]).set_order(**params))
+        if is_usd_pair:
+            # Crypto-USD（官网 币种/USDⓢ，统一 USD 订单簿）：用 USDC 交易须
+            # tradeQuoteCcy=USDC（changelog 迁移场景；FAQ：多稳定币自动内部换算）。
+            # python-okx set_order 未封装 tradeQuoteCcy → 经 send_request 透传。
+            # 9/30 后 instId 须切 Crypto-USDC（届时默认 USDC 结算、可不传 tradeQuoteCcy）。
+            params["tradeQuoteCcy"] = "USDC"
+            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
+        else:
+            data = okx_sdk.check(api.set_order(**params))
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
@@ -933,12 +978,20 @@ def settle_expired_puts(now_ms=None) -> list:
             "settle_pnl": round(pnl, 6),
             "settle_ts": _utc_now(),
         }
+        # ITM：毛赔付 = (行权价−结算价)×面值×张数（净盈亏 settle_pnl 已含权利金收入）
+        if result["status"] == STATUS_SETTLED_ITM:
+            base = (inst_id or "").split("-")[0]
+            lot = FAMILY_LOT.get(base)
+            sz = int(e.get("sz") or 0)
+            fields["settle_payout"] = (round((strike - px) * lot * sz, 6)
+                                        if lot and sz and px is not None else None)
         if result["status"] == STATUS_SETTLED_REVIEW:
             fields["note"] = result["note"]
         if update_ledger(lambda x: x["id"] == e["id"], **fields) is not None:
             settled.append({"id": e["id"], "inst_id": inst_id,
                             "status": result["status"], "settle_px": px,
                             "settle_pnl": round(pnl, 6),
+                            "settle_payout": fields.get("settle_payout"),
                             "note": result.get("note", "")})
     return settled
 
@@ -1020,3 +1073,40 @@ def _norm_liq(v) -> Optional[float]:
         return float(s)
     except ValueError:
         return None
+def manual_close_entry(entry_id: str, note: str = "") -> Optional[dict]:
+    """台账手动关账（单步、无资金流）：把 open 卖 put 行标 closed_manual。
+
+    用途：OKX 官方后台手动平仓等系统外操作收尾——仓位在交易所已消失，
+    但台账状态机只认本系统成交路径，open 行会变 phantom（settle 只处理
+    已到期行、该仓永远查不到交割账单）。手动关账只做台账标记留痕，不查
+    OKX、不回填平仓价/盈亏（外部成交不在本系统内）。
+    仅 kind=open_put 且 status=open 可关；已 settled/closed 行拒绝（幂等）。
+    """
+    default_note = "官方后台平仓（系统外操作），手动关账"
+    e = update_ledger(
+        lambda x: x.get("kind") == "open_put" and x.get("status") == "open"
+                  and x.get("id") == entry_id,
+        status="closed_manual",
+        close_ts=_utc_now(),
+        note=note or default_note)
+    return e
+
+
+def reopen_entry(entry_id: str) -> Optional[dict]:
+    """撤销手动关账：closed_manual → open（误关账恢复，交回到期巡检/settle 管辖）。
+
+    仅 kind=open_put 且 status=closed_manual 可撤销；settled/closed 是资金流终态
+    （到期结算/买回平仓后仓位已了结），不可逆。恢复后保留原 note 并追加撤销标记，
+    close_ts 残留无碍（open 行渲染不显示）。
+    """
+    cur = find_entry(lambda x: x.get("kind") == "open_put"
+                     and x.get("status") == "closed_manual" and x.get("id") == entry_id)
+    if cur is None:
+        return None
+    note = (cur.get("note") or "") + " | 已撤销手动关账（回到 open）"
+    return update_ledger(lambda x: x.get("id") == entry_id
+                         and x.get("status") == "closed_manual",
+                         status="open", note=note)
+
+
+# ── instrument / 盘口辅助 ──────────────────────────────────────

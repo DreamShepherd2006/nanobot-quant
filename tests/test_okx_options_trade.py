@@ -57,6 +57,12 @@ class _FakeTrade:
         self.last_px = params.get("px", params.get("sz", "1"))
         return {"code": "0", "data": [{"ordId": f"ord-{len(self.calls)}", "clOrdId": ""}]}
 
+    def send_request(self, path, method, **params):
+        # python-okx 未封装参数的透传通道（如现货 USD 对下单 tradeQuoteCcy）
+        self.calls.append({"path": path, "method": method, **params})
+        self.last_px = params.get("px", params.get("sz", "1"))
+        return {"code": "0", "data": [{"ordId": f"ord-{len(self.calls)}", "clOrdId": ""}]}
+
     def get_order(self, instId=None, ordId=None, **kw):
         # 缺省 filled（既有 settle 测试依赖），撤单测试经 order_states 设 live/canceled
         state = self.order_states.get(ordId, "filled")
@@ -232,23 +238,40 @@ def test_close_put_without_open_rejected(_patch_entry):
 
 
 def test_spot_cover_quote_amt(_mock_sdk, _patch_entry):
-    e = ot.spot_cover("bot1", spot_inst="BTC-USDC", quote_amt=50.0)
+    e = ot.spot_cover("bot1", spot_inst="BTC-USD", quote_amt=50.0)
     call = _mock_sdk.calls[-1]
-    assert call["instId"] == "BTC-USDC"
+    assert call["instId"] == "BTC-USD"
     assert call["side"] == "buy"
-    assert call["tdMode"] == "cash"
     assert call["ordType"] == "market"
     assert call["sz"] == "50.00"
     assert call["tgtCcy"] == "quote_ccy"
     assert call["tag"] == ot.TAG_COVER
+    # Crypto-USD（统一 USD 订单簿）：tdMode=cross（acctLv=3 子账号）+ tradeQuoteCcy=USDC
+    # 经 send_request 透传（set_order 未封装 tradeQuoteCcy）
+    assert call["path"] == "/api/v5/trade/order"
+    assert call["method"] == "POST"
+    assert call["tradeQuoteCcy"] == "USDC"
+    assert call["tdMode"] == "cross"
     assert e["status"] == "filled"
 
 
 def test_spot_cover_base_qty(_mock_sdk, _patch_entry):
-    ot.spot_cover("bot1", spot_inst="BTC-USDC", base_qty=0.01)
+    ot.spot_cover("bot1", spot_inst="SOL-USD", base_qty=0.01)
     call = _mock_sdk.calls[-1]
     assert call["tgtCcy"] == "base_ccy"
-    assert call["sz"] == "0.01"
+    assert call["tradeQuoteCcy"] == "USDC"
+    assert call["tdMode"] == "cross"
+
+
+def test_spot_cover_usdt_pair_uses_set_order_with_td_mode(_mock_sdk, _patch_entry):
+    # 普通现货对（USDT 等）走 set_order；acctLv=3 子账号同样 tdMode=cross
+    ot.spot_cover("bot1", spot_inst="SOL-USDT", quote_amt=10.0)
+    call = _mock_sdk.calls[-1]
+    assert call["instId"] == "SOL-USDT"
+    assert call["tdMode"] == "cross"
+    assert "tradeQuoteCcy" not in call
+    assert "path" not in call
+    assert call["sz"] == "10.00"
 
 
 def test_spot_cover_requires_amount(_patch_entry):
@@ -617,6 +640,9 @@ def test_settle_itm_exercised(_mock_sdk, _patch_entry):
     row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
     assert row["status"] == ot.STATUS_SETTLED_ITM
     assert row["settle_px"] == pytest.approx(99.0)
+    # ITM 毛赔付 = (行权价−结算价)×面值×张数（面值走家族常量；101-P → SOL 0.1）
+    # 净盈亏 settle_pnl 已含权利金收入，与毛赔付分开存
+    assert row["settle_payout"] == pytest.approx((101 - 99.0) * 0.1 * 1, abs=1e-6)
 
 
 def test_settle_keeps_open_when_bill_missing(_mock_sdk, _patch_entry):
@@ -679,3 +705,102 @@ def test_settle_uses_row_account_creds(_mock_sdk, _patch_entry):
         assert seen.get("acct") == "DreamShepherdbot1"
     finally:
         monkeypatch.undo()
+
+
+# ── 台账手动关账（closed_manual，系统外平仓收尾）────────────
+
+def test_manual_close_open_put(_mock_sdk):
+    e = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260908-104-P",
+                      side="sell", sz=1, px=0.27, collateral_usd=10.4, account="A")
+    got = ot.manual_close_entry(e["id"])
+    assert got is not None
+    assert got["status"] == "closed_manual"
+    assert got["close_ts"]
+    assert "手动关账" in got.get("note", "")
+    # 已关账行不可再次关账（幂等）
+    assert ot.manual_close_entry(e["id"]) is None
+
+
+def test_manual_close_custom_note(_mock_sdk):
+    e = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260909-100-P",
+                      side="sell", sz=1, account="A")
+    got = ot.manual_close_entry(e["id"], note="OKX 后台手动平仓测试")
+    assert got["status"] == "closed_manual"
+    assert got["note"] == "OKX 后台手动平仓测试"
+
+
+def test_manual_close_rejects_non_open(_mock_sdk):
+    # settled / closed 行不可手动关账
+    s = ot.add_ledger(kind="open_put", status="settled_otm", inst_id="SOL-USD_UM-260910-90-P",
+                      side="sell", sz=1, account="A")
+    assert ot.manual_close_entry(s["id"]) is None
+    c = ot.add_ledger(kind="close_put", status="closed", inst_id="SOL-USD_UM-260910-90-P",
+                      side="buy", sz=1, account="A")
+    assert ot.manual_close_entry(c["id"]) is None
+    # 未知 id
+    assert ot.manual_close_entry("deadbeef") is None
+
+
+def test_reopen_closed_manual(_mock_sdk):
+    # 撤销手动关账：closed_manual → open（交回 settle 管辖）
+    e = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260907-106-P",
+                      side="sell", sz=1, px=0.46, account="A")
+    ot.manual_close_entry(e["id"])
+    got = ot.reopen_entry(e["id"])
+    assert got is not None
+    assert got["status"] == "open"
+    assert "已撤销手动关账" in got.get("note", "")
+    # 再关账后可再撤销（循环可用）
+    ot.manual_close_entry(e["id"])
+    assert ot.reopen_entry(e["id"])["status"] == "open"
+
+
+def test_reopen_rejects_non_closed_manual(_mock_sdk):
+    # 仅 closed_manual 可撤销；open / settled 不可
+    o = ot.add_ledger(kind="open_put", status="open", inst_id="SOL-USD_UM-260911-95-P",
+                      side="sell", sz=1, account="A")
+    assert ot.reopen_entry(o["id"]) is None
+    s = ot.add_ledger(kind="open_put", status="settled_otm", inst_id="SOL-USD_UM-260911-95-P",
+                      side="sell", sz=1, account="A")
+    assert ot.reopen_entry(s["id"]) is None
+    # 未知 id
+    assert ot.reopen_entry("deadbeef") is None
+
+
+# ── 到期 ITM 补买预填（cover_prefill_defaults）────────────
+
+def test_cover_prefill_defaults_qty_and_px(monkeypatch):
+    # SOL 面值走家族常量（已到期合约 OKX 不再返回规格 → 不依赖 resolve_instrument）
+    monkeypatch.setattr(ot, "resolve_instrument",
+                        lambda iid: (_ for _ in ()).throw(RuntimeError("expired")))
+    # 数量 = 面值×张数；价格默认现货现价
+    d = ot.cover_prefill_defaults("SOL-USD_UM-260907-106-P", 1,
+                                  spot_px=104.5, entry={"settle_px": 104.44})
+    assert d["qty"] == 0.1
+    assert d["px"] == 104.5
+    assert d["px_src"] == "spot"
+    # 2 张
+    d2 = ot.cover_prefill_defaults("SOL-USD_UM-260907-106-P", 2,
+                                   spot_px=104.5, entry={})
+    assert d2["qty"] == 0.2
+
+
+def test_cover_prefill_fallback_settle_then_strike(monkeypatch):
+    monkeypatch.setattr(ot, "resolve_instrument",
+                        lambda iid: {"lot": 0.01, "inst_id": iid})
+    # 现货取价失败 → 结算价 → 行权价
+    d = ot.cover_prefill_defaults("BTC-USD_UM-260912-60000-P", 1,
+                                  spot_px=None,
+                                  entry={"settle_px": 59200.0, "strike": 60000})
+    assert d["px"] == 59200.0
+    assert d["px_src"] == "settle"
+    d2 = ot.cover_prefill_defaults("BTC-USD_UM-260912-60000-P", 1,
+                                   spot_px=None, entry={"strike": 60000})
+    assert d2["px"] == 60000.0
+    assert d2["px_src"] == "strike"
+    # 无任何价格 → px None（页面提示手填）
+    d3 = ot.cover_prefill_defaults("BTC-USD_UM-260912-60000-P", 1,
+                                   spot_px=None, entry=None)
+    assert d3["px"] is None
+    assert d3["px_src"] is None
+

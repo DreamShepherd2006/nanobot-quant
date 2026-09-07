@@ -541,9 +541,14 @@ async function loadLedger() {
       '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
     for (const e of rows) {
       const kind = {open_put: "卖 put 开仓", close_put: "买回平仓", spot_cover: "现货补买", expiry_settle: "到期结算"}[e.kind] || e.kind;
-      const act = (e.status === "pending" && e.ord_id)
-        ? '<a class="act" onclick="cancelOrder(\'' + esc(e.inst_id || "") + '\',\'' + esc(String(e.ord_id)) + '\')">撤单</a>'
-        : "";
+      let act = "";
+      if (e.status === "pending" && e.ord_id) {
+        act = '<a class="act" onclick="cancelOrder(\'' + esc(e.inst_id || "") + '\',\'' + esc(String(e.ord_id)) + '\')">撤单</a>';
+      } else if (e.kind === "open_put" && e.status === "open") {
+        act = '<a class="act" onclick="manualCloseLedger(\'' + esc(e.id) + '\')">手动关账</a>';
+      } else if (e.kind === "open_put" && e.status === "closed_manual") {
+        act = '<a class="act" onclick="reopenLedger(\'' + esc(e.id) + '\')">撤销关账</a>';
+      }
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
@@ -554,6 +559,34 @@ async function loadLedger() {
     html += '</tbody></table>';
     $("ledBody").innerHTML = html;
   } catch (e) { $("ledBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
+}
+
+async function manualCloseLedger(id) {
+  if (!confirm("手动关账：台账 open 卖 put 行（#" + id + "）？\n用于官方后台手动平仓等系统外操作收尾——仅台账标记 closed_manual，不影响 OKX 实际仓位/保证金。")) return;
+  try {
+    const r = await fetch("/config/okx-options/ledger/close", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    alert("✅ 已手动关账（closed_manual）");
+  } catch (e) { alert("手动关账失败：" + e.message); }
+  if (curTab === "led") loadLedger(); else if (curTab === "pos") loadPositions();
+}
+
+async function reopenLedger(id) {
+  if (!confirm("撤销手动关账：台账行（#" + id + "）恢复到 open？\n用于误点「手动关账」后的恢复——回到 open 即交回到期巡检/settle 自动判定。")) return;
+  try {
+    const r = await fetch("/config/okx-options/ledger/reopen", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
+    alert("✅ 已撤销关账，回到 open");
+  } catch (e) { alert("撤销关账失败：" + e.message); }
+  if (curTab === "led") loadLedger(); else if (curTab === "pos") loadPositions();
 }
 
 async function cancelOrder(instId, ordId) {
@@ -582,7 +615,7 @@ async function loadReminder() {
     if (!j.ok || !j.reminders || !j.reminders.length) { rb.style.display = "none"; return; }
     const items = j.reminders.map(x =>
       (x.expired ? "⏰ 已到期待确认" : "⏰ 到期临近") + " " + esc(x.inst_id) + " · " + fmt(x.sz, 0) + " 张 · 到期 " + locDate(x.exp_ms) +
-      ' <a class="act" onclick="openCover(\'' + esc(x.inst_id) + '\')">补买</a>');
+      ' <a class="act" onclick="openCover(\'' + esc(x.inst_id) + '\',\'' + esc(x.sz ?? 1) + '\')">补买</a>');
     rb.innerHTML = items.join("<br>");
     rb.style.display = "block";
   } catch (e) { /* 静默 */ }
@@ -689,20 +722,36 @@ function openClose(instId) {
   $("mGo").textContent = "确认平仓";
   $("mGo").onclick = () => doClose();
 }
-function openCover(instId) {
+function openCover(instId, szArg) {
   modalMode = "cover"; modalInst = instId;
-  const fam = (instId || "").split("-").slice(0, 2).join("-"); // 如 BTC-USD
-  let spot = fam + "-USDC";
-  if (fam === "XAU-USD") { spot = ""; $("mSpec").innerHTML = "<b>XAU-USD_UM</b> 无现货盘——到期 ITM 直接现金结算亏损，无法现货补买（补买仅 BTC/ETH/SOL）。"; }
+  const famBase = (instId || "").split("-")[0]; // 基础币：SOL/BTC/ETH/XAU（期权家族 _UM 段不参与）
+  // 现货对用 币种-USD（官网 SOL/USDⓈ）：SOL-USDC 2026-09-23 才开放、现在下单 51155 合规拒
+  let spot = famBase + "-USD";
+  if (famBase === "XAU") { spot = ""; $("mSpec").innerHTML = "<b>XAU-USD_UM</b> 无现货盘——到期 ITM 直接现金结算亏损，无法现货补买（补买仅 BTC/ETH/SOL）。"; }
   else $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 到期 ITM 现金结算后的现货补买 → 现货对 <b>" + esc(spot) + "</b>（市价单）";
   $("mRowSz").style.display = "none"; $("mRowType").style.display = "none"; $("mRowPx").style.display = "none";
   $("mRowAmt").style.display = ""; $("mRowQty").style.display = "";
   $("mAmt").value = ""; $("mQty").value = "";
   modalOpen("到期补买");
+  $("mPreview").innerHTML = "";   // 补买无权利金预览（预填说明已由 mSpec hint 承担）
   if (!spot) { $("mGo").style.display = "none"; return; }
   $("mGo").style.display = ""; $("mGo").textContent = "确认补买";
   $("mPreviewBtn").style.display = "none";
   $("mGo").onclick = () => doCover(spot);
+  prefillCover(instId, szArg, spot);  // 预填：数量=面值×张数、金额=数量×现货现价（可改）
+}
+async function prefillCover(instId, szArg, spot) {
+  try {
+    const j = await (await fetch("/config/okx-options/cover-prefill?inst_id=" +
+      encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1"))).json();
+    if (!j.ok) throw new Error(j.error || "HTTP " + j.status);
+    const srcTxt = {spot: "现货现价", settle: "结算价", strike: "行权价"}[j.px_src] || "";
+    if (j.qty) { $("mQty").value = j.qty; $("mAmt").value = (j.amount || j.qty * j.px).toFixed(2); }
+    $("mSpec").innerHTML += "<div class=\"hint\">预填：数量 = 行权面值 × 张数（" + j.qty + "）；金额 = 数量 × " + srcTxt + " " +
+      (j.px != null ? fmt(j.px, 2) : "（取价失败，请手填）") + " —— 均可修改，改数量/金额任填其一。</div>";
+  } catch (e) {
+    $("mSpec").innerHTML += "<div class=\"hint\">自动预填失败（" + esc(e.message) + "）——请手填数量或金额。</div>";
+  }
 }
 $("mCancel").addEventListener("click", modalClose);
 $("mSz").addEventListener("input", () => {
@@ -715,6 +764,8 @@ $("mOrdType").addEventListener("change", () => {
   $("mRowPx").style.display = "";
   $("mGo").textContent = modalMode === "sell" ? "确认卖出" : "确认平仓";
 });
+$("mAmt").addEventListener("input", () => { if (modalMode === "cover" && $("mAmt").value) $("mQty").value = ""; });
+$("mQty").addEventListener("input", () => { if (modalMode === "cover" && $("mQty").value) $("mAmt").value = ""; });
 overlay.addEventListener("click", e => { if (e.target === overlay) modalClose(); });
 
 function formVal() {
@@ -869,11 +920,18 @@ function renderLiveEvents(evs) {
   const box = $("liveEvents");
   if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div>'; return; }
   box.innerHTML = "<div class='note' style='margin:6px 0'>📋 最近判定（到期处理区）：</div>" + evs.map(e => {
-    const pnl = e.settle_pnl != null ? usd(Math.abs(e.settle_pnl)) : "—";
-    const cover = e.status === "settled_itm" ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\')">补买</a>' : "";
+    const cover = e.status === "settled_itm" ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\',\'' + esc(e.sz ?? 1) + '\')">补买</a>' : "";
+    let pnlTxt = "";
+    if (e.status === "settled_itm") {
+      const net = e.settle_pnl != null
+        ? (e.settle_pnl < 0 ? "-" : "+") + usd(Math.abs(e.settle_pnl)) + "（含权利金）"
+        : "—";
+      const pay = e.settle_payout != null ? " · 毛赔付 " + usd(Math.abs(e.settle_payout)) : "";
+      pnlTxt = " · 净盈亏 " + net + pay;
+    }
     return "<div style='padding:3px 0'>" + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " + (ST_LABEL[e.status] || esc(e.status)) +
       (e.settle_px != null ? " · 结算价 " + esc(String(e.settle_px)) : "") +
-      (e.status === "settled_itm" ? " · 赔付 " + pnl : "") +
+      (e.status === "settled_itm" ? pnlTxt : "") +
       " · " + locTs(Date.parse(e.ts)) + cover + "</div>";
   }).join("");
 }
