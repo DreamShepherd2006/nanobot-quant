@@ -719,13 +719,19 @@ async function loadCoveredCtx(instId) {
     coveredCtx = r;
     const base = (r.base || fam.split("-")[0]);
     const hint = $("mCostHint");
-    hint.textContent = "现货可用 " + fmt(r.spot_avail, 4) + " " + esc(base) +
-      " → 可卖 <b>" + r.sellable_sz + "</b> 张" + (r.sellable_sz <= 0 ? "（<b style='color:#c62828'>无现货——covered 需现货在手，禁止裸卖上行；补现货后重开</b>）" : "") +
-      "；保本门：K_call + px ≥ C。成本锚默认=" + (r.cost_hint ? "被行权 put 行权价 $" + fmt(r.cost_hint, 4) : "无（手动填：被动持仓接货价）") + "，可改。";
+    const cov = r.spot_cov_pct != null ? "（= 1 张面值的 " + fmt(r.spot_cov_pct, 1) + "%）" : "";
+    const sellableTxt = r.sellable_sz > 0
+      ? "<b style='color:#2e7d32'>现货 " + fmt(r.spot_avail, 4) + " " + esc(base) + cov +
+        " → 可卖 " + r.sellable_sz + " 张</b>（≥面值×99% 即视为 covered；补买扣 fee 后 ~99.9% 仍算）"
+      : "<span style='color:#c62828'>现货 " + fmt(r.spot_avail, 4) + " " + esc(base) + cov +
+        " → 不足 1 张对冲需求（<面值 99%）——该档跳过，补足现货后重开</span>";
+    hint.innerHTML = sellableTxt +
+      "<br>U 本位期权<b>现金结算</b>：被行权只赔 (结算价−K)×面值 的现金差价、<b>不交出币</b>——现货是对冲工具（浮盈对冲赔付），组合（现货+短 call）无爆仓路径。保本门：K_call + px ≥ C，K&lt;C 时永远不通过（浮亏现货需等 K&gt;C 档或价格回升）。" +
+      "成本锚默认=" + (r.cost_hint ? "被行权 put 行权价 $" + fmt(r.cost_hint, 4) : "无（手动填被动持仓接货价）") + "，可改。";
     $("mCost").value = r.cost_hint != null ? r.cost_hint : "";
-    if (r.note) hint.textContent += "<br><span style='color:#b26a00'>" + esc(r.note) + "</span>";
+    if (r.note) hint.innerHTML += "<br><span style='color:#b26a00'>" + esc(r.note) + "</span>";
     gateDisabled = r.sellable_sz <= 0;
-    if (gateDisabled) { $("mPreviewBtn").disabled = true; }
+    // 预览不禁用（可看保本门/权利金）；生成确认令牌（真实下单入口）时拦截裸卖
   } catch (e) { coveredCtx = null; }
 }
 

@@ -982,31 +982,36 @@ def account_balance(account: str = "") -> dict:
 
 
 def covered_context(account: str, family: str) -> dict:
-    """卖 call（covered call）上下文：现货可卖张数 + 成本锚 C 建议（只读）。
+    """卖 call（covered call）上下文：现货对冲覆盖 + 成本锚 C 建议（只读）。
 
-    family 如 SOL-USD_UM → 基础币 SOL。可卖张数 = floor(该币交易账户可用 ÷
-    每张面值)（子账号现货持仓在交易账户余额中，与期权保证金同池）；成本锚
-    建议 = 同 family 已 settled_itm（被行权接货）put 台账行的 max(strike)——
-    被动持仓成本 C 的默认值，页面可改。
+    family 如 SOL-USD_UM → 基础币 SOL。现货对冲覆盖按 99% 容差判定——
+    现货补买会扣 0.1% 手续费（0.1 SOL → 0.0999），按面值整数判据会把自己
+    刚补的货判成「裸卖」；且 U 本位期权为现金结算（被行权只赔现金差价、
+    不交币），现货是对冲工具（浮盈对冲赔付）而非交割物。成本锚建议 = 同
+    family 已 settled_itm（被行权接货）put 台账行的 max(strike)。
     """
     base = (family or "").split("-")[0]
+    lot = FAMILY_LOT.get(base, 0.0)
     out = {"ok": True, "family": family, "base": base,
-           "spot_avail": 0.0, "lot_coin": FAMILY_LOT.get(base, 0.0),
-           "sellable_sz": 0, "cost_hint": None,
-           "note": ""}
+           "spot_avail": 0.0, "lot_coin": lot,
+           "sellable_sz": 0, "spot_cov_pct": 0.0,
+           "cost_hint": None, "note": ""}
     if base == "XAU":
-        out["note"] = ("XAU-USD_UM 无现货盘：卖 call 被行权只能现金结算赔付，"
-                       "现货覆盖不成立——不建议裸卖上行（covered 语义受限）")
+        out["note"] = ("XAU-USD_UM 无现货盘：现金结算赔差无法被现货对冲，"
+                       "卖 call 上行裸风险——不建议（covered 语义受限）")
         return out
     bal = account_balance(account)
     for r in bal.get("details") or []:
         if r.get("ccy") == base:
             out["spot_avail"] = r.get("avail_bal") or 0.0
             break
-    lot = FAMILY_LOT.get(base, 0.0)
     if lot and lot > 0:
-        # 浮点误差补偿（0.3//0.1=2.9999…）：+1e-6 后再取整
-        out["sellable_sz"] = int(out["spot_avail"] / lot + 1e-6)
+        # 每张对冲需求 = 面值；容差 1%（补买扣 fee 后 ~99.9% 覆盖即视为可卖）
+        need_per = lot * 0.99
+        if need_per > 0:
+            out["sellable_sz"] = int(out["spot_avail"] / need_per + 1e-6)
+        if out["spot_avail"] > 0:
+            out["spot_cov_pct"] = round(out["spot_avail"] / lot * 100, 1)
     costs = [float(e.get("strike") or 0)
              for e in load_ledger()
              if e.get("kind") == "open_put"

@@ -958,6 +958,25 @@ def test_covered_context_cost_hint_from_settled_itm(_mock_sdk, _patch_entry, mon
     assert ctx2["cost_hint"] is None
 
 
+def test_covered_context_fee_slippage_coverage(_mock_sdk, _patch_entry, monkeypatch):
+    """现货补买扣 fee 后 0.0999 SOL（99.9% 面值）仍视为 covered 1 张（1% 容差）。"""
+    def _bal(account=""):
+        return {"total_eq_usd": 10.3, "details": [
+            {"ccy": "SOL", "cash_bal": 0.0999, "avail_bal": 0.0999,
+             "frozen_bal": 0.0, "eq": 0.0999, "eq_usd": 10.3, "update_ms": 0}]}
+    monkeypatch.setattr(ot, "account_balance", _bal)
+    ctx = ot.covered_context("bot1", "SOL-USD_UM")
+    assert ctx["sellable_sz"] == 1
+    assert ctx["spot_cov_pct"] == pytest.approx(99.9)
+    # 明显不足（0.05 SOL = 50% 面值）→ 不可卖
+    def _bal_half(account=""):
+        return {"total_eq_usd": 5.0, "details": [
+            {"ccy": "SOL", "cash_bal": 0.05, "avail_bal": 0.05,
+             "frozen_bal": 0.0, "eq": 0.05, "eq_usd": 5.0, "update_ms": 0}]}
+    monkeypatch.setattr(ot, "account_balance", _bal_half)
+    assert ot.covered_context("bot1", "SOL-USD_UM")["sellable_sz"] == 0
+
+
 def test_covered_context_xau_no_spot(_mock_sdk, _patch_entry):
     """XAU 无现货盘：提示 covered 语义受限，可卖 0（不需余额）。"""
     ctx = ot.covered_context("bot1", "XAU-USD_UM")
