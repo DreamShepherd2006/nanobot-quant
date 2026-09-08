@@ -325,6 +325,7 @@ async function loadExpiries() {
     chainAutoPick = true;
     expSel.value = expiryList.length ? String(expiryList[0].exp_ms) : "";
     buildExpTabs();
+    loadChain();
   }
 }
 function buildExpTabs() {
@@ -1128,8 +1129,8 @@ async function saveLive() {
 }
 
 // ── 事件绑定 / 启动 ───────────────────────────────────
-famSel.addEventListener("change", () => { loadExpiries(); loadChain(); });
-expSel.addEventListener("change", loadChain);
+famSel.addEventListener("change", () => { loadExpiries(); });
+expSel.addEventListener("change", () => { buildExpTabs(); loadChain(); });
 hvSel.addEventListener("change", loadChain);
 rngSel.addEventListener("change", loadChain);
 btn.addEventListener("click", loadChain);
@@ -1137,8 +1138,7 @@ accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions();
 $("saveParamsBtn").addEventListener("click", saveParams);
 $("saveLiveBtn").addEventListener("click", saveLive);
 loadAccounts();
-loadExpiries();
-loadChain();
+loadExpiries();   // 内部负责首次默认最近到期后的 loadChain
 loadReminder();
 loadParams();
 loadLive();
