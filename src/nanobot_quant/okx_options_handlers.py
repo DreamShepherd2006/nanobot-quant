@@ -10,9 +10,9 @@ GET  /config/okx-options/accounts   — 已配置子账户（下单目标）
 GET  /config/okx-options/positions  — OKX 期权持仓 + 台账 open 行（只读）
 GET  /config/okx-options/ledger     — 完整台账
 GET  /config/okx-options/reminder   — 到期提醒（72h 内/已到期）
-POST /config/okx-options/preview    — 卖 put 订单预览（纯计算，不下单）
-POST /config/okx-options/sell/start|confirm   — 卖 put 两步确认（真实下单）
-POST /config/okx-options/close/start|confirm  — 买回平仓两步确认
+POST /config/okx-options/preview    — 卖期权订单预览（纯计算，不下单；put/call 按 opt_type 分派）
+POST /config/okx-options/sell/start|confirm   — 卖期权两步确认（put/call 分派；call 可选 cost_basis 保本门）
+POST /config/okx-options/close/start|confirm  — 买回平仓两步确认（put/call 分派）
 POST /config/okx-options/cover/start|confirm  — 到期 ITM 现货补买两步确认
 
 数据/下单全部经官方 python-okx SDK（okx_sdk 唯一 import 点）；
@@ -62,6 +62,33 @@ def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
 def _deny(err: str) -> JSONResponse:
     return JSONResponse({"ok": False, "error": err},
                         status_code=403 if "Commander" in err else 401)
+
+
+def _dispatch_preview(inst_id: str, sz: int, ord_type: str, px,
+                      cost_basis=None) -> dict:
+    """按合约类型分派订单预览：Call → preview_open_call（含保本门），Put → preview_open_put。"""
+    if ot.resolve_instrument(inst_id)["opt_type"] == "C":
+        return ot.preview_open_call(inst_id, sz, ord_type, px,
+                                    cost_basis=cost_basis)
+    return ot.preview_open_put(inst_id, sz, ord_type, px)
+
+
+def _dispatch_sell(account: str, inst_id: str, sz: int, ord_type: str,
+                   px, cost_basis=None) -> dict:
+    """卖期权分派：Call → open_call（cost_basis 保本门强制），Put → open_put。"""
+    if ot.resolve_instrument(inst_id)["opt_type"] == "C":
+        return ot.open_call(account, inst_id=inst_id, sz=sz, ord_type=ord_type,
+                            px=px, cost_basis=cost_basis)
+    return ot.open_put(account, inst_id=inst_id, sz=sz, ord_type=ord_type, px=px)
+
+
+def _dispatch_close(account: str, inst_id: str, sz: int, ord_type: str,
+                    px) -> dict:
+    """买回平仓分派：Call → close_call（只匹配 open_call），Put → close_put。"""
+    if ot.resolve_instrument(inst_id)["opt_type"] == "C":
+        return ot.close_call(account, inst_id=inst_id, sz=sz,
+                             ord_type=ord_type, px=px)
+    return ot.close_put(account, inst_id=inst_id, sz=sz, ord_type=ord_type, px=px)
 
 
 def _cleanup() -> None:
@@ -441,6 +468,19 @@ def register_okx_options_routes(app, gatekeeper) -> None:
 
     # ── 批次 C：下单（预览 → start → confirm 两步确认）─────────
 
+    async def _covered(request: Request) -> JSONResponse:
+        """卖 call（covered）上下文：现货可用/可卖张数 + 成本锚 C 建议（只读）。"""
+        try:
+            q = request.query_params
+            family = q.get("family") or ""
+            account = q.get("account") or ""
+            if not family:
+                return JSONResponse({"ok": False, "error": "缺少 family 参数"})
+            out = await asyncio.to_thread(ot.covered_context, account, family)
+            return JSONResponse(out)
+        except (OkxSdkError, RuntimeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
     async def _preview(request: Request):
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -452,8 +492,10 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         sz = int(_num(body, "sz", 0) or 0)
         ord_type = (body.get("ord_type") or "limit").lower()
         px = _num(body, "px")
+        cost_basis = _num(body, "cost_basis")
         try:
-            out = await asyncio.to_thread(ot.preview_open_put, inst_id, sz, ord_type, px)
+            out = await asyncio.to_thread(
+                _dispatch_preview, inst_id, sz, ord_type, px, cost_basis)
             return JSONResponse(out)
         except (OkxSdkError, RuntimeError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
@@ -470,15 +512,19 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         sz = int(_num(body, "sz", 0) or 0)
         ord_type = (body.get("ord_type") or "limit").lower()
         px = _num(body, "px")
+        cost_basis = _num(body, "cost_basis")
         if sz <= 0:
             return JSONResponse({"ok": False, "error": "张数必须为正整数"})
         try:
-            prev = await asyncio.to_thread(ot.preview_open_put, inst_id, sz, ord_type, px)
+            prev = await asyncio.to_thread(
+                _dispatch_preview, inst_id, sz, ord_type, px, cost_basis)
         except (OkxSdkError, RuntimeError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "stage": _stage("sell", {
             "account": account, "inst_id": inst_id, "sz": sz,
             "ord_type": ord_type, "px": px if ord_type != "market" else None,
+            "cost_basis": cost_basis,
+            "opt_type": prev.get("opt_type", "P"),
             "preview": prev})})
 
     async def _sell_confirm(request: Request):
@@ -496,8 +542,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         p = act["payload"]
         try:
             res = await asyncio.to_thread(
-                ot.open_put, p["account"], inst_id=p["inst_id"], sz=p["sz"],
-                ord_type=p["ord_type"], px=p.get("px"))
+                _dispatch_sell, p["account"], p["inst_id"], p["sz"],
+                p["ord_type"], p.get("px"), p.get("cost_basis"))
             return JSONResponse({"ok": True, "entry": res})
         except (OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
@@ -539,8 +585,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         p = act["payload"]
         try:
             res = await asyncio.to_thread(
-                ot.close_put, p["account"], inst_id=p["inst_id"], sz=p["sz"],
-                ord_type=p["ord_type"], px=p.get("px"))
+                _dispatch_close, p["account"], p["inst_id"], p["sz"],
+                p["ord_type"], p.get("px"))
             return JSONResponse({"ok": True, "entry": res})
         except (OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
@@ -605,6 +651,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/live", _live_get, methods=["GET"])
     app.add_api_route("/config/okx-options/live", _live_set, methods=["POST"])
+    app.add_api_route("/config/okx-options/covered", _covered, methods=["GET"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/confirm", _sell_confirm, methods=["POST"])

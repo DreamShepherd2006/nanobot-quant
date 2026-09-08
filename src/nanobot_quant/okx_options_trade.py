@@ -397,6 +397,68 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
     }
 
 
+def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
+                      px: Optional[float] = None,
+                      cost_basis: Optional[float] = None) -> dict:
+    """卖 call（covered call）订单预览（纯计算，不下单）——镜像 preview_open_put。
+
+    输出含：合约规格、参考盘口、订单参数（side=sell tdMode=isolated 逐仓）、
+    预计权利金 = px×lot×sz、保本门状态（K_call + px ≥ C，cost_basis 提供时）、
+    covered 语义说明（现货在手覆盖上行，不做全损现金担保）。
+    """
+    spec = resolve_instrument(inst_id)
+    if spec["opt_type"] != "C":
+        raise OkxSdkError(f"{inst_id} 不是 Call 合约（{spec['opt_type']}）")
+    lot = spec["lot"]
+    if lot <= 0:
+        raise OkxSdkError(f"{inst_id} 面值解析失败")
+    q = ticker_quote(inst_id)
+    ord_type = (ord_type or "limit").lower()
+    if ord_type not in ("limit", "post_only", "fok", "ioc"):
+        raise OkxSdkError(
+            f"不支持的订单类型 {ord_type}：OKX 期权不支持市价单（50016），"
+            "仅限价/IOC/FOK/post_only（需带价格）")
+    if px is None:
+        raise OkxSdkError("期权限价类订单需提供价格 px")
+    ref_px = px
+    prem = ref_px * lot * sz
+    exp_iso = _exp_str(spec["exp_ms"])
+    gate = None
+    if cost_basis is not None:
+        cb = float(cost_basis)
+        gate = {"cost_basis": round(cb, 4),
+                "guard": round(spec["strike"] + ref_px, 4),
+                "ok": (spec["strike"] + ref_px) >= cb - 1e-9}
+    try:
+        sim = simulate_fill(inst_id, "sell", int(sz))
+    except (OkxSdkError, RuntimeError, ValueError):
+        sim = None
+    return {
+        "ok": True,
+        "inst_id": inst_id,
+        "opt_type": "C",
+        "strike": spec["strike"],
+        "exp_ms": spec["exp_ms"],
+        "exp_date": exp_iso,
+        "lot": lot,
+        "family": spec["inst_family"],
+        "sz": int(sz),
+        "ord_type": ord_type,
+        "px": ref_px,
+        "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]},
+        "td_mode": SELL_TDMODE,
+        "est_premium_usd": round(prem, 4),
+        "gate": gate,
+        "note": ("卖 call（covered call）：持有现货 + 卖虚值/平值 call 收权利金。"
+                 "被行权 = 现金结算赔付 (结算价−K)×面值 后现货市价卖出，"
+                 "等效按 K 出货（保本门保证 K+权利金 ≥ 被动持仓成本 C）。"
+                 "call 上行无界，**不做全损现金担保**——covered 由现货在手实现；"
+                 "isolated 仅平台 IM 冻结，暴涨接近强平价时需主动买回平仓。"
+                 "欧式现金结算，不可提前行权。"),
+        "sim": sim,
+    }
+
+
 def _exp_str(exp_ms: int) -> str:
     try:
         return datetime.fromtimestamp(exp_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -548,21 +610,63 @@ def pending_orders(account: str = "", inst_family: str = "") -> list[dict]:
 def open_put(account: str, *, inst_id: str, sz: int,
              ord_type: str = "limit", px: Optional[float] = None) -> dict:
     """卖 put 开仓（真实下单）。成功后写入台账（pending → 轮询 filled）。"""
+    return _open_option(account=account, inst_id=inst_id, sz=sz,
+                        ord_type=ord_type, px=px, kind="open_put")
+
+
+def open_call(account: str, *, inst_id: str, sz: int,
+              ord_type: str = "limit", px: Optional[float] = None,
+              cost_basis: Optional[float] = None) -> dict:
+    """卖 call（covered call）开仓——镜像 open_put（side=sell、isolated 逐仓）。
+
+    保本门（§33.23，强制 fail-closed）：cost_basis = 被动持仓成本锚 C
+    （接货价 K_put，put 台账 settled_itm max(strike) 自动带出、可改）。
+    提供时要求 strike + px ≥ C（px 为 IOC 保底线 = 最差接受成交价，
+    门成立则实际成交必成立）；不满足直接拒绝该轮，不硬卖。
+
+    担保差异：call 上行无界，**不做全损现金担保**（_ensure_collateral 仅用于
+    卖 put）——covered 语义 = 现货在手，被行权 = 现金结算赔付后现货市价卖出
+    （等效按 K 出货）；isolated 仅平台 IM 冻结，极端暴涨接近强平时需主动
+    买回平仓或补保证金（页面强平价可见）。
+    """
+    return _open_option(account=account, inst_id=inst_id, sz=sz,
+                        ord_type=ord_type, px=px, kind="open_call",
+                        cost_basis=cost_basis)
+
+
+def _open_option(account: str, *, inst_id: str, sz: int,
+                 ord_type: str = "limit", px: Optional[float] = None,
+                 kind: str = "open_put",
+                 cost_basis: Optional[float] = None) -> dict:
+    """卖期权开仓公共路径：kind=open_put/open_call 决定合约类型断言与担保行为。"""
     a = _entry_account(account)
     spec = resolve_instrument(inst_id)
-    if spec["opt_type"] != "P":
-        raise OkxSdkError(f"{inst_id} 不是 Put 合约")
+    want = "P" if kind == "open_put" else "C"
+    if spec["opt_type"] != want:
+        raise OkxSdkError(
+            f"{inst_id} 不是 {'Put' if want == 'P' else 'Call'} 合约"
+            f"（opt_type={spec['opt_type']}，请选 {'P' if want == 'P' else 'C'} 侧合约）")
     if int(sz) <= 0:
         raise OkxSdkError("张数 sz 必须为正整数")
+    if kind == "open_call" and cost_basis is not None:
+        guard = spec["strike"] + (px or 0.0)
+        if guard < float(cost_basis) - 1e-9:
+            raise OkxSdkError(
+                f"保本门不通过（fail-closed，该轮跳过）：K({spec['strike']})"
+                f" + px({px or 0}) = {guard:.4f} < 成本锚 C({float(cost_basis):.4f})。"
+                "请抬高行权价、等待权利金回升，或上调成本锚后再卖 call。")
     # 开盘前快照盘口供参考（下单后立即轮询会很快，先落台账 pending）
     q = ticker_quote(inst_id)
     entry = add_ledger(
-        kind="open_put", account=account or a["label"], inst_id=inst_id,
+        kind=kind, account=account or a["label"], inst_id=inst_id,
         strike=spec["strike"], exp_ms=spec["exp_ms"], lot=spec["lot"],
         family=spec["inst_family"], side="sell", ord_type=ord_type,
         px=px,
         sz=int(sz), status="pending", ref_bid=q["bid"], ref_ask=q["ask"],
     )
+    if kind == "open_call" and cost_basis is not None:
+        update_ledger(lambda x: x["id"] == entry["id"], cost_basis=round(float(cost_basis), 6))
+        entry["cost_basis"] = round(float(cost_basis), 6)
     try:
         res = _place(a["creds"], inst_id=inst_id, side="sell", sz=int(sz),
                      ord_type=ord_type, px=px, tag=TAG_OPEN)
@@ -573,14 +677,15 @@ def open_put(account: str, *, inst_id: str, sz: int,
         raise
     update_ledger(lambda x: x["id"] == entry["id"], ord_id=ord_id)
     entry["ord_id"] = ord_id
-    return _settle_open_entry(a["creds"], entry)
+    return _settle_open_entry(a["creds"], entry, kind=kind)
 
 
-def _settle_open_entry(creds: dict, entry: dict) -> dict:
+def _settle_open_entry(creds: dict, entry: dict, kind: str = "open_put") -> dict:
     """短轮询（约 10×0.5s）等成交，回填 avg px/权利金/状态。
 
-    filled → open 时自动触发 _ensure_collateral：把逐仓保证金追加至
-    全损担保（走 A——见 _ensure_collateral 文档）。
+    filled → open 时：卖 put（kind=open_put）自动触发 _ensure_collateral
+    （逐仓保证金追加至全损担保，走 A）；卖 call（open_call）**不做全损担保**
+    （上行无界，covered=现货在手），仅记 margin_note。
     """
     if not entry.get("ord_id"):
         return entry
@@ -595,7 +700,15 @@ def _settle_open_entry(creds: dict, entry: dict) -> dict:
                 premium_usd=round(px * entry["lot"] * filled_sz, 4),
             )
             if upd:
-                upd = _ensure_collateral(creds, upd) or upd
+                if kind == "open_put":
+                    upd = _ensure_collateral(creds, upd) or upd
+                else:
+                    upd = update_ledger(
+                        lambda x: x["id"] == entry["id"],
+                        collateral_usd=None, margin_added=0.0,
+                        margin_note="covered（现货在手——call 上行无界不做全损"
+                                    "现金担保；isolated 仅平台 IM 冻结，暴涨接近"
+                                    "强平价时需主动买回平仓或补保证金）") or upd
             return upd or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
@@ -665,16 +778,39 @@ def _ensure_collateral(creds: dict, entry: dict) -> Optional[dict]:
 
 def close_put(account: str, *, inst_id: str, sz: int,
               ord_type: str = "limit", px: Optional[float] = None) -> dict:
-    """买回平仓（真实下单）。入口须先找到该 inst 的 open 台账行。"""
+    """买回平仓卖 put（真实下单）。入口须先找到该 inst 的 open 台账行。"""
+    return _close_option(account=account, inst_id=inst_id, sz=sz,
+                         ord_type=ord_type, px=px,
+                         open_kind="open_put", close_kind="close_put")
+
+
+def close_call(account: str, *, inst_id: str, sz: int,
+               ord_type: str = "limit", px: Optional[float] = None) -> dict:
+    """买回平仓卖 call（covered call 平仓，止盈/主动落袋）——镜像 close_put。
+
+    止盈语义：卖 call 收权利金后，权利金回落（如 30%，控制参数待自动化批）
+    或主动决策时买回平仓，pnl = (开仓价 − 买回价)×每张面值×张数。
+    """
+    return _close_option(account=account, inst_id=inst_id, sz=sz,
+                         ord_type=ord_type, px=px,
+                         open_kind="open_call", close_kind="close_call")
+
+
+def _close_option(account: str, *, inst_id: str, sz: int,
+                  ord_type: str = "limit", px: Optional[float] = None,
+                  open_kind: str = "open_put",
+                  close_kind: str = "close_put") -> dict:
+    """买回平仓公共路径：open_kind/close_kind 决定台账行与记录类型。"""
     a = _entry_account(account)
-    open_entry = find_entry(lambda x: (x.get("kind") == "open_put"
+    open_entry = find_entry(lambda x: (x.get("kind") == open_kind
                                        and x.get("inst_id") == inst_id
                                        and x.get("status") == "open"))
     if open_entry is None:
-        raise OkxSdkError(f"台账无 {inst_id} 的 open 卖 put 记录（无法平仓）")
+        label = "卖 put" if open_kind == "open_put" else "卖 call"
+        raise OkxSdkError(f"台账无 {inst_id} 的 open {label} 记录（无法平仓）")
     q = ticker_quote(inst_id)
     entry = add_ledger(
-        kind="close_put", account=account or a["label"], inst_id=inst_id,
+        kind=close_kind, account=account or a["label"], inst_id=inst_id,
         strike=open_entry.get("strike"), exp_ms=open_entry.get("exp_ms"),
         lot=open_entry.get("lot"), family=open_entry.get("family"),
         side="buy", ord_type=ord_type, px=px,
@@ -843,6 +979,47 @@ def account_balance(account: str = "") -> dict:
     out.sort(key=lambda x: x["eq_usd"], reverse=True)
     return {"total_eq_usd": _f(d.get("totalEq")), "details": out,
             "account": a["name"] or a["label"], "account_uid": a["uid"]}
+
+
+def covered_context(account: str, family: str) -> dict:
+    """卖 call（covered call）上下文：现货对冲覆盖 + 成本锚 C 建议（只读）。
+
+    family 如 SOL-USD_UM → 基础币 SOL。现货对冲覆盖按 99% 容差判定——
+    现货补买会扣 0.1% 手续费（0.1 SOL → 0.0999），按面值整数判据会把自己
+    刚补的货判成「裸卖」；且 U 本位期权为现金结算（被行权只赔现金差价、
+    不交币），现货是对冲工具（浮盈对冲赔付）而非交割物。成本锚建议 = 同
+    family 已 settled_itm（被行权接货）put 台账行的 max(strike)。
+    """
+    base = (family or "").split("-")[0]
+    lot = FAMILY_LOT.get(base, 0.0)
+    out = {"ok": True, "family": family, "base": base,
+           "spot_avail": 0.0, "lot_coin": lot,
+           "sellable_sz": 0, "spot_cov_pct": 0.0,
+           "cost_hint": None, "note": ""}
+    if base == "XAU":
+        out["note"] = ("XAU-USD_UM 无现货盘：现金结算赔差无法被现货对冲，"
+                       "卖 call 上行裸风险——不建议（covered 语义受限）")
+        return out
+    bal = account_balance(account)
+    for r in bal.get("details") or []:
+        if r.get("ccy") == base:
+            out["spot_avail"] = r.get("avail_bal") or 0.0
+            break
+    if lot and lot > 0:
+        # 每张对冲需求 = 面值；容差 1%（补买扣 fee 后 ~99.9% 覆盖即视为可卖）
+        need_per = lot * 0.99
+        if need_per > 0:
+            out["sellable_sz"] = int(out["spot_avail"] / need_per + 1e-6)
+        if out["spot_avail"] > 0:
+            out["spot_cov_pct"] = round(out["spot_avail"] / lot * 100, 1)
+    costs = [float(e.get("strike") or 0)
+             for e in load_ledger()
+             if e.get("kind") == "open_put"
+             and e.get("status") == STATUS_SETTLED_ITM
+             and e.get("family") == family]
+    if costs:
+        out["cost_hint"] = max(costs)
+    return out
 
 
 def open_puts(account: str = "") -> list[dict]:
