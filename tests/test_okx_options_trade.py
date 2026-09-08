@@ -804,3 +804,118 @@ def test_cover_prefill_fallback_settle_then_strike(monkeypatch):
     assert d3["px"] is None
     assert d3["px_src"] is None
 
+
+
+# ── 批 1 Step 1：卖 call（covered call）执行层（2026-09-08）──────
+
+
+def test_place_sell_call_params(_mock_sdk, _patch_entry):
+    """卖 call 下单镜像 put：side=sell isolated；成交回填，kind=open_call。"""
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0)
+    call = _mock_sdk.calls[-1]
+    assert call["instId"] == "BTC-USD_UM-260904-80000-C"
+    assert call["side"] == "sell"
+    assert call["tdMode"] == "isolated"
+    assert call["sz"] == "1"
+    assert call["tag"] == ot.TAG_OPEN
+    assert entry["status"] == "open"
+    assert entry["kind"] == "open_call"
+    assert entry["filled_px"] == 110.0
+    assert entry["premium_usd"] == pytest.approx(110.0 * 0.01)
+    # call 不做全损现金担保：不触发 set_margin_balance，记 covered 语义
+    assert _mock_sdk.account.margin_calls == []
+    assert "covered" in (entry.get("margin_note") or "")
+
+
+def test_open_call_rejects_put_inst(_patch_entry):
+    """open_call 传 put 合约 → 拒绝。"""
+    with pytest.raises(OkxSdkError):
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                     ord_type="limit", px=110.0)
+
+
+def test_open_call_guard_fail_closed(_patch_entry):
+    """保本门：cost_basis > K+px → fail-closed 拒绝，该轮跳过不硬卖。"""
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0, cost_basis=80200.0)  # K+px=80110 < C
+    assert "保本门不通过" in str(ei.value)
+
+
+def test_open_call_guard_ok(_mock_sdk, _patch_entry):
+    """保本门通过：K+px ≥ C → 正常开仓，台账记录 cost_basis。"""
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0, cost_basis=80000.0)
+    assert entry["status"] == "open"
+    assert entry["cost_basis"] == pytest.approx(80000.0)
+    assert entry["strike"] == 80000.0
+
+
+def test_place_close_call_buy(_mock_sdk, _patch_entry):
+    """买回平仓卖 call（止盈/主动落袋）：kind=close_call，pnl=(开−平)×lot×sz。"""
+    ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                 ord_type="limit", px=110.0)
+    e = ot.close_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                      ord_type="limit", px=108.0)
+    call = _mock_sdk.calls[-1]
+    assert call["side"] == "buy"
+    assert call["tdMode"] == "isolated"
+    assert call["tag"] == ot.TAG_CLOSE
+    assert e["status"] == "closed"
+    assert e["pnl_usd"] == pytest.approx(0.02)  # (110−108)×0.01×1
+    entries = ot.load_ledger()
+    open_rows = [x for x in entries if x["kind"] == "open_call"
+                 and x["inst_id"] == "BTC-USD_UM-260904-80000-C"]
+    assert open_rows[0]["status"] == "closed"
+
+
+def test_close_call_without_open_rejected(_patch_entry):
+    """无 open 卖 call 记录 → 无法平仓。"""
+    with pytest.raises(OkxSdkError):
+        ot.close_call("bot1", inst_id="BTC-USD_UM-260904-88000-C", sz=1,
+                      ord_type="limit", px=5)
+
+
+def test_close_call_does_not_touch_put_rows(_mock_sdk, _patch_entry):
+    """call 平仓只匹配 open_call——同名 strike 的 put 行不受影响。"""
+    ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                ord_type="limit", px=110.0)
+    ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                 ord_type="limit", px=110.0)
+    e = ot.close_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                      ord_type="limit", px=108.0)
+    assert e["status"] == "closed"
+    entries = ot.load_ledger()
+    put_row = [x for x in entries if x["kind"] == "open_put"
+               and x["inst_id"] == "BTC-USD_UM-260904-80000-P"][0]
+    assert put_row["status"] == "open"  # put 行仍 open，未被 call 平仓误碰
+
+
+def test_preview_open_call_limit(_mock_sdk):
+    p = ot.preview_open_call("BTC-USD_UM-260904-80000-C", 1, "limit", px=110.0)
+    assert p["ok"] is True
+    assert p["opt_type"] == "C"
+    assert p["est_premium_usd"] == pytest.approx(110.0 * 0.01)
+    assert p["td_mode"] == "isolated"
+    assert "covered" in p["note"]
+    assert p["gate"] is None  # 未提供 cost_basis 不显示保本门
+
+
+def test_preview_open_call_gate(_mock_sdk):
+    ok = ot.preview_open_call("BTC-USD_UM-260904-80000-C", 1, "limit",
+                              px=110.0, cost_basis=80000.0)
+    assert ok["gate"]["ok"] is True
+    bad = ot.preview_open_call("BTC-USD_UM-260904-80000-C", 1, "limit",
+                               px=110.0, cost_basis=80150.0)
+    assert bad["gate"]["ok"] is False
+
+
+def test_preview_open_call_rejects_put(_mock_sdk):
+    with pytest.raises(OkxSdkError):
+        ot.preview_open_call("BTC-USD_UM-260904-80000-P", 1, "limit", px=10)
+
+
+def test_preview_open_call_rejects_market(_mock_sdk):
+    with pytest.raises(OkxSdkError):
+        ot.preview_open_call("BTC-USD_UM-260904-80000-C", 2, "market")
