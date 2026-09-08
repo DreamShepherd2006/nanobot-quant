@@ -65,34 +65,54 @@
   .kv { background:#f7f9fb; border-radius:6px; padding:10px 12px; font-size:.86em; line-height:1.7; margin:8px 0; }
   .kv b { color:#444; }
   .kv .warn { color:#e65100; font-weight:600; }
+  /* ── 紧凑期权链（欧易式：strike 居中 / ITM 色区 / 到期 tabs / 折叠设置）── */
+  .mainbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:2px; }
+  .mainbar label { font-size:.85em; color:#666; font-weight:600; }
+  .mainbar select, .mainbar button { font-size:.86em; }
+  details.settings { background:#fff; border-radius:8px; padding:10px 16px; margin-bottom:12px; border:1px solid #e0e0e0; }
+  details.settings summary { cursor:pointer; font-weight:600; font-size:.9em; color:#555; user-select:none; outline:none; }
+  details.settings[open] summary { margin-bottom:10px; }
+  .exp-tabs { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+  .exp-tab { padding:2px 12px; border-radius:12px; background:#eef2f7; font-size:.8em; cursor:pointer; border:1px solid transparent; color:#444; }
+  .exp-tab.on { background:#1565c0; color:#fff; }
+  .meta { display:flex; gap:16px; align-items:center; font-size:.8em; color:#666; flex-wrap:wrap; }
+  .meta .m-k { color:#999; }
+  .meta .m-v { font-weight:700; color:#333; }
+  table.tdchain { font-size:.8em; }
+  table.tdchain th, table.tdchain td { padding:3px 6px; }
+  table.tdchain th { background:#f7f8fa; }
+  .stk { background:#263238; color:#fff; font-weight:700; text-align:center; }
+  tr.atm .stk { background:#0d47a1; box-shadow: inset 0 0 0 2px #fff; }
+  td.bgi-c { background:#e7f5ea; }
+  td.bgi-p { background:#fbecea; }
+  .pos-tick { color:#fff; font-size:.72em; }
 </style>
 </head>
 <body>
-<h1>📈 OKX 期权链</h1>
-<div class="subtitle">卖 put 定价辅助（批次 B）+ 卖 put 执行（批次 C）— OKX U 本位线性期权（USDSⓈ-M），美元现金结算。链 + IV + HV；行内卖 put / 持仓监控 / 到期补买闭环。</div>
+<h1>📈 OKX 期权链 <span class="tag">USDSⓈ-M · U 本位现金结算</span></h1>
+<div class="subtitle">链 + IV + HV · 行内卖 put / 卖 call(covered) / 持仓监控 / 到期补买闭环。</div>
 
 <div class="card">
-  <div class="tabs">
+  <div class="tabs" style="margin-bottom:8px">
     <button class="tab on" data-tab="chain">🔗 期权链</button>
     <button class="tab" data-tab="pos">📦 持仓</button>
     <button class="tab" data-tab="led">🧾 台账</button>
     <span style="flex:1"></span>
-    <label>子账号</label>
-    <select id="account"><option value="">加载中…</option></select>
+    <button class="btn-ghost" id="loadBtn" style="font-size:.85em;padding:5px 12px">🔄 刷新</button>
+    <span class="hint" id="updated"></span>
   </div>
-
-  <div class="ctl" id="chainCtl">
+  <div class="mainbar" id="chainCtl">
+    <label>子账号</label>
+    <select id="account" style="width:auto;max-width:240px"><option value="">加载中…</option></select>
     <label>标的</label>
-    <select id="family">
+    <select id="family" style="width:auto">
       <option value="BTC-USD_UM">BTC-USD_UM</option>
       <option value="ETH-USD_UM">ETH-USD_UM</option>
       <option value="SOL-USD_UM">SOL-USD_UM</option>
       <option value="XAU-USD_UM">XAU-USD_UM</option>
     </select>
-    <label>到期</label>
-    <select id="expiry"><option value="">近 3 个到期（默认）</option></select>
     <label>HV 窗口</label>
-    <select id="hvDays">
+    <select id="hvDays" style="width:auto">
       <option value="30" selected>30 天</option>
       <option value="7">7 天</option>
       <option value="14">14 天</option>
@@ -100,22 +120,22 @@
       <option value="90">90 天</option>
     </select>
     <label>strike 范围</label>
-    <select id="range">
+    <select id="range" style="width:auto">
       <option value="20" selected>现价 ±20%</option>
       <option value="10">±10%</option>
       <option value="30">±30%</option>
       <option value="50">±50%</option>
       <option value="">全部</option>
     </select>
-    <button class="btn-primary" id="loadBtn">🔄 刷新</button>
-    <span class="hint" id="updated"></span>
   </div>
   <div class="banner err" id="errBanner"></div>
   <div class="banner loading" id="loadingBanner">⏳ 拉取 OKX 期权链…</div>
-  <div class="banner warn" id="reminderBanner"></div>
 </div>
+<div class="banner warn" id="reminderBanner" style="margin:0 0 12px"></div>
 
-<div class="card" id="paramCard">
+<details class="settings" id="settingsCard">
+  <summary>⚙️ 设置 · 担保自动追加 · 到期巡检</summary>
+  <div class="card" id="paramCard" style="margin-bottom:10px;border:none;padding:10px 0 0;border-radius:0">
   <div class="ctl">
     <label>⚙️ 担保设置（逐仓自动追加）</label>
     <input type="number" id="mCollRatio" min="0" max="200" step="5" value="100" title="全损担保的百分比">
@@ -126,7 +146,7 @@
   <div class="note">卖 put 成交后自动把该仓保证金追加至「strike×面值×张数 × 比例」（100% = 全损担保：浮亏上限 &lt; 保证金 → 数学上无强平路径，可扛到到期；追加资金平仓/到期后自动释放）。0% = 关闭自动追加（仅平台默认 IM 冻结，浮亏可能击穿提前强平）。范围 0–200%。</div>
 </div>
 
-<div class="card" id="liveCard">
+<div class="card" id="liveCard" style="border:none;padding:10px 0 0;border-radius:0">
   <div class="ctl">
     <label>🟤 到期巡检（自动判定）</label>
     <input type="checkbox" id="liveEnabled" title="常驻巡检已到期 open put：OTM 自动关账 / ITM 记赔付；AI 不自行开启">
@@ -138,14 +158,18 @@
   </div>
   <div class="note" id="liveNote">常驻巡检到期 open put：到期后查 OKX 交割账单自动判定——<b>到期作废(OTM)</b> 自动关账（结算价≥行权价）、<b>到期被行权(ITM)</b> 记赔付待补买（两步确认）、账单未出保持 open 下轮重试、判定矛盾挂「待核对」人工看。判定事件逐笔落盘（跨重启保留）。</div>
   <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
-</div>
+  </div>
+</details>
 
-<div class="card" id="summaryCard" style="display:none">
-  <h3>市场概览</h3>
-  <div class="summary" id="summary"></div>
-</div>
-
-<div class="card" id="chainCard" style="display:none">
+<div class="card" id="chainCard" style="display:none;padding:10px 14px">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div class="meta" id="summary" style="flex:1"></div>
+  </div>
+  <div id="expBar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 2px">
+    <span class="hint" style="margin:0">到期</span>
+    <div class="exp-tabs" id="expTabs"></div>
+    <select id="expiry" style="width:auto;font-size:.8em" title="更多到期组合"><option value="">近 3 个到期（组合）</option></select>
+  </div>
   <div id="groups"></div>
   <div class="note" id="priceNote"></div>
 </div>
@@ -276,50 +300,88 @@ async function loadAccounts() {
 }
 
 // ── 链 ─────────────────────────────────────────────────
+let expiryList = [];       // 全部未到期（构建到期 tabs / 全部组合）
+let chainAutoPick = false; // 首次/换标的时已自动选最近到期
+let selExp = "";            // 当前链请求的到期：单 ms / ""（近3 组合）/ 多 ms 串（全部）
 async function loadExpiries() {
   const fam = famSel.value;
-  expSel.innerHTML = '<option value="">近 3 个到期（默认）</option>';
+  expiryList = [];
   try {
     const r = await fetch("/config/okx-options/expiries?family=" + fam);
     const j = await r.json();
-    if (j.ok && j.expiries) {
-      for (const e of j.expiries) {
-        const opt = document.createElement("option");
-        opt.value = e.exp_ms;
-        opt.textContent = e.date + "（" + e.days + " 天后）";
-        expSel.appendChild(opt);
-      }
-    }
+    if (j.ok && j.expiries) expiryList = j.expiries;
   } catch (e) { /* 不阻塞 */ }
+  // 下拉：组合视图（近 3 个 / 全部到期）
+  expSel.innerHTML = '<option value="">近 3 个到期（组合）</option>';
+  if (expiryList.length > 3) {
+    const allOpt = document.createElement("option");
+    allOpt.value = expiryList.map(e => e.exp_ms).join(",");
+    allOpt.textContent = "全部到期（" + expiryList.length + " 个）";
+    expSel.appendChild(allOpt);
+  }
+  buildExpTabs();
+  if (!chainAutoPick || expSel.dataset.fam !== fam) {
+    // 首次或换标的：默认最近一个到期（单表，欧易式 tab 首项）
+    expSel.dataset.fam = fam;
+    chainAutoPick = true;
+    selExp = expiryList.length ? String(expiryList[0].exp_ms) : "";
+    buildExpTabs();
+    loadChain();
+  }
+}
+function buildExpTabs() {
+  const bar = $("expTabs");
+  bar.innerHTML = "";
+  if (!expiryList.length) { bar.innerHTML = '<span class="na">无未到期合约</span>'; return; }
+  const cur = String(selExp || "");
+  const maxTabs = 6;
+  for (let i = 0; i < Math.min(expiryList.length, maxTabs); i++) {
+    const e = expiryList[i];
+    const b = document.createElement("button");
+    b.className = "exp-tab" + (cur === String(e.exp_ms) ? " on" : "");
+    b.textContent = e.date.slice(5) + "（" + e.days + "d）";
+    b.title = e.date + " · " + e.days + " 天后到期";
+    b.onclick = () => { selExp = String(e.exp_ms); buildExpTabs(); loadChain(); };
+    bar.appendChild(b);
+  }
 }
 
-function cellHtml(side) {
-  return '<td>' + bidAsk(side.bid, side.ask) + '</td><td>' + pct(side.iv) + '</td><td>' + fmt(side.delta, 3) + '</td>';
+function cellHtml(side, cls) {
+  const k = cls ? " class=\"" + cls + "\"" : "";
+  return '<td' + k + '>' + bidAsk(side.bid, side.ask) + '</td><td' + k + '>' + pct(side.iv) + '</td><td' + k + '>' + fmt(side.delta, 3) + '</td>';
 }
 function renderChain(data) {
   chainData = data;
   const spot = data.spot, hv = data.hv || {};
-  $("summaryCard").style.display = "";
-  const spotUsd = spot ? "$" + Number(spot).toLocaleString("en-US", {maximumFractionDigits: 0}) : "—";
-  const hvHtml = hv.hv_pct !== null && hv.hv_pct !== undefined ? fmt(hv.hv_pct, 1) + "%（年化 · " + hv.days + " 个日收益）" : "—";
+  $("chainCard").style.display = "";
+  const spotNum = spot ? Number(spot) : NaN;
+  const spotUsd = spot ? "$" + Number(spot).toLocaleString("en-US", {maximumFractionDigits: 2}) : "—";
+  const hvHtml = hv.hv_pct !== null && hv.hv_pct !== undefined ? fmt(hv.hv_pct, 1) + "%（" + hv.days + "D）" : "—";
+  const base = data.family.split("-")[0];
   $("summary").innerHTML =
-    '<div><div class="k">现货（' + esc(data.spot_inst) + '）</div><div class="v">' + spotUsd + '</div></div>' +
-    '<div><div class="k">现货 ' + esc(hv.days) + 'D HV（年化）</div><div class="v">' + hvHtml + '</div></div>' +
-    '<div><div class="k">每张面值</div><div class="v">' + fmt(data.lot_coin, 4) + ' ' + esc(data.family.split("-")[0]) + '</div></div>';
+    '<span><span class="m-k">现货</span> <span class="m-v">' + esc(data.spot_inst) + ' ' + spotUsd + '</span></span>' +
+    '<span><span class="m-k">现货 ' + esc(hv.days) + 'D HV</span> <span class="m-v">' + hvHtml + '</span></span>' +
+    '<span><span class="m-k">每张面值</span> <span class="m-v">' + fmt(data.lot_coin, 4) + ' ' + esc(base) + '</span></span>';
   const wrap = $("groups");
   if (!data.groups || !data.groups.length) {
     wrap.innerHTML = '<div class="empty">该选择下无合约（或均无报价）</div>';
-    $("chainCard").style.display = "";
     $("priceNote").textContent = data.price_note || "";
     return;
   }
   let html = "";
   for (const g of data.groups) {
-    html += '<div class="grp"><div class="grp-title">📅 ' + g.date +
-            ' <span class="tag">' + g.days + ' 天后到期</span> <span class="tag">' +
-            g.rows.length + ' 档</span></div>';
-    html += '<div style="overflow-x:auto"><table><thead><tr>' +
-      '<th>Strike</th>' +
+    // ATM 行 = |strike − spot| 最小档（白框标记）；默认单到期 → 省略组标题，紧凑
+    let atmStrike = null, atmDist = Infinity;
+    if (!isNaN(spotNum)) {
+      for (const r of g.rows) {
+        const d = Math.abs(Number(r.strike) - spotNum);
+        if (d < atmDist) { atmDist = d; atmStrike = r.strike; }
+      }
+    }
+    if (data.groups.length > 1)
+      html += '<div class="grp-title">📅 ' + g.date + ' <span class="tag">' + g.days + ' 天后到期</span> <span class="tag">' + g.rows.length + ' 档</span></div>';
+    html += '<div style="overflow-x:auto"><table class="tdchain"><thead><tr>' +
+      '<th class="stk">Strike</th>' +
       '<th colspan="3" class="sec call">Call</th>' +
       '<th colspan="3" class="sec put">Put（卖 put 视角）</th>' +
       '<th class="sec put">权利金/张</th><th class="sec put">年化</th><th></th>' +
@@ -330,6 +392,10 @@ function renderChain(data) {
       '</tr></thead><tbody>';
     for (const r of g.rows) {
       const c = r.C, p = r.P;
+      const k = Number(r.strike);
+      const clsC = !isNaN(spotNum) && k < spotNum ? "bgi-c" : "";
+      const clsP = !isNaN(spotNum) && k > spotNum ? "bgi-p" : "";
+      const isAtm = atmStrike === r.strike;
       const sellBtn = (p.inst_id && p.bid !== null)
         ? '<a class="act put-sell" onclick="openSell(' + g.exp_ms + ',' + r.strike + ')">卖 put</a>'
         : '<span class="na">—</span>';
@@ -342,17 +408,17 @@ function renderChain(data) {
       const lcBtnC = c.inst_id
         ? '<a class="act" title="生命周期：mark 价 vs 标的价" onclick="openLifecycle(\'' + c.inst_id + '\')">📊</a>'
         : '';
-      html += '<tr><td>' + Number(r.strike).toLocaleString("en-US") + '</td>' +
-        cellHtml(c) +
-        cellHtml(p) +
+      html += '<tr' + (isAtm ? ' class="atm"' : '') + '><td class="stk">' + Number(r.strike).toLocaleString("en-US") +
+        (isAtm ? ' <span class="pos-tick">▼</span>' : '') + '</td>' +
+        cellHtml(c, clsC) +
+        cellHtml(p, clsP) +
         '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
         '<td>' + (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
         '<td>' + lcBtnC + ' ' + sellCallBtn + '<br>' + lcBtn + ' ' + sellBtn + '</td></tr>';
     }
-    html += '</tbody></table></div></div>';
+    html += '</tbody></table></div>';
   }
   wrap.innerHTML = html;
-  $("chainCard").style.display = "";
   $("priceNote").textContent = data.price_note || "";
 }
 
@@ -362,7 +428,7 @@ async function loadChain() {
   $("loadingBanner").textContent = "⏳ 拉取 OKX 期权链…";
   $("loadingBanner").style.display = "block";
   $("chainCard").style.display = "none";
-  const fam = famSel.value, exp = expSel.value, hv = hvSel.value, rng = rngSel.value;
+  const fam = famSel.value, exp = selExp, hv = hvSel.value, rng = rngSel.value;
   let url = "/config/okx-options/chain?family=" + fam + "&hv_days=" + hv;
   if (exp) url += "&expiries=" + exp;
   if (rng !== "") url += "&range=" + rng;
@@ -637,7 +703,6 @@ function switchTab(tab) {
   curTab = tab;
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   $("chainCtl").style.display = (tab === "chain") ? "" : "none";
-  $("summaryCard").style.display = (tab === "chain" && chainData) ? "" : "none";
   $("chainCard").style.display = (tab === "chain") ? $("chainCard").style.display : "none";
   $("posCard").style.display = (tab === "pos") ? "" : "none";
   $("ledCard").style.display = (tab === "led") ? "" : "none";
@@ -1065,8 +1130,8 @@ async function saveLive() {
 }
 
 // ── 事件绑定 / 启动 ───────────────────────────────────
-famSel.addEventListener("change", () => { loadExpiries(); loadChain(); });
-expSel.addEventListener("change", loadChain);
+famSel.addEventListener("change", () => { loadExpiries(); });
+expSel.addEventListener("change", () => { selExp = expSel.value; buildExpTabs(); loadChain(); });
 hvSel.addEventListener("change", loadChain);
 rngSel.addEventListener("change", loadChain);
 btn.addEventListener("click", loadChain);
@@ -1074,8 +1139,7 @@ accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions();
 $("saveParamsBtn").addEventListener("click", saveParams);
 $("saveLiveBtn").addEventListener("click", saveLive);
 loadAccounts();
-loadExpiries();
-loadChain();
+loadExpiries();   // 内部负责首次默认最近到期后的 loadChain
 loadReminder();
 loadParams();
 loadLive();
