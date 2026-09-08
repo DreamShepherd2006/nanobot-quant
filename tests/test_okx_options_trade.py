@@ -919,3 +919,47 @@ def test_preview_open_call_rejects_put(_mock_sdk):
 def test_preview_open_call_rejects_market(_mock_sdk):
     with pytest.raises(OkxSdkError):
         ot.preview_open_call("BTC-USD_UM-260904-80000-C", 2, "market")
+
+
+# ── 批 1 Step 3：covered_context（现货可卖张数 + 成本锚 C 建议）────
+
+
+def _fake_sol_balance(account=""):
+    return {"total_eq_usd": 24.0, "details": [
+        {"ccy": "SOL", "cash_bal": 0.3, "avail_bal": 0.3,
+         "frozen_bal": 0.0, "eq": 0.3, "eq_usd": 24.0, "update_ms": 0}]}
+
+
+def test_covered_context_basic(_mock_sdk, _patch_entry, monkeypatch):
+    """现货可用 0.3 SOL（lot 0.1）→ 可卖 3 张；无 settled_itm → cost_hint None。"""
+    monkeypatch.setattr(ot, "account_balance", _fake_sol_balance)
+    ctx = ot.covered_context("bot1", "SOL-USD_UM")
+    assert ctx["ok"] is True
+    assert ctx["base"] == "SOL"
+    assert ctx["lot_coin"] == 0.1
+    assert ctx["spot_avail"] == pytest.approx(0.3)
+    assert ctx["sellable_sz"] == 3
+    assert ctx["cost_hint"] is None
+
+
+def test_covered_context_cost_hint_from_settled_itm(_mock_sdk, _patch_entry, monkeypatch):
+    """成本锚建议 = 同 family 已 settled_itm put 的 max(strike)。"""
+    monkeypatch.setattr(ot, "account_balance", _fake_sol_balance)
+    # 人为把一条 open_put 台账行置为 settled_itm（模拟被行权接货）
+    ot.open_put("bot1", inst_id="SOL-USD_UM-260910-101-P", sz=1,
+                ord_type="limit", px=0.3)
+    entries = ot.load_ledger()
+    eid = [e for e in entries if e["kind"] == "open_put"][0]["id"]
+    ot.update_ledger(lambda x: x["id"] == eid, status=ot.STATUS_SETTLED_ITM)
+    ctx = ot.covered_context("bot1", "SOL-USD_UM")
+    assert ctx["cost_hint"] == 101.0
+    # 其他 family 不被计入
+    ctx2 = ot.covered_context("bot1", "BTC-USD_UM")
+    assert ctx2["cost_hint"] is None
+
+
+def test_covered_context_xau_no_spot(_mock_sdk, _patch_entry):
+    """XAU 无现货盘：提示 covered 语义受限，可卖 0（不需余额）。"""
+    ctx = ot.covered_context("bot1", "XAU-USD_UM")
+    assert ctx["sellable_sz"] == 0
+    assert "无现货盘" in ctx["note"]

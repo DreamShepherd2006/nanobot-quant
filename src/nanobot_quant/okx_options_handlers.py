@@ -468,6 +468,19 @@ def register_okx_options_routes(app, gatekeeper) -> None:
 
     # ── 批次 C：下单（预览 → start → confirm 两步确认）─────────
 
+    async def _covered(request: Request) -> JSONResponse:
+        """卖 call（covered）上下文：现货可用/可卖张数 + 成本锚 C 建议（只读）。"""
+        try:
+            q = request.query_params
+            family = q.get("family") or ""
+            account = q.get("account") or ""
+            if not family:
+                return JSONResponse({"ok": False, "error": "缺少 family 参数"})
+            out = await asyncio.to_thread(ot.covered_context, account, family)
+            return JSONResponse(out)
+        except (OkxSdkError, RuntimeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
     async def _preview(request: Request):
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -638,6 +651,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/live", _live_get, methods=["GET"])
     app.add_api_route("/config/okx-options/live", _live_set, methods=["POST"])
+    app.add_api_route("/config/okx-options/covered", _covered, methods=["GET"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/confirm", _sell_confirm, methods=["POST"])

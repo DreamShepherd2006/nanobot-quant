@@ -981,6 +981,42 @@ def account_balance(account: str = "") -> dict:
             "account": a["name"] or a["label"], "account_uid": a["uid"]}
 
 
+def covered_context(account: str, family: str) -> dict:
+    """卖 call（covered call）上下文：现货可卖张数 + 成本锚 C 建议（只读）。
+
+    family 如 SOL-USD_UM → 基础币 SOL。可卖张数 = floor(该币交易账户可用 ÷
+    每张面值)（子账号现货持仓在交易账户余额中，与期权保证金同池）；成本锚
+    建议 = 同 family 已 settled_itm（被行权接货）put 台账行的 max(strike)——
+    被动持仓成本 C 的默认值，页面可改。
+    """
+    base = (family or "").split("-")[0]
+    out = {"ok": True, "family": family, "base": base,
+           "spot_avail": 0.0, "lot_coin": FAMILY_LOT.get(base, 0.0),
+           "sellable_sz": 0, "cost_hint": None,
+           "note": ""}
+    if base == "XAU":
+        out["note"] = ("XAU-USD_UM 无现货盘：卖 call 被行权只能现金结算赔付，"
+                       "现货覆盖不成立——不建议裸卖上行（covered 语义受限）")
+        return out
+    bal = account_balance(account)
+    for r in bal.get("details") or []:
+        if r.get("ccy") == base:
+            out["spot_avail"] = r.get("avail_bal") or 0.0
+            break
+    lot = FAMILY_LOT.get(base, 0.0)
+    if lot and lot > 0:
+        # 浮点误差补偿（0.3//0.1=2.9999…）：+1e-6 后再取整
+        out["sellable_sz"] = int(out["spot_avail"] / lot + 1e-6)
+    costs = [float(e.get("strike") or 0)
+             for e in load_ledger()
+             if e.get("kind") == "open_put"
+             and e.get("status") == STATUS_SETTLED_ITM
+             and e.get("family") == family]
+    if costs:
+        out["cost_hint"] = max(costs)
+    return out
+
+
 def open_puts(account: str = "") -> list[dict]:
     """OKX 当前期权净仓（只读）。无凭证/无仓位 → []；失败抛错由调用方处理。"""
     a = _entry_account(account)
