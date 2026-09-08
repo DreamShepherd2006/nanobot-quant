@@ -302,6 +302,7 @@ async function loadAccounts() {
 // ── 链 ─────────────────────────────────────────────────
 let expiryList = [];       // 全部未到期（构建到期 tabs / 全部组合）
 let chainAutoPick = false; // 首次/换标的时已自动选最近到期
+let selExp = "";            // 当前链请求的到期：单 ms / ""（近3 组合）/ 多 ms 串（全部）
 async function loadExpiries() {
   const fam = famSel.value;
   expiryList = [];
@@ -323,7 +324,7 @@ async function loadExpiries() {
     // 首次或换标的：默认最近一个到期（单表，欧易式 tab 首项）
     expSel.dataset.fam = fam;
     chainAutoPick = true;
-    expSel.value = expiryList.length ? String(expiryList[0].exp_ms) : "";
+    selExp = expiryList.length ? String(expiryList[0].exp_ms) : "";
     buildExpTabs();
     loadChain();
   }
@@ -332,7 +333,7 @@ function buildExpTabs() {
   const bar = $("expTabs");
   bar.innerHTML = "";
   if (!expiryList.length) { bar.innerHTML = '<span class="na">无未到期合约</span>'; return; }
-  const cur = String(expSel.value || "");
+  const cur = String(selExp || "");
   const maxTabs = 6;
   for (let i = 0; i < Math.min(expiryList.length, maxTabs); i++) {
     const e = expiryList[i];
@@ -340,7 +341,7 @@ function buildExpTabs() {
     b.className = "exp-tab" + (cur === String(e.exp_ms) ? " on" : "");
     b.textContent = e.date.slice(5) + "（" + e.days + "d）";
     b.title = e.date + " · " + e.days + " 天后到期";
-    b.onclick = () => { expSel.value = String(e.exp_ms); buildExpTabs(); loadChain(); };
+    b.onclick = () => { selExp = String(e.exp_ms); buildExpTabs(); loadChain(); };
     bar.appendChild(b);
   }
 }
@@ -427,7 +428,7 @@ async function loadChain() {
   $("loadingBanner").textContent = "⏳ 拉取 OKX 期权链…";
   $("loadingBanner").style.display = "block";
   $("chainCard").style.display = "none";
-  const fam = famSel.value, exp = expSel.value, hv = hvSel.value, rng = rngSel.value;
+  const fam = famSel.value, exp = selExp, hv = hvSel.value, rng = rngSel.value;
   let url = "/config/okx-options/chain?family=" + fam + "&hv_days=" + hv;
   if (exp) url += "&expiries=" + exp;
   if (rng !== "") url += "&range=" + rng;
@@ -1130,7 +1131,7 @@ async function saveLive() {
 
 // ── 事件绑定 / 启动 ───────────────────────────────────
 famSel.addEventListener("change", () => { loadExpiries(); });
-expSel.addEventListener("change", () => { buildExpTabs(); loadChain(); });
+expSel.addEventListener("change", () => { selExp = expSel.value; buildExpTabs(); loadChain(); });
 hvSel.addEventListener("change", loadChain);
 rngSel.addEventListener("change", loadChain);
 btn.addEventListener("click", loadChain);
