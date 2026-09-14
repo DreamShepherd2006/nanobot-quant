@@ -85,19 +85,31 @@ def load_events(limit: int = 50) -> list[dict]:
             continue
         if len(out) >= limit:
             break
-    # settled_itm 事件 enrich covered：台账存在同现货对（期权基础币 -USD/-USDC）的
-    # filled spot_cover 行 ⇒ 该笔到期已现货补买（前端据此不再显示「补买」入口）。
+    # 到期事件 enrich：台账存在同现货对（期权基础币 -USD/-USDC）的 filled 行
+    #   put  → filled spot_cover ⇒ 已现货补买（covered=True，前端不再显示「补买」入口）
+    #   call → filled spot_exit  ⇒ 已现货出货（exited=True，前端不再显示「出货」入口）
     covers: set[str] = set()
+    exits: set[str] = set()
     try:
         for r in ot.load_ledger():
-            if r.get("kind") == "spot_cover" and r.get("status") == "filled":
+            if r.get("status") != "filled":
+                continue
+            if r.get("kind") == "spot_cover":
                 covers.add(str(r.get("inst_id") or ""))
+            elif r.get("kind") == "spot_exit":
+                exits.add(str(r.get("inst_id") or ""))
     except Exception:
-        covers = set()
+        covers, exits = set(), set()
     for ev in out:
         if ev.get("status") == ot.STATUS_SETTLED_ITM:
             base = str(ev.get("inst_id") or "").split("-")[0]
-            ev["covered"] = any(c in covers for c in (f"{base}-USD", f"{base}-USDC"))
+            pairs = (f"{base}-USD", f"{base}-USDC")
+            is_call = (str(ev.get("opt_type") or "").upper() == "C"
+                       or str(ev.get("inst_id") or "").endswith("-C"))
+            if is_call:
+                ev["exited"] = any(c in exits for c in pairs)
+            else:
+                ev["covered"] = any(c in covers for c in pairs)
     return out
 
 
@@ -135,7 +147,7 @@ def save_live_config(enabled: bool | None = None,
 # ── 单轮巡检（线程与测试共用）──────────────────────────────
 
 def run_once() -> dict:
-    """一轮到期判定：settle_expired_puts → 逐笔 append 事件 + 更新 LIVE_STATE。
+    """一轮到期判定：settle_expired_puts（put+call）→ 逐笔 append 事件 + 更新 LIVE_STATE。
     任何异常不外抛（巡检自愈：本轮错误记 last_error，下轮继续）。"""
     settled = []
     error = ""
@@ -143,29 +155,36 @@ def run_once() -> dict:
         settled = ot.settle_expired_puts()
     except Exception as e:  # noqa: BLE001 —— daemon 巡检不容许线程猝死
         error = f"{type(e).__name__}: {e}"
+    # 先落盘事件、后更新 LIVE_STATE：total_settled 语义 = 已落盘判定笔数，
+    # 避免「计数已 +1 但事件未写完」的观测竞态（页面/测试按计数读事件会拿到空）。
+    if settled:
+        try:
+            by_id = {e.get("id"): e for e in ot.load_ledger()}
+            for s in settled:
+                row = by_id.get(s.get("id")) or {}
+                _append_event({
+                    "ts": _utc_now(),
+                    "type": "settle",
+                    "id": s.get("id"),
+                    "inst_id": s.get("inst_id"),
+                    "account": row.get("account") or "",
+                    "strike": row.get("strike"),
+                    "sz": row.get("sz"),
+                    "exp_ms": row.get("exp_ms"),
+                    "status": s.get("status"),
+                    "opt_type": s.get("opt_type") or ("C" if str(s.get("inst_id") or "").endswith("-C") else "P"),
+                    "settle_px": s.get("settle_px"),
+                    "settle_pnl": s.get("settle_pnl"),
+                    "settle_payout": s.get("settle_payout"),
+                    "note": s.get("note", ""),
+                })
+        except Exception as e:  # noqa: BLE001 —— 落盘失败不阻断状态更新
+            error = (error + " | " if error else "") + f"event_append: {type(e).__name__}: {e}"
     with _lock:
         _state["last_run"] = _utc_now()
         _state["last_settled"] = settled
         _state["last_error"] = error
         _state["total_settled"] += len(settled)
-    if settled:
-        by_id = {e.get("id"): e for e in ot.load_ledger()}
-        for s in settled:
-            row = by_id.get(s.get("id")) or {}
-            _append_event({
-                "ts": _utc_now(),
-                "type": "settle",
-                "id": s.get("id"),
-                "inst_id": s.get("inst_id"),
-                "account": row.get("account") or "",
-                "strike": row.get("strike"),
-                "sz": row.get("sz"),
-                "exp_ms": row.get("exp_ms"),
-                "status": s.get("status"),
-                "settle_px": s.get("settle_px"),
-                "settle_pnl": s.get("settle_pnl"),
-                "note": s.get("note", ""),
-            })
     return {"settled": settled, "error": error}
 
 
