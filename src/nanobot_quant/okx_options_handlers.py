@@ -270,7 +270,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             bal = await asyncio.to_thread(ot.account_balance, account)
             cfg = await asyncio.to_thread(ot.account_config, account)
             open_rows = [e for e in ot.load_ledger()
-                         if e.get("kind") == "open_put"
+                         if e.get("kind") in ("open_put", "open_call")
                          and e.get("status") in ("open", "pending", ot.STATUS_SETTLED_REVIEW)]
             resp = {"ok": True, "positions": puts,
                     "balance": bal, "config": cfg,
@@ -372,7 +372,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": str(e)})
 
     async def _ledger_close(request: Request):
-        # 台账手动关账（单步、无资金流）：open 卖 put 行 → closed_manual
+        # 台账手动关账（单步、无资金流）：open 卖 put/call 行 → closed_manual
         # （官方后台手动平仓等系统外操作收尾，仅台账标记，不查 OKX）
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -390,7 +390,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": str(e2)})
         if e is None:
             return JSONResponse({"ok": False,
-                                 "error": "未找到该 open 卖 put 行（可能已关账/结算）"})
+                                 "error": "未找到该 open 卖 put/call 行（可能已关账/结算）"})
         return JSONResponse({"ok": True, "entry": e})
 
     async def _ledger_reopen(request: Request):
@@ -410,7 +410,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": str(e2)})
         if e is None:
             return JSONResponse({"ok": False,
-                                 "error": "未找到该 closed_manual 卖 put 行（仅手动关账行可撤销）"})
+                                 "error": "未找到该 closed_manual 卖 put/call 行（仅手动关账行可撤销）"})
         return JSONResponse({"ok": True, "entry": e})
 
     async def _cover_prefill(request: Request):
@@ -439,6 +439,36 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": str(e2)})
         pre.update({"inst_id": inst_id, "sz": sz,
                     "amount": round((pre["qty"] or 0) * (pre["px"] or 0), 2)})
+        return JSONResponse({"ok": True, **pre})
+
+    async def _exit_prefill(request: Request):
+        # 到期 ITM（call 被行权）现货出货预填：数量 = 面值(lot)×张数、价格默认 = 现货现价
+        inst_id = request.query_params.get("inst_id") or ""
+        try:
+            sz = max(int(request.query_params.get("sz") or "1"), 1)
+        except ValueError:
+            sz = 1
+        if not inst_id:
+            return JSONResponse({"ok": False, "error": "缺少 inst_id"})
+        spot_inst = ot.spot_pair_of(inst_id)
+        if not spot_inst:
+            return JSONResponse({"ok": False,
+                                 "error": "该标的无现货盘（XAU）——call 被行权只能现金结算亏损，无法现货出货"})
+        fam = od.family_of(inst_id)
+        try:
+            spot = await asyncio.to_thread(od.spot_price, fam)
+        except (okx_sdk.OkxSdkError, RuntimeError):
+            spot = None
+        ent = await asyncio.to_thread(
+            ot.find_entry, lambda x: x.get("kind") == "open_call"
+            and x.get("inst_id") == inst_id
+            and x.get("status") == ot.STATUS_SETTLED_ITM)
+        try:
+            pre = await asyncio.to_thread(ot.exit_prefill_defaults,
+                                          inst_id, sz, spot, ent)
+        except (okx_sdk.OkxSdkError, RuntimeError) as e2:
+            return JSONResponse({"ok": False, "error": str(e2)})
+        pre.update({"inst_id": inst_id, "sz": sz, "spot_inst": spot_inst})
         return JSONResponse({"ok": True, **pre})
 
     # ── 担保设置（逐仓自动追加比例，option_params.json）────────
@@ -633,6 +663,52 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         except (OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
 
+    async def _exit_start(request: Request):
+        """出货两步确认第一步：生成一次性令牌（下发前不碰资金）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        account = (body.get("account") or "").strip()
+        inst_id = (body.get("inst_id") or "").strip().upper()
+        spot_inst = (body.get("spot_inst") or "").strip().upper()
+        base_qty = _num(body, "base_qty")
+        quote_amt = _num(body, "quote_amt")
+        if not spot_inst:
+            return JSONResponse({"ok": False, "error": "缺少 spot_inst（现货交易对，如 SOL-USD）"})
+        if (base_qty is None or base_qty <= 0) and (quote_amt is None or quote_amt <= 0):
+            return JSONResponse({"ok": False, "error": "需指定 base_qty 或 quote_amt"})
+        prev = {"spot_inst": spot_inst, "base_qty": base_qty, "quote_amt": quote_amt,
+                "note": ("到期 ITM（call 被行权）现金结算后的现货出货（市价卖出）——"
+                         "U 本位不交币，市价卖出现货 ≈ 等效按 K 出货，把 covered 组合闭回无持仓。")}
+        return JSONResponse({"ok": True, "stage": _stage("exit", {
+            "account": account, "inst_id": inst_id, "spot_inst": spot_inst,
+            "base_qty": base_qty, "quote_amt": quote_amt, "preview": prev})})
+
+    async def _exit_confirm(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        act, perr = _consume(body)
+        if perr:
+            return JSONResponse({"ok": False, "error": perr})
+        if act["action"] != "exit":
+            return JSONResponse({"ok": False, "error": "动作类型不匹配，请重新发起"})
+        p = act["payload"]
+        try:
+            res = await asyncio.to_thread(
+                ot.spot_exit, p["account"], spot_inst=p["spot_inst"],
+                base_qty=p.get("base_qty"), quote_amt=p.get("quote_amt"),
+                ref_inst=p.get("inst_id") or "")
+            return JSONResponse({"ok": True, "entry": res})
+        except (OkxSdkError, RuntimeError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
     app.add_api_route("/config/okx-options", _page, methods=["GET"])
     app.add_api_route("/config/okx-options/expiries", _expiries, methods=["GET"])
     app.add_api_route("/config/okx-options/chain", _chain, methods=["GET"])
@@ -660,3 +736,6 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/cover/start", _cover_start, methods=["POST"])
     app.add_api_route("/config/okx-options/cover/confirm", _cover_confirm, methods=["POST"])
     app.add_api_route("/config/okx-options/cover-prefill", _cover_prefill, methods=["GET"])
+    app.add_api_route("/config/okx-options/exit-prefill", _exit_prefill, methods=["GET"])
+    app.add_api_route("/config/okx-options/exit/start", _exit_start, methods=["POST"])
+    app.add_api_route("/config/okx-options/exit/confirm", _exit_confirm, methods=["POST"])

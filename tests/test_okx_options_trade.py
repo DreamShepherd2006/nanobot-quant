@@ -982,3 +982,121 @@ def test_covered_context_xau_no_spot(_mock_sdk, _patch_entry):
     ctx = ot.covered_context("bot1", "XAU-USD_UM")
     assert ctx["sellable_sz"] == 0
     assert "无现货盘" in ctx["note"]
+
+
+# ── C26 批 2：call 到期判定 + 现货出货 ────────────────────
+
+def _seed_expired_call(inst="SOL-USD_UM-260909-104-C", strike=104.0,
+                       exp_ms=1757145600000, account="bot1", sz=1, lot=0.1):
+    return ot.add_ledger(kind="open_call", status="open", inst_id=inst,
+                         account=account, strike=strike, exp_ms=exp_ms,
+                         sz=sz, lot=lot, px=0.5, premium_usd=0.05,
+                         family="SOL-USD_UM", collateral_usd=1.5329)
+
+
+def test_settle_call_itm_exercised(_mock_sdk, _patch_entry):
+    # 真实案例 104-C：结算价 104.6 > K=104 → settled_itm；毛赔付 = (结算价−K)×面值×张数
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260909-104-C", "171",
+                                            "104.6", "-0.0116")]
+    e = _seed_expired_call()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert len(out) == 1 and out[0]["status"] == ot.STATUS_SETTLED_ITM
+    assert out[0]["opt_type"] == "C"
+    row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
+    assert row["status"] == ot.STATUS_SETTLED_ITM
+    assert row["settle_px"] == pytest.approx(104.6)
+    assert row["settle_payout"] == pytest.approx((104.6 - 104) * 0.1 * 1, abs=1e-6)
+    assert row["settle_pnl"] == pytest.approx(-0.0116, abs=1e-6)
+
+
+def test_settle_call_otm_worthless(_mock_sdk, _patch_entry):
+    # call 到期作废（172）且结算价 ≤ K → settled_otm 自动关账（无毛赔付）
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260909-104-C", "172",
+                                            "104.0", "0.045")]
+    e = _seed_expired_call()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert out[0]["status"] == ot.STATUS_SETTLED_OTM
+    assert out[0]["opt_type"] == "C"
+    row = next(x for x in ot.load_ledger() if x["id"] == e["id"])
+    assert row["status"] == ot.STATUS_SETTLED_OTM
+    assert "settle_payout" not in row
+
+
+def test_settle_call_review_on_contradiction(_mock_sdk, _patch_entry):
+    # call 被行权行（171）但结算价 ≤ K → 矛盾 → review（fail-closed 不猜）
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260909-104-C", "171",
+                                            "104.0", "0.0")]
+    _seed_expired_call()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert out[0]["status"] == ot.STATUS_SETTLED_REVIEW
+    assert "存疑" in out[0]["note"]
+
+
+def test_settle_put_px_equal_strike_still_otm(_mock_sdk, _patch_entry):
+    # put 边界（结算价 == strike → 作废行）保持既有口径，call 改动不影响 put
+    _mock_sdk.account.bills = [_settle_bill("SOL-USD_UM-260906-101-P", "172",
+                                            "101.0", "0.0")]
+    _seed_expired_put()
+    out = ot.settle_expired_puts(now_ms=1757145700000)
+    assert out[0]["status"] == ot.STATUS_SETTLED_OTM
+    assert out[0]["opt_type"] == "P"
+
+
+def test_spot_pair_of():
+    assert ot.spot_pair_of("SOL-USD_UM-260909-106-C") == "SOL-USD"
+    assert ot.spot_pair_of("BTC-USD_UM-260904-80000-P") == "BTC-USD"
+    assert ot.spot_pair_of("XAU-USD_UM-260904-4000-P") == ""   # XAU 无现货盘 → 出货不适用
+    assert ot.spot_pair_of("") == ""
+
+
+def test_spot_exit_market_sell_usd_pair(_mock_sdk, _patch_entry):
+    # 出货 = 现货市价卖出（与补买镜像）：side=sell、tdMode=cross、tag=TAG_EXIT
+    e = ot.spot_exit("bot1", spot_inst="SOL-USD", base_qty=0.1,
+                     ref_inst="SOL-USD_UM-260909-104-C")
+    call = _mock_sdk.calls[-1]
+    assert call["instId"] == "SOL-USD"
+    assert call["side"] == "sell"
+    assert call["ordType"] == "market"
+    assert call["tgtCcy"] == "base_ccy"
+    assert call["tag"] == ot.TAG_EXIT
+    assert call["tdMode"] == "cross"
+    assert call["tradeQuoteCcy"] == "USDC"          # Crypto-USD 对经 send_request 透传
+    assert e["status"] == "filled"
+    assert e["ref_inst"] == "SOL-USD_UM-260909-104-C"
+
+
+def test_spot_exit_quote_amt_and_requires_amount(_mock_sdk, _patch_entry):
+    ot.spot_exit("bot1", spot_inst="SOL-USDT", quote_amt=10.0)
+    call = _mock_sdk.calls[-1]
+    assert call["sz"] == "10.00" and call["tgtCcy"] == "quote_ccy"
+    assert "tradeQuoteCcy" not in call              # 非 -USD 对走 set_order
+    with pytest.raises(OkxSdkError):
+        ot.spot_exit("bot1", spot_inst="SOL-USD")
+    with pytest.raises(OkxSdkError):
+        ot.spot_exit("bot1", spot_inst="SOL-USD", base_qty=0)
+
+
+def test_exit_prefill_defaults_qty_amount():
+    pre = ot.exit_prefill_defaults("SOL-USD_UM-260909-104-C", 1, 99.5)
+    assert pre["qty"] == pytest.approx(0.1)         # 面值 0.1 SOL × 1 张
+    assert pre["amount"] == pytest.approx(9.95)     # 数量 × 现货现价
+    assert pre["px_src"] == "spot"
+    pre2 = ot.exit_prefill_defaults("SOL-USD_UM-260909-104-C", 1, None,
+                                    {"settle_px": 104.6})
+    assert pre2["px_src"] == "settle" and pre2["px"] == pytest.approx(104.6)
+
+
+def test_manual_close_and_reopen_call(_mock_sdk, _patch_entry):
+    # 手动关账/撤销扩展支持 open_call（此前仅 open_put，call 行点按钮必失败）
+    e = _seed_expired_call()
+    assert ot.manual_close_entry(e["id"])["status"] == "closed_manual"
+    assert ot.reopen_entry(e["id"])["status"] == "open"
+
+
+def test_expiry_reminder_includes_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_call", status="open",
+                  inst_id="SOL-USD_UM-260909-104-C", account="bot1",
+                  strike=104, exp_ms=1757145600000, sz=1, lot=0.1)
+    out = ot.expiry_reminder(hours=100000)
+    assert len(out) == 1 and out[0]["opt_type"] == "C"

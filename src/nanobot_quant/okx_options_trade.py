@@ -77,6 +77,7 @@ def suggest_close_px(ask: Optional[float]) -> Optional[float]:
 TAG_OPEN = "nbputo1"
 TAG_CLOSE = "nbputc1"
 TAG_COVER = "nbcov1"
+TAG_EXIT = "nbexit1"
 
 _LEDGER_NAME = "okx_options_ledger.json"
 _TTL = 30.0  # 两步确认一次性 tx_id 有效期（秒）
@@ -930,6 +931,116 @@ def _settle_cover_entry(creds: dict, entry: dict) -> dict:
     return entry
 
 
+def spot_pair_of(inst_id: str) -> str:
+    """期权 instId → 现货交易对（SOL-USD_UM-260909-106-C → SOL-USD）。
+
+    XAU 无现货盘 → 返回 ""（调用方 fail-closed：call 出货不适用）。
+    与页面补买/出货的 币种-USD 规则一致（SOL-USDC 2026-09-23 才开放）。
+    """
+    base = (inst_id or "").split("-")[0].upper()
+    if not base or base == "XAU":
+        return ""
+    return base + "-USD"
+
+
+def spot_exit(account: str, *, spot_inst: str,
+              base_qty: Optional[float] = None,
+              quote_amt: Optional[float] = None,
+              ref_inst: str = "") -> dict:
+    """到期 ITM（call 被行权）现金结算后的现货卖出（出货闭环，C26 批 2）。
+
+    与 spot_cover 镜像（反向）：side=sell、市价单、tdMode=cross（acctLv=3
+    multi-currency 模式，与补买同规则）、现货对 币种-USD。U 本位期权现金结算
+    只赔差价、不交币——call 被行权后现货仍在账上，市价卖出 ≈ 等效按 K 出货，
+    把 covered 组合闭环回无持仓状态（下一轮循环起点）。
+
+    ref_inst = 触发本次出货的 call instId（审计留痕；页面「已出货」判定按此查
+    台账 filled spot_exit 行）。数量二选一：base_qty（基础币）／quote_amt（计价币额）。
+    两步确认由 handlers 层负责（判定自动、出货人工放行——与补买同规则）。
+    """
+    a = _entry_account(account)
+    if base_qty is not None:
+        if base_qty <= 0:
+            raise OkxSdkError("出货数量必须 > 0")
+        sz, tgt = f"{base_qty:.8f}".rstrip("0").rstrip("."), "base_ccy"
+    elif quote_amt is not None:
+        if quote_amt <= 0:
+            raise OkxSdkError("出货金额必须 > 0")
+        sz, tgt = f"{quote_amt:.2f}", "quote_ccy"
+    else:
+        raise OkxSdkError("出货需指定 base_qty 或 quote_amt")
+    entry = add_ledger(
+        kind="spot_exit", account=account or a["label"], inst_id=spot_inst,
+        spot_inst=spot_inst, side="sell", ord_type="market",
+        sz=sz, tgt_ccy=tgt, ref_inst=ref_inst or "", status="pending",
+    )
+    params = {
+        "instId": spot_inst, "side": "sell",
+        "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_EXIT,
+        "tdMode": "cross",   # 见 spot_cover：acctLv=3 现货单须 cross（cash 报 51000）
+    }
+    api = okx_sdk.trade_for(a["creds"])
+    try:
+        if spot_inst.endswith("-USD"):
+            params["tradeQuoteCcy"] = "USDC"
+            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
+        else:
+            data = okx_sdk.check(api.set_order(**params))
+    except Exception as e:
+        update_ledger(lambda x: x["id"] == entry["id"], status="failed",
+                      note=f"下单失败: {e}")
+        raise
+    row = data[0] if isinstance(data, list) and data else {}
+    if row.get("sCode") not in (None, "", "0"):
+        raise OkxSdkError(f"OKX {row.get('sCode')} {row.get('sMsg', '')}".strip())
+    ord_id = row.get("ordId") or ""
+    update_ledger(lambda x: x["id"] == entry["id"], ord_id=ord_id)
+    entry["ord_id"] = ord_id
+    return _settle_exit_entry(a["creds"], entry)
+
+
+def _settle_exit_entry(creds: dict, entry: dict) -> dict:
+    for _ in range(10):
+        if not entry.get("ord_id"):
+            return entry
+        o = poll_order(creds, entry["inst_id"], entry["ord_id"])
+        if o["status"] == "filled":
+            return update_ledger(
+                lambda x: x["id"] == entry["id"], status="filled",
+                filled_px=o["avg_px"], filled_sz=o["acc_fill_sz"], fee=o["fee"],
+            ) or entry
+        if o["status"] == "cancelled":
+            return update_ledger(lambda x: x["id"] == entry["id"],
+                                 status="cancelled") or entry
+        time.sleep(0.5)
+    return entry
+
+
+def exit_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
+                          entry: Optional[dict] = None) -> dict:
+    """出货预填（镜像 cover_prefill_defaults）：数量 = 面值(lot)×张数；
+    金额 = 数量 × 现货现价（fallback：结算价 → 行权价，均可在页面修改）。
+
+    返回 {qty, px, px_src, amount}；取价失败 px=None（页面提示手填）。
+    """
+    lot = FAMILY_LOT.get((inst_id or "").split("-")[0], 0.0)
+    if not lot:
+        try:
+            inst = resolve_instrument(inst_id)
+            lot = float(inst.get("lot") or 0.0)
+        except Exception:
+            lot = 0.0
+    px, src = spot_px, "spot"
+    if not px and entry:
+        if entry.get("settle_px"):
+            px, src = entry.get("settle_px"), "settle"
+        elif entry.get("strike"):
+            px, src = entry.get("strike"), "strike"
+    qty = round(lot * sz, 6) if lot else 0.0
+    return {"qty": qty, "px": px, "px_src": src if px else None,
+            "amount": round(qty * px, 2) if px else None}
+
+
 # ── 持仓 / 到期监控（只读）──────────────────────────────────
 
 def account_config(account: str = "") -> dict:
@@ -1088,11 +1199,11 @@ def _parse_exp(inst_id: str) -> Optional[int]:
 
 
 def expiry_reminder(account: str = "", hours: int = 72) -> list[dict]:
-    """台账中 72h 内到期 / 已到期未确认的 open put 提醒。"""
+    """台账中 72h 内到期 / 已到期未确认的 open put/call 提醒。"""
     now_ms = int(time.time() * 1000)
     out = []
     for e in load_ledger():
-        if e.get("kind") != "open_put" or e.get("status") != "open":
+        if e.get("kind") not in ("open_put", "open_call") or e.get("status") != "open":
             continue
         exp = int(e.get("exp_ms") or 0)
         if exp and exp - now_ms <= hours * 3600_000:
@@ -1100,6 +1211,7 @@ def expiry_reminder(account: str = "", hours: int = 72) -> list[dict]:
                 "id": e["id"], "inst_id": e["inst_id"], "account": e.get("account"),
                 "strike": e.get("strike"), "exp_ms": exp, "sz": e.get("sz"),
                 "premium_usd": e.get("premium_usd"), "lot": e.get("lot"),
+                "opt_type": ("C" if e.get("kind") == "open_call" else "P"),
                 "expired": exp <= now_ms,
             })
     return out
@@ -1122,24 +1234,29 @@ STATUS_SETTLED_REVIEW = "settled_review"
 
 
 def settle_expired_puts(now_ms=None) -> list:
-    """台账已到期仍 open 的 put → 查 OKX 交割账单判定 作废/被行权 → 更新台账。
+    """台账已到期仍 open 的 put/call → 查 OKX 交割账单判定 作废/被行权 → 更新台账。
 
-    判定信号（不做单信号赌博）——每笔结算行交叉校验：
-      subType=172（到期作废）且 px(结算价) ≥ strike → settled_otm
-      subType=171（到期被行权）且 px < strike        → settled_itm
-      subType 与 px 矛盾 / 其他交割 subType（170 等） → settled_review（fail-closed）
-      账单未出（OKX 结算后 ~27s 出现）/ 查不到         → 保持 open，下轮重试
-    返回本次判定列表 [{id, inst_id, status, settle_px, settle_pnl, note}]。
+    判定信号（不做单信号赌博）——每笔结算行交叉校验（按 opt_type 分派）：
+      put（卖方）：
+        172 到期作废 且 px(结算价) ≥ strike → settled_otm
+        171 到期被行权 且 px < strike        → settled_itm
+      call（卖方 covered，C26 批 2）：
+        172 到期作废 且 px ≤ strike → settled_otm
+        171 到期被行权 且 px > strike → settled_itm
+      矛盾 / 其他交割 subType（170 等） → settled_review（fail-closed）
+      账单未出（OKX 结算后 ~27s 出现）/ 查不到 → 保持 open，下轮重试
+    返回本次判定列表 [{id, inst_id, opt_type, status, settle_px, settle_pnl, note}]。
     """
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     settled = []
     for e in load_ledger():
-        if e.get("kind") != "open_put" or e.get("status") != "open":
+        if e.get("kind") not in ("open_put", "open_call") or e.get("status") != "open":
             continue
         exp_ms = int(e.get("exp_ms") or 0)
         if not exp_ms or exp_ms > now_ms:
             continue  # 未到期
         inst_id = e.get("inst_id") or ""
+        opt_type = "C" if e.get("kind") == "open_call" else "P"
         row = _find_delivery_bill(e.get("account") or "", inst_id, exp_ms, now_ms)
         if row is None:
             continue  # 账单未出/延迟 → 保持 open，下轮重试
@@ -1147,7 +1264,7 @@ def settle_expired_puts(now_ms=None) -> list:
         px = _f(row.get("px"))          # 账单「成交价」= OKX 结算价（101-P: 105.0）
         pnl = _f(row.get("pnl"))
         strike = float(e.get("strike") or 0)
-        result = _classify_settlement(sub, px, strike)
+        result = _classify_settlement(sub, px, strike, opt_type)
         fields = {
             "status": result["status"],
             "settle_subtype": sub,
@@ -1155,22 +1272,29 @@ def settle_expired_puts(now_ms=None) -> list:
             "settle_pnl": round(pnl, 6),
             "settle_ts": _utc_now(),
         }
-        # ITM：毛赔付 = (行权价−结算价)×面值×张数（净盈亏 settle_pnl 已含权利金收入）
+        # ITM：毛赔付 = 实值部分×面值×张数（净盈亏 settle_pnl 已含权利金收入）
+        # put = (行权价−结算价)、call = (结算价−行权价)
         if result["status"] == STATUS_SETTLED_ITM:
             base = (inst_id or "").split("-")[0]
             lot = FAMILY_LOT.get(base)
             sz = int(e.get("sz") or 0)
-            fields["settle_payout"] = (round((strike - px) * lot * sz, 6)
+            intrinsic = (px - strike) if opt_type == "C" else (strike - px)
+            fields["settle_payout"] = (round(intrinsic * lot * sz, 6)
                                         if lot and sz and px is not None else None)
         if result["status"] == STATUS_SETTLED_REVIEW:
             fields["note"] = result["note"]
         if update_ledger(lambda x: x["id"] == e["id"], **fields) is not None:
             settled.append({"id": e["id"], "inst_id": inst_id,
+                            "opt_type": opt_type,
                             "status": result["status"], "settle_px": px,
                             "settle_pnl": round(pnl, 6),
                             "settle_payout": fields.get("settle_payout"),
                             "note": result.get("note", "")})
     return settled
+
+
+#: 语义别名（判定已覆盖 put/call；旧名保留兼容 handlers/daemon/测试）
+settle_expired_options = settle_expired_puts
 
 
 def _find_delivery_bill(account: str, inst_id: str, begin_ms: int,
@@ -1186,18 +1310,28 @@ def _find_delivery_bill(account: str, inst_id: str, begin_ms: int,
     return hits[0] if hits else None
 
 
-def _classify_settlement(sub: str, px: float, strike: float) -> dict:
-    """账单行 subType + 结算价交叉判定 OTM/ITM（矛盾 → review，不猜）。"""
+def _classify_settlement(sub: str, px: float, strike: float,
+                         opt_type: str = "P") -> dict:
+    """账单行 subType + 结算价交叉判定 OTM/ITM（矛盾 → review，不猜）。
+
+    put：OTM = 结算价 ≥ K（puts 无价值）；ITM = 结算价 < K。
+    call：OTM = 结算价 ≤ K；ITM = 结算价 > K（被行权，赔 (结算价−K)×面值）。
+    """
+    is_call = str(opt_type).upper() == "C"
     if sub == _BILL_SUBTYPE_WORTHLESS:            # 172 到期作废
-        if px >= strike:
+        ok = px <= strike if is_call else px >= strike
+        if ok:
             return {"status": STATUS_SETTLED_OTM}
         return {"status": STATUS_SETTLED_REVIEW,
-                "note": "作废行但结算价 {} < strike {}，账单存疑".format(px, strike)}
+                "note": "作废行但结算价 {} {} strike {}，账单存疑".format(
+                    px, ">" if is_call else "<", strike)}
     if sub == _BILL_SUBTYPE_EXERCISED:            # 171 到期被行权
-        if px < strike:
+        ok = px > strike if is_call else px < strike
+        if ok:
             return {"status": STATUS_SETTLED_ITM}
         return {"status": STATUS_SETTLED_REVIEW,
-                "note": "被行权行但结算价 {} ≥ strike {}，账单存疑".format(px, strike)}
+                "note": "被行权行但结算价 {} {} strike {}，账单存疑".format(
+                    px, "≤" if is_call else "≥", strike)}
     return {"status": STATUS_SETTLED_REVIEW,
             "note": "交割账单未知 subType={}，请人工核对".format(sub)}
 
@@ -1251,17 +1385,18 @@ def _norm_liq(v) -> Optional[float]:
     except ValueError:
         return None
 def manual_close_entry(entry_id: str, note: str = "") -> Optional[dict]:
-    """台账手动关账（单步、无资金流）：把 open 卖 put 行标 closed_manual。
+    """台账手动关账（单步、无资金流）：把 open 卖 put/call 行标 closed_manual。
 
     用途：OKX 官方后台手动平仓等系统外操作收尾——仓位在交易所已消失，
     但台账状态机只认本系统成交路径，open 行会变 phantom（settle 只处理
     已到期行、该仓永远查不到交割账单）。手动关账只做台账标记留痕，不查
     OKX、不回填平仓价/盈亏（外部成交不在本系统内）。
-    仅 kind=open_put 且 status=open 可关；已 settled/closed 行拒绝（幂等）。
+    仅 kind=open_put/open_call 且 status=open 可关；已 settled/closed 行拒绝（幂等）。
     """
     default_note = "官方后台平仓（系统外操作），手动关账"
     e = update_ledger(
-        lambda x: x.get("kind") == "open_put" and x.get("status") == "open"
+        lambda x: x.get("kind") in ("open_put", "open_call")
+                  and x.get("status") == "open"
                   and x.get("id") == entry_id,
         status="closed_manual",
         close_ts=_utc_now(),
@@ -1272,11 +1407,11 @@ def manual_close_entry(entry_id: str, note: str = "") -> Optional[dict]:
 def reopen_entry(entry_id: str) -> Optional[dict]:
     """撤销手动关账：closed_manual → open（误关账恢复，交回到期巡检/settle 管辖）。
 
-    仅 kind=open_put 且 status=closed_manual 可撤销；settled/closed 是资金流终态
-    （到期结算/买回平仓后仓位已了结），不可逆。恢复后保留原 note 并追加撤销标记，
-    close_ts 残留无碍（open 行渲染不显示）。
+    仅 kind=open_put/open_call 且 status=closed_manual 可撤销；settled/closed 是
+    资金流终态（到期结算/买回平仓后仓位已了结），不可逆。恢复后保留原 note 并
+    追加撤销标记，close_ts 残留无碍（open 行渲染不显示）。
     """
-    cur = find_entry(lambda x: x.get("kind") == "open_put"
+    cur = find_entry(lambda x: x.get("kind") in ("open_put", "open_call")
                      and x.get("status") == "closed_manual" and x.get("id") == entry_id)
     if cur is None:
         return None
