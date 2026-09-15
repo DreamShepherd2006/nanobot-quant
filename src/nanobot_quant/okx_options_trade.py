@@ -1469,21 +1469,60 @@ def _parse_exp(inst_id: str) -> Optional[int]:
 
 
 def expiry_reminder(account: str = "", hours: int = 72) -> list[dict]:
-    """台账中 72h 内到期 / 已到期未确认的 open put/call 提醒。"""
+    """到期待办提醒（C28 1c）：按台账状态分派动作，页面据此给出对应入口。
+
+    action 语义：
+      close  = 未到期但临近 → 可平仓了结（也可等现金结算）
+      wait   = 已到期、交割账单未出 → 等自动判定（无需动作）
+      cover  = put 被行权(ITM)、尚未补买 → 补买（两步确认）
+      exit   = call 被行权(ITM)、尚未出货 → 出货（两步确认）
+      review = 判定矛盾 → 人工核对台账与 OKX 账单
+
+    闭环判定不依赖判定事件（事件是一次性快照、追溯补单后不会更新），
+    直接扫台账 filled 的 spot_cover / spot_exit 行——与台账 tab 的判定口径一致。
+    """
     now_ms = int(time.time() * 1000)
+    rows = load_ledger()
+    closed: set[tuple[str, str]] = set()
+    for x in rows:
+        if x.get("status") == "filled" and x.get("kind") in ("spot_cover", "spot_exit"):
+            base = str(x.get("inst_id") or "").split("-")[0]
+            if base:
+                closed.add((base, x["kind"]))
     out = []
-    for e in load_ledger():
-        if e.get("kind") not in ("open_put", "open_call") or e.get("status") != "open":
+    for e in rows:
+        kind = e.get("kind")
+        if kind not in ("open_put", "open_call"):
             continue
+        is_call = kind == "open_call"
+        st = e.get("status")
         exp = int(e.get("exp_ms") or 0)
-        if exp and exp - now_ms <= hours * 3600_000:
-            out.append({
-                "id": e["id"], "inst_id": e["inst_id"], "account": e.get("account"),
-                "strike": e.get("strike"), "exp_ms": exp, "sz": e.get("sz"),
-                "premium_usd": e.get("premium_usd"), "lot": e.get("lot"),
-                "opt_type": ("C" if e.get("kind") == "open_call" else "P"),
-                "expired": exp <= now_ms,
-            })
+        item = {
+            "id": e.get("id"), "inst_id": e.get("inst_id"), "account": e.get("account"),
+            "strike": e.get("strike"), "exp_ms": exp, "sz": e.get("sz"),
+            "premium_usd": e.get("premium_usd"), "lot": e.get("lot"),
+            "opt_type": ("C" if is_call else "P"), "kind": kind, "status": st,
+        }
+        if st == "open":
+            if not exp or exp - now_ms > hours * 3600_000:
+                continue
+            expired = exp <= now_ms
+            item["expired"] = expired
+            item["action"] = "wait" if expired else "close"
+            out.append(item)
+        elif st == STATUS_SETTLED_ITM:
+            base = str(e.get("inst_id") or "").split("-")[0]
+            if (base, "spot_exit" if is_call else "spot_cover") in closed:
+                continue
+            item["expired"] = True
+            item["action"] = "exit" if is_call else "cover"
+            out.append(item)
+        elif st == STATUS_SETTLED_REVIEW:
+            item["expired"] = True
+            item["action"] = "review"
+            out.append(item)
+    _prio = {"cover": 0, "exit": 0, "review": 1, "wait": 2, "close": 3}
+    out.sort(key=lambda x: (_prio.get(x["action"], 9), x.get("exp_ms") or 0))
     return out
 
 
