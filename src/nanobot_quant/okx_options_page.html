@@ -146,6 +146,32 @@
   <div class="note">卖 put 成交后自动把该仓保证金追加至「strike×面值×张数 × 比例」（100% = 全损担保：浮亏上限 &lt; 保证金 → 数学上无强平路径，可扛到到期；追加资金平仓/到期后自动释放）。0% = 关闭自动追加（仅平台默认 IM 冻结，浮亏可能击穿提前强平）。范围 0–200%。</div>
 </div>
 
+<div class="card" id="selCard" style="border:none;padding:10px 0 0;border-radius:0">
+  <div class="ctl">
+    <label>🎯 合约选择（卖 put 候选）</label>
+    <input type="number" id="selDist" min="0" max="50" step="0.5" value="5" style="width:70px" title="strike 必须 ≤ 基准价×(1−该百分比)">
+    <span class="hint">% 距离</span>
+    <input type="number" id="selExpMin" min="0" max="180" step="1" value="3" style="width:60px">
+    <span class="hint">–</span>
+    <input type="number" id="selExpMax" min="0" max="180" step="1" value="7" style="width:60px">
+    <span class="hint">天</span>
+    <input type="number" id="selDMin" min="0" max="1" step="0.05" value="0.15" style="width:70px">
+    <span class="hint">–</span>
+    <input type="number" id="selDMax" min="0" max="1" step="0.05" value="0.35" style="width:70px">
+    <span class="hint">delta</span>
+    <input type="number" id="selTopN" min="1" max="20" step="1" value="5" style="width:60px">
+    <span class="hint">候选 top N</span>
+    <select id="selSort" style="width:auto">
+      <option value="net_yield">排序：净收益率</option>
+      <option value="net_premium">排序：净权利金</option>
+      <option value="apr">排序：年化</option>
+    </select>
+    <button class="btn-ghost" id="saveSelBtn">保存</button>
+    <span class="hint" id="selHint"></span>
+  </div>
+  <div class="note">候选生成口径（详见 docs/quant-system.md 33.26）：① 到期天数窗口 ② 有买盘（bid&gt;0，否则卖不出去）③ <b>strike ≤ 基准价×(1−距离%)</b> 硬过滤（安全边际优先，不满足的档直接排除）④ delta 带（控制被行权概率；填 0 / 0 关闭）⑤ 排序。净收益率 = <b>净权利金 ÷ 担保额</b>，净权利金 = bid×面值 − 名义×0.03% 手续费（期权费按名义收）。基准价 = 标的实时现价。</div>
+</div>
+
 <div class="card" id="liveCard" style="border:none;padding:10px 0 0;border-radius:0">
   <div class="ctl">
     <label>🟤 到期巡检（自动判定）</label>
@@ -171,6 +197,14 @@
     <select id="expiry" style="width:auto;font-size:.8em" title="更多到期组合"><option value="">近 3 个到期（组合）</option></select>
   </div>
   <div id="groups"></div>
+  <div id="candWrap" style="margin-top:12px">
+    <div class="ctl" style="margin-bottom:4px">
+      <b style="font-size:.9em">🎯 卖 put 候选（按「🎯 合约选择」参数自动挑档）</b>
+      <button class="btn-ghost" id="candRefresh" style="font-size:.85em;padding:4px 10px">🔄 生成候选</button>
+      <span class="hint" id="candMeta"></span>
+    </div>
+    <div id="candBody"><div class="empty">点「🔄 生成候选」：按当前选择参数（距离 / 到期 / delta 过滤 + 净收益率排序）挑出可卖合约</div></div>
+  </div>
   <div class="note" id="priceNote"></div>
 </div>
 
@@ -438,6 +472,11 @@ async function loadChain() {
     if (!j.ok) throw new Error(j.error || ("HTTP " + r.status));
     renderChain(j.data);
     $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", {hour12: false});
+    // 首屏自动生成一次卖 put 候选（用户点过刷新后不再自动覆盖）
+    if ($("candBody") && $("candBody").dataset.auto !== "1") {
+      $("candBody").dataset.auto = "1";
+      loadCandidates();
+    }
   } catch (e) { showErr(e.message); } finally {
     $("loadingBanner").style.display = "none"; btn.disabled = false;
   }
@@ -1212,6 +1251,82 @@ async function saveParams() {
   }
 }
 
+// ── C24：合约选择（卖 put 候选）────────────────────────
+async function loadSelector() {
+  try {
+    const r = await fetch("/config/okx-options/params");
+    const j = await r.json();
+    const s = (j.ok && j.params && j.params.selector) || {};
+    if (s.min_distance_pct !== undefined) $("selDist").value = s.min_distance_pct;
+    if (s.expiry_min_days !== undefined) $("selExpMin").value = s.expiry_min_days;
+    if (s.expiry_max_days !== undefined) $("selExpMax").value = s.expiry_max_days;
+    if (s.delta_min !== undefined) $("selDMin").value = s.delta_min;
+    if (s.delta_max !== undefined) $("selDMax").value = s.delta_max;
+    if (s.top_n !== undefined) $("selTopN").value = s.top_n;
+    if (s.sort_by) $("selSort").value = s.sort_by;
+  } catch (e) { $("selHint").textContent = "参数读取失败"; }
+}
+async function saveSelector() {
+  const sel = {
+    min_distance_pct: Number($("selDist").value),
+    expiry_min_days: Number($("selExpMin").value),
+    expiry_max_days: Number($("selExpMax").value),
+    delta_min: Number($("selDMin").value),
+    delta_max: Number($("selDMax").value),
+    top_n: Number($("selTopN").value),
+    sort_by: $("selSort").value,
+  };
+  try {
+    const j = await jpost("/config/okx-options/selector", {selector: sel});
+    const p = (j.params && j.params.selector) || sel;
+    $("selHint").textContent = "✅ 已保存（距离 ≥" + p.min_distance_pct + "% · 到期 " + p.expiry_min_days + "–" + p.expiry_max_days + " 天）";
+    loadCandidates();
+  } catch (e) { $("selHint").textContent = "❌ " + e.message; }
+}
+async function loadCandidates() {
+  const fam = ($("family") && $("family").value) || "BTC-USD_UM";
+  $("candBody").innerHTML = '<div class="empty">⏳ 生成候选…</div>';
+  try {
+    const r = await fetch("/config/okx-options/candidates?family=" + encodeURIComponent(fam));
+    const j = await r.json();
+    if (!j.ok) { $("candBody").innerHTML = '<div class="empty">❌ ' + esc(j.error || "拉取失败") + '</div>'; return; }
+    renderCandidates(j);
+  } catch (e) { $("candBody").innerHTML = '<div class="empty">❌ ' + esc(e.message) + '</div>'; }
+}
+function renderCandidates(d) {
+  const s = d.selector || {}, f = d.filtered || {};
+  $("candMeta").textContent = "基准 " + fmt(d.base_px, 2) + " · 距离 ≥" + fmt(s.min_distance_pct, 1) + "% · 到期 " +
+    fmt(s.expiry_min_days, 0) + "–" + fmt(s.expiry_max_days, 0) + " 天 · delta " + fmt(s.delta_min, 2) + "–" + fmt(s.delta_max, 2) +
+    " · 过滤[到期 " + (f.expiry || 0) + " · 无买盘 " + (f.no_bid || 0) + " · 距离 " + (f.distance || 0) + " · delta " + (f.delta || 0) +
+    "] · 命中 " + (d.scanned || 0) + (d.note ? " · " + d.note : "");
+  const cs = d.candidates || [];
+  if (!cs.length) {
+    $("candBody").innerHTML = '<div class="empty">无候选：可放宽距离 / delta 带 / 到期窗口后重试</div>';
+    return;
+  }
+  let h = '<table><thead><tr><th>合约</th><th>到期</th><th>天</th><th>strike</th><th>距现价</th><th>bid</th><th>IV</th><th>delta</th>' +
+          '<th>担保额</th><th>净权利金</th><th>净收益率</th><th>年化</th><th>操作</th></tr></thead><tbody>';
+  for (const c of cs) {
+    const dist = (d.base_px && c.strike) ? (c.strike / d.base_px - 1) * 100 : null;
+    h += '<tr><td>' + esc(c.inst_id) + '</td><td>' + esc(c.date || "") + '</td><td>' + fmt(c.days, 0) + '</td><td>' + fmt(c.strike, 2) +
+      '</td><td>' + (dist === null ? "—" : (dist > 0 ? "+" : "") + fmt(dist, 2) + "%") + '</td><td>' + fmt(c.bid, 4) + '</td><td>' +
+      (c.iv === null || c.iv === undefined ? "—" : fmt(c.iv, 1) + "%") + '</td><td>' +
+      (c.delta === null || c.delta === undefined ? "—" : fmt(c.delta, 3)) + '</td><td>' + usd(c.notional_usd) + '</td><td>' +
+      usd(c.net_premium_usd) + '</td><td><b>' + fmt(c.net_yield_pct, 3) + '%</b></td><td>' + fmt(c.apr_pct, 1) + '%</td>' +
+      '<td><button class="btn-ghost" data-sell="' + esc(c.inst_id) + '" style="font-size:.8em;padding:3px 8px">卖出</button></td></tr>';
+  }
+  h += '</tbody></table>';
+  $("candBody").innerHTML = h;
+  $("candBody").querySelectorAll("button[data-sell]").forEach(b => {
+    b.addEventListener("click", () => {
+      if (typeof openSellFor === "function") openSellFor(b.dataset.sell);
+      else showErr("页面脚本缺少 openSellFor，请硬刷新（Ctrl+F5）");
+    });
+  });
+}
+$("saveSelBtn").addEventListener("click", saveSelector);
+$("candRefresh").addEventListener("click", loadCandidates);
+
 // ── 到期巡检（S3 daemon 状态 / 最近判定事件）──────────
 const ST_LABEL = {settled_otm: "作废·OTM", settled_itm: "被行权·ITM", settled_review: "待核对"};
 function renderLiveEvents(evs) {
@@ -1289,6 +1404,7 @@ loadAccounts();
 loadExpiries();   // 内部负责首次默认最近到期后的 loadChain
 loadReminder();
 loadParams();
+loadSelector();
 loadLive();
 </script>
 </body>
