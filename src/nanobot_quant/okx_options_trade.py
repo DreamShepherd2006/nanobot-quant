@@ -645,7 +645,35 @@ def poll_order(creds: dict, inst_id: str, ord_id: str) -> dict:
         "avg_px": _f(r.get("avgPx")),
         "acc_fill_sz": _f(r.get("accFillSz")),
         "fee": _f(r.get("fee")),
+        "fee_ccy": (r.get("feeCcy") or ""),
     }
+
+
+def fee_usd_fields(fee, side: str, base: str = "", px: float = 0.0,
+                   option: bool = False, fee_ccy: str = "") -> dict:
+    """手续费归一为 USD 口径（台账展示统一口径）。
+
+    OKX 现货手续费从「所得币」扣：买单扣**基础币**（fee 单位 = base，如补买
+    0.1 SOL 的 fee 为 0.0001 SOL，按成交价 104.25 折算 ≈ $0.0104），卖单扣
+    **计价币**（USDC）；期权手续费恒以计价币（USDC）计。台账保留交易所原值
+    fee，另记 fee_ccy（原始币种）与 fee_usd（按成交价折算）供页面统一按
+    USD 展示。
+
+    背景（2026-09-15）：此前只存 fee 数值、不存币种，补买行把 0.0001 SOL
+    当成 $0.0001 展示，与真实支出（$0.0104）相差约 100 倍。
+    """
+    f = _f(fee)
+    ccy = (fee_ccy or "").strip().upper()
+    if not ccy:
+        ccy = (base or "").upper() if (not option and side == "buy") else "USDC"
+    usd = f
+    if ccy not in ("", "USDC", "USDT"):
+        try:
+            if px:
+                usd = f * float(px)
+        except (TypeError, ValueError):
+            usd = f
+    return {"fee": f, "fee_ccy": ccy, "fee_usd": round(abs(usd), 8)}
 
 
 def cancel_order(account: str, *, inst_id: str, ord_id: str) -> dict:
@@ -795,8 +823,10 @@ def _settle_open_entry(creds: dict, entry: dict, kind: str = "open_put") -> dict
             filled_sz = o["acc_fill_sz"] or entry.get("sz") or 0
             upd = update_ledger(
                 lambda x: x["id"] == entry["id"], status="open",
-                filled_px=px, filled_sz=filled_sz, fee=o["fee"],
+                filled_px=px, filled_sz=filled_sz,
                 premium_usd=round(px * entry["lot"] * filled_sz, 4),
+                **fee_usd_fields(o.get("fee"), "sell", px=px, option=True,
+                                 fee_ccy=o.get("fee_ccy")),
             )
             if upd:
                 if kind == "open_put":
@@ -938,8 +968,10 @@ def _settle_close_entry(creds: dict, entry: dict, open_entry: dict) -> dict:
             open_px = open_entry.get("filled_px") or open_entry.get("px") or 0.0
             pnl = (open_px - px) * lot * int(entry.get("sz") or 0)
             update_ledger(lambda x: x["id"] == entry["id"], status="closed",
-                          filled_px=px, filled_sz=o["acc_fill_sz"], fee=o["fee"],
-                          pnl_usd=round(pnl, 4))
+                          filled_px=px, filled_sz=o["acc_fill_sz"],
+                          pnl_usd=round(pnl, 4),
+                          **fee_usd_fields(o.get("fee"), "buy", px=px,
+                                           option=True, fee_ccy=o.get("fee_ccy")))
             update_ledger(lambda x: x["id"] == open_entry["id"], status="closed",
                           close_ts=entry["ts"], pnl_usd=round(pnl, 4))
             return update_ledger(lambda x: x["id"] == entry["id"]) or entry
@@ -1018,9 +1050,12 @@ def _settle_cover_entry(creds: dict, entry: dict) -> dict:
             return entry
         o = poll_order(creds, entry["inst_id"], entry["ord_id"])
         if o["status"] == "filled":
+            base = (entry.get("inst_id") or "").split("-")[0]
             return update_ledger(
                 lambda x: x["id"] == entry["id"], status="filled",
-                filled_px=o["avg_px"], filled_sz=o["acc_fill_sz"], fee=o["fee"],
+                filled_px=o["avg_px"], filled_sz=o["acc_fill_sz"],
+                **fee_usd_fields(o.get("fee"), "buy", base=base,
+                                 px=o["avg_px"], fee_ccy=o.get("fee_ccy")),
             ) or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
@@ -1105,7 +1140,9 @@ def _settle_exit_entry(creds: dict, entry: dict) -> dict:
         if o["status"] == "filled":
             return update_ledger(
                 lambda x: x["id"] == entry["id"], status="filled",
-                filled_px=o["avg_px"], filled_sz=o["acc_fill_sz"], fee=o["fee"],
+                filled_px=o["avg_px"], filled_sz=o["acc_fill_sz"],
+                **fee_usd_fields(o.get("fee"), "sell", px=o["avg_px"],
+                                 fee_ccy=o.get("fee_ccy")),
             ) or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],

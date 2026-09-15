@@ -1169,6 +1169,27 @@ def test_option_fee_est_uses_notional():
     assert ot.option_fee_est(None, 0.1, 1) == 0.0
 
 
+def test_fee_usd_fields_normalises_ccy():
+    # 现货补买：fee 以基础币计（0.0001 SOL @104.25 ≈ $0.010425）
+    f = ot.fee_usd_fields(-0.0001, "buy", base="SOL", px=104.25)
+    assert f["fee_ccy"] == "SOL"
+    assert f["fee_usd"] == pytest.approx(0.010425, rel=1e-3)
+    # 现货出货：fee 以计价币（USDC）计 → 原值即 USD
+    f = ot.fee_usd_fields(-0.0101, "sell", px=101.66)
+    assert f["fee_ccy"] == "USDC"
+    assert f["fee_usd"] == pytest.approx(0.0101)
+    # 期权（含 buy 侧买回）：恒以计价币计，不按 base 折算
+    f = ot.fee_usd_fields(-0.0031, "buy", base="SOL", px=104.0, option=True)
+    assert f["fee_ccy"] == "USDC"
+    assert f["fee_usd"] == pytest.approx(0.0031)
+    # 交易所给出币种时以其为准
+    f = ot.fee_usd_fields(-0.0001, "buy", base="SOL", px=104.25, fee_ccy="SOL")
+    assert f["fee_usd"] == pytest.approx(0.010425, rel=1e-3)
+    # 缺失/异常值不炸
+    f = ot.fee_usd_fields(None, "sell")
+    assert f["fee"] == 0.0 and f["fee_usd"] == 0.0
+
+
 def test_preview_open_put_reports_net_premium():
     p = ot.preview_open_put("BTC-USD_UM-260904-80000-P", 1, "limit", px=110.0)
     fee = ot.option_fee_est(80000, 0.01, 1)

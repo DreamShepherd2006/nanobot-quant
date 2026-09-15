@@ -605,11 +605,19 @@ async function loadPositions() {
   } catch (e) { $("posBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
 }
 
-// 手续费显示：OKX fee 字段为支出（负值/0）——统一按绝对值展示，缺失为 —
-function feeUsd(v) {
-  if (v === null || v === undefined || v === "" || isNaN(Number(v))) return '<span class="na">—</span>';
-  const n = Math.abs(Number(v));
-  return '<span title="实际手续费（交易所扣收，已由 OKX 订单详情回填；期权按名义价值约 0.03%、现货 0.1%）">$' + n.toFixed(4) + '</span>';
+// 手续费显示（统一 USD 口径）：优先 fee_usd（后端按币种折算）；历史行只有 fee 数值
+// 且币种未记录（OKX 现货买单手续费以基础币扣，数值≠USD）——显示原值并标注。
+function feeUsd(e) {
+  if (!e) return '<span class="na">—</span>';
+  const raw = e.fee, usd = e.fee_usd;
+  const okUsd = usd !== null && usd !== undefined && usd !== "" && !isNaN(Number(usd));
+  const okRaw = raw !== null && raw !== undefined && raw !== "" && !isNaN(Number(raw));
+  if (!okUsd && !okRaw) return '<span class="na">—</span>';
+  if (!okUsd) return '<span title="历史记录：仅存数值、未记录币种（OKX 现货买单手续费以基础币扣，该数值不是 USD）">' + Math.abs(Number(raw)).toFixed(4) + '</span>';
+  const ccy = (e.fee_ccy || "USDC");
+  const tip = "实际手续费（交易所扣收；期权按名义约 0.03%、现货 0.1%）" +
+    (ccy && ccy !== "USDC" ? "｜原始 " + raw + " " + ccy + "（按成交价折 USD）" : "");
+  return '<span title="' + tip + '">$' + Math.abs(Number(usd)).toFixed(4) + '</span>';
 }
 
 // 历史遗留行赔付回填（单步、纯本地记账）——settled_* 但缺 settle_px/settle_pnl 的行
@@ -674,7 +682,7 @@ async function loadLedger() {
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
-        '</td><td>' + usd(e.premium_usd) + '</td><td class="mono">' + feeUsd(e.fee) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
+        '</td><td>' + usd(e.premium_usd) + '</td><td class="mono">' + feeUsd(e) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
         '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
         '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
     }
