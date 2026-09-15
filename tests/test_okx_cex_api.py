@@ -101,3 +101,20 @@ def test_empty_balance_details(fake_account, default_creds):
     fake_account.payloads["get_balance"] = {"code": "0", "data": [{}], "msg": ""}
     bal = m.get_balance()
     assert bal == {"total_eq": 0.0, "details": []}
+
+
+def test_to_inst_id_accepts_complete_inst_id():
+    """完整 instId 原样返回。
+
+    否则 X 前缀的现货对会被二次加后缀（XAUT-USDT → XAUT-USDT-USDT），
+    OKX 返回 code=51001 Instrument doesn't exist（2026-09-15 线上实测）。
+    """
+    from nanobot_quant.okx_cex_data import _to_inst_id
+
+    assert _to_inst_id("XAUT-USDT") == "XAUT-USDT"
+    assert _to_inst_id("XSPCX-USDT") == "XSPCX-USDT"
+    assert _to_inst_id("SOL-USDT") == "SOL-USDT"
+    assert _to_inst_id("xaut-usdt") == "XAUT-USDT"      # 大小写归一
+    # 裸 ticker 行为不变
+    assert _to_inst_id("BTC") == "BTC-USDT"
+    assert _to_inst_id("XAAPL") == "XAAPL-USDT"

@@ -1048,11 +1048,11 @@ def test_covered_context_fee_slippage_coverage(_mock_sdk, _patch_entry, monkeypa
     assert ot.covered_context("bot1", "SOL-USD_UM")["sellable_sz"] == 0
 
 
-def test_covered_context_xau_no_spot(_mock_sdk, _patch_entry):
-    """XAU 无现货盘：提示 covered 语义受限，可卖 0（不需余额）。"""
+def test_covered_context_xau_uses_xaut(_mock_sdk, _patch_entry):
+    """XAU 家族的现货币种是 XAUT：余额按 XAUT 匹配，note 说明现货对为 XAUT-USDT。"""
     ctx = ot.covered_context("bot1", "XAU-USD_UM")
-    assert ctx["sellable_sz"] == 0
-    assert "无现货盘" in ctx["note"]
+    assert ctx["sellable_sz"] == 0            # mock 无 XAUT 余额
+    assert "XAUT" in ctx["note"]
 
 
 # ── C26 批 2：call 到期判定 + 现货出货 ────────────────────
@@ -1116,7 +1116,8 @@ def test_settle_put_px_equal_strike_still_otm(_mock_sdk, _patch_entry):
 def test_spot_pair_of():
     assert ot.spot_pair_of("SOL-USD_UM-260909-106-C") == "SOL-USD"
     assert ot.spot_pair_of("BTC-USD_UM-260904-80000-P") == "BTC-USD"
-    assert ot.spot_pair_of("XAU-USD_UM-260904-4000-P") == ""   # XAU 无现货盘 → 出货不适用
+    # XAU 的现货标的是 XAUT（Tether Gold）→ OKX 现货对 XAUT-USDT
+    assert ot.spot_pair_of("XAU-USD_UM-260904-4000-P") == "XAUT-USDT"
     assert ot.spot_pair_of("") == ""
 
 

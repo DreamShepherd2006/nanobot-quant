@@ -1182,16 +1182,23 @@ def _settle_cover_entry(creds: dict, entry: dict) -> dict:
     return entry
 
 
-def spot_pair_of(inst_id: str) -> str:
-    """期权 instId → 现货交易对（SOL-USD_UM-260909-106-C → SOL-USD）。
+# 现货交易对：默认 币种-USD（USD 对，USDC 结算）；XAU 例外——
+# XAU-USD_UM 的现货标的是 XAUT（Tether Gold），OKX 现货对为 XAUT-USDT
+_SPOT_PAIR = {"XAU": "XAUT-USDT"}
+# 现货持仓币种（余额查询用）：XAU 家族对应的是 XAUT 而不是 XAU
+_SPOT_CCY = {"XAU": "XAUT"}
 
-    XAU 无现货盘 → 返回 ""（调用方 fail-closed：call 出货不适用）。
-    与页面补买/出货的 币种-USD 规则一致（SOL-USDC 2026-09-23 才开放）。
+
+def spot_pair_of(inst_id: str) -> str:
+    """期权 instId → 现货交易对。
+
+    SOL-USD_UM-260909-106-C → SOL-USD（USD 对，2026-09-23 起另有 USDC 对）
+    XAU-USD_UM-…            → XAUT-USDT（黄金现货标的是 XAUT）
     """
     base = (inst_id or "").split("-")[0].upper()
-    if not base or base == "XAU":
+    if not base:
         return ""
-    return base + "-USD"
+    return _SPOT_PAIR.get(base, base + "-USD")
 
 
 def spot_exit(account: str, *, spot_inst: str,
@@ -1387,12 +1394,12 @@ def covered_context(account: str, family: str) -> dict:
            "sellable_sz": 0, "spot_cov_pct": 0.0,
            "cost_hint": None, "note": ""}
     if base == "XAU":
-        out["note"] = ("XAU-USD_UM 无现货盘：现金结算赔差无法被现货对冲，"
-                       "卖 call 上行裸风险——不建议（covered 语义受限）")
-        return out
+        out["note"] = ("XAU-USD_UM 的现货标的是 XAUT（Tether Gold）——"
+                       "对冲/出货按 XAUT-USDT 现货对处理")
+    ccy = _SPOT_CCY.get(base, base)
     bal = account_balance(account)
     for r in bal.get("details") or []:
-        if r.get("ccy") == base:
+        if r.get("ccy") == ccy:
             out["spot_avail"] = r.get("avail_bal") or 0.0
             break
     if lot and lot > 0:

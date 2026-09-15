@@ -179,15 +179,40 @@ def test_hv_from_closes(fake_sdk):
     assert hv["hv_pct"] is not None and hv["hv_pct"] > 0
 
 
-def test_xau_index_reference_and_no_hv(fake_sdk):
-    """XAU 无现货盘 → 参考价走指数（idxPx），现货 HV 不可用（None）。"""
+def test_xau_spot_reference_and_hv(fake_sdk):
+    """XAU-USD_UM 的现货标的是 XAUT（Tether Gold）→ 参考价走 XAUT-USDT 现货。
+
+    现货盘带成交价，HV 与其它家族同口径可算（此前按指数参考 → HV 不可用）。
+    """
     chain = od.fetch_chain("XAU-USD_UM", expiries=[_D1], spot_pct_range=None)
-    assert chain["spot"] == 4473.25
-    assert chain["spot_inst"] == "XAU-USD (index)"
-    assert chain["hv"]["hv_pct"] is None
-    # 盘口/权利金换算与 BTC 家族共用同一公式（prem_usd = ask × lot，见 test_put_premium_apr_and_iv）；
-    # XAU 无现货盘仅影响参考价来源与 HV，不影响 prem 口径
+    assert chain["spot"] == 81000.0            # mock 现货 last
+    assert chain["spot_inst"] == "XAUT-USDT"
+    assert chain["hv"]["hv_pct"] is not None
+    # 盘口/权利金换算与 BTC 家族共用同一公式（prem_usd = ask × lot，见 test_put_premium_apr_and_iv）
     assert chain["groups"][0]["rows"]
+
+
+def test_td_kline_available_for_xau(fake_sdk, monkeypatch):
+    """XAU 也能取到标的 K 线 —— TD 面板与策略轮次依赖同一入口。
+
+    走 okx_cex_data.fetch_kline（OKX 公共行情，免 key），故在此打桩。
+    """
+    import pandas as pd
+    import nanobot_quant.okx_cex_data as ocd
+
+    idx = pd.to_datetime(["2026-09-15 15:00", "2026-09-15 15:05"]).tz_localize("UTC")
+    fake = pd.DataFrame({"Open": [1.0, 1.1], "High": [1.2, 1.3], "Low": [0.9, 1.0],
+                         "Close": [1.1, 1.2], "Volume": [10.0, 11.0]}, index=idx)
+    monkeypatch.setattr(ocd, "fetch_kline", lambda *a, **k: fake)
+    df, err = od.td_kline("XAU-USD_UM", period="5m", bars=120)
+    assert err == ""
+    assert df is not None and len(df) == 2
+    assert "Close" in df.columns
+
+
+def test_td_kline_rejects_unknown_family(fake_sdk):
+    df, err = od.td_kline("XRP-USD_UM")
+    assert df is None and "未知家族" in err
 
 
 # ── 生命周期（mark 价 + 标的参考价对齐）───────────────────────
