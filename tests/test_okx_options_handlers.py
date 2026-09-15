@@ -97,3 +97,56 @@ def test_ledger_page_pnl_falls_back_to_settle_pnl():
     assert "/^settled_/" in html          # 到期结算行以官方账单口径 settle_pnl 为准
     assert "+ pnlUsd(e) +" in html          # 台账表盈亏列已改用 pnlUsd
     assert "无待回填行" in html               # 回填扫描 0 行时的说明
+
+
+def test_c24_routes_registered():
+    """C24 合约选择路由已注册：候选生成（GET）+ 选择参数保存（POST）。"""
+    class _App:           # 只需 add_api_route（gatekeeper 用 FastAPI；测试不依赖 fastapi）
+        def __init__(self):
+            self.routes = []
+
+        def add_api_route(self, path, fn, methods=None):
+            self.routes.append(type("R", (), {"path": path})())
+
+    app = _App()
+
+    class _GK:            # 注册阶段不访问 gatekeeper
+        pass
+
+    oh.register_okx_options_routes(app, _GK())
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/config/okx-options/candidates" in paths
+    assert "/config/okx-options/selector" in paths
+
+
+def test_selector_save_validates_and_persists(monkeypatch, tmp_path):
+    """选择参数保存：非法值报错、合法值落盘（selector 字段）。"""
+    from nanobot_quant import okx_options_select as osel
+    from nanobot_quant import okx_options_trade as ot
+
+    saved = {}
+
+    def fake_save(**fields):
+        saved.update(fields)
+        return {"collateral_ratio_pct": 100, **fields}
+
+    monkeypatch.setattr(ot, "save_option_params", fake_save)
+    cleaned, err = osel.validate_selector({"min_distance_pct": 7, "top_n": 3,
+                                           "expiry_min_days": 4, "expiry_max_days": 6,
+                                           "delta_min": 0.2, "delta_max": 0.3,
+                                           "sort_by": "apr"})
+    assert err is None
+    assert cleaned["min_distance_pct"] == 7.0 and cleaned["top_n"] == 3
+    bad, berr = osel.validate_selector({"min_distance_pct": 99})
+    assert bad is None and berr
+
+
+def test_page_has_candidate_ui():
+    """页面含候选 UI 与选择参数控件（防止前端改动被回退）。"""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1]
+            / "src" / "nanobot_quant" / "okx_options_page.html").read_text(encoding="utf-8")
+    for token in ('id="candWrap"', 'id="candBody"', 'id="candRefresh"', 'id="selDist"',
+                  'id="selMinYield"', 'id="saveSelBtn"', "function renderCandidates",
+                  "function loadCandidates", "loadSelector()"):
+        assert token in html, token

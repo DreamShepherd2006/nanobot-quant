@@ -32,6 +32,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant import okx_options_data as od
 from nanobot_quant import okx_options_live as ol
+from nanobot_quant import okx_options_select as osel
 from nanobot_quant import okx_options_trade as ot
 from nanobot_quant.data_sources.periods import PERIODS
 from nanobot_quant.okx_cex_credentials import list_sub_accounts
@@ -195,6 +196,47 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         except OkxSdkError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "data": chain})
+
+    # ── C24：合约选择（卖 put 候选 + 选择参数）──────────────
+
+    async def _candidates(request: Request):
+        """按选择参数从期权链挑卖 put 候选（只读计算，不下单）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        q = request.query_params
+        family = (q.get("family") or "BTC-USD_UM").upper()
+        if family not in od.FAMILIES:
+            return JSONResponse({"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
+        base_px = None
+        if q.get("base_px"):
+            try:
+                base_px = float(q["base_px"])
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "base_px 参数非法"})
+        try:
+            res = await asyncio.to_thread(osel.select_puts, family, base_px)
+        except OkxSdkError as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **res})
+
+    async def _selector_save(request: Request):
+        """保存卖 put 候选选择参数（option_params.json 的 selector 字段）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        raw = body.get("selector") if isinstance(body.get("selector"), dict) else body
+        cleaned, verr = osel.validate_selector(raw)
+        if verr:
+            return JSONResponse({"ok": False, "error": verr})
+        try:
+            params = await asyncio.to_thread(ot.save_option_params, selector=cleaned)
+        except (RuntimeError, OSError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "params": params})
 
     # ── 批次 C：账户 / 持仓 / 台账 / 提醒（只读）────────────────
 
@@ -739,6 +781,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options", _page, methods=["GET"])
     app.add_api_route("/config/okx-options/expiries", _expiries, methods=["GET"])
     app.add_api_route("/config/okx-options/chain", _chain, methods=["GET"])
+    app.add_api_route("/config/okx-options/candidates", _candidates, methods=["GET"])
+    app.add_api_route("/config/okx-options/selector", _selector_save, methods=["POST"])
     app.add_api_route("/config/okx-options/ticker", _ticker, methods=["GET"])
     app.add_api_route("/config/okx-options/sim", _sim, methods=["GET"])
     app.add_api_route("/config/okx-options/lifecycle", _lifecycle, methods=["GET"])
