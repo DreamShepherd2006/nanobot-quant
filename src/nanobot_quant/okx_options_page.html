@@ -605,6 +605,50 @@ async function loadPositions() {
   } catch (e) { $("posBody").innerHTML = '<div class="empty" style="color:#c62828">' + esc(e.message) + '</div>'; }
 }
 
+// 手续费显示（统一 USD 口径）：优先 fee_usd（后端按币种折算）；历史行只有 fee 数值
+// 且币种未记录（OKX 现货买单手续费以基础币扣，数值≠USD）——显示原值并标注。
+function feeUsd(e) {
+  if (!e) return '<span class="na">—</span>';
+  const raw = e.fee, usd = e.fee_usd;
+  const okUsd = usd !== null && usd !== undefined && usd !== "" && !isNaN(Number(usd));
+  const okRaw = raw !== null && raw !== undefined && raw !== "" && !isNaN(Number(raw));
+  if (!okUsd && !okRaw) return '<span class="na">—</span>';
+  if (!okUsd) return '<span title="历史记录：仅存数值、未记录币种（OKX 现货买单手续费以基础币扣，该数值不是 USD）">' + Math.abs(Number(raw)).toFixed(4) + '</span>';
+  const ccy = (e.fee_ccy || "USDC");
+  const tip = "实际手续费（交易所扣收；期权按名义约 0.03%、现货 0.1%）" +
+    (ccy && ccy !== "USDC" ? "｜原始 " + raw + " " + ccy + "（按成交价折 USD）" : "");
+  return '<span title="' + tip + '">$' + Math.abs(Number(usd)).toFixed(4) + '</span>';
+}
+
+// 盈亏显示（口径）：到期结算行（settled_*）以 OKX 交割账单口径 settle_pnl 为准
+// （含权利金收入与赔付）——实验期遗留的旧 pnl_usd 不得覆盖官方结算数；
+// 其它行用 pnl_usd（开仓/买回的平台收益），缺失时回退 settle_pnl（悬浮标注口径）。
+function pnlUsd(e) {
+  const ok = v => v !== null && v !== undefined && v !== "" && !isNaN(Number(v));
+  const settled = /^settled_/.test(String(e.status || ""));
+  if (settled && ok(e.settle_pnl)) return '<span title="到期结算净盈亏（含权利金收入与赔付，来自 OKX 交割账单）">' + usd(e.settle_pnl) + '</span>';
+  if (ok(e.pnl_usd)) return usd(e.pnl_usd);
+  if (ok(e.settle_pnl)) return '<span title="到期结算净盈亏（含权利金收入与赔付）">' + usd(e.settle_pnl) + '</span>';
+  return '<span class="na">—</span>';
+}
+
+// 历史遗留行赔付回填（单步、纯本地记账）——settled_* 但缺 settle_px/settle_pnl 的行
+async function backfillLedger() {
+  if (!confirm("回填历史赔付：对已结算但缺赔付数据的台账行，按 OKX 交割账单补齐结算价/毛赔付/净盈亏？\n（仅本地台账写入，不改状态、不涉及资金操作）")) return;
+  try {
+    const j = await (await fetch("/config/okx-options/ledger/backfill", {method: "POST"})).json();
+    if (!j.ok) throw new Error(j.error || "回填失败");
+    const filled = j.filled || [];
+    let msg = "回填完成：扫描 " + (j.scanned || 0) + " 行，成功 " + filled.length + " 行";
+    if (!j.scanned) msg += "\n（无待回填行：台账中已结算行均已有结算价/赔付数据——盈亏见「盈亏(USD)」列，鼠标悬浮看口径）";
+    if (filled.length) msg += "\n" + filled.map(x => "✅ " + x.inst_id + "：结算价 " + fmt(x.settle_px, 6) + " · 毛赔付 " + usd(x.settle_payout) + " · 净 " + usd(x.settle_pnl)).join("\n");
+    if ((j.skipped || []).length) msg += "\n跳过 " + j.skipped.length + " 行：" + j.skipped.map(x => x.inst_id + "（" + x.reason + "）").join("；");
+    if ((j.errors || []).length) msg += "\n错误 " + j.errors.length + " 行：" + j.errors.map(x => x.inst_id + "：" + x.error).join("；");
+    alert(msg);
+    loadLedger();
+  } catch (e) { alert("回填失败：" + e.message); }
+}
+
 async function loadLedger() {
   $("ledBody").innerHTML = '<div class="empty">加载中…</div>';
   try {
@@ -613,8 +657,9 @@ async function loadLedger() {
     if (!j.ok) throw new Error(j.error || "HTTP " + r.status);
     const rows = j.ledger || [];
     if (!rows.length) { $("ledBody").innerHTML = '<div class="empty">台账为空（尚未卖出期权）</div>'; return; }
-    let html = '<table><thead><tr><th>时间(UTC)</th><th>动作</th><th>合约</th><th>方向</th><th>类型</th>' +
-      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
+    let html = '<div style="margin:0 0 8px"><button onclick="backfillLedger()" title="对已结算但缺赔付数据的台账行，按 OKX 交割账单补回填结算价/毛赔付/净盈亏（纯本地记账，不改状态、不涉及资金流）">🩹 回填历史赔付</button></div>';
+    html += '<table><thead><tr><th>时间(UTC)</th><th>动作</th><th>合约</th><th>方向</th><th>类型</th>' +
+      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>手续费(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
     // 到期动作入口按台账自身状态判定（不依赖判定事件）——覆盖遗留 settled_itm 行
     const filledCovers = new Set(), filledExits = new Set();
     for (const x of rows) {
@@ -650,8 +695,8 @@ async function loadLedger() {
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
-        '</td><td>' + usd(e.premium_usd) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
-        '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
+        '</td><td>' + usd(e.premium_usd) + '</td><td class="mono">' + feeUsd(e) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
+        '</td><td>' + pnlUsd(e) + '</td><td>' + esc(e.status) +
         '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
     }
     html += '</tbody></table>';
@@ -896,12 +941,19 @@ function openCover(instId, szArg) {
 async function prefillCover(instId, szArg, spot) {
   try {
     const j = await (await fetch("/config/okx-options/cover-prefill?inst_id=" +
-      encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1"))).json();
+      encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1") +
+      "&account=" + encodeURIComponent((accSel && accSel.value) || ""))).json();
     if (!j.ok) throw new Error(j.error || "HTTP " + j.status);
     const srcTxt = {spot: "现货现价", settle: "结算价", strike: "行权价"}[j.px_src] || "";
     if (j.qty) { $("mQty").value = j.qty; $("mAmt").value = (j.amount || j.qty * j.px).toFixed(2); }
     $("mSpec").innerHTML += "<div class=\"hint\">预填：数量 = 行权面值 × 张数（" + j.qty + "）；金额 = 数量 × " + srcTxt + " " +
       (j.px != null ? fmt(j.px, 2) : "（取价失败，请手填）") + " —— 均可修改，改数量/金额任填其一。</div>";
+    if (j.quote_avail !== undefined) {
+      $("mSpec").innerHTML += "<div class=\"hint\">账户 USDC 可用 $" + fmt(j.quote_avail, 2) +
+        (j.buyable_qty ? "（按现价约可买 " + j.buyable_qty + " " + ((j.spot_inst || "").split("-")[0]) + "）" : "") +
+        (j.min_sz ? "；最小下单 " + j.min_sz : "") + (j.limits_err ? "；" + esc(j.limits_err) : "") +
+        "——超出由交易所拒单。</div>";
+    }
   } catch (e) {
     $("mSpec").innerHTML += "<div class=\"hint\">自动预填失败（" + esc(e.message) + "）——请手填数量或金额。</div>";
   }
@@ -928,13 +980,21 @@ function openExit(instId, szArg) {
 async function prefillExit(instId, szArg, spot) {
   try {
     const j = await (await fetch("/config/okx-options/exit-prefill?inst_id=" +
-      encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1"))).json();
+      encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1") +
+      "&account=" + encodeURIComponent((accSel && accSel.value) || ""))).json();
     if (!j.ok) throw new Error(j.error || "HTTP " + j.status);
     if (j.spot_inst) exitSpot = j.spot_inst;   // 后端解析的现货对为准（与下单同源）
     const srcTxt = {spot: "现货现价", settle: "结算价", strike: "行权价"}[j.px_src] || "";
     if (j.qty) { $("mQty").value = j.qty; $("mAmt").value = (j.amount || j.qty * j.px).toFixed(2); }
     $("mSpec").innerHTML += "<div class=\"hint\">预填：数量 = 行权面值 × 张数（" + j.qty + "）；金额 = 数量 × " + srcTxt + " " +
       (j.px != null ? fmt(j.px, 2) : "（取价失败，请手填）") + " —— 均可修改，改数量/金额任填其一。</div>";
+    if (j.avail !== undefined) {
+      let t = "可用 " + j.avail + " → 可卖 " + (j.sellable != null ? j.sellable : "—") +
+        (j.lot_sz ? "（步进 " + j.lot_sz + "）" : "");
+      if (j.qty_capped) t += "；预填已按可卖量收敛（补买 0.1% 手续费使到账略少于行权数量）";
+      if (j.limits_err) t += "；" + esc(j.limits_err);
+      $("mSpec").innerHTML += "<div class=\"hint\">" + t + "——超出由交易所拒单。</div>";
+    }
   } catch (e) {
     $("mSpec").innerHTML += "<div class=\"hint\">自动预填失败（" + esc(e.message) + "）——请手填数量或金额。</div>";
   }
@@ -1047,7 +1107,12 @@ async function doPreview(mode) {
     }
     $("mPreview").innerHTML =
       "<b>权利金/张(USD)：</b>" + usd(p.est_premium_usd ? p.est_premium_usd / (f.sz || 1) : null) +
-      "（合计 " + usd(p.est_premium_usd) + "）<br>" + extraTxt + "<br>" +
+      "（合计 " + usd(p.est_premium_usd) + "）<br>" +
+      "<b>手续费（预估）：</b>" + usd(p.fee_est_usd) +
+      " · <b>净权利金：</b><span style='color:#0a8f4f'>" + usd(p.net_premium_usd) + "</span>" +
+      (p.net_yield_pct != null ? " · <b>净收益率：</b>" + fmt(p.net_yield_pct, 3) + "%（分母 " +
+        (p.opt_type === "C" ? "行权名义 " + usd(p.notional_usd) : "担保额 " + usd(p.collateral_est_usd)) + "）" : "") +
+      "<br>" + extraTxt + "<br>" +
       "<b>订单：</b>sell · tdMode=isolated · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
       "<br><span style='color:#888'>参考盘口 ask=" + fmt(p.ref.ask, 2) + " bid=" + fmt(p.ref.bid, 2) + "</span>";
     const simEl = $("mSim");
