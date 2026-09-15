@@ -13,6 +13,7 @@ fail-closed / 账单未出保持 open 下轮重试），判定结果逐笔 appen
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,6 +181,16 @@ def save_live_config(enabled: bool | None = None,
 
 # ── 策略轮次（卖 put + 权利金回落止盈）──────────────────────
 
+def _log(msg: str) -> None:
+    """诊断输出统一走 stderr（前缀 [OPT-LIVE]，便于在 Runtime logs 里 grep）。
+
+    两处历史教训：① gatekeeper 进程未配 logging handler，logger.info 被 Python
+    lastResort 静默丢弃；② launch.sh 会捕获 stdout 并 eval，print 到 stdout 会被
+    当 shell 命令执行。因此统一 print(..., file=sys.stderr, flush=True)。
+    """
+    print(f"[OPT-LIVE] {msg}", file=sys.stderr, flush=True)
+
+
 def _strategy_params(cfg: dict) -> dict:
     """live_config()['strategy'] → evaluate_entry 需要的 params 形状。"""
     return dict(cfg.get("strategy") or {})
@@ -230,15 +241,27 @@ def strategy_round(cfg: dict | None = None) -> dict:
     entries: list[dict] = []
     exits: list[dict] = []
 
+    families = s.get("families") or []
+    entry_setup = s.get("entry_setup")
+    entry_cd = s.get("entry_countdown")
+    _log(f"策略轮次开始 | 家族={families} 周期={s.get('td_period')}×{s.get('td_bars')} "
+         f"入场条件=setup_buy≥{entry_setup} 或 cd_buy≥{entry_cd} "
+         f"| IV闸门={s.get('iv_min_percentile')} 止盈={s.get('take_profit_pct')}% "
+         f"张数上限=单标的{s.get('max_per_symbol')}/全局{s.get('max_total')} "
+         f"| dry_run={dry}")
+
     # 持仓（张数上限与止盈共用一次查询）
     try:
         positions = ot.open_puts(account)
     except Exception as e:  # noqa: BLE001 —— 持仓查不到则本轮不动作
+        _log(f"⚠️ 持仓查询失败（本轮不动作）：{type(e).__name__}: {e}")
         return {"dry_run": dry, "entries": [], "exits": [],
                 "notes": [f"持仓查询失败：{type(e).__name__}: {e}"]}
 
     counts = st.contracts_by_family(positions)
     total_contracts = sum(counts.values())
+    _log(f"当前持仓 | 在仓合约数={total_contracts} 分家族={counts or '{}'} "
+         f"明细={[(p.get('inst_id'), p.get('pos')) for p in positions]}")
 
     # ① 入场（逐个家族）
     for family in s.get("families") or []:
@@ -247,20 +270,33 @@ def strategy_round(cfg: dict | None = None) -> dict:
             sig = _td_signal_for(base, str(s.get("td_period") or "5m"),
                                  int(s.get("td_bars") or 120))
         except Exception as e:  # noqa: BLE001
-            notes.append(f"{base}: K 线/TD 失败 {type(e).__name__}: {e}")
+            msg = f"{base}: K 线/TD 失败 {type(e).__name__}: {e}"
+            notes.append(msg)
+            _log(f"⚠️ {msg}")
             continue
         if sig is None:
             notes.append(f"{base}: 无 K 线数据")
+            _log(f"⚠️ {base}: 无 K 线数据（数据源返回空）")
             continue
+        _log(f"{base} TD | setup_buy={sig.get('setup_buy')}/{entry_setup} "
+             f"cd_buy={sig.get('cd_buy')}/{entry_cd} "
+             f"setup_sell={sig.get('setup_sell')} cd_sell={sig.get('cd_sell')} "
+             f"price={sig.get('price')} rec={sig.get('recommendation')}")
         dec, note = st.evaluate_entry(
             family, td_signal=sig, params=s,
             open_contracts=counts.get(base, 0), total_contracts=total_contracts)
         if dec is None:
             notes.append(f"{base}: {note}")
+            _log(f"{base} → 无动作：{note}")
             continue
         rec: dict = {**dec.to_event(), "dry_run": dry}
         if dry:
             rec["status"] = "dry_run(would_sell)"
+            _log(f"{base} → 【dry-run】卖出 {dec.inst_id} ×{dec.sz} "
+                 f"| 盘口 bid={rec.get('bid')} 净收益率={rec.get('net_yield_pct')}% "
+                 f"年化={rec.get('apr_pct')}% 担保=${rec.get('notional_usd')} "
+                 f"IV={rec.get('iv')} delta={rec.get('delta')} 天数={rec.get('days')} "
+                 f"| 理由={rec.get('entry_reason')} {note}")
         else:
             try:
                 res = _sell_put(account, dec.inst_id, dec.sz)
@@ -269,9 +305,13 @@ def strategy_round(cfg: dict | None = None) -> dict:
                                 if k in res}
                 counts[base] = counts.get(base, 0) + dec.sz
                 total_contracts += dec.sz
+                _log(f"{base} → 已卖出 {dec.inst_id} ×{dec.sz} | "
+                     f"ord_id={rec['order'].get('ord_id')} status={rec['order'].get('status')} "
+                     f"avg_px={rec['order'].get('avg_px')}")
             except Exception as e:  # noqa: BLE001 —— 失败必须可见
                 rec["status"] = "failed"
                 rec["error"] = f"{type(e).__name__}: {e}"
+                _log(f"⚠️ {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{rec['error']}")
         entries.append(rec)
 
     # ② 止盈（权利金回落）
@@ -279,20 +319,35 @@ def strategy_round(cfg: dict | None = None) -> dict:
         tp = float(s.get("take_profit_pct") or 0)
     except (TypeError, ValueError):
         tp = 0.0
-    for x in st.evaluate_exits(positions, tp_pct=tp):
+    exit_rows = st.evaluate_exits(positions, tp_pct=tp)
+    for x in exit_rows:
         rec = {**x.to_event(), "dry_run": dry}
         if dry:
             rec["status"] = "dry_run(would_buy_back)"
+            _log(f"→ 【dry-run】买回 {x.inst_id} ×{x.sz} | "
+                 f"开仓 {rec.get('entry_px')} → 现价 {rec.get('mark_px')} "
+                 f"（回落 {rec.get('drop_pct')} ≥ 止盈线 {tp}%）理由={rec.get('reason')}")
         else:
             try:
                 res = _buy_back(account, x.inst_id, x.sz)
                 rec["status"] = "bought_back"
                 rec["order"] = {k: res.get(k) for k in ("ord_id", "status", "avg_px", "px")
                                 if k in res}
+                _log(f"→ 已买回 {x.inst_id} ×{x.sz} | "
+                     f"ord_id={rec['order'].get('ord_id')} status={rec['order'].get('status')} "
+                     f"avg_px={rec['order'].get('avg_px')}")
             except Exception as e:  # noqa: BLE001
                 rec["status"] = "failed"
                 rec["error"] = f"{type(e).__name__}: {e}"
+                _log(f"⚠️ 买回失败 {x.inst_id} ×{x.sz}：{rec['error']}")
         exits.append(rec)
+
+    # 无止盈时也留一行（否则「没卖出=没输出」会让人以为循环没跑）
+    if not exit_rows and positions:
+        _log(f"止盈巡检 | {len(positions)} 张在仓，均未达回落 {tp}% 门槛，继续持有")
+
+    _log(f"策略轮次结束 | 卖出 {len(entries)} · 买回 {len(exits)} · 备注 {len(notes)}"
+         + (f" | {notes}" if notes else ""))
 
     return {"dry_run": dry, "entries": entries, "exits": exits,
             "notes": notes, "contracts": counts}
@@ -305,10 +360,19 @@ def run_once() -> dict:
     任何异常不外抛（巡检自愈：本轮错误记 last_error，下轮继续）。"""
     settled = []
     error = ""
+    _log("── 巡检轮次开始 ──")
     try:
         settled = ot.settle_expired_puts()
     except Exception as e:  # noqa: BLE001 —— daemon 巡检不容许线程猝死
         error = f"{type(e).__name__}: {e}"
+        _log(f"⚠️ 到期判定异常：{error}")
+    if settled:
+        for s in settled:
+            _log(f"到期判定：{s.get('inst_id')} → {s.get('status')} "
+                 f"结算价={s.get('settle_px')} 净盈亏={s.get('settle_pnl')} "
+                 f"毛赔付={s.get('settle_payout')} | {s.get('note', '')}")
+    else:
+        _log("到期判定：本轮无新判定（未到期或账单未出）")
     # 先落盘事件、后更新 LIVE_STATE：total_settled 语义 = 已落盘判定笔数，
     # 避免「计数已 +1 但事件未写完」的观测竞态（页面/测试按计数读事件会拿到空）。
     if settled:
@@ -349,11 +413,16 @@ def run_once() -> dict:
             _append_event({"ts": _utc_now(), "type": "exit", **rec})
     except Exception as e:  # noqa: BLE001 —— 策略异常不得杀线程
         error = (error + " | " if error else "") + f"strategy: {type(e).__name__}: {e}"
+        _log(f"⚠️ 策略轮次异常（线程继续）：{type(e).__name__}: {e}")
     with _lock:
         _state["last_strategy"] = strat
         _state["total_entries"] += len((strat or {}).get("entries") or [])
         _state["total_exits"] += len((strat or {}).get("exits") or [])
         _state["last_error"] = error
+    _log(f"── 巡检轮次结束 ── 到期判定 {len(settled)} 笔 · "
+         f"策略 卖 {len((strat or {}).get('entries') or [])} / "
+         f"买回 {len((strat or {}).get('exits') or [])}"
+         + (f" · error={error}" if error else ""))
     return {"settled": settled, "strategy": strat, "error": error}
 
 
