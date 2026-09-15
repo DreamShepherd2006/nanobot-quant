@@ -247,7 +247,7 @@ def strategy_round(cfg: dict | None = None) -> dict:
     _log(f"策略轮次开始 | 家族={families} 周期={s.get('td_period')}×{s.get('td_bars')} "
          f"入场条件=setup_buy≥{entry_setup} 或 cd_buy≥{entry_cd} "
          f"| IV闸门={s.get('iv_min_percentile')} 止盈={s.get('take_profit_pct')}% "
-         f"张数上限=单标的{s.get('max_per_symbol')}/全局{s.get('max_total')} "
+         f"张数上限=单标的{s.get('max_contracts_per_family')}/全局{s.get('max_contracts_total')} "
          f"| dry_run={dry}")
 
     # 持仓（张数上限与止盈共用一次查询）
