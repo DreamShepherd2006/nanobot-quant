@@ -1,0 +1,145 @@
+"""卖 put 自动循环决策核心单测（纯函数，不触网）。"""
+
+from __future__ import annotations
+
+from nanobot_quant import okx_options_strategy as st
+
+FAMILY = "SOL-USD_UM"
+
+# 注入用的期权链（与 okx_options_data.fetch_chain 同形）
+CHAIN = {
+    "family": FAMILY, "spot": 100.0, "lot_coin": 0.1,
+    "groups": [{
+        "days": 5, "date": "2026-09-20", "exp_ms": 1789948800000,
+        "rows": [
+            {"strike": 88.0, "P": {"inst_id": "SOL-USD_UM-260920-88-P",
+                                    "bid": 0.30, "ask": 0.36, "iv": 80.0, "delta": -0.12}},
+            {"strike": 92.0, "P": {"inst_id": "SOL-USD_UM-260920-92-P",
+                                    "bid": 0.60, "ask": 0.70, "iv": 75.0, "delta": -0.22}},
+        ],
+    }],
+}
+
+PARAMS = {"entry_setup": 9, "entry_countdown": 13,
+          "max_contracts_per_family": 1, "max_contracts_total": 3}
+
+
+def _entry(**kw):
+    args = {"td_signal": {"setup_buy": 9, "cd_buy": 0}, "params": PARAMS,
+            "chain": CHAIN, "base_px": 100.0}
+    args.update(kw)
+    return st.evaluate_entry(FAMILY, **args)
+
+
+# ── TD 信号判定 ──────────────────────────────────────
+class TestTdEntryReason:
+    def test_setup_channel(self):
+        assert st.td_entry_reason({"setup_buy": 9}, entry_setup=9,
+                                  entry_countdown=13) == "buy9(setup_buy=9)"
+
+    def test_countdown_channel(self):
+        r = st.td_entry_reason({"setup_buy": 3, "cd_buy": 13}, entry_setup=9,
+                               entry_countdown=13)
+        assert r == "cd13(cd_buy=13)"
+
+    def test_setup_wins_when_both(self):
+        r = st.td_entry_reason({"setup_buy": 10, "cd_buy": 13}, entry_setup=9,
+                               entry_countdown=13)
+        assert r.startswith("buy9")
+
+    def test_below_thresholds_and_junk(self):
+        assert st.td_entry_reason({"setup_buy": 8, "cd_buy": 12}, entry_setup=9,
+                                  entry_countdown=13) is None
+        assert st.td_entry_reason({}, entry_setup=9, entry_countdown=13) is None
+        assert st.td_entry_reason(None, entry_setup=9, entry_countdown=13) is None
+
+
+# ── 入场决策 ─────────────────────────────────────────
+class TestEvaluateEntry:
+    def test_happy_path_uses_selector_top1(self):
+        d, note = _entry()
+        assert d is not None
+        assert d.inst_id == "SOL-USD_UM-260920-92-P"   # 净收益率更高排在前
+        assert d.sz == 1 and d.bid == 0.60
+        assert d.entry_reason == "buy9(setup_buy=9)"
+        assert "信号：buy9" in note
+
+    def test_no_signal_returns_none_with_reason(self):
+        d, note = _entry(td_signal={"setup_buy": 5, "cd_buy": 2})
+        assert d is None and "无 TD 衰竭信号" in note
+
+    def test_family_contract_cap_blocks(self):
+        d, note = _entry(open_contracts=1)
+        assert d is None and "张数上限" in note
+
+    def test_total_contract_cap_blocks(self):
+        d, note = _entry(total_contracts=3)
+        assert d is None and "全局在仓" in note
+
+    def test_iv_gate_blocks_low_percentile(self):
+        d, note = _entry(params={**PARAMS, "iv_min_percentile": 70},
+                         iv_percentile=42.0)
+        assert d is None and "IV 闸门" in note
+
+    def test_iv_gate_fail_open_when_no_sample(self):
+        d, note = _entry(params={**PARAMS, "iv_min_percentile": 70},
+                         iv_percentile=None)
+        assert d is not None and "样本不足，放行" in note
+
+    def test_iv_gate_passes_when_high(self):
+        d, note = _entry(params={**PARAMS, "iv_min_percentile": 70},
+                         iv_percentile=88.0)
+        assert d is not None and "IV 闸门" in note
+
+    def test_no_candidate_when_chain_empty(self):
+        d, note = _entry(chain={"spot": 100.0, "lot_coin": 0.1, "groups": []})
+        assert d is None and "无合格候选" in note
+
+    def test_iv_gate_disabled_by_default(self):
+        d, _ = _entry(iv_percentile=5.0)   # 未配 iv_min_percentile
+        assert d is not None
+
+
+# ── 出场决策 ─────────────────────────────────────────
+def _pos(inst, pos, avg, mark, side="short"):
+    return {"inst_id": inst, "side": side, "pos": pos, "avg_px": avg, "mark_px": mark}
+
+
+class TestEvaluateExits:
+    def test_take_profit_when_premium_halved(self):
+        rows = [_pos("SOL-USD_UM-260918-94-P", 1.0, 0.40, 0.19)]
+        out = st.evaluate_exits(rows, tp_pct=50)
+        assert len(out) == 1 and out[0].drop_pct == 52.5 and out[0].reason == "take_profit"
+
+    def test_not_yet_when_drop_small(self):
+        assert st.evaluate_exits([_pos("SOL-USD_UM-260918-94-P", 1.0, 0.40, 0.30)],
+                                 tp_pct=50) == []
+
+    def test_disabled_when_zero(self):
+        assert st.evaluate_exits([_pos("SOL-USD_UM-260918-94-P", 1.0, 0.40, 0.01)],
+                                 tp_pct=0) == []
+
+    def test_long_positions_ignored(self):
+        rows = [_pos("SOL-USD_UM-260918-94-C", 1.0, 0.40, 0.10, side="long")]
+        assert st.evaluate_exits(rows, tp_pct=50) == []
+
+    def test_junk_rows_skipped(self):
+        rows = [_pos("", 1.0, 0.4, 0.1), _pos("SOL-USD_UM-260918-94-P", 0, 0.4, 0.1),
+                _pos("SOL-USD_UM-260918-94-P", 1.0, None, 0.1)]
+        assert st.evaluate_exits(rows, tp_pct=50) == []
+
+    def test_premium_rises_no_exit(self):
+        rows = [_pos("SOL-USD_UM-260918-94-P", 1.0, 0.25, 0.39)]  # 与当前 94-P 实况同
+        assert st.evaluate_exits(rows, tp_pct=50) == []
+
+
+class TestContractsByFamily:
+    def test_counts_short_only(self):
+        rows = [_pos("SOL-USD_UM-260918-94-P", 1.0, 0.3, 0.3),
+                _pos("SOL-USD_UM-260918-96-P", 2.0, 0.3, 0.3),
+                _pos("BTC-USD_UM-260918-56000-C", 1.0, 40, 40, side="long")]
+        assert st.contracts_by_family(rows) == {"SOL": 3}
+
+    def test_empty(self):
+        assert st.contracts_by_family([]) == {}
+        assert st.contracts_by_family(None) == {}
