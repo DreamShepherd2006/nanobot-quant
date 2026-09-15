@@ -1295,7 +1295,7 @@ async function loadCandidates() {
 }
 function renderCandidates(d) {
   const s = d.selector || {}, f = d.filtered || {};
-  $("candMeta").textContent = "基准 " + fmt(d.base_px, 2) + " · 距离 ≥" + fmt(s.min_distance_pct, 1) + "% · 到期 " +
+  $("candMeta").textContent = (d.family || "") + " · 基准 " + fmt(d.base_px, 2) + " · 距离 ≥" + fmt(s.min_distance_pct, 1) + "% · 到期 " +
     fmt(s.expiry_min_days, 0) + "–" + fmt(s.expiry_max_days, 0) + " 天 · delta " + fmt(s.delta_min, 2) + "–" + fmt(s.delta_max, 2) +
     " · 过滤[到期 " + (f.expiry || 0) + " · 无买盘 " + (f.no_bid || 0) + " · 距离 " + (f.distance || 0) + " · delta " + (f.delta || 0) +
     "] · 命中 " + (d.scanned || 0) + (d.note ? " · " + d.note : "");
@@ -1312,7 +1312,7 @@ function renderCandidates(d) {
       '</td><td>' + (dist === null ? "—" : (dist > 0 ? "+" : "") + fmt(dist, 2) + "%") + '</td><td>' + fmt(c.bid, 4) + '</td><td>' +
       (c.iv === null || c.iv === undefined ? "—" : fmt(c.iv, 1) + "%") + '</td><td>' +
       (c.delta === null || c.delta === undefined ? "—" : fmt(c.delta, 3)) + '</td><td>' + usd(c.notional_usd) + '</td><td>' +
-      usd(c.net_premium_usd) + '</td><td><b>' + fmt(c.net_yield_pct, 3) + '%</b></td><td>' + fmt(c.apr_pct, 1) + '%</td>' +
+      "$" + fmt(c.net_premium_usd, 4) + '</td><td><b>' + fmt(c.net_yield_pct, 3) + '%</b></td><td>' + fmt(c.apr_pct, 1) + '%</td>' +
       '<td><button class="btn-ghost" data-sell="' + esc(c.inst_id) + '" style="font-size:.8em;padding:3px 8px">卖出</button></td></tr>';
   }
   h += '</tbody></table>';
@@ -1392,7 +1392,7 @@ async function saveLive() {
 }
 
 // ── 事件绑定 / 启动 ───────────────────────────────────
-famSel.addEventListener("change", () => { loadExpiries(); });
+famSel.addEventListener("change", () => { loadExpiries(); loadCandidates(); });
 expSel.addEventListener("change", () => { selExp = expSel.value; buildExpTabs(); loadChain(); });
 hvSel.addEventListener("change", loadChain);
 rngSel.addEventListener("change", loadChain);
