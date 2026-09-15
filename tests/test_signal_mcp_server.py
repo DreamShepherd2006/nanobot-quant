@@ -44,6 +44,7 @@ EXPECTED_TOOLS = {
     "wallet_add",
     "wallet_switch",
     "cex_sub_order",
+    "options_broker_selftest",
 }
 
 

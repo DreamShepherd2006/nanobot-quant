@@ -374,6 +374,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         if not ok:
             return _deny(err)
         return JSONResponse({"ok": True, "live": ol.live_state(),
+                             "config": ol.live_config(),
+                             "strategy_defaults": ol.DEFAULT_STRATEGY,
                              "events": ol.load_events(30)})
 
     async def _live_set(request: Request):
@@ -395,9 +397,19 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False,
                                  "error": f"interval_s 范围 {ol.MIN_INTERVAL_S}–"
                                           f"{ol.MAX_INTERVAL_S} 秒"})
-        ol.save_live_config(enabled=enabled, interval_s=interval_s)
+        strategy = b.get("strategy")
+        if strategy is not None and not isinstance(strategy, dict):
+            return JSONResponse({"ok": False, "error": "strategy 需为对象"})
+        if isinstance(strategy, dict) and strategy.get("families") is not None:
+            fams = strategy.get("families")
+            if isinstance(fams, str):
+                strategy["families"] = [f.strip() for f in fams.split(",") if f.strip()]
+            if not isinstance(strategy.get("families"), list):
+                return JSONResponse({"ok": False,
+                                     "error": "strategy.families 需为数组或逗号分隔字符串"})
+        ol.save_live_config(enabled=enabled, interval_s=interval_s, strategy=strategy)
         state = await asyncio.to_thread(ol.sync)
-        return JSONResponse({"ok": True, "live": state})
+        return JSONResponse({"ok": True, "live": state, "config": ol.live_config()})
 
     # ── 撤单 / 当前委托（单步，撤单无资金流）────────────
 
