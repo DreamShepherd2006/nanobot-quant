@@ -187,15 +187,38 @@
 
 <div class="card" id="liveCard" style="border:none;padding:10px 0 0;border-radius:0">
   <div class="ctl">
-    <label>🟤 到期巡检（自动判定）</label>
-    <input type="checkbox" id="liveEnabled" title="常驻巡检已到期 open put/call：OTM 自动关账 / ITM 记赔付；AI 不自行开启">
+    <label>🟤 自动循环（到期判定 + 卖 put 策略）</label>
+    <input type="checkbox" id="liveEnabled" title="常驻循环：到期判定（OTM 自动关账 / ITM 记赔付）+ 卖 put 策略轮次；AI 不自行开启">
     <span class="hint">开启</span>
     <input type="number" id="liveInterval" min="10" max="3600" step="10" value="60" style="width:90px" title="巡检周期（秒）">
     <span class="hint">秒/轮</span>
+    <label style="color:#c62828" title="勾选 = 只观察不下单（记录「打算卖什么/买回什么」）；取消勾选才会真实下单">🖐 dry-run（不下单）
+      <input type="checkbox" id="liveDryRun" checked>
+    </label>
     <button class="btn-ghost" id="saveLiveBtn">保存</button>
     <span class="hint" id="liveStatus"></span>
   </div>
-  <div class="note" id="liveNote">常驻巡检到期 open put/call：到期后查 OKX 交割账单自动判定——<b>到期作废(OTM)</b> 自动关账（put：结算价≥K；call：结算价≤K）、<b>到期被行权(ITM)</b> 记赔付（put 待补买 / call 待出货，均两步确认人工放行）、账单未出保持 open 下轮重试、判定矛盾挂「待核对」人工看。判定事件逐笔落盘（跨重启保留）。</div>
+  <div class="ctl" style="margin-top:6px">
+    <span class="hint">标的家族</span>
+    <input type="text" id="liveFamilies" style="width:150px" title="逗号分隔，如 SOL-USD_UM,BTC-USD_UM（OKX U 本位 instFamily）">
+    <span class="hint">信号周期</span>
+    <select id="liveTdPeriod" style="width:80px" title="标的 TD 信号周期（5m 为实证主力周期）">
+      <option value="1m">1m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="1H">1H</option>
+    </select>
+    <span class="hint">买9 / CD</span>
+    <input type="number" id="liveEntrySetup" min="1" max="20" style="width:58px" title="setup_buy ≥ 此值触发入场">
+    <input type="number" id="liveEntryCd" min="1" max="20" style="width:58px" title="cd_buy ≥ 此值触发入场">
+    <span class="hint">IV 闸门</span>
+    <input type="number" id="liveIvMin" min="0" max="100" style="width:58px" title="当前 IV 分位低于此值则跳过（恐慌未定价）；0=关；样本不足时放行">
+    <span class="hint">分位·止盈</span>
+    <input type="number" id="liveTp" min="0" max="95" style="width:58px" title="权利金回落此比例即买回（0=关闭止盈）">
+    <span class="hint">%·张数上限</span>
+    <input type="number" id="liveMaxFam" min="0" max="20" style="width:52px" title="单标的在仓张数上限">
+    <input type="number" id="liveMaxAll" min="0" max="50" style="width:52px" title="全局在仓张数上限">
+  </div>
+  <div class="note" id="liveNote">常驻循环每周期两件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 策略</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → 候选选档 → 卖 put；持仓权利金回落超止盈线即买回）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。</div>
+  <div id="liveStrategy"><div class="empty">最近一轮策略：暂无（开启循环后显示决策与原因）</div></div>
   <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
   </div>
 </details>
@@ -1419,8 +1442,24 @@ $("candRefresh").addEventListener("click", loadCandidates);
 const ST_LABEL = {settled_otm: "作废·OTM", settled_itm: "被行权·ITM", settled_review: "待核对"};
 function renderLiveEvents(evs) {
   const box = $("liveEvents");
-  if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无判定事件（开启巡检后，到期的 put/call 会自动判定落盘）</div>'; return; }
-  box.innerHTML = "<div class='note' style='margin:6px 0'>📋 最近判定（到期处理区）：</div>" + evs.map(e => {
+  if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无事件（开启循环后：到期的 put/call 自动判定、策略轮次逐笔落盘）</div>'; return; }
+  const strat = evs.filter(e => e.type === "entry" || e.type === "exit");
+  const settle = evs.filter(e => e.type !== "entry" && e.type !== "exit");
+  let html = "";
+  if (strat.length) {
+    html += "<div class='note' style='margin:6px 0'>🤖 策略事件（卖 put / 止盈买回）：</div>" + strat.slice(0, 12).map(e => {
+      const isEntry = e.type === "entry";
+      const st = String(e.status || "");
+      const label = st.indexOf("dry_run") === 0
+        ? (isEntry ? "🖐 打算卖" : "🖐 打算买回")
+        : (st === "sold" || st === "bought_back" ? "✅ " + (isEntry ? "已卖" : "已买回") : "❌ 失败");
+      return "<div style='padding:3px 0'>" + label + " · " + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " +
+        locTs(Date.parse(e.ts)) +
+        (e.error ? " · <span style='color:#c62828'>" + esc(e.error) + "</span>" : "") + "</div>";
+    }).join("");
+  }
+  if (settle.length) {
+    html += "<div class='note' style='margin:6px 0'>📋 最近判定（到期处理区）：</div>" + settle.map(e => {
     const isCall = /-C$/i.test(String(e.inst_id || ""));
     const cover = (e.status === "settled_itm" && !isCall && !e.covered)
       ? ' <a class="act" onclick="openCover(\'' + esc(e.inst_id) + '\',\'' + esc(e.sz ?? 1) + '\')">补买</a>'
@@ -1443,19 +1482,58 @@ function renderLiveEvents(evs) {
       (e.status === "settled_itm" ? pnlTxt : "") +
       " · " + locTs(Date.parse(e.ts)) + cover + ship + "</div>";
   }).join("");
+  }
+  box.innerHTML = html;
+}
+function renderLiveStrategy(strat) {
+  const box = $("liveStrategy");
+  if (!strat) { box.innerHTML = '<div class="empty">最近一轮策略：暂无（开启循环后显示决策与原因）</div>'; return; }
+  const dry = strat.dry_run !== false;
+  const rows = [];
+  for (const e of (strat.entries || [])) {
+    rows.push("<div style='padding:2px 0'>" + (dry ? "🖐 打算卖" : (e.status === "sold" ? "✅ 已卖" : "❌ 下单失败")) +
+      " · " + esc(e.inst_id) + " · strike " + fmt(e.strike, 2) + " · bid " + fmt(e.bid, 4) +
+      (e.entry_reason ? " · " + esc(e.entry_reason) : "") +
+      (e.net_yield_pct != null ? " · 净收益率 " + fmt(e.net_yield_pct, 3) + "%" : "") +
+      (e.days != null ? " · " + fmt(e.days, 0) + "天" : "") +
+      (e.error ? " · <span style='color:#c62828'>" + esc(e.error) + "</span>" : "") + "</div>");
+  }
+  for (const x of (strat.exits || [])) {
+    rows.push("<div style='padding:2px 0'>" + (dry ? "🖐 打算买回" : (x.status === "bought_back" ? "✅ 已买回" : "❌ 买回失败")) +
+      " · " + esc(x.inst_id) + " · 权利金回落 " + fmt(x.drop_pct, 1) + "%（" + fmt(x.entry_px, 4) +
+      " → " + fmt(x.mark_px, 4) + "）" +
+      (x.error ? " · <span style='color:#c62828'>" + esc(x.error) + "</span>" : "") + "</div>");
+  }
+  for (const n of (strat.notes || [])) rows.push("<div style='padding:2px 0;color:#777'>· " + esc(n) + "</div>");
+  box.innerHTML = "<div class='note' style='margin:6px 0'>📋 最近一轮策略" +
+    (dry ? "（<b style='color:#c62828'>dry-run：仅记录，未下单</b>）" : "") + "：</div>" +
+    (rows.join("") || '<div class="empty">本轮无动作</div>');
 }
 async function loadLive() {
   try {
     const j = await (await fetch("/config/okx-options/live")).json();
     if (!j.ok) return;
-    const lv = j.live, cfg = lv.config;
+    const lv = j.live, cfg = lv.config || {};
     $("liveEnabled").checked = !!cfg.enabled;
-    $("liveInterval").value = cfg.interval_s;
+    $("liveInterval").value = cfg.interval_s || 60;
+    const s = cfg.strategy || {};
+    $("liveDryRun").checked = s.dry_run !== false;
+    $("liveFamilies").value = (s.families || []).join(",");
+    $("liveTdPeriod").value = s.td_period || "5m";
+    $("liveEntrySetup").value = s.entry_setup ?? 9;
+    $("liveEntryCd").value = s.entry_countdown ?? 13;
+    $("liveIvMin").value = s.iv_min_percentile ?? 0;
+    $("liveTp").value = s.take_profit_pct ?? 50;
+    $("liveMaxFam").value = s.max_contracts_per_family ?? 1;
+    $("liveMaxAll").value = s.max_contracts_total ?? 3;
     const st = [];
-    st.push(lv.running ? "🟢 巡检中" : "⚪ 已停止");
+    st.push(lv.running ? "🟢 循环中" : "⚪ 已停止");
+    if (s.dry_run !== false) st.push("🖐 dry-run（不下单）");
     if (lv.last_run) st.push("上次 " + locTs(Date.parse(lv.last_run)));
-    st.push("累计判定 " + lv.total_settled + " 笔");
+    st.push("累计判定 " + lv.total_settled + " 笔 · 策略 " + (lv.total_entries || 0) + " 卖 / " +
+            (lv.total_exits || 0) + " 买回");
     $("liveStatus").innerHTML = st.join(" · ");
+    renderLiveStrategy(lv.last_strategy);
     renderLiveEvents(j.events || []);
     if (lv.last_error) {
       const w = document.createElement("div");
@@ -1471,9 +1549,23 @@ async function saveLive() {
   const interval_s = parseInt($("liveInterval").value, 10);
   if (isNaN(interval_s) || interval_s < 10 || interval_s > 3600) { showErr("巡检周期须为 10–3600 秒"); return; }
   try {
-    const j = await jpost("/config/okx-options/live", {enabled, interval_s});
-    $("liveStatus").textContent = j.ok ? (enabled ? "已保存 · 巡检启动中" : "已保存 · 巡检已停止") : "保存失败";
-    loadLive();
+    const strategy = {
+      dry_run: $("liveDryRun").checked,
+      families: $("liveFamilies").value.split(",").map(x => x.trim()).filter(Boolean),
+      td_period: $("liveTdPeriod").value,
+      entry_setup: parseInt($("liveEntrySetup").value, 10) || 9,
+      entry_countdown: parseInt($("liveEntryCd").value, 10) || 13,
+      iv_min_percentile: parseInt($("liveIvMin").value, 10) || 0,
+      take_profit_pct: parseFloat($("liveTp").value) || 0,
+      max_contracts_per_family: parseInt($("liveMaxFam").value, 10) || 0,
+      max_contracts_total: parseInt($("liveMaxAll").value, 10) || 0,
+    };
+    const j = await jpost("/config/okx-options/live", {enabled, interval_s, strategy});
+    if (!j.ok) { showErr(j.error || "保存失败"); return; }
+    $("liveStatus").textContent = enabled
+      ? (strategy.dry_run ? "已保存 · 循环启动中（dry-run，不下单）" : "已保存 · 循环启动中（真实下单）")
+      : "已保存 · 循环已停止";
+    setTimeout(loadLive, 800);
   } catch (e) {
     const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
   }
