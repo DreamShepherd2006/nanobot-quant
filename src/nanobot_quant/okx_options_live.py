@@ -196,12 +196,20 @@ def _strategy_params(cfg: dict) -> dict:
     return dict(cfg.get("strategy") or {})
 
 
-def _td_signal_for(base: str, bar: str, bars: int) -> dict | None:
-    """标的最新 TD 信号（Gate CEX 同所 K 线 → 原版 TD 引擎）。"""
-    from .data_sources import gate_cex
+def _td_signal_for(family: str, base: str, bar: str, bars: int) -> dict | None:
+    """标的最新 TD 信号（OKX 现货 K 线 → 原版 TD 引擎）。
+
+    数据面与期权链统一：链 / IV / HV 都走 OKX，而 TD 信号原先走 Gate CEX
+    （沿用了现货线「与执行同所」的约定）——期权执行在 OKX，那个约定在这里
+    不成立，否则同一个标的会出现两套 K 线（页面对不上策略）。
+    """
+    from .okx_options_data import td_kline
     from .strategies.td_sequential import calculate
-    df = gate_cex.fetch_kline(base, bar=bar, limit=int(bars))
+
+    df, err = td_kline(family, period=bar, bars=int(bars))
     if df is None or len(df) == 0:
+        if err:
+            _log(f"⚠️ {base}: 标的 K 线不可用 —— {err}")
         return None
     return calculate(df)
 
@@ -267,7 +275,7 @@ def strategy_round(cfg: dict | None = None) -> dict:
     for family in s.get("families") or []:
         base = str(family).split("-")[0]
         try:
-            sig = _td_signal_for(base, str(s.get("td_period") or "5m"),
+            sig = _td_signal_for(family, base, str(s.get("td_period") or "5m"),
                                  int(s.get("td_bars") or 120))
         except Exception as e:  # noqa: BLE001
             msg = f"{base}: K 线/TD 失败 {type(e).__name__}: {e}"

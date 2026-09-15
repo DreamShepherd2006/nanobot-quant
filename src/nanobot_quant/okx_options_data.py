@@ -61,6 +61,41 @@ def _instruments(family: str) -> list[dict]:
     return _cached(f"inst:{family}", _load)
 
 
+# TD 面板 / 期权策略轮次用的标的 K 线周期（OKX bar 与面板周期名一致）
+TD_BARS = ("1m", "3m", "5m", "15m")
+
+
+def td_kline(family: str, period: str = "5m", bars: int = 120):
+    """标的 K 线（OKX 现货成交价）→ TD 引擎可用 DataFrame。
+
+    返回 ``(df, err)``：df 列为 Open/High/Low/Close/Volume、UTC 索引，供
+    ``strategies.td_sequential.calculate`` 直接使用；失败时 ``(None, 原因)``。
+
+    数据面与期权链统一（链/IV/HV 均在 OKX）：index 参考价家族（XAU-USD_UM）
+    无现货盘与成交价，不适用于 TD，按原因返回。
+    """
+    ref, kind = _ref_inst(family)
+    if not ref:
+        return None, f"未知家族 {family}"
+    if kind != "spot":
+        return None, f"{family} 无现货盘（参考价 {ref}，无成交价）"
+    if period not in TD_BARS:
+        return None, f"不支持的周期 {period}"
+
+    from nanobot_quant.okx_cex_data import fetch_kline as _okx_kline
+
+    def _load():
+        return _okx_kline(ref, bar=period, limit=int(bars))
+
+    try:
+        df = _cached(f"tdk:{ref}:{period}:{bars}", _load)
+    except Exception as e:  # noqa: BLE001 —— 展示/决策均按失败返回原因，不外抛
+        return None, f"OKX K 线获取失败：{type(e).__name__}: {e}"
+    if df is None or len(df) == 0:
+        return None, "OKX 返回空 K 线"
+    return df, ""
+
+
 def _tickers() -> dict[str, dict]:
     def _load():
         rows = okx_sdk.check(okx_sdk.market().get_tickers(instType="OPTION"))
