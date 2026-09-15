@@ -94,5 +94,6 @@ def test_ledger_page_pnl_falls_back_to_settle_pnl():
             / "src" / "nanobot_quant" / "okx_options_page.html").read_text(encoding="utf-8")
     assert "function pnlUsd(e)" in html
     assert "ok(e.pnl_usd)" in html and "ok(e.settle_pnl)" in html
+    assert "/^settled_/" in html          # 到期结算行以官方账单口径 settle_pnl 为准
     assert "+ pnlUsd(e) +" in html          # 台账表盈亏列已改用 pnlUsd
     assert "无待回填行" in html               # 回填扫描 0 行时的说明

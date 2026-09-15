@@ -620,10 +620,13 @@ function feeUsd(e) {
   return '<span title="' + tip + '">$' + Math.abs(Number(usd)).toFixed(4) + '</span>';
 }
 
-// 盈亏显示：优先 pnl_usd（开仓/买回的平台收益），回退 settle_pnl（到期结算净盈亏，
-// 含权利金收入与赔付）——到期判定行只写 settle_pnl，不回写 pnl_usd。
+// 盈亏显示（口径）：到期结算行（settled_*）以 OKX 交割账单口径 settle_pnl 为准
+// （含权利金收入与赔付）——实验期遗留的旧 pnl_usd 不得覆盖官方结算数；
+// 其它行用 pnl_usd（开仓/买回的平台收益），缺失时回退 settle_pnl（悬浮标注口径）。
 function pnlUsd(e) {
   const ok = v => v !== null && v !== undefined && v !== "" && !isNaN(Number(v));
+  const settled = /^settled_/.test(String(e.status || ""));
+  if (settled && ok(e.settle_pnl)) return '<span title="到期结算净盈亏（含权利金收入与赔付，来自 OKX 交割账单）">' + usd(e.settle_pnl) + '</span>';
   if (ok(e.pnl_usd)) return usd(e.pnl_usd);
   if (ok(e.settle_pnl)) return '<span title="到期结算净盈亏（含权利金收入与赔付）">' + usd(e.settle_pnl) + '</span>';
   return '<span class="na">—</span>';
