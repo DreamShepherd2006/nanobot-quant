@@ -146,6 +146,16 @@
   <div class="note">卖 put 成交后自动把该仓保证金追加至「strike×面值×张数 × 比例」（100% = 全损担保：浮亏上限 &lt; 保证金 → 数学上无强平路径，可扛到到期；追加资金平仓/到期后自动释放）。0% = 关闭自动追加（仅平台默认 IM 冻结，浮亏可能击穿提前强平）。范围 0–200%。</div>
 </div>
 
+<div class="card" id="tolCard" style="margin-bottom:10px;border:none;padding:10px 0 0;border-radius:0">
+  <div class="ctl">
+    <label>🎯 定价保护线</label>
+    <input type="number" id="mTolPct" min="0" max="50" step="1" value="5" title="容忍滑点：卖出方向均价×(1−tol)，买入方向均价×(1+tol)">
+    <span class="hint">% 容忍滑点</span>
+    <span class="hint" id="tolHint"></span>
+  </div>
+  <div class="note">下单弹窗的 px 保护线 = <b>N 张盘口模拟成交均价 × (1 ∓ 容忍滑点%)</b>（卖 put/卖 call 开仓降 tol、买回平仓升 tol）。IOC 语义下 px 是「最差接受线」而非目标价：正常盘口仍成交在最优档（卖吃 bid、买吃 ask），仅当盘口在提交瞬间崩到该线之外时自动拒单不成交。0% = 盘口稍差即拒单（最严）；旧规则固定 bid×0.5（≈50% 宽闸门）保留为盘口深度不可用时的兜底。</div>
+</div>
+
 <div class="card" id="selCard" style="border:none;padding:10px 0 0;border-radius:0">
   <div class="ctl">
     <label>🎯 合约选择（卖 put 候选）</label>
@@ -911,39 +921,51 @@ async function loadCoveredCtx(instId) {
 }
 
 // 自动定价预填（与后端 suggest_sell_px/suggest_close_px 同规则，px=toFixed(2)）
-async function prefillSellPx(instId, opt) {
-  const isCall = opt === "C";
-  $("mTypeHint").textContent = "获取盘口报价中…"; $("mPxHint").textContent = "";
-  let bidP = null;
+let lastSuggestedPx = null;   // 保护线跟随用：只在 px 未被手改时覆盖
+async function suggestPx(instId, side, sz) {
   try {
-    const r = await (await fetch("/config/okx-options/ticker?inst_id=" + encodeURIComponent(instId))).json();
-    bidP = (r && r.ok && r.data && r.data.bid != null && r.data.bid > 0) ? r.data.bid : null;
-  } catch (e) { /* 下方统一降级 */ }
-  if (bidP != null) {
-    $("mPx").value = (bidP * 0.5).toFixed(2);
-    $("mTypeHint").textContent = "自动预填 IOC 保底 px = 当前 bid×0.5（=" + (bidP * 0.5).toFixed(2) + ", 可改）；正常盘口仍按最优买价成交，盘口崩至保底以下自动拒单";
-    $("mPxHint").textContent = "想立即成交可切限价并填 bid（=表格 bid 列）；IOC 保底越低越易成交，成交价由盘口决定、px 只是保护线";
+    const r = await (await fetch("/config/okx-options/suggest-px?inst_id=" +
+      encodeURIComponent(instId) + "&side=" + side + "&sz=" + (sz || 1))).json();
+    return (r && r.ok) ? r : null;
+  } catch (e) { return null; }
+}
+
+async function prefillSellPx(instId, opt) {
+  $("mTypeHint").textContent = "获取盘口深度与保护线中…"; $("mPxHint").textContent = "";
+  const sz = parseInt(($("mSz") && $("mSz").value) || "1", 10) || 1;
+  const r = await suggestPx(instId, "sell", sz);
+  const px = (r && r.px != null && r.px > 0) ? r.px : null;
+  const b = (r && r.basis) || {};
+  if (px != null) {
+    $("mPx").value = px.toFixed(2); lastSuggestedPx = px.toFixed(2);
+    const basisTxt = b.mode === "sim_avg"
+      ? "" + sz + " 张盘口模拟均价 " + fmt(b.sim_avg_px, 4) + " × (1−" + fmt(b.tolerance_pct, 1) + "%)"
+      : "盘口深度不可用，回退旧规则 bid×0.5";
+    $("mTypeHint").textContent = "自动预填 IOC 保护线 px = " + px.toFixed(2) + "（" + basisTxt + "，可改）；正常盘口仍按最优买价成交（吃 bid），盘口崩至保护线以下自动拒单";
+    $("mPxHint").textContent = "想立即成交可切限价并填 bid（=表格 bid 列）；保护线越低越易成交，成交价由盘口决定、px 只是保护线；改张数会自动跟随重算";
   } else {
     $("mPx").value = "";
-    $("mTypeHint").textContent = "当前无可用 bid（无买盘/获取失败）——卖 put 可能无法成交；换近实值档或稍后重试，或手动填 IOC 保底（建议 bid×0.5）";
+    $("mTypeHint").textContent = "当前无可用盘口（无买盘/获取失败）——卖 put 可能无法成交；换近实值档或稍后重试，或手动填 IOC 保底（建议 bid×0.5）";
     $("mPxHint").textContent = "";
   }
 }
 
 async function prefillClosePx(instId) {
-  $("mTypeHint").textContent = "获取盘口报价中…"; $("mPxHint").textContent = "";
-  let askP = null;
-  try {
-    const r = await (await fetch("/config/okx-options/ticker?inst_id=" + encodeURIComponent(instId))).json();
-    askP = (r && r.ok && r.data && r.data.ask != null && r.data.ask > 0) ? r.data.ask : null;
-  } catch (e) { /* 下方统一降级 */ }
-  if (askP != null) {
-    $("mPx").value = askP.toFixed(2);
-    $("mTypeHint").textContent = "自动预填 IOC px = 当前 ask（=" + askP.toFixed(2) + ", 可改）；吃当前卖一成交，ask 升高自动撤单不追价、下轮重试";
-    $("mPxHint").textContent = "px 是最高接受价：填 ask 精确吃买一；薄盘口想扫深档可往高填（追价有滑点风险）";
+  $("mTypeHint").textContent = "获取盘口深度与保护线中…"; $("mPxHint").textContent = "";
+  const sz = parseInt(($("mSz") && $("mSz").value) || "1", 10) || 1;
+  const r = await suggestPx(instId, "buy", sz);
+  const px = (r && r.px != null && r.px > 0) ? r.px : null;
+  const b = (r && r.basis) || {};
+  if (px != null) {
+    $("mPx").value = px.toFixed(2); lastSuggestedPx = px.toFixed(2);
+    const basisTxt = b.mode === "sim_avg"
+      ? "" + sz + " 张盘口模拟均价 " + fmt(b.sim_avg_px, 4) + " × (1+" + fmt(b.tolerance_pct, 1) + "%)"
+      : "盘口深度不可用，回退当前 ask";
+    $("mTypeHint").textContent = "自动预填 IOC 最高接受价 px = " + px.toFixed(2) + "（" + basisTxt + "，可改）；吃卖盘成交，盘口跳至该线以上自动拒单不追价";
+    $("mPxHint").textContent = "px 是最高接受价：贴着卖一填成交快；薄盘口想扫深档可往高填（追价有滑点风险）；改张数会自动跟随重算";
   } else {
     $("mPx").value = "";
-    $("mTypeHint").textContent = "该合约当前无 ask（无卖盘/获取失败）——平仓可能无法成交，稍后重试或手动填 px（IOC 建议 ≥当前 ask）";
+    $("mTypeHint").textContent = "该合约当前无盘口（无卖盘/获取失败）——平仓可能无法成交，稍后重试或手动填 px（IOC 建议 ≥当前 ask）";
     $("mPxHint").textContent = "";
   }
 }
@@ -1063,9 +1085,14 @@ async function doExit(spot) {
 }
 $("mCancel").addEventListener("click", modalClose);
 $("mSz").addEventListener("input", () => {
-  // 张数联动盘口模拟（C22a）：平仓直接刷新模拟；卖 put 重跑预览（含模拟）
+  // 张数联动盘口模拟（C22a）+ 保护线跟随（C22b）：平仓刷新模拟，卖 put 重跑预览
   if (modalMode === "close") { renderSim("buy"); }
   else if (modalMode === "sell") { doPreview("sell"); }
+  // 张数变 → 模拟均价变 → 保护线跟随重算（仅当 px 未被手改）
+  const keep = $("mPx").value;
+  if (modalInst && (!keep || keep === lastSuggestedPx)) {
+    if (modalMode === "close") prefillClosePx(modalInst); else prefillSellPx(modalInst, modalOpt);
+  }
 });
 $("mOrdType").addEventListener("change", () => {
   // 期权无纯市价单：px 行恒显示（limit/ioc/fok/post_only 均需价格）
@@ -1149,13 +1176,18 @@ async function doPreview(mode) {
     }
     $("mPreview").innerHTML =
       "<b>权利金/张(USD)：</b>" + usd(p.est_premium_usd ? p.est_premium_usd / (f.sz || 1) : null) +
-      "（合计 " + usd(p.est_premium_usd) + "）<br>" +
-      "<b>手续费（预估）：</b>" + usd(p.fee_est_usd) +
-      " · <b>净权利金：</b><span style='color:#0a8f4f'>" + usd(p.net_premium_usd) + "</span>" +
+      "（合计 " + usd(p.est_premium_usd) + "）" +
+      (p.fill_px_est != null && p.px != null && Math.abs(p.fill_px_est - p.px) > 1e-9
+        ? "<span style='color:#888'> · 按预期成交价 " + fmt(p.fill_px_est, 4) + " 估（模拟均价）</span>" : "") + "<br>" +
+      "<b>手续费（预估）：</b>" + "$" + fmt(p.fee_est_usd, 4) +
+      " · <b>净权利金：</b><span style='color:#0a8f4f'>" + "$" + fmt(p.net_premium_usd, 4) + "</span>" +
       (p.net_yield_pct != null ? " · <b>净收益率：</b>" + fmt(p.net_yield_pct, 3) + "%（分母 " +
         (p.opt_type === "C" ? "行权名义 " + usd(p.notional_usd) : "担保额 " + usd(p.collateral_est_usd)) + "）" : "") +
       "<br>" + extraTxt + "<br>" +
       "<b>订单：</b>sell · tdMode=isolated · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
+      (p.px_basis && p.px_basis.mode === "sim_avg"
+        ? "<span style='color:#888'>（保护线 = " + esc(f.sz || 1) + " 张模拟均价 " + fmt(p.px_basis.sim_avg_px, 4) +
+          " × (1−" + fmt(p.px_basis.tolerance_pct, 1) + "%)）</span>" : "") +
       "<br><span style='color:#888'>参考盘口 ask=" + fmt(p.ref.ask, 2) + " bid=" + fmt(p.ref.bid, 2) + "</span>";
     const simEl = $("mSim");
     simEl.style.display = "";
@@ -1239,16 +1271,27 @@ async function loadParams() {
       $("mCollRatio").value = j.params.collateral_ratio_pct ?? 100;
       $("paramHint").textContent = "当前自动追加目标 = 全损 × " + (j.params.collateral_ratio_pct ?? 100) + "%" +
         ((j.params.collateral_ratio_pct ?? 100) === 0 ? "（已关闭）" : "");
+      const tol = j.params.px_tolerance_pct ?? 5;
+      if ($("mTolPct")) $("mTolPct").value = tol;
+      if ($("tolHint")) $("tolHint").textContent = "保护线 = N 张模拟均价 × (1 ∓ " + tol + "%)";
     }
   } catch (e) { $("paramHint").textContent = "读取失败"; }
 }
 async function saveParams() {
   const ratio = parseInt($("mCollRatio").value, 10);
   if (isNaN(ratio) || ratio < 0 || ratio > 200) { showErr("担保比例须为整数（0–200）"); return; }
+  const tol = parseFloat($("mTolPct") ? $("mTolPct").value : "5");
+  if (isNaN(tol) || tol < 0 || tol > 50) { showErr("容忍滑点须在 0–50 之间"); return; }
   try {
-    const j = await jpost("/config/okx-options/params", {collateral_ratio_pct: ratio});
-    $("paramHint").textContent = "已保存：自动追加目标 = 全损 × " + (j.params.collateral_ratio_pct ?? ratio) + "%";
+    const j = await jpost("/config/okx-options/params",
+      {collateral_ratio_pct: ratio, px_tolerance_pct: tol});
+    if (!j.ok) { showErr(j.error || "保存失败"); return; }
+    $("paramHint").textContent = "已保存：自动追加目标 = 全损 × " + (j.params.collateral_ratio_pct ?? ratio) +
+      "% · 容忍滑点 " + (j.params.px_tolerance_pct ?? tol) + "%";
     $("mCollRatio").value = j.params.collateral_ratio_pct;
+    if ($("mTolPct")) $("mTolPct").value = j.params.px_tolerance_pct ?? tol;
+    if ($("tolHint")) $("tolHint").textContent = "保护线 = N 张模拟均价 × (1 ∓ " +
+      (j.params.px_tolerance_pct ?? tol) + "%)";
   } catch (e) {
     const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
   }

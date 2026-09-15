@@ -170,6 +170,70 @@ def _patch_entry(monkeypatch):
         "uid": account or "881574754615066858"})
 
 
+# ── 定价保护线（C22b，2026-09-15）────────────────────────────
+
+def test_suggest_px_from_sim_sell_and_buy():
+    """保护线 = N 张模拟均价 × (1∓容忍滑点%)：卖出降、买回升。"""
+    assert ot.suggest_px_from_sim({"avg_px": 0.25}, "sell", 5.0) == pytest.approx(0.24, abs=0.005)
+    assert ot.suggest_px_from_sim({"avg_px": 0.25}, "buy", 5.0) == pytest.approx(0.26, abs=0.005)
+    assert ot.suggest_px_from_sim({"avg_px": 1.0}, "sell", 0.0) == 1.0     # 0% = 均价本身
+    # 容忍滑点越界按 0–50 钳制
+    assert ot.suggest_px_from_sim({"avg_px": 1.0}, "sell", 999) == 0.5
+
+
+def test_suggest_px_from_sim_invalid_returns_none():
+    assert ot.suggest_px_from_sim(None, "sell", 5.0) is None
+    assert ot.suggest_px_from_sim({}, "sell", 5.0) is None
+    assert ot.suggest_px_from_sim({"avg_px": 0}, "sell", 5.0) is None
+    assert ot.suggest_px_from_sim({"avg_px": "abc"}, "sell", 5.0) is None
+
+
+def test_suggest_px_falls_back_without_sim():
+    """无盘口深度（sim=None）→ 旧规则兜底：卖 bid×0.5、买 ask。"""
+    # 0.25×0.5=0.125 → Python round 到 0.12（与后端一致；旧前端 toFixed 会给 0.13）
+    assert suggest_sell_px(0.25) == pytest.approx(0.12, abs=0.005)
+    assert suggest_close_px(0.60) == pytest.approx(0.60)
+    assert suggest_sell_px(None) is None
+    assert suggest_close_px(0) is None
+    # 有 sim → 新规则优先（0.25×0.95）
+    assert suggest_sell_px(0.25, sim={"avg_px": 0.25}, tolerance_pct=5.0) == pytest.approx(0.24, abs=0.005)
+
+
+def test_px_tolerance_pct_default_clamp_and_persist():
+    assert ot.px_tolerance_pct() == ot.DEFAULT_PX_TOLERANCE_PCT          # 默认 5%
+    ot.save_option_params(px_tolerance_pct=12)
+    assert ot.px_tolerance_pct() == pytest.approx(12.0)
+    ot.save_option_params(px_tolerance_pct=999)                          # 越界 → 钳制 50
+    assert ot.px_tolerance_pct() == pytest.approx(50.0)
+    ot.save_option_params(collateral_ratio_pct=80)                       # 改担保不动容忍滑点
+    p = ot.load_option_params()
+    assert p["collateral_ratio_pct"] == 80 and p["px_tolerance_pct"] == pytest.approx(50.0)
+
+
+def test_suggest_px_for_order_modes(monkeypatch):
+    monkeypatch.setattr(ot, "simulate_fill", lambda inst, side, sz: {"avg_px": 0.25, "filled": sz})
+    out = ot.suggest_px_for_order("BTC-USD_UM-260904-80000-P", "sell", 1)
+    assert out["ok"] is True and out["px"] == pytest.approx(0.24, abs=0.005)
+    assert out["basis"]["mode"] == "sim_avg" and out["basis"]["sz"] == 1
+    # 盘口不可用 → 回退（买方向回退 ask=110.0）
+    monkeypatch.setattr(ot, "simulate_fill", lambda *a, **k: None)
+    out2 = ot.suggest_px_for_order("BTC-USD_UM-260904-80000-P", "buy", 2)
+    assert out2["px"] == pytest.approx(110.0) and out2["basis"]["mode"] == "fallback"
+    with pytest.raises(OkxSdkError):
+        ot.suggest_px_for_order("BTC-USD_UM-260904-80000-P", "weird", 1)
+
+
+def test_preview_put_reports_suggested_px_and_fill_px(monkeypatch):
+    """预览新增保护线 + 预期成交价口径（模拟均价优先）。"""
+    monkeypatch.setattr(ot, "simulate_fill", lambda inst, side, sz: {"avg_px": 105.0, "filled": sz})
+    p = ot.preview_open_put("BTC-USD_UM-260904-80000-P", 1, "ioc", px=100.0)
+    assert p["suggested_px"] == pytest.approx(105.0 * 0.95, abs=0.02)     # 105×0.95
+    assert p["px_basis"]["mode"] == "sim_avg"
+    assert p["fill_px_est"] == pytest.approx(105.0)                       # 预期成交价 = 模拟均价
+    assert p["est_premium_usd"] == pytest.approx(105.0 * 0.01)            # 按预期成交价计权利金
+    assert p["px"] == pytest.approx(100.0)                                # 用户填入的 px 原样保留
+
+
 # ── preview ───────────────────────────────────────────────
 
 def test_preview_open_put_limit():
