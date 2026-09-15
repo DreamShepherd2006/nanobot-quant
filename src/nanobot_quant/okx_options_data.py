@@ -137,7 +137,7 @@ def _spot_price(family: str) -> float | None:
 
     def _load():
         if kind == "index":
-            # XAU 等无现货盘的家族：直接取指数价（idxPx）；okx 1.0.9 方法名复数 get_index_tickers
+            # _SPOT 未收录的家族（当前无）：回退指数价（idxPx）；okx 1.0.9 方法名复数 get_index_tickers
             idx = okx_sdk.check(okx_sdk.market().get_index_tickers(instId=ref))
             try:
                 return float(idx[0]["idxPx"]) if idx and idx[0].get("idxPx") else None
@@ -160,7 +160,7 @@ def spot_price(family: str) -> float | None:
 def _spot_hv(family: str, days: int = 30) -> dict:
     """现货日线年化历史波动率（对数收益标准差 × sqrt(365)）。
 
-    仅现货盘家族可算（需日线成交价）；无现货盘（index 参考，如 XAU）→ hv_pct=None。
+    仅现货盘家族可算（需日线成交价）；_SPOT 未收录、回退指数参考的家族 → hv_pct=None。
     """
     ref, kind = _ref_inst(family)
     if not ref:
