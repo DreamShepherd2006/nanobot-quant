@@ -73,8 +73,15 @@ def _to_inst_id(ticker: str) -> str:
     'XSPCX-USDT'
     >>> _to_inst_id("BTC")
     'BTC-USDT'
+    >>> _to_inst_id("XAUT-USDT")   # 完整 instId 原样返回
+    'XAUT-USDT'
     """
     ticker = ticker.upper().strip()
+    # 已是完整 instId（含分隔符）→ 原样返回。否则 X 前缀的现货对会被二次加
+    # 后缀：XAUT-USDT → XAUT-USDT-USDT，OKX 报 code=51001 Instrument doesn't exist
+    # （SOL-USDT 之类的非 X 开头对恰好绕过，所以这个坑只在 X 开头的对暴露）。
+    if "-" in ticker:
+        return ticker
     if ticker.startswith("X"):
         # Already an X-prefixed tokenized stock
         return f"{ticker}-USDT"
