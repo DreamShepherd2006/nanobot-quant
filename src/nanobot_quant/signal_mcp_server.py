@@ -67,6 +67,7 @@ from nanobot_quant.tools.tools_wallet import (
 from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import get_backtest_result, run_backtest
 from nanobot_quant.tools.tools_cex import cex_sub_order
+from nanobot_quant.tools.tools_options import options_broker_selftest
 from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import (
     _redirect_lumibot_console_to_stderr,
@@ -211,6 +212,11 @@ _TOOL_DESCRIPTIONS = {
         "side=buy → amount 为 USDT 金额；side=sell → amount 为基础币数量。"
         "返回 status=filled（成交明细）/ pending（已提交未 closed）/ error（明确原因）。"
     ),
+    "options_broker_selftest": (
+        "期权执行层只读自检（不下单/不改台账/不动保证金）：一次确认期权链、"
+        "Asset↔instId 与每张面值 multiplier（lumibot fork patch 是否生效）、"
+        "期权子账号配置与余额、当前期权持仓。返回 status=ok/partial/error + checks。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -223,6 +229,7 @@ _TOOL_DISPATCH = {
     "run_backtest": run_backtest,
     "get_backtest_result": get_backtest_result,
     "cex_sub_order": cex_sub_order,
+    "options_broker_selftest": options_broker_selftest,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,

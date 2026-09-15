@@ -85,6 +85,7 @@ except ImportError:
             # 镜像 lumibot v4.5.78：Broker 保存 data_source（策略
             # get_historical_prices 委托 broker.data_source，回测驱动依赖）。
             self.data_source = kwargs.get("data_source")
+            self.option_source = kwargs.get("option_source")
             self.name = kwargs.get("name", "stub")
 
     _brokers.Broker = _Broker
@@ -92,9 +93,17 @@ except ImportError:
     _entities = types.ModuleType("lumibot.entities")
 
     class _Asset:
-        def __init__(self, symbol="", asset_type=""):
+        # 镜像 lumibot v4.5.78 + fork patch：期权 multiplier 默认 100，但显式
+        # 传入优先（加密期权一张 = 0.1 SOL / 0.01 BTC）。
+        def __init__(self, symbol="", asset_type="", expiration=None, strike=None,
+                     right=None, multiplier=None):
             self.symbol = symbol
             self.asset_type = asset_type
+            self.expiration = expiration
+            self.strike = strike
+            self.right = right
+            self.multiplier = (multiplier if multiplier is not None
+                               else (100 if str(asset_type).lower() == "option" else 1))
 
     class _Position:
         # 与 lumibot v4.5.78 真实签名一致：无 current_price 参数
@@ -128,9 +137,15 @@ except ImportError:
         # 镜像 lumibot v4.5.78 entities.Order 的必用成员：
         # set_filled 只设 event 不更新 status（backtest/cex broker 手动同步 status="fill"）、
         # custom_params 默认 None（写入前需先置 dict）、identifier 默认 None。
+        class OrderType:  # 镜像 Order.OrderType（broker 解析用）
+            LIMIT = "limit"
+            MARKET = "market"
+            STOP = "stop"
+            STOP_LIMIT = "stop_limit"
+
         def __init__(self, strategy=None, identifier=None, asset=None, quantity=0,
                      side="buy", status="new", limit_price=None, stop_price=None,
-                     custom_params=None, error=None):
+                     custom_params=None, error=None, order_type=None):
             self.strategy = strategy
             self.identifier = identifier
             self.asset = asset
@@ -141,6 +156,7 @@ except ImportError:
             self.stop_price = stop_price
             self.custom_params = custom_params
             self.error = error
+            self.order_type = order_type
             self.filled = False
             self._event = None
 
@@ -161,10 +177,19 @@ except ImportError:
         def is_filled(self):
             return self.filled is True or self.status == "fill"
 
+    class _Quote:
+        # 镜像 lumibot v4.5.78 entities.Quote 最小成员（期权数据源 get_quote 用）
+        def __init__(self, asset=None, bid=None, ask=None, price=None, **kwargs):
+            self.asset = asset
+            self.bid = bid
+            self.ask = ask
+            self.price = price
+
     _entities.Asset = _Asset
     _entities.Position = _Position
     _entities.Bars = _Bars
     _entities.Order = _Order
+    _entities.Quote = _Quote
 
     # onchainos_data_source imports lumibot.data_sources.DataSource
     _data_sources = types.ModuleType("lumibot.data_sources")
