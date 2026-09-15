@@ -6,7 +6,7 @@
 （``entry_setup`` / ``entry_countdown``），所以页面上的「距信号还差多少」
 就是策略轮次实际使用的口径 —— 页面与自动化不会各说各话。
 
-数据源 = Gate CEX 现货 K 线（与执行通道同源），复用 td-table 的取数与引擎，
+数据源 = OKX 现货 K 线（与期权链 / IV / HV 同一数据面），复用 td-table 的引擎，
 口径与 TD 序列分析页一致。
 """
 
@@ -15,8 +15,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from nanobot_quant.okx_options_data import FAMILIES
-from nanobot_quant.td_table_handlers import _engine_run, _fetch_cex_kline
+from nanobot_quant.okx_options_data import FAMILIES, td_kline
+from nanobot_quant.td_table_handlers import _engine_run
 
 # 面板可选周期（33.13 原设计：1m 提示级 / 5m 主力 / 15m 高质量补充）
 PERIODS = ("1m", "3m", "5m", "15m")
@@ -62,13 +62,9 @@ def _compute(family: str, period: str, bars: int, thr: dict) -> dict[str, Any]:
         "family": family, "base": base, "period": period, "bars": bars,
         "entry_setup": thr["entry_setup"], "entry_countdown": thr["entry_countdown"],
     }
-    try:
-        df = _fetch_cex_kline(f"{base}_USDT", bar=period, limit=bars)
-    except Exception as e:  # noqa: BLE001
-        row["error"] = f"K 线获取失败：{type(e).__name__}: {e}"
-        return row
+    df, err = td_kline(family, period=period, bars=bars)
     if df is None or len(df) == 0:
-        row["error"] = "无 K 线数据"
+        row["error"] = err or "无 K 线数据"
         return row
 
     try:

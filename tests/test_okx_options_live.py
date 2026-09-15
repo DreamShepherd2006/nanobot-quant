@@ -29,7 +29,7 @@ def _iso(tmp_path, monkeypatch):
     ol._stop.clear()
     # 策略轮次默认打桩（不触网）：持仓空 + 无 K 线；策略专项测试用 _strat 覆盖
     monkeypatch.setattr(ot, "open_puts", lambda account="": [])
-    monkeypatch.setattr(ol, "_td_signal_for", lambda base, bar, bars: None)
+    monkeypatch.setattr(ol, "_td_signal_for", lambda family, base, bar, bars: None)
     yield tmp_path
     ol.stop()  # 保证测试结束无 daemon 线程泄漏
     ol._state.update(running=False, last_run=None, last_settled=[],
@@ -230,7 +230,7 @@ def _strat(monkeypatch, _iso):
 
     calls = {"sell": [], "buy": []}
     monkeypatch.setattr(ol, "_td_signal_for",
-                        lambda base, bar, bars: {"setup_buy": 9, "cd_buy": 0})
+                        lambda family, base, bar, bars: {"setup_buy": 9, "cd_buy": 0})
     monkeypatch.setattr(ol.ot, "open_puts", lambda account="": [dict(SOL_POS)])
     monkeypatch.setattr(ol.ot, "suggest_px_for_order",
                         lambda inst, side, sz=None: {"px": 0.3})
@@ -307,7 +307,7 @@ class TestStrategyRound:
         assert "51000" in out["entries"][0]["error"]
 
     def test_no_kline_is_noted(self, _strat, monkeypatch):
-        monkeypatch.setattr(ol, "_td_signal_for", lambda base, bar, bars: None)
+        monkeypatch.setattr(ol, "_td_signal_for", lambda family, base, bar, bars: None)
         out = ol.strategy_round(_cfg())
         assert any("无 K 线数据" in n for n in out["notes"])
 
