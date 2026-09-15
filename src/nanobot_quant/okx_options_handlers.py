@@ -273,6 +273,26 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "sim": sim})
 
+    async def _suggest_px(request: Request):
+        # 定价保护线（C22b）：N 张盘口模拟均价 × (1 ∓ 容忍滑点%)——下单页预填用
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        q = request.query_params
+        inst = (q.get("inst_id") or "").strip().upper()
+        side = (q.get("side") or "sell").lower()
+        try:
+            sz = int(q.get("sz") or 1)
+        except ValueError:
+            sz = 1
+        if not inst:
+            return JSONResponse({"ok": False, "error": "inst_id 必填"})
+        try:
+            out = await asyncio.to_thread(ot.suggest_px_for_order, inst, side, sz)
+            return JSONResponse(out)
+        except (OkxSdkError, RuntimeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
     async def _lifecycle(request: Request):
         # 单合约生命周期：mark 价从上市到现在 + 同时刻标的参考价（表格，无图）
         err, ok = _authorized(request, gatekeeper)
@@ -555,15 +575,26 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         body, jerr = await _json_body(request)
         if jerr:
             return JSONResponse({"ok": False, "error": jerr})
-        raw = body.get("collateral_ratio_pct")
-        try:
-            ratio = int(raw)
-        except (TypeError, ValueError):
-            return JSONResponse({"ok": False, "error": "担保比例必须为整数（0–200）"})
-        if not 0 <= ratio <= 200:
-            return JSONResponse({"ok": False, "error": "担保比例须在 0–200 之间"})
-        return JSONResponse({"ok": True, "params": ot.save_option_params(
-            collateral_ratio_pct=ratio)})
+        fields: dict = {}
+        if body.get("collateral_ratio_pct") is not None:
+            try:
+                ratio = int(body.get("collateral_ratio_pct"))
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "error": "担保比例必须为整数（0–200）"})
+            if not 0 <= ratio <= 200:
+                return JSONResponse({"ok": False, "error": "担保比例须在 0–200 之间"})
+            fields["collateral_ratio_pct"] = ratio
+        if body.get("px_tolerance_pct") is not None:
+            try:
+                tol = float(body.get("px_tolerance_pct"))
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "error": "容忍滑点必须为数字（0–50）"})
+            if not 0 <= tol <= 50:
+                return JSONResponse({"ok": False, "error": "容忍滑点须在 0–50 之间"})
+            fields["px_tolerance_pct"] = tol
+        if not fields:
+            return JSONResponse({"ok": False, "error": "无可保存字段"})
+        return JSONResponse({"ok": True, "params": ot.save_option_params(**fields)})
 
     # ── 批次 C：下单（预览 → start → confirm 两步确认）─────────
 
@@ -785,6 +816,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/selector", _selector_save, methods=["POST"])
     app.add_api_route("/config/okx-options/ticker", _ticker, methods=["GET"])
     app.add_api_route("/config/okx-options/sim", _sim, methods=["GET"])
+    app.add_api_route("/config/okx-options/suggest-px", _suggest_px, methods=["GET"])
     app.add_api_route("/config/okx-options/lifecycle", _lifecycle, methods=["GET"])
     app.add_api_route("/config/okx-options/accounts", _accounts, methods=["GET"])
     app.add_api_route("/config/okx-options/positions", _positions, methods=["GET"])

@@ -52,25 +52,111 @@ CLOSE_TDMODE = "isolated"
 #: 买回（平仓）：IOC px = ask——精确吃当前卖一；ask 波动升高自动撤、下轮重试不追价。
 SELL_PX_BID_RATIO = 0.5
 
+#: 定价保护线（C22b，2026-09-15）：px = N 张盘口模拟均价 × (1 ∓ 容忍滑点%)
+#:   卖出方向（卖 put / 卖 call 开仓，吃买盘）：均价 × (1 − tol)
+#:   买入方向（买回平仓，吃卖盘）：均价 × (1 + tol)
+#: 盘口深度不可用（sim 为 None）时回退旧规则（bid×0.5 / ask）——fail-safe 不变。
+#: 与旧规则的区别：旧规则是固定 −50% 的极宽闸门（几乎不触发），新规则以「N 张
+#: 实际可成交均价」为基准、容忍度可配，盘口在提交瞬间崩坏时更早拒单。
+DEFAULT_PX_TOLERANCE_PCT = 5.0
+PX_TOLERANCE_MIN, PX_TOLERANCE_MAX = 0.0, 50.0
 
-def suggest_sell_px(bid: Optional[float]) -> Optional[float]:
-    """卖 put 开仓建议 px（IOC 保底线 = bid×0.5）。
 
-    px 只是保护线不是目标价：正常盘口 IOC 扫单仍按最优买价（bid）成交，
-    仅当盘口崩至 bid×0.5 以下时自动撤单。bid 缺失/非正 → None
-    （自动化调用方须 fail-closed 不下单）。页面预填与此同规则（toFixed(2)）。
+def px_tolerance_pct() -> float:
+    """定价保护线容忍滑点（%）：卖出方向均价×(1−tol)，买入方向×(1+tol)。"""
+    try:
+        v = float(load_option_params().get(
+            "px_tolerance_pct", DEFAULT_PX_TOLERANCE_PCT))
+    except (TypeError, ValueError):
+        return DEFAULT_PX_TOLERANCE_PCT
+    return min(max(v, PX_TOLERANCE_MIN), PX_TOLERANCE_MAX)
+
+
+def suggest_px_from_sim(sim: Optional[dict], side: str,
+                        tolerance_pct: Optional[float] = None) -> Optional[float]:
+    """由盘口吃单模拟推价格保护线（C22b）。
+
+    sim 为 ``simulate_fill()`` 的结果；``avg_px`` 缺失/非正或 sim 为 None →
+    返回 None（调用方回退旧规则）。IOC 语义下 px 是「最差接受线」而非目标价：
+    正常盘口仍成交在最优档，仅当盘口崩至该线以下（卖出）/ 跳高至该线以上
+    （买入）时自动拒单。
     """
+    if not sim or not isinstance(sim, dict):
+        return None
+    try:
+        avg = float(sim.get("avg_px"))
+    except (TypeError, ValueError):
+        return None
+    if avg <= 0:
+        return None
+    tol = px_tolerance_pct() if tolerance_pct is None else float(tolerance_pct)
+    tol = min(max(tol, PX_TOLERANCE_MIN), PX_TOLERANCE_MAX)
+    mult = (1.0 - tol / 100.0) if (side or "sell").lower() == "sell" \
+        else (1.0 + tol / 100.0)
+    px = round(avg * mult, 2)
+    return px if px > 0 else None
+
+
+def suggest_px_for_order(inst_id: str, side: str, sz: int = 1) -> dict:
+    """下单页预填用的保护线（含口径说明）；前端与自动化共用同一规则。
+
+    返回 ``{ok, px, basis, ref}``；盘口不可用时 ``px=None`` +
+    ``basis.mode="none"``（调用方提示手动填价，不阻塞）。
+    """
+    inst_id = (inst_id or "").strip().upper()
+    side = (side or "sell").lower()
+    if side not in ("sell", "buy"):
+        raise OkxSdkError(f"side 仅支持 sell/buy，收到 {side}")
+    sz = max(1, int(sz or 1))
+    q = ticker_quote(inst_id)
+    try:
+        sim = simulate_fill(inst_id, side, sz)
+    except (OkxSdkError, RuntimeError, ValueError):
+        sim = None
+    tol = px_tolerance_pct()
+    px = suggest_px_from_sim(sim, side, tol)
+    if px is not None:
+        basis = {"mode": "sim_avg", "tolerance_pct": tol,
+                 "sim_avg_px": sim.get("avg_px"), "sz": sz, "side": side}
+    else:
+        px = (suggest_sell_px(q["bid"]) if side == "sell"
+              else suggest_close_px(q["ask"]))
+        basis = {"mode": "fallback", "tolerance_pct": tol,
+                 "fallback": "bid×0.5" if side == "sell" else "ask",
+                 "sim_avg_px": None, "sz": sz, "side": side}
+        if px is None:
+            basis["mode"] = "none"
+    return {"ok": True, "px": px, "inst_id": inst_id, "basis": basis,
+            "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]}}
+
+
+def suggest_sell_px(bid: Optional[float], sim: Optional[dict] = None,
+                    tolerance_pct: Optional[float] = None) -> Optional[float]:
+    """卖 put/call 开仓建议 px（保护线）。
+
+    优先：N 张盘口模拟均价 × (1 − 容忍滑点%)（C22b）；盘口深度不可用时回退旧规则
+    bid×0.5。px 只是保护线不是目标价：正常盘口 IOC 扫单仍按最优买价（bid）成交，
+    仅当盘口崩至保护线以下时自动撤单。bid 缺失/非正且无 sim → None
+    （自动化调用方须 fail-closed 不下单）。
+    """
+    px = suggest_px_from_sim(sim, "sell", tolerance_pct)
+    if px is not None:
+        return px
     if not bid or bid <= 0:
         return None
     return round(bid * SELL_PX_BID_RATIO, 2)
 
 
-def suggest_close_px(ask: Optional[float]) -> Optional[float]:
-    """买回平仓建议 px = 当前 ask（吃买一，不留缓冲）。
+def suggest_close_px(ask: Optional[float], sim: Optional[dict] = None,
+                     tolerance_pct: Optional[float] = None) -> Optional[float]:
+    """买回平仓建议 px（最高接受价）。
 
-    px 是最高接受价：填 ask 精确吃当前卖一；ask 升高 IOC 自动撤单、
-    下轮重试（薄盘口不追价，重试成本低）。ask 缺失/非正 → None。
+    优先：N 张盘口模拟均价 × (1 + 容忍滑点%)（C22b）；无盘口深度时回退当前 ask
+    （精确吃卖一，不留缓冲）。ask 缺失/非正且无 sim → None。
     """
+    px = suggest_px_from_sim(sim, "buy", tolerance_pct)
+    if px is not None:
+        return px
     if not ask or ask <= 0:
         return None
     return round(ask, 2)
@@ -145,6 +231,11 @@ def save_option_params(**fields) -> dict:
     except (TypeError, ValueError):
         ratio = DEFAULT_COLLATERAL_RATIO_PCT
     d["collateral_ratio_pct"] = min(max(ratio, 0), 200)
+    try:
+        tol = float(d.get("px_tolerance_pct", DEFAULT_PX_TOLERANCE_PCT))
+    except (TypeError, ValueError):
+        tol = DEFAULT_PX_TOLERANCE_PCT
+    d["px_tolerance_pct"] = min(max(tol, PX_TOLERANCE_MIN), PX_TOLERANCE_MAX)
     p = params_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".json.tmp")
@@ -446,14 +537,21 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
     if px is None:
         raise OkxSdkError("期权限价类订单需提供价格 px")
     ref_px = px
-    prem = ref_px * lot * sz
-    collat = spec["strike"] * lot * sz
-    fee_est = option_fee_est(spec["strike"], lot, sz)
-    ratio = collateral_ratio_pct()
     try:
         sim = simulate_fill(inst_id, "sell", int(sz))
     except (OkxSdkError, RuntimeError, ValueError):
         sim = None
+    tol = px_tolerance_pct()
+    suggested_px = suggest_sell_px(q["bid"], sim=sim, tolerance_pct=tol)
+    # 预期成交价（口径）：盘口模拟均价优先（IOC 吃买盘实际能拿到的价）→ 回退下单价
+    try:
+        fill_px = float(sim["avg_px"]) if (sim and sim.get("avg_px")) else ref_px
+    except (TypeError, ValueError):
+        fill_px = ref_px
+    prem = fill_px * lot * sz
+    collat = spec["strike"] * lot * sz
+    fee_est = option_fee_est(spec["strike"], lot, sz)
+    ratio = collateral_ratio_pct()
     exp_iso = _exp_str(spec["exp_ms"])
     return {
         "ok": True,
@@ -467,6 +565,13 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
         "sz": int(sz),
         "ord_type": ord_type,
         "px": ref_px,
+        "suggested_px": suggested_px,
+        "px_basis": {"mode": ("sim_avg" if (sim and sim.get("avg_px"))
+                                else "fallback_bid_ratio"),
+                     "tolerance_pct": tol,
+                     "sim_avg_px": (sim.get("avg_px") if sim else None),
+                     "fallback": "bid×0.5"},
+        "fill_px_est": round(fill_px, 4),
         "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]},
         "td_mode": SELL_TDMODE,
         "est_premium_usd": round(prem, 4),
@@ -513,20 +618,26 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
     if px is None:
         raise OkxSdkError("期权限价类订单需提供价格 px")
     ref_px = px
-    prem = ref_px * lot * sz
     notional = spec["strike"] * lot * sz
     fee_est = option_fee_est(spec["strike"], lot, sz)
     exp_iso = _exp_str(spec["exp_ms"])
+    try:
+        sim = simulate_fill(inst_id, "sell", int(sz))
+    except (OkxSdkError, RuntimeError, ValueError):
+        sim = None
+    tol = px_tolerance_pct()
+    suggested_px = suggest_sell_px(q["bid"], sim=sim, tolerance_pct=tol)
+    try:
+        fill_px = float(sim["avg_px"]) if (sim and sim.get("avg_px")) else ref_px
+    except (TypeError, ValueError):
+        fill_px = ref_px
+    prem = fill_px * lot * sz
     gate = None
     if cost_basis is not None:
         cb = float(cost_basis)
         gate = {"cost_basis": round(cb, 4),
                 "guard": round(spec["strike"] + ref_px, 4),
                 "ok": (spec["strike"] + ref_px) >= cb - 1e-9}
-    try:
-        sim = simulate_fill(inst_id, "sell", int(sz))
-    except (OkxSdkError, RuntimeError, ValueError):
-        sim = None
     return {
         "ok": True,
         "inst_id": inst_id,
@@ -539,6 +650,13 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
         "sz": int(sz),
         "ord_type": ord_type,
         "px": ref_px,
+        "suggested_px": suggested_px,
+        "px_basis": {"mode": ("sim_avg" if (sim and sim.get("avg_px"))
+                                else "fallback_bid_ratio"),
+                     "tolerance_pct": tol,
+                     "sim_avg_px": (sim.get("avg_px") if sim else None),
+                     "fallback": "bid×0.5"},
+        "fill_px_est": round(fill_px, 4),
         "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]},
         "td_mode": SELL_TDMODE,
         "est_premium_usd": round(prem, 4),
