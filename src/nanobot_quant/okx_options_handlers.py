@@ -33,6 +33,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from nanobot_quant import okx_options_data as od
 from nanobot_quant import okx_options_live as ol
 from nanobot_quant import okx_options_select as osel
+from nanobot_quant import okx_options_td as otd
 from nanobot_quant import okx_options_trade as ot
 from nanobot_quant.data_sources.periods import PERIODS
 from nanobot_quant.okx_cex_credentials import list_sub_accounts
@@ -843,6 +844,19 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/live", _live_get, methods=["GET"])
     app.add_api_route("/config/okx-options/live", _live_set, methods=["POST"])
+    async def _td_panel(request: Request):
+        # 标的 TD 状态（C24 ⑤）：人工卖 put 前看标的是否临近衰竭，只读展示
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        period = (request.query_params.get("period") or "").strip() or None
+        try:
+            data = await asyncio.to_thread(otd.panel, period)
+        except Exception as e:  # noqa: BLE001 —— 展示层，异常回 JSON 不 500
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, "data": data})
+
+    app.add_api_route("/config/okx-options/td", _td_panel, methods=["GET"])
     app.add_api_route("/config/okx-options/covered", _covered, methods=["GET"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])

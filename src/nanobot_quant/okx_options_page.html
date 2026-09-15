@@ -223,6 +223,28 @@
   </div>
 </details>
 
+<!-- 📊 标的 TD 状态（C24 ⑤）：与自动循环同源的衰竭进度，只读展示 -->
+<div class="card" id="tdCard" style="margin-bottom:12px;padding:10px 14px">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <b>📊 标的 TD 状态</b>
+    <span class="hint" style="margin:0">与自动循环同源：卖 put 触发口径 = Buy Setup ≥ 入场阈值 或 CD Buy ≥ Countdown 阈值</span>
+    <select id="tdPeriod" style="width:auto">
+      <option value="1m">1m</option><option value="3m">3m</option>
+      <option value="5m" selected>5m</option><option value="15m">15m</option>
+    </select>
+    <button class="btn-ghost" id="tdRefreshBtn" style="font-size:.85em;padding:5px 12px">🔄 刷新</button>
+    <span class="hint" id="tdUpdated" style="margin:0"></span>
+  </div>
+  <div id="tdBody" style="margin-top:8px"><div class="empty">加载中…</div></div>
+  <div class="hint" style="margin-top:6px">
+    图例：
+    <span style="background:#e8f5e9;padding:0 4px;border-radius:3px">绿行 = 已达到阈值（自动循环会在此状态卖 put）</span>
+    <span style="background:#fff3e0;padding:0 4px;border-radius:3px;margin-left:6px">橙行 = 临近阈值（差 ≤2）</span>
+    <span style="font-weight:700;color:#2e7d32;margin-left:6px">绿色数字 = 该列已达阈值</span>
+    ｜周期默认跟随「🟤 自动循环」配置（可手动切换）；XAU 无现货盘，K 线取不到时留空
+  </div>
+</div>
+
 <div class="card" id="chainCard" style="display:none;padding:10px 14px">
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
     <div class="meta" id="summary" style="flex:1"></div>
@@ -1571,6 +1593,60 @@ async function saveLive() {
   }
 }
 
+// ── 📊 标的 TD 状态（C24 ⑤）：与自动循环同源，只读 ──────────
+const tdSel = $("tdPeriod");
+
+function tdCell(v, thr) {
+  const st = (Number(v) >= Number(thr)) ? "font-weight:700;color:#2e7d32" : "";
+  return '<td style="' + st + '">' + (v ?? "—") + "</td>";
+}
+
+async function loadTd() {
+  const box = $("tdBody");
+  if (!box) return;
+  try {
+    const r = await fetch("/config/okx-options/td?period=" + encodeURIComponent(tdSel.value || "5m"));
+    const j = await r.json();
+    if (!j.ok) { box.innerHTML = '<div class="empty">⚠️ ' + esc(j.error || "读取失败") + "</div>"; return; }
+    renderTd(j.data);
+    $("tdUpdated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", {hour12: false});
+  } catch (e) {
+    box.innerHTML = '<div class="empty">⚠️ ' + esc(e.message) + "</div>";
+  }
+}
+
+function renderTd(d) {
+  const rows = (d && d.rows) || [];
+  if (!rows.length) { $("tdBody").innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  let h = '<div style="overflow-x:auto"><table><thead><tr>' +
+    "<th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th><th>CD Sell</th>" +
+    "<th>Score</th><th>价格</th><th>进度（阈值口径）</th><th>卖 put 信号</th><th>最后 bar</th></tr></thead><tbody>";
+  for (const r of rows) {
+    if (r.error) {
+      h += '<tr><td><b>' + esc(r.base) + "</b></td><td colspan='9' class='hint'>" + esc(r.error) + "</td></tr>";
+      continue;
+    }
+    const bg = r.sell_put_ready ? "#e8f5e9" : (r.near ? "#fff3e0" : "");
+    const sig = r.sell_put_ready ? '<b style="color:#2e7d32">✅ 可卖 put</b>'
+              : (r.near ? '<span style="color:#ef6c00">临近</span>' : '<span class="hint">HOLD</span>');
+    h += '<tr style="background:' + bg + '">' +
+      "<td><b>" + esc(r.base) + "</b></td>" +
+      tdCell(r.setup_buy, r.entry_setup) +
+      tdCell(r.setup_sell, 9) +
+      tdCell(r.cd_buy, r.entry_countdown) +
+      "<td>" + (r.cd_sell ?? "—") + "</td>" +
+      "<td>" + fmt(r.score, 1) + "</td>" +
+      "<td>" + fmt(r.price, 4) + "</td>" +
+      "<td class='hint'>" + esc(r.progress || "") + "</td>" +
+      "<td>" + sig + "</td>" +
+      "<td class='hint'>" + esc(r.bar_time || "") + "</td></tr>";
+  }
+  $("tdBody").innerHTML = h + "</tbody></table></div>";
+}
+
+tdSel.addEventListener("change", loadTd);
+$("tdRefreshBtn").addEventListener("click", loadTd);
+
 // ── 事件绑定 / 启动 ───────────────────────────────────
 famSel.addEventListener("change", () => { loadExpiries(); loadCandidates(); });
 expSel.addEventListener("change", () => { selExp = expSel.value; buildExpTabs(); loadChain(); });
@@ -1586,6 +1662,8 @@ loadReminder();
 loadParams();
 loadSelector();
 loadLive();
+loadTd();
+setInterval(loadTd, 10000);   // 标的 TD 状态（与自动循环同源，只读）
 </script>
 </body>
 </html>
