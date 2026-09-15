@@ -18,8 +18,10 @@ DEFAULT_SELECTOR: dict = {
     "min_distance_pct": 5.0,     # strike 必须 ≤ 基准价×(1−该百分比)；0 = 关闭硬过滤
     "expiry_min_days": 3.0,      # 到期天数窗口下限
     "expiry_max_days": 7.0,      # 到期天数窗口上限
-    "delta_min": 0.15,           # delta 带下限（用绝对值比较）；0 与 0 = 关闭
+    "delta_min": 0.05,           # delta 带下限（绝对值）；默认宽松（低 delta 更安全；
+                                 # 上限才是风险控制，「保费太薄」交给 min_net_yield_pct）
     "delta_max": 0.35,           # delta 带上限
+    "min_net_yield_pct": 0.0,    # 净收益率下限（0 = 关闭；>0 时低于该值不出候选）
     "top_n": 5,                  # 返回候选数
     "sort_by": "net_yield",      # net_yield | net_premium | apr
 }
@@ -33,6 +35,7 @@ _LIMITS = {
     "expiry_max_days": (0.0, 180.0),
     "delta_min": (0.0, 1.0),
     "delta_max": (0.0, 1.0),
+    "min_net_yield_pct": (0.0, 10.0),
     "top_n": (1, 20),
 }
 
@@ -132,7 +135,8 @@ def select_puts(family: str, base_px: float | None = None,
     f_rate = OPTION_FEE_RATE_TAKER
 
     cands: list[dict] = []
-    filtered = {"expiry": 0, "no_bid": 0, "distance": 0, "delta": 0, "no_lot": 0}
+    filtered = {"expiry": 0, "no_bid": 0, "distance": 0, "delta": 0, "net": 0, "yield": 0,
+                "no_lot": 0}
     for g in chain.get("groups", []):
         days = g.get("days")
         if days is None or not (lo <= days <= hi):
@@ -165,6 +169,13 @@ def select_puts(family: str, base_px: float | None = None,
             prem = bid * lot
             fee = notional * f_rate
             net = prem - fee
+            if net <= 0:                          # 扣手续费后无利可图（薄权利金）
+                filtered["net"] += 1
+                continue
+            net_yield = net / notional * 100 if notional else 0.0
+            if sel["min_net_yield_pct"] > 0 and net_yield < sel["min_net_yield_pct"]:
+                filtered["yield"] += 1
+                continue
             cands.append({
                 "inst_id": inst,
                 "strike": strike,
@@ -180,7 +191,7 @@ def select_puts(family: str, base_px: float | None = None,
                 "premium_usd": round(prem, 8),
                 "fee_usd": round(fee, 8),
                 "net_premium_usd": round(net, 8),
-                "net_yield_pct": round(net / notional * 100, 4) if notional else None,
+                "net_yield_pct": round(net_yield, 4),
                 "apr_pct": round(net / notional * 100 * 365 / max(float(days), 0.5), 2)
                 if notional else None,
                 "delta_gap": round(abs(ad - _DELTA_TARGET), 4) if ad is not None else 9.9,

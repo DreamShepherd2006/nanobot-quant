@@ -36,7 +36,7 @@ def test_hard_filters_expiry_bid_distance_delta():
         _group(5, 2, [
             {"strike": 96.0, "P": _put("260920-96-P", 0.0, -0.2)},                  # 无买盘
             {"strike": 94.0, "P": _put("260920-94-P", None, -0.2)},                 # bid 缺失
-            {"strike": 93.0, "P": _put("260920-93-P", 0.4, -0.05)},                 # delta 偏低
+            {"strike": 93.0, "P": _put("260920-93-P", 0.4, -0.04)},                 # delta 低于下限
             {"strike": 92.0, "P": _put("260920-92-P", 0.4, -0.9)},                  # delta 偏高
             {"strike": 95.0, "P": _put("260920-95-P", 0.5, -0.25)},                 # ✅ 命中
         ]),
@@ -60,6 +60,28 @@ def test_net_premium_and_yield_use_bid_minus_fee():
     assert c["fee_usd"] == pytest.approx(notional * FEE, rel=1e-9)
     assert c["net_premium_usd"] == pytest.approx(0.05 - notional * FEE, rel=1e-9)
     assert c["net_yield_pct"] == pytest.approx((0.05 - notional * FEE) / notional * 100, rel=1e-3)
+
+
+def test_net_non_positive_filtered_out():
+    """扣手续费后无利可图的档必须排除（薄权利金防御）。"""
+    chain = _chain(groups=[_group(5, 2, [
+        {"strike": 90.0, "P": _put("a", 0.001, -0.20)},   # 权利金 0.0001 < 费 0.0027
+        {"strike": 95.0, "P": _put("b", 0.50, -0.25)},    # ✅
+    ])])
+    r = osel.select_puts("SOL-USD_UM", chain=chain)
+    assert [c["inst_id"] for c in r["candidates"]] == ["b"]
+    assert r["filtered"]["net"] == 1
+
+
+def test_min_net_yield_filter():
+    """min_net_yield_pct > 0 时低于该净收益率的档不出候选。"""
+    chain = _chain(groups=[_group(5, 2, [
+        {"strike": 95.0, "P": _put("a", 0.50, -0.25)},    # 净收益率 ≈0.50%
+        {"strike": 90.0, "P": _put("b", 0.05, -0.25)},    # ≈0.29%
+    ])])
+    r = osel.select_puts("SOL-USD_UM", chain=chain, selector={"min_net_yield_pct": 0.4})
+    assert [c["inst_id"] for c in r["candidates"]] == ["a"]
+    assert r["filtered"]["yield"] == 1
 
 
 def test_delta_missing_is_kept_with_marker():
@@ -111,12 +133,16 @@ def test_distance_filter_can_be_disabled():
 def test_selector_params_clamps_bad_values():
     s = osel.selector_params({"min_distance_pct": "abc", "top_n": 999,
                               "expiry_min_days": 10, "expiry_max_days": 5,
-                              "delta_min": 0.4, "delta_max": 0.1, "sort_by": "nope"})
+                              "delta_min": 0.4, "delta_max": 0.1, "sort_by": "nope",
+                              "min_net_yield_pct": 99})
     assert s["min_distance_pct"] == osel.DEFAULT_SELECTOR["min_distance_pct"]
     assert s["top_n"] == 20
     assert s["expiry_max_days"] == 10          # 上限被拉到不低于下限
     assert s["delta_max"] == 0.4               # 同上
+    assert s["min_net_yield_pct"] == 10.0      # 越界钳制
     assert s["sort_by"] == osel.DEFAULT_SELECTOR["sort_by"]
+    assert osel.DEFAULT_SELECTOR["delta_min"] == 0.05          # 默认下限已放宽
+    assert osel.selector_params({})["delta_min"] == 0.05       # 未传 → 回落默认
 
 
 def test_validate_selector_rejects_out_of_range():
@@ -136,11 +162,14 @@ def test_validate_selector_defaults_and_ok():
     cleaned, err = osel.validate_selector({"min_distance_pct": 6, "top_n": 3,
                                            "expiry_min_days": 4, "expiry_max_days": 6,
                                            "delta_min": 0.2, "delta_max": 0.3,
-                                           "sort_by": "apr"})
+                                           "min_net_yield_pct": 0.1, "sort_by": "apr"})
     assert err is None
     assert cleaned == {"min_distance_pct": 6.0, "top_n": 3, "expiry_min_days": 4.0,
                        "expiry_max_days": 6.0, "delta_min": 0.2, "delta_max": 0.3,
-                       "sort_by": "apr"}
+                       "min_net_yield_pct": 0.1, "sort_by": "apr"}
+    # 缺省字段回落到默认值（min_net_yield_pct 默认 0 = 关闭）
+    cleaned2, err2 = osel.validate_selector({"min_distance_pct": 5})
+    assert err2 is None and cleaned2["min_net_yield_pct"] == 0.0
 
 
 def test_window_relaxed_note_when_no_expiry_in_range(monkeypatch):

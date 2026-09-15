@@ -147,6 +147,6 @@ def test_page_has_candidate_ui():
     html = (Path(__file__).resolve().parents[1]
             / "src" / "nanobot_quant" / "okx_options_page.html").read_text(encoding="utf-8")
     for token in ('id="candWrap"', 'id="candBody"', 'id="candRefresh"', 'id="selDist"',
-                  'id="saveSelBtn"', "function renderCandidates", "function loadCandidates",
-                  "loadSelector()"):
+                  'id="selMinYield"', 'id="saveSelBtn"', "function renderCandidates",
+                  "function loadCandidates", "loadSelector()"):
         assert token in html, token

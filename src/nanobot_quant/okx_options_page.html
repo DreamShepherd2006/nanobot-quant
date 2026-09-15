@@ -155,10 +155,13 @@
     <span class="hint">–</span>
     <input type="number" id="selExpMax" min="0" max="180" step="1" value="7" style="width:60px">
     <span class="hint">天</span>
-    <input type="number" id="selDMin" min="0" max="1" step="0.05" value="0.15" style="width:70px">
+    <input type="number" id="selDMin" min="0" max="1" step="0.05" value="0.05" style="width:70px">
     <span class="hint">–</span>
     <input type="number" id="selDMax" min="0" max="1" step="0.05" value="0.35" style="width:70px">
     <span class="hint">delta</span>
+    <input type="number" id="selMinYield" min="0" max="10" step="0.05" value="0" style="width:70px"
+           title="净收益率下限（%）；0 = 关闭。扣手续费后无利可图的档始终被排除">
+    <span class="hint">% 净收益率下限</span>
     <input type="number" id="selTopN" min="1" max="20" step="1" value="5" style="width:60px">
     <span class="hint">候选 top N</span>
     <select id="selSort" style="width:auto">
@@ -169,7 +172,7 @@
     <button class="btn-ghost" id="saveSelBtn">保存</button>
     <span class="hint" id="selHint"></span>
   </div>
-  <div class="note">候选生成口径（详见 docs/quant-system.md 33.26）：① 到期天数窗口 ② 有买盘（bid&gt;0，否则卖不出去）③ <b>strike ≤ 基准价×(1−距离%)</b> 硬过滤（安全边际优先，不满足的档直接排除）④ delta 带（控制被行权概率；填 0 / 0 关闭）⑤ 排序。净收益率 = <b>净权利金 ÷ 担保额</b>，净权利金 = bid×面值 − 名义×0.03% 手续费（期权费按名义收）。基准价 = 标的实时现价。</div>
+  <div class="note">候选生成口径（详见 docs/quant-system.md 33.26）：① 到期天数窗口 ② 有买盘（bid&gt;0，否则卖不出去）③ <b>strike ≤ 基准价×(1−距离%)</b> 硬过滤（安全边际优先，不满足的档直接排除）④ delta 带（<b>上限才是风险控制</b>；低 delta = 更安全但保费薄，下限默认 0.05，填 0 / 0 关闭）⑤ <b>扣手续费后无利可图（净权利金 ≤ 0）始终排除</b>，可用「净收益率下限」再抬高门槛 ⑥ 排序。净收益率 = <b>净权利金 ÷ 担保额</b>，净权利金 = bid×面值 − 名义×0.03% 手续费（期权费按名义收）。基准价 = 标的实时现价。</div>
 </div>
 
 <div class="card" id="liveCard" style="border:none;padding:10px 0 0;border-radius:0">
@@ -1262,6 +1265,7 @@ async function loadSelector() {
     if (s.expiry_max_days !== undefined) $("selExpMax").value = s.expiry_max_days;
     if (s.delta_min !== undefined) $("selDMin").value = s.delta_min;
     if (s.delta_max !== undefined) $("selDMax").value = s.delta_max;
+    if (s.min_net_yield_pct !== undefined) $("selMinYield").value = s.min_net_yield_pct;
     if (s.top_n !== undefined) $("selTopN").value = s.top_n;
     if (s.sort_by) $("selSort").value = s.sort_by;
   } catch (e) { $("selHint").textContent = "参数读取失败"; }
@@ -1273,6 +1277,7 @@ async function saveSelector() {
     expiry_max_days: Number($("selExpMax").value),
     delta_min: Number($("selDMin").value),
     delta_max: Number($("selDMax").value),
+    min_net_yield_pct: Number($("selMinYield").value),
     top_n: Number($("selTopN").value),
     sort_by: $("selSort").value,
   };
@@ -1298,10 +1303,17 @@ function renderCandidates(d) {
   $("candMeta").textContent = (d.family || "") + " · 基准 " + fmt(d.base_px, 2) + " · 距离 ≥" + fmt(s.min_distance_pct, 1) + "% · 到期 " +
     fmt(s.expiry_min_days, 0) + "–" + fmt(s.expiry_max_days, 0) + " 天 · delta " + fmt(s.delta_min, 2) + "–" + fmt(s.delta_max, 2) +
     " · 过滤[到期 " + (f.expiry || 0) + " · 无买盘 " + (f.no_bid || 0) + " · 距离 " + (f.distance || 0) + " · delta " + (f.delta || 0) +
-    "] · 命中 " + (d.scanned || 0) + (d.note ? " · " + d.note : "");
+    " · 扣费亏 " + (f.net || 0) + " · 低收益 " + (f.yield || 0) + "] · 命中 " + (d.scanned || 0) + (d.note ? " · " + d.note : "");
   const cs = d.candidates || [];
   if (!cs.length) {
-    $("candBody").innerHTML = '<div class="empty">无候选：可放宽距离 / delta 带 / 到期窗口后重试</div>';
+    const hints = [];
+    if (f.distance) hints.push("距离过滤 " + f.distance + " 档 → 可放宽「% 距离」");
+    if (f.delta) hints.push("delta 带过滤 " + f.delta + " 档 → 可放宽 delta 带");
+    if (f.no_bid) hints.push("无买盘 " + f.no_bid + " 档（薄盘卖不出）");
+    if (f.net) hints.push("扣费后无利可图 " + f.net + " 档");
+    if (f.yield) hints.push("净收益率低于下限 " + f.yield + " 档");
+    if (f.expiry) hints.push("到期窗口过滤 " + f.expiry + " 档 → 可放宽「天」范围");
+    $("candBody").innerHTML = '<div class="empty">无候选：' + esc(hints.join(" · ") || "可放宽距离 / delta 带 / 到期窗口后重试") + '</div>';
     return;
   }
   let h = '<table><thead><tr><th>合约</th><th>到期</th><th>天</th><th>strike</th><th>距现价</th><th>bid</th><th>IV</th><th>delta</th>' +
