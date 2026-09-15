@@ -620,6 +620,15 @@ function feeUsd(e) {
   return '<span title="' + tip + '">$' + Math.abs(Number(usd)).toFixed(4) + '</span>';
 }
 
+// 盈亏显示：优先 pnl_usd（开仓/买回的平台收益），回退 settle_pnl（到期结算净盈亏，
+// 含权利金收入与赔付）——到期判定行只写 settle_pnl，不回写 pnl_usd。
+function pnlUsd(e) {
+  const ok = v => v !== null && v !== undefined && v !== "" && !isNaN(Number(v));
+  if (ok(e.pnl_usd)) return usd(e.pnl_usd);
+  if (ok(e.settle_pnl)) return '<span title="到期结算净盈亏（含权利金收入与赔付）">' + usd(e.settle_pnl) + '</span>';
+  return '<span class="na">—</span>';
+}
+
 // 历史遗留行赔付回填（单步、纯本地记账）——settled_* 但缺 settle_px/settle_pnl 的行
 async function backfillLedger() {
   if (!confirm("回填历史赔付：对已结算但缺赔付数据的台账行，按 OKX 交割账单补齐结算价/毛赔付/净盈亏？\n（仅本地台账写入，不改状态、不涉及资金操作）")) return;
@@ -628,6 +637,7 @@ async function backfillLedger() {
     if (!j.ok) throw new Error(j.error || "回填失败");
     const filled = j.filled || [];
     let msg = "回填完成：扫描 " + (j.scanned || 0) + " 行，成功 " + filled.length + " 行";
+    if (!j.scanned) msg += "\n（无待回填行：台账中已结算行均已有结算价/赔付数据——盈亏见「盈亏(USD)」列，鼠标悬浮看口径）";
     if (filled.length) msg += "\n" + filled.map(x => "✅ " + x.inst_id + "：结算价 " + fmt(x.settle_px, 6) + " · 毛赔付 " + usd(x.settle_payout) + " · 净 " + usd(x.settle_pnl)).join("\n");
     if ((j.skipped || []).length) msg += "\n跳过 " + j.skipped.length + " 行：" + j.skipped.map(x => x.inst_id + "（" + x.reason + "）").join("；");
     if ((j.errors || []).length) msg += "\n错误 " + j.errors.length + " 行：" + j.errors.map(x => x.inst_id + "：" + x.error).join("；");
@@ -683,7 +693,7 @@ async function loadLedger() {
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
         '</td><td>' + usd(e.premium_usd) + '</td><td class="mono">' + feeUsd(e) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
-        '</td><td>' + usd(e.pnl_usd) + '</td><td>' + esc(e.status) +
+        '</td><td>' + pnlUsd(e) + '</td><td>' + esc(e.status) +
         '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
     }
     html += '</tbody></table>';

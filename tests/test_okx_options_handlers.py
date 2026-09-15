@@ -84,3 +84,15 @@ def test_dispatch_preview_put(_dispatch_mocks):
     oh._dispatch_preview("SOL-USD_UM-260910-101-P", 1, "limit", 0.3)
     assert "preview_open_put" in _dispatch_mocks
     assert "preview_open_call" not in _dispatch_mocks
+
+
+def test_ledger_page_pnl_falls_back_to_settle_pnl():
+    """台账「盈亏」列须回退读 settle_pnl：到期判定行只写 settle_pnl（无 pnl_usd），
+    此前页面盈亏恒显示「—」（2026-09-15 重建实测 104-C 行）。"""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1]
+            / "src" / "nanobot_quant" / "okx_options_page.html").read_text(encoding="utf-8")
+    assert "function pnlUsd(e)" in html
+    assert "ok(e.pnl_usd)" in html and "ok(e.settle_pnl)" in html
+    assert "+ pnlUsd(e) +" in html          # 台账表盈亏列已改用 pnlUsd
+    assert "无待回填行" in html               # 回填扫描 0 行时的说明
