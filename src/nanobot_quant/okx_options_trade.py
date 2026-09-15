@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import secrets
 import time
@@ -232,11 +233,89 @@ def resolve_instrument(inst_id: str) -> dict:
 # 供到期补买预填等场景：合约到期后 OKX instruments 不再返回规格，面值须本地解析。
 FAMILY_LOT = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XAU": 0.01}
 
+#: OKX 期权吃单手续费率（按「名义价值 = strike × 面值 × 张数」计）——
+#: 2026-09-14 实盘账单反推：call 104-C 1 张 fee 0.00309 USDC，
+#: 名义 104×0.1 = 10.4 → 0.0297% ≈ 0.03%（低于 OKX 最低手续费时按最低收，
+#: 故薄权利金合约的实际费率占比会显著更高）。仅用于预览估算；实盘
+#: 实际手续费以订单详情 fee 字段为准并记入台账。
+OPTION_FEE_RATE_TAKER = 0.0003
+
+
+def option_fee_est(strike: float, lot: float, sz: int) -> float:
+    """期权吃单手续费预估（USD）= 名义价值 × 吃单费率。"""
+    try:
+        return max(0.0, float(strike) * float(lot) * int(sz) * OPTION_FEE_RATE_TAKER)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _floor_step(value: float, step: float) -> float:
+    """按交易对步进向下取整（浮点安全）；step<=0 原值返回。"""
+    try:
+        v = float(value or 0.0)
+        s = float(step or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if s > 0:
+        return round(max(0.0, math.floor(v / s + 1e-9) * s), 10)
+    return round(max(0.0, v), 10)
+
+
+def spot_limits(account: str = "", spot_inst: str = "",
+                px: Optional[float] = None) -> dict:
+    """现货出货/补买上下文（只读）：可用余额 + 交易对精度 → 可卖/可买量。
+
+    - avail：基础币可用余额（出货的可卖上限来源）
+    - quote_avail：计价币（USDC）可用（补买的金额上限来源）
+    - lot_sz/min_sz：OKX public instruments 的数量步进/最小下单量
+    - sellable：按 lot_sz 向下取整后的最大可卖量（≤ avail）
+    - buyable_qty：quote_avail ÷ px 再按 lot_sz 向下取整（px 缺失 → None）
+
+    取数失败不抛错——各项 0/None + err 说明，页面照常可下单（超量由
+    交易所拒单裁决，2026-09-14 用户拍板：不做前端硬拦截）。
+    """
+    base = (spot_inst or "").split("-")[0]
+    quote = "USDC"   # 统一 USD 订单簿以 USDC 结算（Crypto-USDC 对 2026-09-23 上架）
+    out = {"spot_inst": spot_inst, "base": base, "quote": quote,
+           "avail": 0.0, "quote_avail": 0.0, "lot_sz": 0.0, "min_sz": 0.0,
+           "sellable": 0.0, "buyable_qty": None, "err": ""}
+    if not base or not spot_inst:
+        out["err"] = "缺少现货对"
+        return out
+    try:
+        rows = okx_sdk.check(okx_sdk.market().get_instruments(
+            instType="SPOT", instId=spot_inst))
+        r = rows[0] if isinstance(rows, list) and rows else {}
+        out["lot_sz"] = _f(r.get("lotSz"))
+        out["min_sz"] = _f(r.get("minSz"))
+    except (okx_sdk.OkxSdkError, RuntimeError) as e:
+        out["err"] = f"交易对精度查询失败：{e}"
+    try:
+        bal = account_balance(account)
+        for d in bal.get("details") or []:
+            if d.get("ccy") == base:
+                out["avail"] = _f(d.get("avail_bal"))
+            elif d.get("ccy") == quote:
+                out["quote_avail"] = _f(d.get("avail_bal"))
+    except (okx_sdk.OkxSdkError, RuntimeError) as e:
+        out["err"] = ((out["err"] + "；") if out["err"] else "") + f"余额查询失败：{e}"
+    out["sellable"] = _floor_step(out["avail"], out["lot_sz"])
+    try:
+        pxv = float(px or 0.0)
+    except (TypeError, ValueError):
+        pxv = 0.0
+    if pxv > 0 and out["quote_avail"] > 0:
+        out["buyable_qty"] = _floor_step(out["quote_avail"] / pxv, out["lot_sz"])
+    return out
+
 
 def cover_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
-                           entry: Optional[dict] = None) -> dict:
+                           entry: Optional[dict] = None,
+                           limits: Optional[dict] = None) -> dict:
     """到期 ITM 补买预填：数量 = 面值(lot)×张数；价格默认 = 现货现价
     （fallback：结算价 → 行权价，全部可在页面修改）。
+
+    limits（spot_limits 结果）提供时附账户可用（USDC）与可买量，供页面提示。
     """
     lot = FAMILY_LOT.get((inst_id or "").split("-")[0], 0.0)
     if not lot:
@@ -251,8 +330,15 @@ def cover_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
             px, src = entry.get("settle_px"), "settle"
         elif entry.get("strike"):
             px, src = entry.get("strike"), "strike"
-    return {"qty": round(lot * sz, 6) if lot else 0.0,
-            "px": px, "px_src": src if px else None}
+    out = {"qty": round(lot * sz, 6) if lot else 0.0,
+           "px": px, "px_src": src if px else None}
+    if limits:
+        out["quote_avail"] = round(limits.get("quote_avail") or 0.0, 6)
+        out["lot_sz"] = limits.get("lot_sz") or 0.0
+        out["min_sz"] = limits.get("min_sz") or 0.0
+        out["buyable_qty"] = limits.get("buyable_qty")
+        out["limits_err"] = limits.get("err") or ""
+    return out
 
 
 def ticker_quote(inst_id: str) -> dict:
@@ -362,6 +448,7 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
     ref_px = px
     prem = ref_px * lot * sz
     collat = spec["strike"] * lot * sz
+    fee_est = option_fee_est(spec["strike"], lot, sz)
     ratio = collateral_ratio_pct()
     try:
         sim = simulate_fill(inst_id, "sell", int(sz))
@@ -383,6 +470,10 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
         "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]},
         "td_mode": SELL_TDMODE,
         "est_premium_usd": round(prem, 4),
+        "fee_est_usd": round(fee_est, 4),
+        "net_premium_usd": round(prem - fee_est, 4),
+        "net_yield_pct": (round((prem - fee_est) / collat * 100, 3)
+                          if collat else None),
         "collateral_est_usd": round(collat, 2),
         "collateral_target_usd": round(collat * ratio / 100.0, 2),
         "collateral_ratio_pct": ratio,
@@ -423,6 +514,8 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
         raise OkxSdkError("期权限价类订单需提供价格 px")
     ref_px = px
     prem = ref_px * lot * sz
+    notional = spec["strike"] * lot * sz
+    fee_est = option_fee_est(spec["strike"], lot, sz)
     exp_iso = _exp_str(spec["exp_ms"])
     gate = None
     if cost_basis is not None:
@@ -449,6 +542,11 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
         "ref": {"bid": q["bid"], "ask": q["ask"], "last": q["last"]},
         "td_mode": SELL_TDMODE,
         "est_premium_usd": round(prem, 4),
+        "fee_est_usd": round(fee_est, 4),
+        "net_premium_usd": round(prem - fee_est, 4),
+        "notional_usd": round(notional, 2),
+        "net_yield_pct": (round((prem - fee_est) / notional * 100, 3)
+                          if notional else None),
         "gate": gate,
         "note": ("卖 call（covered call）：持有现货 + 卖虚值/平值 call 收权利金。"
                  "被行权 = 现金结算赔付 (结算价−K)×面值 后现货市价卖出，"
@@ -1017,11 +1115,15 @@ def _settle_exit_entry(creds: dict, entry: dict) -> dict:
 
 
 def exit_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
-                          entry: Optional[dict] = None) -> dict:
+                          entry: Optional[dict] = None,
+                          limits: Optional[dict] = None) -> dict:
     """出货预填（镜像 cover_prefill_defaults）：数量 = 面值(lot)×张数；
     金额 = 数量 × 现货现价（fallback：结算价 → 行权价，均可在页面修改）。
 
-    返回 {qty, px, px_src, amount}；取价失败 px=None（页面提示手填）。
+    limits（spot_limits 结果）提供时：数量取 min(面值×张数, 可用余额可卖量)
+    ——补买 0.1% 手续费使到账略少于行权数量（0.1 → 0.0999），直接照抄
+    行权数量会被交易所拒单（2026-09-14 实测），预填顺手按可用余额收敛。
+    返回 {qty, px, px_src, amount, avail, sellable, lot_sz, min_sz, limits_err}。
     """
     lot = FAMILY_LOT.get((inst_id or "").split("-")[0], 0.0)
     if not lot:
@@ -1037,8 +1139,21 @@ def exit_prefill_defaults(inst_id: str, sz: int, spot_px: float | None = None,
         elif entry.get("strike"):
             px, src = entry.get("strike"), "strike"
     qty = round(lot * sz, 6) if lot else 0.0
-    return {"qty": qty, "px": px, "px_src": src if px else None,
-            "amount": round(qty * px, 2) if px else None}
+    out = {"qty": qty, "px": px, "px_src": src if px else None,
+           "amount": round(qty * px, 2) if px else None}
+    if limits:
+        avail = round(limits.get("avail") or 0.0, 10)
+        sellable = limits.get("sellable") or 0.0
+        out.update({"avail": avail, "sellable": sellable,
+                    "lot_sz": limits.get("lot_sz") or 0.0,
+                    "min_sz": limits.get("min_sz") or 0.0,
+                    "limits_err": limits.get("err") or ""})
+        if sellable > 0 and qty > sellable:
+            out["qty"] = round(sellable, 10)
+            out["qty_capped"] = True
+            if px:
+                out["amount"] = round(out["qty"] * px, 2)
+    return out
 
 
 # ── 持仓 / 到期监控（只读）──────────────────────────────────
@@ -1295,6 +1410,73 @@ def settle_expired_puts(now_ms=None) -> list:
 
 #: 语义别名（判定已覆盖 put/call；旧名保留兼容 handlers/daemon/测试）
 settle_expired_options = settle_expired_puts
+
+
+def backfill_settlements(now_ms=None, lookback_days: int = 90) -> dict:
+    """历史遗留行赔付回填：已 settled_* 但缺 settle_px/settle_pnl 的台账行。
+
+    背景（2026-09-14）：到期判定入口曾只跟「判定事件」走，实验期写入的
+    settled_itm 行（无 settle 事件、无赔付数据）没有任何补判路径——台账行
+    赔付永远显示「—」。本函数按 OKX 交割账单回填 settle_px/settle_pnl/
+    settle_payout/settle_subtype，**不改状态**（仅当账单判定与现有状态冲突时
+    追加 note 提示人工核对，fail-closed 不自动改状态）。
+
+    返回 {scanned, filled: [...], skipped: [...], errors: [...]}。
+    """
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    res: dict = {"scanned": 0, "filled": [], "skipped": [], "errors": []}
+    for e in load_ledger():
+        kind = e.get("kind")
+        st = e.get("status") or ""
+        if kind not in ("open_put", "open_call"):
+            continue
+        if st not in (STATUS_SETTLED_ITM, STATUS_SETTLED_OTM,
+                      STATUS_SETTLED_REVIEW):
+            continue
+        if e.get("settle_px"):          # 已有赔付数据 → 无需回填
+            continue
+        exp_ms = int(e.get("exp_ms") or 0)
+        if not exp_ms or exp_ms > now_ms:
+            continue
+        res["scanned"] += 1
+        inst_id = e.get("inst_id") or ""
+        opt_type = "C" if kind == "open_call" else "P"
+        try:
+            row = _find_delivery_bill(e.get("account") or "", inst_id, exp_ms,
+                                      exp_ms + lookback_days * 86400000)
+        except (OkxSdkError, RuntimeError) as ex:
+            res["errors"].append({"id": e.get("id"), "inst_id": inst_id,
+                                  "error": str(ex)})
+            continue
+        if row is None:
+            res["skipped"].append({
+                "id": e.get("id"), "inst_id": inst_id,
+                "reason": f"到期后 {lookback_days} 天内未找到交割账单（可能已超出可查范围）"})
+            continue
+        px = _f(row.get("px"))                 # 结算价
+        pnl = _f(row.get("pnl"))               # 净盈亏（含权利金）
+        sub = row.get("subType")
+        strike = float(e.get("strike") or 0)
+        result = _classify_settlement(sub, px, strike, opt_type)
+        fields = {"settle_subtype": sub, "settle_px": px,
+                  "settle_pnl": round(pnl, 6), "settle_ts": _utc_now(),
+                  "settle_backfilled": True}
+        if result["status"] == STATUS_SETTLED_ITM:
+            base = (inst_id or "").split("-")[0]
+            lot = FAMILY_LOT.get(base)
+            sz = int(e.get("sz") or 0)
+            intrinsic = (px - strike) if opt_type == "C" else (strike - px)
+            fields["settle_payout"] = (round(intrinsic * lot * sz, 6)
+                                       if lot and sz and px is not None else None)
+        if result["status"] != st:
+            fields["note"] = ((e.get("note") or "") + "｜" +
+                              f"回填：账单判定 {result['status']} 与台账 {st} "
+                              "不一致，请人工核对").strip("｜")
+        if update_ledger(lambda x: x.get("id") == e.get("id"), **fields) is not None:
+            res["filled"].append({"id": e.get("id"), "inst_id": inst_id,
+                                  "settle_px": px, "settle_pnl": round(pnl, 6),
+                                  "settle_payout": fields.get("settle_payout")})
+    return res
 
 
 def _find_delivery_bill(account: str, inst_id: str, begin_ms: int,

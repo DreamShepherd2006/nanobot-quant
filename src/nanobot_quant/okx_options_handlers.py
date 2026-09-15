@@ -413,6 +413,18 @@ def register_okx_options_routes(app, gatekeeper) -> None:
                                  "error": "未找到该 closed_manual 卖 put/call 行（仅手动关账行可撤销）"})
         return JSONResponse({"ok": True, "entry": e})
 
+    async def _ledger_backfill(request: Request):
+        # 历史遗留行赔付回填（单步、纯本地台账写入、无资金流）：
+        # settled_* 但缺 settle_px/settle_pnl 的行 → 按 OKX 交割账单补回填
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        try:
+            res = await asyncio.to_thread(ot.backfill_settlements)
+        except (okx_sdk.OkxSdkError, RuntimeError) as e2:
+            return JSONResponse({"ok": False, "error": str(e2)})
+        return JSONResponse({"ok": True, **res})
+
     async def _cover_prefill(request: Request):
         # 到期 ITM 补买预填：数量 = 面值(lot)×张数、价格默认 = 现货现价（可改）
         inst_id = request.query_params.get("inst_id") or ""
@@ -432,12 +444,21 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             ot.find_entry, lambda x: x.get("kind") == "open_put"
             and x.get("inst_id") == inst_id
             and x.get("status") == ot.STATUS_SETTLED_ITM)
+        spot_inst = ot.spot_pair_of(inst_id)
+        limits = None
+        if spot_inst:
+            try:
+                limits = await asyncio.to_thread(
+                    ot.spot_limits, request.query_params.get("account") or "",
+                    spot_inst, spot)
+            except (okx_sdk.OkxSdkError, RuntimeError):
+                limits = None
         try:
             pre = await asyncio.to_thread(ot.cover_prefill_defaults,
-                                          inst_id, sz, spot, ent)
+                                          inst_id, sz, spot, ent, limits)
         except (okx_sdk.OkxSdkError, RuntimeError) as e2:
             return JSONResponse({"ok": False, "error": str(e2)})
-        pre.update({"inst_id": inst_id, "sz": sz,
+        pre.update({"inst_id": inst_id, "sz": sz, "spot_inst": spot_inst,
                     "amount": round((pre["qty"] or 0) * (pre["px"] or 0), 2)})
         return JSONResponse({"ok": True, **pre})
 
@@ -464,8 +485,14 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             and x.get("inst_id") == inst_id
             and x.get("status") == ot.STATUS_SETTLED_ITM)
         try:
+            limits = await asyncio.to_thread(
+                ot.spot_limits, request.query_params.get("account") or "",
+                spot_inst, spot)
+        except (okx_sdk.OkxSdkError, RuntimeError):
+            limits = None
+        try:
             pre = await asyncio.to_thread(ot.exit_prefill_defaults,
-                                          inst_id, sz, spot, ent)
+                                          inst_id, sz, spot, ent, limits)
         except (okx_sdk.OkxSdkError, RuntimeError) as e2:
             return JSONResponse({"ok": False, "error": str(e2)})
         pre.update({"inst_id": inst_id, "sz": sz, "spot_inst": spot_inst})
@@ -720,6 +747,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/ledger", _ledger, methods=["GET"])
     app.add_api_route("/config/okx-options/ledger/close", _ledger_close, methods=["POST"])
     app.add_api_route("/config/okx-options/ledger/reopen", _ledger_reopen, methods=["POST"])
+    app.add_api_route("/config/okx-options/ledger/backfill", _ledger_backfill, methods=["POST"])
     app.add_api_route("/config/okx-options/reminder", _reminder, methods=["GET"])
     app.add_api_route("/config/okx-options/pending", _pending, methods=["GET"])
     app.add_api_route("/config/okx-options/cancel", _cancel, methods=["POST"])

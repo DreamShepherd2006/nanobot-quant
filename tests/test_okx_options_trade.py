@@ -39,6 +39,13 @@ class _FakeMarket:
             "instId": instId, "bidPx": "100.0", "askPx": "110.0", "last": "105.0",
         }]}
 
+    def get_instruments(self, instType=None, instId=None, **kw):
+        # 现货对精度（spot_limits 用）：SOL-USDC 实测 lotSz/minSz = 0.001
+        return {"code": "0", "data": [{
+            "instId": instId, "lotSz": "0.001", "minSz": "0.001",
+            "tickSz": "0.01",
+        }]}
+
     def get_books(self, instId=None, sz=None, **kw):
         # 无盘口（空档）——preview 的 simulate_fill 走 None 容错路径
         return {"code": "0", "data": [{"bids": [], "asks": [], "ts": "0"}]}
@@ -1100,3 +1107,150 @@ def test_expiry_reminder_includes_call(monkeypatch, tmp_path):
                   strike=104, exp_ms=1757145600000, sz=1, lot=0.1)
     out = ot.expiry_reminder(hours=100000)
     assert len(out) == 1 and out[0]["opt_type"] == "C"
+
+
+# ── A. 现货限额预填（出货/补买按可用余额收敛） ───────────────
+
+def _patch_balances(monkeypatch, sol=0.0999, usdc=6.05):
+    monkeypatch.setattr(ot, "account_balance", lambda account="": {
+        "details": [{"ccy": "SOL", "avail_bal": sol},
+                    {"ccy": "USDC", "avail_bal": usdc}]})
+
+
+def test_spot_limits_floors_to_lot(monkeypatch):
+    _patch_balances(monkeypatch)
+    lim = ot.spot_limits("bot1", "SOL-USD", 101.66)
+    assert lim["lot_sz"] == pytest.approx(0.001)
+    assert lim["avail"] == pytest.approx(0.0999)
+    # 2026-09-14 实测：补买 0.1% 手续费使到账 0.0999 → 按 0.001 步进下取整 = 0.099
+    assert lim["sellable"] == pytest.approx(0.099)
+    assert lim["quote_avail"] == pytest.approx(6.05)
+    assert lim["buyable_qty"] == pytest.approx(0.059)   # 6.05 / 101.66 → 0.0595 → 0.059
+    assert lim["err"] == ""
+
+
+def test_spot_limits_without_spot_pair():
+    lim = ot.spot_limits("bot1", "")
+    assert lim["err"] and lim["sellable"] == 0.0
+
+
+def test_exit_prefill_caps_qty_to_avail(monkeypatch):
+    _patch_balances(monkeypatch)
+    lim = ot.spot_limits("bot1", "SOL-USD", 101.66)
+    pre = ot.exit_prefill_defaults("SOL-USD_UM-260909-104-C", 1, 101.66, None, lim)
+    assert pre["qty"] == pytest.approx(0.099)            # min(行权 0.1, 可卖 0.099)
+    assert pre["qty_capped"] is True
+    assert pre["amount"] == pytest.approx(round(0.099 * 101.66, 2))
+    assert pre["sellable"] == pytest.approx(0.099)
+
+
+def test_exit_prefill_without_limits_keeps_notional():
+    pre = ot.exit_prefill_defaults("SOL-USD_UM-260909-104-C", 1, 101.66)
+    assert pre["qty"] == pytest.approx(0.1)
+    assert "qty_capped" not in pre
+
+
+def test_cover_prefill_reports_avail(monkeypatch):
+    _patch_balances(monkeypatch)
+    lim = ot.spot_limits("bot1", "SOL-USD", 101.66)
+    pre = ot.cover_prefill_defaults("SOL-USD_UM-260907-106-P", 1, 101.66, None, lim)
+    assert pre["qty"] == pytest.approx(0.1)             # 补买数量仍按行权面值
+    assert pre["quote_avail"] == pytest.approx(6.05)
+    assert pre["buyable_qty"] == pytest.approx(0.059)
+    assert pre["lot_sz"] == pytest.approx(0.001)
+
+
+# ── B. 手续费口径（净权利金 / 净收益率） ────────────────────
+
+def test_option_fee_est_uses_notional():
+    # 实盘反推：call 104-C（strike 104 × lot 0.1 × 1 张）实际 fee 0.00309 USDC
+    assert ot.option_fee_est(104, 0.1, 1) == pytest.approx(0.00312, rel=0.03)
+    assert ot.option_fee_est(0, 0.1, 1) == 0.0
+    assert ot.option_fee_est(None, 0.1, 1) == 0.0
+
+
+def test_preview_open_put_reports_net_premium():
+    p = ot.preview_open_put("BTC-USD_UM-260904-80000-P", 1, "limit", px=110.0)
+    fee = ot.option_fee_est(80000, 0.01, 1)
+    notional = 80000 * 0.01
+    assert p["fee_est_usd"] == pytest.approx(round(fee, 4))
+    assert p["net_premium_usd"] == pytest.approx(round(1.1 - fee, 4))
+    assert p["net_yield_pct"] == pytest.approx(round((1.1 - fee) / notional * 100, 3))
+
+
+# ── C. 历史遗留行赔付回填 ────────────────────────────────
+
+def test_backfill_settlements_fills_legacy_row(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_call", inst_id="SOL-USD_UM-260909-104-C", sz=1,
+                  strike=104, lot=0.1, status=ot.STATUS_SETTLED_ITM,
+                  exp_ms=1757462400000, account="881574754615066858")
+    seen = []
+
+    def fake_bill(account, inst_id, begin_ms, end_ms):
+        seen.append((account, inst_id, begin_ms, end_ms))
+        return {"px": "104.6", "pnl": "-0.0116", "subType": "171", "type": "3"}
+
+    monkeypatch.setattr(ot, "_find_delivery_bill", fake_bill)
+    res = ot.backfill_settlements(now_ms=1757500000000)
+    assert res["scanned"] == 1 and len(res["filled"]) == 1
+    assert seen[0][2] == 1757462400000                       # 窗口从到期时刻起
+    row = ot.load_ledger()[0]
+    assert row["settle_px"] == pytest.approx(104.6)
+    assert row["settle_pnl"] == pytest.approx(-0.0116)
+    assert row["settle_payout"] == pytest.approx((104.6 - 104) * 0.1)   # call 毛赔付
+    assert row["settle_backfilled"] is True
+    assert row["status"] == ot.STATUS_SETTLED_ITM             # 状态不改（fail-closed）
+    assert "note" not in row                                  # 判定一致 → 不加核对标记
+
+
+def test_backfill_flags_status_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_put", inst_id="SOL-USD_UM-260907-106-P", sz=1,
+                  strike=106, lot=0.1, status=ot.STATUS_SETTLED_OTM,
+                  exp_ms=1757260800000, account="bot1")
+    monkeypatch.setattr(ot, "_find_delivery_bill", lambda *a, **kw: {
+        "px": "104.4", "pnl": "-0.0644", "subType": "171", "type": "3"})
+    res = ot.backfill_settlements(now_ms=1757500000000)
+    assert len(res["filled"]) == 1
+    row = ot.load_ledger()[0]
+    assert row["status"] == ot.STATUS_SETTLED_OTM              # 不自动改状态
+    assert "不一致" in (row.get("note") or "")                  # 提示人工核对
+
+
+def test_backfill_skips_rows_with_settled_data(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_put", inst_id="SOL-USD_UM-260907-106-P", sz=1,
+                  strike=106, status=ot.STATUS_SETTLED_ITM, settle_px=104.4,
+                  settle_pnl=-0.06, exp_ms=1757260800000)
+    called = []
+    monkeypatch.setattr(ot, "_find_delivery_bill",
+                        lambda *a, **kw: called.append(a) or None)
+    res = ot.backfill_settlements(now_ms=1757500000000)
+    assert res["scanned"] == 0 and called == [] and res["filled"] == []
+
+
+def test_backfill_skips_unexpired_and_open(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_call", inst_id="SOL-USD_UM-260915-120-C", sz=1,
+                  strike=120, status=ot.STATUS_SETTLED_ITM,
+                  exp_ms=1758000000000, account="bot1")     # 尚未到期
+    ot.add_ledger(kind="open_put", inst_id="SOL-USD_UM-260910-100-P", sz=1,
+                  strike=100, status="open", exp_ms=1757462400000)
+    called = []
+    monkeypatch.setattr(ot, "_find_delivery_bill",
+                        lambda *a, **kw: called.append(a) or None)
+    res = ot.backfill_settlements(now_ms=1757500000000)
+    assert res["scanned"] == 0 and called == []
+
+
+def test_backfill_reports_missing_bill(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_call", inst_id="SOL-USD_UM-260909-104-C", sz=1,
+                  strike=104, status=ot.STATUS_SETTLED_ITM,
+                  exp_ms=1757462400000, account="bot1")
+    monkeypatch.setattr(ot, "_find_delivery_bill", lambda *a, **kw: None)
+    res = ot.backfill_settlements(now_ms=1757500000000)
+    assert res["scanned"] == 1 and res["filled"] == []
+    assert res["skipped"] and "未找到交割账单" in res["skipped"][0]["reason"]
+    assert ot.load_ledger()[0].get("settle_px") is None
