@@ -214,6 +214,7 @@
     <div class="ctl" style="margin-bottom:4px">
       <b style="font-size:.9em">🎯 卖 put 候选（按「🎯 合约选择」参数自动挑档）</b>
       <button class="btn-ghost" id="candRefresh" style="font-size:.85em;padding:4px 10px">🔄 生成候选</button>
+      <span class="hint" id="candStamp"></span>
       <span class="hint" id="candMeta"></span>
     </div>
     <div id="candBody"><div class="empty">点「🔄 生成候选」：按当前选择参数（距离 / 到期 / delta 过滤 + 净收益率排序）挑出可卖合约</div></div>
@@ -391,6 +392,13 @@ function buildExpTabs() {
     b.onclick = () => { selExp = String(e.exp_ms); buildExpTabs(); loadChain(); };
     bar.appendChild(b);
   }
+}
+function jumpToExpiry(expMs) {
+  // 自动切到指定到期（生成候选后调用）；目标不在 tabs 列表时不切、返回 false
+  if (!expiryList.some(e => String(e.exp_ms) === String(expMs))) return false;
+  if (String(selExp) === String(expMs)) return true;
+  selExp = String(expMs); buildExpTabs(); loadChain();
+  return true;
 }
 
 function cellHtml(side, cls) {
@@ -808,9 +816,30 @@ async function loadReminder() {
     const r = await fetch("/config/okx-options/reminder");
     const j = await r.json();
     if (!j.ok || !j.reminders || !j.reminders.length) { rb.style.display = "none"; return; }
-    const items = j.reminders.map(x =>
-      (x.expired ? "⏰ 已到期待确认" : "⏰ 到期临近") + " " + esc(x.inst_id) + " · " + fmt(x.sz, 0) + " 张 · 到期 " + locDate(x.exp_ms) +
-      ' <a class="act" onclick="openCover(\'' + esc(x.inst_id) + '\',\'' + esc(x.sz ?? 1) + '\')">补买</a>');
+    // 动作按后端 action 分派（close 平仓 / wait 等账单 / cover 补买 / exit 出货 / review 核对），
+    // 不再一律给「补买」——补买只属于 put 被行权后的动作。
+    const ACT_HEAD = {close: "⏰ 到期临近", wait: "⏰ 已到期待判定", cover: "⚠️ 被行权·待补买", exit: "⚠️ 被行权·待出货", review: "⚠️ 判定待核对"};
+    const items = j.reminders.map(x => {
+      const inst = esc(x.inst_id), szA = esc(String(x.sz ?? 1));
+      const base = (String(x.inst_id || "").split("-")[0] || "").toUpperCase();
+      let tail = "", act = "";
+      if (x.action === "close") {
+        tail = "可平仓了结，或等待现金结算";
+        act = ' <a class="act" onclick="openClose(\'' + inst + '\')">平仓</a>';
+      } else if (x.action === "wait") {
+        tail = "已到期，等待 OKX 交割账单（通常 ~30s 自动判定）";
+      } else if (x.action === "cover") {
+        tail = "现金结算已赔付，需买入现货补回组合";
+        act = ' <a class="act" onclick="openCover(\'' + inst + '\',\'' + szA + '\')">补买</a>';
+      } else if (x.action === "exit") {
+        const noSpot = /^XAU/.test(base);
+        tail = noSpot ? "XAU 无现货盘，只能承担现金结算（无需出货）" : "现金结算已赔付，需市价卖出现货出货";
+        if (!noSpot) act = ' <a class="act" onclick="openExit(\'' + inst + '\',\'' + szA + '\')">出货</a>';
+      } else if (x.action === "review") {
+        tail = "判定矛盾，请人工核对台账与 OKX 账单";
+      }
+      return (ACT_HEAD[x.action] || "⏰ 待办") + " " + inst + " · " + fmt(x.sz, 0) + " 张 · 到期 " + locDate(x.exp_ms) + " · " + tail + act;
+    });
     rb.innerHTML = items.join("<br>");
     rb.style.display = "block";
   } catch (e) { /* 静默 */ }
@@ -1184,7 +1213,7 @@ async function doPreview(mode) {
       (p.net_yield_pct != null ? " · <b>净收益率：</b>" + fmt(p.net_yield_pct, 3) + "%（分母 " +
         (p.opt_type === "C" ? "行权名义 " + usd(p.notional_usd) : "担保额 " + usd(p.collateral_est_usd)) + "）" : "") +
       "<br>" + extraTxt + "<br>" +
-      "<b>订单：</b>sell · tdMode=isolated · " + esc(p.ord_type) + " · px=" + fmt(p.px, 4) +
+      "<b>订单：</b>sell · tdMode=isolated · " + esc(p.ord_type) + " · px=" + fmt(p.px, 2) +
       (p.px_basis && p.px_basis.mode === "sim_avg"
         ? "<span style='color:#888'>（保护线 = " + esc(f.sz || 1) + " 张模拟均价 " + fmt(p.px_basis.sim_avg_px, 4) +
           " × (1−" + fmt(p.px_basis.tolerance_pct, 1) + "%)）</span>" : "") +
@@ -1339,6 +1368,10 @@ async function loadCandidates() {
     const j = await r.json();
     if (!j.ok) { $("candBody").innerHTML = '<div class="empty">❌ ' + esc(j.error || "拉取失败") + '</div>'; return; }
     renderCandidates(j);
+    $("candStamp").textContent = "生成于 " + new Date().toLocaleTimeString("zh-CN", {hour12: false});
+    // 候选按参数取「到期窗口」内的档，可能与链表当前 tab 不同 → 生成后自动切到候选所在到期，
+    // 免得两表数字看着「打架」（同一 strike 不同到期的 IV/delta 本来就不一样）。
+    if (j.candidates && j.candidates.length && j.candidates[0].exp_ms) jumpToExpiry(j.candidates[0].exp_ms);
   } catch (e) { $("candBody").innerHTML = '<div class="empty">❌ ' + esc(e.message) + '</div>'; }
 }
 function renderCandidates(d) {
