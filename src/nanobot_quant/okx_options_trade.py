@@ -1332,6 +1332,15 @@ def account_config(account: str = "") -> dict:
     }
 
 
+def account_creds(account: str = "") -> dict:
+    """子账号 API 凭证（供 broker/data source 层复用 _entry_account 的解析）。
+
+    Broker 的查单（poll_order）需要 creds 而非账号名——此前只有私有
+    _entry_account 能拿到；这里给执行层一个稳定的公开入口。
+    """
+    return _entry_account(account)["creds"]
+
+
 def account_balance(account: str = "") -> dict:
     """子账号资产（只读）：details 按币种 + 总权益 totalEq(USD)。
 
