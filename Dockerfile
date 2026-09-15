@@ -15,9 +15,22 @@ WORKDIR /app
 # ── 2a. Quant: lumibot first (to pin deps before nanobot) ──
 # ibapi (Interactive Brokers API) needs gcc/g++ to build from source.
 # lumibot pulls: yfinance, pandas, matplotlib, scipy, polars, plotly, etc.
-RUN echo "[bust=4]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/lumibot.git@v4.5.78 \
-    && echo "✅ lumibot v4.5.78"
+RUN echo "[bust=8]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/lumibot.git@651a394f \
+    && echo "✅ lumibot @651a394f (upstream dev — Asset 支持显式期权乘数；美股期权默认 100 不变，OKX 加密期权一张 = 0.1 SOL / 0.01 BTC·ETH·XAU)"
+
+# 验证 lumibot 期权乘数补丁在运行时生效（构建期断言，失败即构建失败）
+# 美股期权不传 multiplier → 100（与改动前逐字节等价）；加密期权显式传入 → 生效
+RUN python3 -c "\
+from datetime import date; \
+from lumibot.entities import Asset; \
+_eq = Asset(symbol='SPY', asset_type='option', strike=400, expiration=date(2026, 1, 16), right='CALL'); \
+_crypto = Asset(symbol='SOL', asset_type='option', strike=94, expiration=date(2026, 9, 18), right='PUT', multiplier=0.1); \
+_stock = Asset(symbol='AAPL'); \
+assert _eq.multiplier == 100, f'equity option default broken: {_eq.multiplier}'; \
+assert _crypto.multiplier == 0.1, f'crypto option multiplier broken: {_crypto.multiplier}'; \
+assert _stock.multiplier == 1, f'stock default broken: {_stock.multiplier}'; \
+print('[LUMIBOT-MULTIPLIER-OK] equity_default=100 crypto_explicit=0.1 stock_default=1')"
 
 # ── 2b. nanobot (force-reinstall to override lumibot conflicts) ──
 # lumibot downgrades pypdf→6.14.2 and websockets→15.0.1;
@@ -73,11 +86,11 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=480]" && pip install --break-system-packages \
+RUN echo "[bust=500]" && pip install --break-system-packages \
         'mcp<2' \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@3b35a90 \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@88a0310 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @3b35a90 (upstream main — C22b 定价保护线= N 张模拟均价×(1∓容忍滑点%) + 预览口径统一, PR #331; bust=476) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @88a0310 (upstream main — C28 1c 到期提醒分派 + 期权执行层 PR #335 + 2b 卖 put 自动循环 dry-run PR #336; bust=500) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
