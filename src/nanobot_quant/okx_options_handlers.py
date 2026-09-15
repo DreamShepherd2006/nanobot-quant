@@ -549,7 +549,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         spot_inst = ot.spot_pair_of(inst_id)
         if not spot_inst:
             return JSONResponse({"ok": False,
-                                 "error": "该标的无现货盘（XAU）——call 被行权只能现金结算亏损，无法现货出货"})
+                                 "error": "无法解析该标的的现货对，无法现货出货"})
         fam = od.family_of(inst_id)
         try:
             spot = await asyncio.to_thread(od.spot_price, fam)

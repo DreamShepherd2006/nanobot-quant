@@ -30,9 +30,11 @@ from nanobot_quant.okx_sdk import OkxSdkError
 _CACHE_TTL = 8.0
 _cache: dict[str, tuple[float, Any]] = {}
 
-# 参考价来源：现货盘（_SPOT）或指数盘（_INDEX，无现货盘的家族如 XAU）
-_SPOT = {"BTC-USD_UM": "BTC-USDT", "ETH-USD_UM": "ETH-USDT", "SOL-USD_UM": "SOL-USDT"}
-_INDEX = {"XAU-USD_UM": "XAU-USD"}
+# 参考价来源：现货盘（_SPOT）；_INDEX 留给将来真的无现货盘的家族
+# XAU-USD_UM 的现货标的是 XAUT（Tether Gold）：OKX 现货对为 XAUT-USDT
+_SPOT = {"BTC-USD_UM": "BTC-USDT", "ETH-USD_UM": "ETH-USDT",
+         "SOL-USD_UM": "SOL-USDT", "XAU-USD_UM": "XAUT-USDT"}
+_INDEX: dict[str, str] = {}
 FAMILIES = ("BTC-USD_UM", "ETH-USD_UM", "SOL-USD_UM", "XAU-USD_UM")
 
 
@@ -71,8 +73,9 @@ def td_kline(family: str, period: str = "5m", bars: int = 120):
     返回 ``(df, err)``：df 列为 Open/High/Low/Close/Volume、UTC 索引，供
     ``strategies.td_sequential.calculate`` 直接使用；失败时 ``(None, 原因)``。
 
-    数据面与期权链统一（链/IV/HV 均在 OKX）：index 参考价家族（XAU-USD_UM）
-    无现货盘与成交价，不适用于 TD，按原因返回。
+    数据面与期权链统一（链/IV/HV 均在 OKX）：家族均映射到 OKX 现货盘
+    （XAU-USD_UM 的现货标的是 XAUT，对应 XAUT-USDT）；无现货盘的家族
+    在 _SPOT 中缺席，按原因返回。
     """
     ref, kind = _ref_inst(family)
     if not ref:
