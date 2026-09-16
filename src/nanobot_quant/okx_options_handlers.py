@@ -35,6 +35,7 @@ from nanobot_quant import okx_options_live as ol
 from nanobot_quant import okx_options_select as osel
 from nanobot_quant import okx_options_td as otd
 from nanobot_quant import okx_options_trade as ot
+from nanobot_quant.backtest.options_replay_data_source import probe as backtest_probe
 from nanobot_quant.data_sources.periods import PERIODS
 from nanobot_quant.okx_cex_credentials import list_sub_accounts
 from nanobot_quant.okx_sdk import OkxSdkError
@@ -849,6 +850,42 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/live", _live_get, methods=["GET"])
     app.add_api_route("/config/okx-options/live", _live_set, methods=["POST"])
+    async def _backtest_probe(request: Request):
+        """期权回测数据层诊断（只读，真实拉数）。
+
+        GET /config/okx-options/backtest-probe?family=SOL-USD_UM&timestep=15m&days=3
+
+        验证两个未实测假设：标的 K 线能否按区间拉到；期权 instId 推算
+        （每日到期 + 整数 strike）的 mark 命中率。命中率 0 = 枚举规则要修正。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        q = request.query_params
+        family = (q.get("family") or "SOL-USD_UM").upper()
+        if family not in od.FAMILIES:
+            return JSONResponse(
+                {"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
+        try:
+            days = max(1, min(30, int(q.get("days") or 3)))
+        except (TypeError, ValueError):
+            days = 3
+        try:
+            length = max(1, min(300, int(q.get("length") or 120)))
+        except (TypeError, ValueError):
+            length = 120
+        try:
+            strike_pct = abs(float(q.get("strike_pct") or 0.20))
+        except (TypeError, ValueError):
+            strike_pct = 0.20
+        timestep = (q.get("timestep") or "15m").strip()
+        try:
+            data = await asyncio.to_thread(
+                backtest_probe, family, timestep, days, length, strike_pct)
+        except Exception as e:  # noqa: BLE001 —— 诊断端点不 500
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, "data": data})
+
     async def _td_panel(request: Request):
         # 标的 TD 状态（C24 ⑤）：人工卖 put 前看标的是否临近衰竭，只读展示
         err, ok = _authorized(request, gatekeeper)
@@ -867,6 +904,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         return JSONResponse({"ok": True, "data": data})
 
     app.add_api_route("/config/okx-options/td", _td_panel, methods=["GET"])
+    app.add_api_route("/config/okx-options/backtest-probe", _backtest_probe, methods=["GET"])
     app.add_api_route("/config/okx-options/covered", _covered, methods=["GET"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])

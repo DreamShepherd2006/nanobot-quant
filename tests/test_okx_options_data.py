@@ -244,6 +244,6 @@ def test_fetch_lifecycle_rejects_bad_input(fake_sdk):
         od.fetch_lifecycle(inst_id, "7m")
     with pytest.raises(od.OkxSdkError, match="未知标的家族"):
         od.fetch_lifecycle("XRP-USD_UM-260906-101-P", "5m")
-    with pytest.raises(od.OkxSdkError, match="不存在"):
+    with pytest.raises(od.OkxSdkError, match="不存在|无法解析"):
         od.fetch_lifecycle(f"BTC-USD_UM-{_D1}-99999-P", "5m")
 

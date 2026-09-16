@@ -232,7 +232,11 @@ def _family_of(inst_id: str) -> str:
 
 
 def _find_inst(inst_id: str) -> dict:
-    """在家族 instruments（含已到期）中定位单合约；未知家族/合约报错。"""
+    """在家族 instruments（**仅当前在售**）中定位单合约；未知家族/合约报错。
+
+    注意：OKX ``get_instruments`` 只返回在售合约 —— 已到期的合约查不到，
+    调用方应捕获 ``OkxSdkError`` 并改用 ``_parse_inst_id()`` 回退。
+    """
     family = _family_of(inst_id)
     if family not in FAMILIES:
         raise OkxSdkError(f"未知标的家族 {family}，可选 {FAMILIES}")
@@ -240,6 +244,50 @@ def _find_inst(inst_id: str) -> dict:
         if i.get("instId") == inst_id:
             return i
     raise OkxSdkError(f"合约不存在或已被移除: {inst_id}")
+
+
+def _parse_inst_id(inst_id: str) -> dict:
+    """从 instId 反解合约元数据 —— **已到期合约**不在 in-sale 列表时的回退。
+
+    ``SOL-USD_UM-260912-77-P``
+      → instFamily=SOL-USD_UM, expTime=2026-09-12 08:00 UTC, stk=77, optType=P
+
+    尾部固定 3 段（exp/strike/type）→ 从**右侧**取段（``_UM`` 后缀会破坏左侧段位假设）。
+    到期时刻补 08:00 UTC（OKX 期权每日到期）——这是推断值，不是官方字段。
+    ``ctVal``/``ctMult`` 留空，``lot_coin`` 由 ``FAMILY_LOT`` 常量兜底。
+    """
+    raw = inst_id.strip().upper()
+    parts = raw.split("-")
+    if len(parts) < 5:
+        raise OkxSdkError(f"无法解析期权 instId: {inst_id}")
+    opt_type = parts[-1]
+    if opt_type not in ("P", "C"):
+        raise OkxSdkError(f"无法解析期权类型（应为 P/C）: {inst_id}")
+    try:
+        strike = float(parts[-2])
+    except ValueError:
+        raise OkxSdkError(f"无法解析行权价: {inst_id}") from None
+    ymd = parts[-3]
+    if len(ymd) != 6 or not ymd.isdigit():
+        raise OkxSdkError(f"无法解析到期日（应为 yymmdd）: {inst_id}")
+    exp_dt = datetime.datetime.strptime(ymd, "%y%m%d").replace(
+        hour=8, tzinfo=datetime.timezone.utc)
+    family = "-".join(parts[:-3])
+    if family not in FAMILIES:
+        raise OkxSdkError(f"未知标的家族 {family}，可选 {FAMILIES}")
+    # OKX 官方 instruments 的 stk 为字符串：整数不带小数（"77" 而非 "77.0"）
+    stk = str(int(strike)) if strike.is_integer() else str(strike)
+    return {
+        "instId": raw,
+        "instFamily": family,
+        "uly": f"{family.split('-')[0]}-USD",
+        "stk": stk,
+        "optType": opt_type,
+        "expTime": str(int(exp_dt.timestamp() * 1000)),
+        "listTime": "",
+        "ctVal": "", "ctMult": "", "ctValCcy": "",
+        "_parsed": True,
+    }
 
 
 def _mark_candle_pages(inst_id: str, bar: str) -> tuple[dict[int, float], bool]:
@@ -314,7 +362,11 @@ def fetch_lifecycle(inst_id: str, bar: str = "15m") -> dict:
     if bar in _OKX_BAR_UNAVAILABLE:
         raise OkxSdkError(_OKX_BAR_UNAVAILABLE[bar])
     okx_bar = _OKX_BAR_MAP.get(bar, bar)
-    inst = _find_inst(inst_id)
+    try:
+        inst = _find_inst(inst_id)
+    except OkxSdkError:
+        # 已到期合约不在 in-sale instruments 列表 → 从 instId 反解回退
+        inst = _parse_inst_id(inst_id)
     family = inst.get("instFamily") or _family_of(inst_id)
     mark_rows, truncated = _mark_candle_pages(inst_id, okx_bar)
     if not mark_rows:
@@ -325,6 +377,11 @@ def fetch_lifecycle(inst_id: str, bar: str = "15m") -> dict:
     ref_map: dict[int, float] = {}
     if ref_inst:
         ref_map = _ref_prices(ref_inst, kind, okx_bar, times[0])
+    # 合约规格缺失（instId 反解路径无 ctVal/ctMult）时用家族常量兜底
+    lot_coin = _lot_coin(inst)
+    if not lot_coin:
+        from nanobot_quant.okx_options_trade import FAMILY_LOT
+        lot_coin = FAMILY_LOT.get(inst_id.split("-")[0].upper(), 0.0)
     return {
         "inst_id": inst_id,
         "family": family,
@@ -332,13 +389,14 @@ def fetch_lifecycle(inst_id: str, bar: str = "15m") -> dict:
         "opt_type": inst.get("optType"),
         "exp_ms": int(inst.get("expTime") or 0),
         "list_ms": int(inst.get("listTime") or 0),
-        "lot_coin": _lot_coin(inst),
+        "lot_coin": lot_coin,
         "ref_inst": ref_inst or None,
         "ref_kind": kind or None,
         "bar": bar,
         "rows": [{"ts": ts, "mark_px": mark_rows[ts], "ref_px": ref_map.get(ts)}
                   for ts in times],
         "truncated": truncated,
+        "inst_parsed": bool(inst.get("_parsed")),
     }
 
 
