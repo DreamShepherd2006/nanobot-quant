@@ -703,3 +703,98 @@ def probe(
     out["notes"] = list(ds.notes)
     out["elapsed_s"] = round(time.time() - t0, 1)
     return out
+
+
+def probe_chain_dict(
+    family: str,
+    timestep: str = _DEFAULT_BAR,
+    days: int = 3,
+    length: int = 120,
+    strike_pct: float = _DEFAULT_STRIKE_PCT,
+    end_ts: Optional[int] = None,
+) -> dict:
+    """``chain_dict_at`` 真实性校验（**真实拉数**，只读）。
+
+    单测里的 mark 是用 BS 自己生成的（σ 已知），只能证明「反解器自洽」，
+    **证不了真实 mark 反解出来的 IV/delta 是否合乎期权市场**。
+
+    这里用真实链跑一遍，回答：
+      * 反解出的 IV 是否落在期权市场合理区间（SOL 实务约 0.3–1.5）
+      * put delta 是否 ∈ (−1, 0)、且随 strike 单调
+      * 选档窗口（剩 3–7 天）内是否真的有候选
+    """
+    t0 = time.time()
+    end = int(end_ts or t0)
+    start = end - max(1, int(days)) * 86400
+    out: dict = {"family": family, "timestep": timestep,
+                 "window": {"start": start, "end": end}}
+    try:
+        ds = OptionsReplayDataSource(
+            family=family, timestep=timestep,
+            start_ts=start, end_ts=end,
+            length=length, strike_pct=strike_pct,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 探针不抛
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    out["bar"] = ds.bar
+    out["ref_inst"] = ds.ref_inst
+    try:
+        ds.prefetch()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"prefetch 异常 {type(exc).__name__}: {exc}"
+        out["notes"] = list(ds.notes)
+        return out
+
+    bt = ds.bar_times
+    out["bars"] = len(bt)
+    out["contracts"] = {"enumerated": len(ds._contracts),
+                        "with_mark": len(ds._premiums)}
+    if not bt:
+        out["error"] = "没有标的 K 线，无法选时刻"
+        return out
+
+    ts = bt[len(bt) // 2]
+    ds.seek(ts)
+    ch = ds.chain_dict_at(expiry_min_days=3, expiry_max_days=7)
+
+    rows: list[dict] = []
+    ivs: list[float] = []
+    deltas: list[tuple[float, float]] = []
+    for g in ch["groups"]:
+        for r in g["rows"]:
+            c = r["P"]
+            if c["iv"] is not None:
+                ivs.append(float(c["iv"]))
+            if c["delta"] is not None:
+                deltas.append((float(r["strike"]), float(c["delta"])))
+            if len(rows) < 8:
+                rows.append({
+                    "inst": c["inst_id"], "strike": r["strike"],
+                    "days": round(float(g["days"]), 3),
+                    "mark": round(float(c["mark_px"]), 6),
+                    "bid": round(float(c["bid"]), 6),
+                    "iv": None if c["iv"] is None else round(float(c["iv"]), 4),
+                    "delta": None if c["delta"] is None else round(float(c["delta"]), 4),
+                })
+    deltas.sort()
+    mono = (all(deltas[i][1] <= deltas[i + 1][1] + 1e-9
+                for i in range(len(deltas) - 1))
+            if len(deltas) > 1 else None)
+    sane_iv = bool(ivs) and all(0.05 <= v <= 3.0 for v in ivs)
+    out["chain_dict"] = {
+        "ts": ts.isoformat(),
+        "spot": ch["spot"],
+        "lot_coin": ch["lot_coin"],
+        "groups": len(ch["groups"]),
+        "stats": ch["stats"],
+        "iv_min": round(min(ivs), 4) if ivs else None,
+        "iv_max": round(max(ivs), 4) if ivs else None,
+        "iv_within_market_range": sane_iv,
+        "delta_monotonic_in_strike": mono,
+        "sample": rows,
+    }
+    out["ok"] = bool(ch["stats"]["kept"]) and sane_iv
+    out["notes"] = list(ds.notes)
+    out["elapsed_s"] = round(time.time() - t0, 1)
+    return out
