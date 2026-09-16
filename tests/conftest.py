@@ -74,6 +74,24 @@ except ImportError:
 
     _strategy_mod.Strategy = _Strategy
     _strategies.strategy = _strategy_mod
+
+    # okx_options_live 惰性 import StrategyExecutor（E 期期权接线步 2）。
+    # 镜像真实 lumibot：run()/stop() 存在但为 no-op，测试不依赖调度行为。
+    _strategy_executor_mod = types.ModuleType("lumibot.strategies.strategy_executor")
+
+    class _StrategyExecutor:
+        def __init__(self, strategy=None, *args, **kwargs):
+            self.strategy = strategy
+            self.daemon = False
+
+        def run(self):
+            return None
+
+        def stop(self):
+            return None
+
+    _strategy_executor_mod.StrategyExecutor = _StrategyExecutor
+    _strategies.strategy_executor = _strategy_executor_mod
     _lumibot.strategies = _strategies
 
     # onchainos_broker imports lumibot.brokers.Broker (base class) and
@@ -220,6 +238,8 @@ except ImportError:
     sys.modules.setdefault("lumibot", _lumibot)
     sys.modules.setdefault("lumibot.strategies", _strategies)
     sys.modules.setdefault("lumibot.strategies.strategy", _strategy_mod)
+    sys.modules.setdefault("lumibot.strategies.strategy_executor",
+                           _strategy_executor_mod)
     sys.modules.setdefault("lumibot.brokers", _brokers)
     sys.modules.setdefault("lumibot.entities", _entities)
 
