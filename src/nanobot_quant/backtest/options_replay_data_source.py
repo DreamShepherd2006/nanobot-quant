@@ -29,6 +29,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from nanobot_quant.bs_pricing import bs_delta, implied_vol, years_to_expiry
 from nanobot_quant.okx_options_data import (
     FAMILIES,
     _OKX_BAR_MAP,
@@ -45,6 +46,10 @@ _DEFAULT_STRIKE_STEP = 1.0
 
 # 枚举上限：防止 strike 带 × 到期日 组合爆炸（超限截断并记 note）
 _MAX_CONTRACTS = 400
+
+# 到期日枚举尾窗（天）：区间末尾持有的 put 往往在 end_ts 之后才到期
+# （选档要求剩 3–7 天），若只枚举到 end_ts，回测尾部将无链可卖。
+_ENUM_TAIL_DAYS = 7
 
 # 合约并发拉取数（网络密集；单合约失败不阻塞）
 _PREFETCH_WORKERS = 6
@@ -272,11 +277,12 @@ class OptionsReplayDataSource:
                 strikes.append(round(k * step, 6))
             k += 1
 
-        # 到期日：区间内每天 08:00 UTC
+        # 到期日：区间内每天 08:00 UTC。上限延伸 _ENUM_TAIL_DAYS 天 —— 区间末尾
+        # 持有的 put 常在 end_ts 之后才到期，只枚举到 end_ts 会让回测尾部无链可卖。
         day = 86400
         t = ((start_ts or 0) // day) * day
         expiries: list[int] = []
-        limit_ts = self._end_ts or int(time.time())
+        limit_ts = (self._end_ts or int(time.time())) + _ENUM_TAIL_DAYS * day
         while t <= limit_ts:
             exp_ms = (t + 8 * 3600) * 1000
             if exp_ms > (start_ts or 0) * 1000:
@@ -440,6 +446,119 @@ class OptionsReplayDataSource:
         out.sort(key=lambda r: (r["exp_ms"], r["strike"]))
         return out
 
+    # ── 选档桥接（回测 ↔ 实盘共用 select_puts）────────────────
+
+    def _lot_coin(self) -> float:
+        """每张合约面值（币数）。
+
+        取 ``FAMILY_LOT`` 家族常量（SOL=0.1、BTC/ETH/XAU=0.01）。取不到返回 0.0
+        —— 调用方（select_puts）会记为 ``no_lot`` 并剔除，不静默当 1 张。
+        """
+        base = (self._family or "").split("-")[0].upper()
+        if not base:
+            return 0.0
+        try:
+            from nanobot_quant.okx_options_trade import FAMILY_LOT
+            v = FAMILY_LOT.get(base)
+            if v:
+                return float(v)
+        except Exception:  # pragma: no cover - 常量缺失时退化
+            pass
+        return 0.0
+
+    def chain_dict_at(
+        self,
+        ts=None,
+        opt_type: str = "P",
+        expiry_min_days: Optional[float] = None,
+        expiry_max_days: Optional[float] = None,
+        slippage: float = 0.0,
+    ) -> dict:
+        """把该时刻的链快照转成 ``okx_options_select.select_puts`` 认的 chain dict。
+
+        这是**回测与实盘共用同一份选档代码的唯一桥接层** —— 过滤/排序逻辑一行
+        都不重写，回测侧只负责把历史 mark 还原成「链」。
+
+        字段映射（回测没有盘口，一律以 mark 代理）：
+
+        ==========  ==================================================
+        ``bid``     ``mark × (1 − slippage)`` —— 模拟「买一价」。
+                    选档与成交共用它，避免「选档看 mark、成交吃 bid」的口径分裂。
+        ``ask``     ``mark × (1 + slippage)``
+        ``iv``      从 mark 反解（与 OKX ``markVol`` 同口径：欧式/无股息/r≈0）
+        ``delta``   BS 算（代入反解出的 IV）；反解失败 → None
+        ``days``    ``(exp_ms − ts) / 86400000``
+        ==========  ==================================================
+
+        ``slippage`` 为小数（0.005 = 0.5%），默认 0 = 直接用 mark。
+        缺 spot / 已到期 / 反解失败的合约一律剔除并计入 ``stats``
+        —— 静默降级不可接受，调用方必须看得到剔了多少、为什么。
+        """
+        t = ts or self._current_ts
+        lot = self._lot_coin()
+        empty = {"spot": 0.0, "lot_coin": lot, "groups": [],
+                 "stats": {"total": 0, "kept": 0, "expired": 0,
+                           "no_spot": 1, "no_iv": 0}}
+        if t is None:
+            return dict(empty)
+        t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
+        spot = self.price_of()
+        stats = {"total": 0, "kept": 0, "expired": 0, "no_spot": 0, "no_iv": 0}
+        if spot <= 0:
+            stats["no_spot"] = 1
+            return {"spot": 0.0, "lot_coin": lot, "groups": [], "stats": stats}
+
+        sl = max(0.0, float(slippage or 0.0))
+        right = (opt_type or "P").upper()[:1]
+        groups: dict[int, dict] = {}
+        for c in self.chain_at(t, opt_type):
+            stats["total"] += 1
+            exp_ms = int(c.get("exp_ms") or 0)
+            strike = float(c.get("strike") or 0)
+            mark = float(c.get("mark_px") or 0)
+            if exp_ms <= t_ms or strike <= 0 or mark <= 0:
+                stats["expired"] += 1
+                continue
+            tv = years_to_expiry(t_ms, exp_ms)
+            iv = implied_vol(mark, spot, strike, tv, right) if tv else None
+            if iv is None:
+                stats["no_iv"] += 1
+                continue
+            delta = bs_delta(spot, strike, tv, iv, 0.0, right)
+            g = groups.get(exp_ms)
+            if g is None:
+                g = groups[exp_ms] = {
+                    "days": (exp_ms - t_ms) / 86_400_000.0,
+                    "exp_ms": exp_ms,
+                    "date": datetime.fromtimestamp(
+                        exp_ms // 1000, tz=timezone.utc).strftime("%y%m%d"),
+                    "rows": [],
+                }
+            g["rows"].append({
+                "strike": _fmt_strike(strike),
+                right: {
+                    "inst_id": c.get("inst_id"),
+                    "bid": mark * (1.0 - sl),
+                    "ask": mark * (1.0 + sl),
+                    "iv": iv,
+                    "delta": delta,
+                    "mark_px": mark,
+                },
+            })
+            stats["kept"] += 1
+
+        out_groups = []
+        for exp_ms in sorted(groups):
+            g = groups[exp_ms]
+            if expiry_min_days is not None and g["days"] < expiry_min_days:
+                continue
+            if expiry_max_days is not None and g["days"] > expiry_max_days:
+                continue
+            g["rows"].sort(key=lambda r: float(r["strike"]))
+            out_groups.append(g)
+        return {"spot": spot, "lot_coin": lot, "groups": out_groups,
+                "stats": stats}
+
     def contracts(self) -> list[dict]:
         """全部预拉成功的合约（附 mark 覆盖 bar 数）。"""
         return [
@@ -581,6 +700,113 @@ def probe(
             ],
         }
 
+    out["notes"] = list(ds.notes)
+    out["elapsed_s"] = round(time.time() - t0, 1)
+    return out
+
+
+def _deltas_monotonic(pairs: list[tuple[float, float]]) -> Optional[bool]:
+    """put delta 是否随 strike 单调。
+
+    put delta **恒为负**，且随 strike 上升而**递减**
+    （实测 −0.37@100 → −0.74@106）。首版按 call 的递增方向写，
+    在真实数据上直接报 false —— 抽成纯函数 + 单测锁死方向。
+    """
+    if len(pairs) < 2:
+        return None
+    pairs = sorted(pairs)
+    return all(pairs[i][1] >= pairs[i + 1][1] - 1e-9
+               for i in range(len(pairs) - 1))
+
+
+def probe_chain_dict(
+    family: str,
+    timestep: str = _DEFAULT_BAR,
+    days: int = 3,
+    length: int = 120,
+    strike_pct: float = _DEFAULT_STRIKE_PCT,
+    end_ts: Optional[int] = None,
+) -> dict:
+    """``chain_dict_at`` 真实性校验（**真实拉数**，只读）。
+
+    单测里的 mark 是用 BS 自己生成的（σ 已知），只能证明「反解器自洽」，
+    **证不了真实 mark 反解出来的 IV/delta 是否合乎期权市场**。
+
+    这里用真实链跑一遍，回答：
+      * 反解出的 IV 是否落在期权市场合理区间（SOL 实务约 0.3–1.5）
+      * put delta 是否 ∈ (−1, 0)、且随 strike 单调
+      * 选档窗口（剩 3–7 天）内是否真的有候选
+    """
+    t0 = time.time()
+    end = int(end_ts or t0)
+    start = end - max(1, int(days)) * 86400
+    out: dict = {"family": family, "timestep": timestep,
+                 "window": {"start": start, "end": end}}
+    try:
+        ds = OptionsReplayDataSource(
+            family=family, timestep=timestep,
+            start_ts=start, end_ts=end,
+            length=length, strike_pct=strike_pct,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 探针不抛
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    out["bar"] = ds.bar
+    out["ref_inst"] = ds.ref_inst
+    try:
+        ds.prefetch()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"prefetch 异常 {type(exc).__name__}: {exc}"
+        out["notes"] = list(ds.notes)
+        return out
+
+    bt = ds.bar_times
+    out["bars"] = len(bt)
+    out["contracts"] = {"enumerated": len(ds._contracts),
+                        "with_mark": len(ds._premiums)}
+    if not bt:
+        out["error"] = "没有标的 K 线，无法选时刻"
+        return out
+
+    ts = bt[len(bt) // 2]
+    ds.seek(ts)
+    ch = ds.chain_dict_at(expiry_min_days=3, expiry_max_days=7)
+
+    rows: list[dict] = []
+    ivs: list[float] = []
+    deltas: list[tuple[float, float]] = []
+    for g in ch["groups"]:
+        for r in g["rows"]:
+            c = r["P"]
+            if c["iv"] is not None:
+                ivs.append(float(c["iv"]))
+            if c["delta"] is not None:
+                deltas.append((float(r["strike"]), float(c["delta"])))
+            if len(rows) < 8:
+                rows.append({
+                    "inst": c["inst_id"], "strike": r["strike"],
+                    "days": round(float(g["days"]), 3),
+                    "mark": round(float(c["mark_px"]), 6),
+                    "bid": round(float(c["bid"]), 6),
+                    "iv": None if c["iv"] is None else round(float(c["iv"]), 4),
+                    "delta": None if c["delta"] is None else round(float(c["delta"]), 4),
+                })
+    deltas.sort()
+    mono = _deltas_monotonic(deltas)
+    sane_iv = bool(ivs) and all(0.05 <= v <= 3.0 for v in ivs)
+    out["chain_dict"] = {
+        "ts": ts.isoformat(),
+        "spot": ch["spot"],
+        "lot_coin": ch["lot_coin"],
+        "groups": len(ch["groups"]),
+        "stats": ch["stats"],
+        "iv_min": round(min(ivs), 4) if ivs else None,
+        "iv_max": round(max(ivs), 4) if ivs else None,
+        "iv_within_market_range": sane_iv,
+        "delta_monotonic_in_strike": mono,
+        "sample": rows,
+    }
+    out["ok"] = bool(ch["stats"]["kept"]) and sane_iv
     out["notes"] = list(ds.notes)
     out["elapsed_s"] = round(time.time() - t0, 1)
     return out

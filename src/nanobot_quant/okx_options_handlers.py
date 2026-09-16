@@ -36,6 +36,9 @@ from nanobot_quant import okx_options_select as osel
 from nanobot_quant import okx_options_td as otd
 from nanobot_quant import okx_options_trade as ot
 from nanobot_quant.backtest.options_replay_data_source import probe as backtest_probe
+from nanobot_quant.backtest.options_replay_data_source import (
+    probe_chain_dict as backtest_probe_chain,
+)
 from nanobot_quant.data_sources.periods import PERIODS
 from nanobot_quant.okx_cex_credentials import list_sub_accounts
 from nanobot_quant.okx_sdk import OkxSdkError
@@ -905,6 +908,38 @@ def register_okx_options_routes(app, gatekeeper) -> None:
 
     app.add_api_route("/config/okx-options/td", _td_panel, methods=["GET"])
     app.add_api_route("/config/okx-options/backtest-probe", _backtest_probe, methods=["GET"])
+
+    async def _backtest_probe_chain(request: Request):
+        """``chain_dict_at`` 真实性校验（只读，真实拉数）。
+
+        GET /config/okx-options/backtest-probe/chain?family=SOL-USD_UM&days=3
+
+        单测里的 mark 是 BS 自己生成的（σ 已知），只能证明反解器自洽；
+        这里用**真实链**看反解出的 IV 是否落在市场合理区间、delta 是否单调。
+        路径式（非 query 多参）——聊天/文档里裸 ``&`` 常被渲染成 HTML 实体。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        q = request.query_params
+        family = (q.get("family") or "SOL-USD_UM").upper()
+        if family not in od.FAMILIES:
+            return JSONResponse(
+                {"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
+        try:
+            days = max(1, min(30, int(q.get("days") or 3)))
+        except (TypeError, ValueError):
+            days = 3
+        timestep = (q.get("timestep") or "15m").strip()
+        try:
+            data = await asyncio.to_thread(
+                backtest_probe_chain, family, timestep, days)
+        except Exception as e:  # noqa: BLE001 —— 诊断端点不 500
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, "data": data})
+
+    app.add_api_route("/config/okx-options/backtest-probe/chain",
+                      _backtest_probe_chain, methods=["GET"])
     app.add_api_route("/config/okx-options/covered", _covered, methods=["GET"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])
