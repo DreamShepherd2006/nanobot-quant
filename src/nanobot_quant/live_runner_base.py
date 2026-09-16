@@ -221,26 +221,41 @@ class LiveRunnerBase:
         return {"ok": True, "started": False, "stopped": False, "unchanged": True}
 
     # ══════════════════════ 主循环 ══════════════════════
-    def _loop(self) -> None:
-        cfg = dict(self._cfg)
-        interval = self._interval_s(cfg)
+    def run_forever(self) -> None:
+        """主循环。默认实现 = interval 心跳 + :meth:`_tick`。
+
+        子类可覆盖以换调度形态（如把节拍交给 lumibot engine 的长驻模式）。
+        覆盖时**必须响应 ``self._stop_event``**，否则 :meth:`stop` 只能等超时。
+        """
         while not self._stop_event.is_set():
-            self._round_active = True
-            try:
-                result = self.do_round()
-                with self._lock:
-                    self._state["last_run"] = _utc_now()
-                    self._state["last_result"] = result
-                    self._state["total_rounds"] = int(
-                        self._state.get("total_rounds") or 0) + 1
-            except Exception as e:  # 单轮异常不外抛：记 last_error，下轮继续
-                with self._lock:
-                    self._state["last_error"] = f"{type(e).__name__}: {e}"
-                self._log(f"单轮异常（下轮继续）：{type(e).__name__}: {e}")
-            finally:
-                self._round_active = False
-            if self._stop_event.wait(timeout=interval):
+            self._tick()
+            if self._stop_event.wait(timeout=self._interval_s(self._cfg)):
                 break
+
+    def _tick(self) -> None:
+        """单轮：标 _round_active（优雅停止依赖它）→ do_round() → 记录状态。"""
+        self._round_active = True
+        try:
+            result = self.do_round()
+            with self._lock:
+                self._state["last_run"] = _utc_now()
+                self._state["last_result"] = result
+                self._state["total_rounds"] = int(
+                    self._state.get("total_rounds") or 0) + 1
+        except Exception as e:  # 单轮异常不外抛：记 last_error，下轮继续
+            with self._lock:
+                self._state["last_error"] = f"{type(e).__name__}: {e}"
+            self._log(f"单轮异常（下轮继续）：{type(e).__name__}: {e}")
+        finally:
+            self._round_active = False
+
+    def _loop(self) -> None:
+        try:
+            self.run_forever()
+        except Exception as e:  # 主循环异常：记账并退出（不静默）
+            with self._lock:
+                self._state["last_error"] = f"{type(e).__name__}: {e}"
+            self._log(f"主循环异常退出：{type(e).__name__}: {e}")
         with self._lock:
             self._state["running"] = False
         self._log("循环线程退出")
