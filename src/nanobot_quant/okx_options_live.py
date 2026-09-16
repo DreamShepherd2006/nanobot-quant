@@ -1,42 +1,40 @@
-"""期权到期巡检 daemon（C23 S3，2026-09-07）。
+"""期权自动循环 daemon（C23 S3 + E 期接线，2026-09-07 / 2026-09-16）。
 
-复用 TD live 机制形态：daemon 线程 + 参数文件启停 + LIVE_STATE + append-only 事件文件。
-每轮跑 ot.settle_expired_puts()（OTM 自动关账 / ITM 记赔付 / 矛盾挂 settled_review
-fail-closed / 账单未出保持 open 下轮重试），判定结果逐笔 append 事件文件（跨重启保留）
-并更新进程内 LIVE_STATE 供页面「到期处理区」轮询回看。
+**一轮 = ① 到期判定 + ② 策略轮次**，与 TD live 同构（一个 runner · 一个开关 ·
+一个 LIVE_STATE · 一轮内做完）——机制层改为继承 :class:`LiveRunnerBase`
+（daemon 线程 / 优雅停止 / ``sync()`` 幂等 / 进程内 LIVE_STATE / append-only
+事件文件），本模块只保留期权特有逻辑。``td_live.py`` 本次未动，将来单独迁移。
 
-启停：option_params.json 的 live 字段 {"enabled": bool, "interval_s": int}——
-期权页顶部「到期巡检」开关（WebUI 手动开启，AI 不自行开启；与现货 td_enabled 同规则）。
-心跳周期默认 60s、范围 10–3600，WebUI 可配；interval 变更经 sync() 重启线程生效。
+- ① 到期判定：``ot.settle_expired_puts()``（OTM 自动关账 / ITM 记赔付 / 矛盾挂
+  settled_review fail-closed / 账单未出保持 open 下轮重试）。
+- ② 策略轮次：TD 衰竭信号 → IV 闸门 → 合约选择 → 卖 put；权利金回落止盈买回。
+  ``dry_run=True``（默认）时**只记录决策不下单** —— 「AI 不能自行授权实盘」在
+  闭环里的结构性落实。
+
+启停：``option_params.json`` 的 ``live`` 字段
+``{"enabled": bool, "interval_s": int, "strategy": {...}}`` —— 期权页手动开关
+（AI 不自行开启，与现货 td_enabled 同规则）。心跳默认 60s、范围 10–3600；
+interval / strategy 变更经 ``sync()`` 重启线程生效。
+
+诊断输出一律走 stderr（前缀 ``[OPT-LIVE]``）——gatekeeper 进程未配 logging
+handler（logger.info 被 lastResort 静默丢弃）、launch.sh 会 eval stdout。
 """
 
 from __future__ import annotations
 
 import json
 import sys
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import okx_options_trade as ot
+from .live_runner_base import LiveRunnerBase
 
 _LIVE_EVENTS_NAME = "okx_options_live_events.jsonl"
 
 DEFAULT_INTERVAL_S = 60
 MIN_INTERVAL_S = 10
 MAX_INTERVAL_S = 3600
-
-# 进程内 LIVE_STATE（页面轮询巡检状态/最近判定；事件文件为持久化权威）
-_state = {
-    "running": False,
-    "last_run": None,      # ISO UTC
-    "last_settled": [],    # 最近一轮判定结果
-    "last_strategy": None,  # 最近一轮策略决策（entries/exits/notes）
-    "last_error": "",      # 最近一轮异常（无则为空）
-    "total_settled": 0,    # 累计判定笔数（自进程启动）
-    "total_entries": 0,    # 累计卖 put 笔数（含 dry_run）
-    "total_exits": 0,      # 累计止盈买回笔数（含 dry_run）
-}
 
 # 策略默认参数（option_params.json 的 live.strategy 段；用户可在页面改）
 # 取向（2026-09-15 拍板）：先跑通闭环，参数用真实样本迭代——所以
@@ -55,9 +53,6 @@ DEFAULT_STRATEGY: dict = {
     "max_contracts_total": 3,
     "dry_run": True,
 }
-_lock = threading.Lock()
-_thread: threading.Thread | None = None
-_stop = threading.Event()
 
 
 # ── 事件文件（append-only JSONL，与台账同目录持久化）───────
@@ -238,6 +233,8 @@ def strategy_round(cfg: dict | None = None) -> dict:
     ``dry_run=True``（默认）时**只记录决策、不下单**——这是「AI 不能自行授权
     实盘」在闭环里的结构性落实：循环跑起来也不会真下单，需用户手动关掉。
     决策失败/异常一律入 notes，不向外抛（daemon 不容许线程猝死）。
+
+    注：E 期接线后本函数将被 lumibot Strategy 取代（步 2），步 1 保持原样。
     """
     from . import okx_options_strategy as st
 
@@ -361,26 +358,76 @@ def strategy_round(cfg: dict | None = None) -> dict:
             "notes": notes, "contracts": counts}
 
 
-# ── 单轮巡检（线程与测试共用）─────────────────────────────
+# ── Runner（机制层继承 LiveRunnerBase，与 TD live 同构）──────
 
-def run_once() -> dict:
-    """一轮到期判定：settle_expired_puts（put+call）→ 逐笔 append 事件 + 更新 LIVE_STATE。
-    任何异常不外抛（巡检自愈：本轮错误记 last_error，下轮继续）。"""
-    settled = []
+class _OkxOptionsRunner(LiveRunnerBase):
+    """一轮 = 到期判定 + 策略轮次。
+
+    ``do_round()`` 返回 ``{"settled", "strategy", "error"}``，同时把期权页需要的
+    字段写进 LIVE_STATE（``last_settled`` / ``last_strategy`` / ``total_*``）——
+    与接线前 :func:`live_state` 的输出字段完全一致，页面/测试零改动。
+    """
+
+    LOG_PREFIX = "[OPT-LIVE]"
+    EVENTS_NAME = _LIVE_EVENTS_NAME
+    DEFAULT_INTERVAL_S = DEFAULT_INTERVAL_S
+    INTERVAL_RANGE = (MIN_INTERVAL_S, MAX_INTERVAL_S)
+
+    # ── 基类钩子 ──
+    def load_config(self) -> dict:
+        return live_config()
+
+    def config_changed(self, old: dict, new: dict) -> bool:
+        # 与接线前的 `last_cfg == cfg` 全等比较语义一致：
+        # interval / enabled / strategy（页面保存的整份 config）任一变化即重启。
+        return dict(old or {}) != dict(new or {})
+
+    def storage_dir(self) -> Path:
+        # 经模块级 events_path() 取目录（而非直接 _storage_dir()），
+        # 便于测试 monkeypatch 隔离事件文件——两条路径同源，行为一致。
+        return events_path().parent
+
+    def do_round(self) -> dict:
+        return _run_round(self)
+
+
+_RUNNER: _OkxOptionsRunner | None = None
+
+
+def _runner() -> _OkxOptionsRunner:
+    global _RUNNER
+    if _RUNNER is None:
+        _RUNNER = _OkxOptionsRunner()
+    return _RUNNER
+
+
+# 兼容层：历史上 _state 是模块级字典（可能有外部直接读取），现指向 runner 的
+# 同一对象——读写双向可见，且 do_round 仍写入原有字段名。
+_state: dict = _runner()._state
+
+
+def _run_round(runner: LiveRunnerBase) -> dict:
+    """单轮：① 到期判定（settle_expired_puts）② 策略轮次；异常不外抛。
+
+    任何异常都记入 ``last_error`` 并让线程继续（巡检自愈）。
+    """
+    settled: list[dict] = []
     error = ""
-    _log("── 巡检轮次开始 ──")
+    with runner._lock:
+        runner._state["last_run"] = _utc_now()
+    runner._log("── 巡检轮次开始 ──")
     try:
         settled = ot.settle_expired_puts()
     except Exception as e:  # noqa: BLE001 —— daemon 巡检不容许线程猝死
         error = f"{type(e).__name__}: {e}"
-        _log(f"⚠️ 到期判定异常：{error}")
+        runner._log(f"⚠️ 到期判定异常：{error}")
     if settled:
         for s in settled:
-            _log(f"到期判定：{s.get('inst_id')} → {s.get('status')} "
-                 f"结算价={s.get('settle_px')} 净盈亏={s.get('settle_pnl')} "
-                 f"毛赔付={s.get('settle_payout')} | {s.get('note', '')}")
+            runner._log(f"到期判定：{s.get('inst_id')} → {s.get('status')} "
+                        f"结算价={s.get('settle_px')} 净盈亏={s.get('settle_pnl')} "
+                        f"毛赔付={s.get('settle_payout')} | {s.get('note', '')}")
     else:
-        _log("到期判定：本轮无新判定（未到期或账单未出）")
+        runner._log("到期判定：本轮无新判定（未到期或账单未出）")
     # 先落盘事件、后更新 LIVE_STATE：total_settled 语义 = 已落盘判定笔数，
     # 避免「计数已 +1 但事件未写完」的观测竞态（页面/测试按计数读事件会拿到空）。
     if settled:
@@ -388,7 +435,7 @@ def run_once() -> dict:
             by_id = {e.get("id"): e for e in ot.load_ledger()}
             for s in settled:
                 row = by_id.get(s.get("id")) or {}
-                _append_event({
+                runner._append_event({
                     "ts": _utc_now(),
                     "type": "settle",
                     "id": s.get("id"),
@@ -406,93 +453,82 @@ def run_once() -> dict:
                 })
         except Exception as e:  # noqa: BLE001 —— 落盘失败不阻断状态更新
             error = (error + " | " if error else "") + f"event_append: {type(e).__name__}: {e}"
-    with _lock:
-        _state["last_run"] = _utc_now()
-        _state["last_settled"] = settled
-        _state["last_error"] = error
-        _state["total_settled"] += len(settled)
+    with runner._lock:
+        runner._state["last_settled"] = settled
+        runner._state["last_error"] = error
+    runner._bump("settled", len(settled))
     # ② 策略轮次（入场 + 止盈）：到期判定之后跑，互不阻断
     strat = None
     try:
         strat = strategy_round(live_config())
         for rec in (strat.get("entries") or []):
-            _append_event({"ts": _utc_now(), "type": "entry", **rec})
+            runner._append_event({"ts": _utc_now(), "type": "entry", **rec})
         for rec in (strat.get("exits") or []):
-            _append_event({"ts": _utc_now(), "type": "exit", **rec})
+            runner._append_event({"ts": _utc_now(), "type": "exit", **rec})
     except Exception as e:  # noqa: BLE001 —— 策略异常不得杀线程
         error = (error + " | " if error else "") + f"strategy: {type(e).__name__}: {e}"
-        _log(f"⚠️ 策略轮次异常（线程继续）：{type(e).__name__}: {e}")
-    with _lock:
-        _state["last_strategy"] = strat
-        _state["total_entries"] += len((strat or {}).get("entries") or [])
-        _state["total_exits"] += len((strat or {}).get("exits") or [])
-        _state["last_error"] = error
-    _log(f"── 巡检轮次结束 ── 到期判定 {len(settled)} 笔 · "
-         f"策略 卖 {len((strat or {}).get('entries') or [])} / "
-         f"买回 {len((strat or {}).get('exits') or [])}"
-         + (f" · error={error}" if error else ""))
+        runner._log(f"⚠️ 策略轮次异常（线程继续）：{type(e).__name__}: {e}")
+    with runner._lock:
+        runner._state["last_strategy"] = strat
+        runner._state["last_error"] = error
+    runner._bump("entries", len((strat or {}).get("entries") or []))
+    runner._bump("exits", len((strat or {}).get("exits") or []))
+    runner._log(f"── 巡检轮次结束 ── 到期判定 {len(settled)} 笔 · "
+                f"策略 卖 {len((strat or {}).get('entries') or [])} / "
+                f"买回 {len((strat or {}).get('exits') or [])}"
+                + (f" · error={error}" if error else ""))
     return {"settled": settled, "strategy": strat, "error": error}
 
 
-# ── 线程生命周期 ──────────────────────────────────────────
+# ── 模块级 API（保持接线前的签名与返回，内部委托 runner 单例）──────
 
-def _loop() -> None:
-    while not _stop.wait(live_config()["interval_s"]):
-        run_once()
+def run_once() -> dict:
+    """跑一轮（线程与测试共用）。"""
+    return _runner().do_round()
 
 
 def live_state() -> dict:
+    """期权页轮询的完整状态（字段与接线前完全一致）。"""
     cfg = live_config()
-    with _lock:
-        return {
-            "config": cfg,
-            "running": bool(_thread is not None and _thread.is_alive()),
-            "last_run": _state["last_run"],
-            "last_settled": _state["last_settled"],
-            "last_strategy": _state["last_strategy"],
-            "last_error": _state["last_error"],
-            "total_settled": _state["total_settled"],
-            "total_entries": _state["total_entries"],
-            "total_exits": _state["total_exits"],
-        }
+    r = _runner()
+    with r._lock:
+        st = dict(r._state)
+    totals = st.get("totals") or {}
+    return {
+        "config": cfg,
+        "running": bool(r._thread is not None and r._thread.is_alive()),
+        "last_run": st.get("last_run"),
+        "last_settled": st.get("last_settled") or [],
+        "last_strategy": st.get("last_strategy"),
+        "last_error": st.get("last_error") or "",
+        "total_settled": int(totals.get("settled") or 0),
+        "total_entries": int(totals.get("entries") or 0),
+        "total_exits": int(totals.get("exits") or 0),
+    }
 
 
-def stop() -> None:
-    """停止巡检线程（幂等）。不打断正在执行的一轮——等它自然结束。"""
-    global _thread
-    with _lock:
-        t = _thread
-        _stop.set()
-    if t is not None:
-        t.join(timeout=10)
-    with _lock:
-        if _thread is t:
-            _thread = None
-    _stop.clear()
-
-
-def _start_thread(cfg: dict) -> None:
-    global _thread
-    _stop.clear()
-    t = threading.Thread(target=_loop, name="okx-options-live", daemon=True)
-    t._live_cfg = cfg  # type: ignore[attr-defined]
-    with _lock:
-        _thread = t
-    t.start()
+def stop() -> dict:
+    """停止循环（幂等）。不打断正在执行的一轮——等它自然结束。"""
+    return _runner().stop()
 
 
 def sync() -> dict:
-    """按 option_params live 配置启/停/重启线程（幂等）。
-    运行中且配置未变 → 不动；运行中配置变（interval）→ 重启；enabled=false → 停。"""
-    cfg = live_config()
-    with _lock:
-        t = _thread
-        alive = t is not None and t.is_alive()
-        last_cfg = getattr(t, "_live_cfg", None) if t is not None else None
-    if alive and last_cfg == cfg:
-        return live_state()
-    if alive:
-        stop()  # 需要重启或停止——等当前一轮自然结束后再操作
-    if cfg["enabled"]:
-        _start_thread(cfg)
+    """按 option_params live 配置启/停/重启（幂等）。
+
+    运行中且配置未变 → 不动；运行中配置变（interval / strategy / enabled）→ 重启；
+    enabled=false → 停。
+    """
+    _runner().sync()
     return live_state()
+
+
+__all__ = [
+    "DEFAULT_STRATEGY", "DEFAULT_INTERVAL_S", "MIN_INTERVAL_S", "MAX_INTERVAL_S",
+    "LIVE_EVENTS_NAME",
+    "live_config", "save_live_config", "strategy_round",
+    "run_once", "live_state", "sync", "stop",
+    "events_path", "load_events",
+]
+
+# 旧名（接线前为模块级常量，可能有外部引用）
+LIVE_EVENTS_NAME = _LIVE_EVENTS_NAME

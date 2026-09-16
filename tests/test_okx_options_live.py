@@ -25,8 +25,11 @@ def _iso(tmp_path, monkeypatch):
     ol._state.update(running=False, last_run=None, last_settled=[],
                      last_error="", total_settled=0, last_strategy=None,
                      total_entries=0, total_exits=0)
-    ol._thread = None
-    ol._stop.clear()
+    # 机制层已抽到 LiveRunnerBase（2026-09-16）：线程/停止位/计数都在 runner 实例上
+    _r = ol._runner()
+    _r._thread = None
+    _r._stop_event.clear()
+    _r._state["totals"] = {}
     # 策略轮次默认打桩（不触网）：持仓空 + 无 K 线；策略专项测试用 _strat 覆盖
     monkeypatch.setattr(ot, "open_puts", lambda account="": [])
     monkeypatch.setattr(ol, "_td_signal_for", lambda family, base, bar, bars: None)
