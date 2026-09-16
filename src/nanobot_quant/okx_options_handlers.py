@@ -377,6 +377,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         return JSONResponse({"ok": True, "live": ol.live_state(),
                              "config": ol.live_config(),
                              "strategy_defaults": ol.DEFAULT_STRATEGY,
+                             "available_families": list(od.FAMILIES),
                              "events": ol.load_events(30)})
 
     async def _live_set(request: Request):
@@ -408,6 +409,10 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             if not isinstance(strategy.get("families"), list):
                 return JSONResponse({"ok": False,
                                      "error": "strategy.families 需为数组或逗号分隔字符串"})
+            unknown = [f for f in strategy["families"] if f not in od.FAMILIES]
+            if unknown:
+                return JSONResponse({"ok": False,
+                                     "error": f"未知标的家族 {unknown}；可选：{list(od.FAMILIES)}"})
         ol.save_live_config(enabled=enabled, interval_s=interval_s, strategy=strategy)
         state = await asyncio.to_thread(ol.sync)
         return JSONResponse({"ok": True, "live": state, "config": ol.live_config()})

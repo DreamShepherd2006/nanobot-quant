@@ -86,6 +86,16 @@
   td.bgi-c { background:#e7f5ea; }
   td.bgi-p { background:#fbecea; }
   .pos-tick { color:#fff; font-size:.72em; }
+.livebar { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e0e0e0; border-left:4px solid #7e57c2; border-radius:6px; padding:8px 14px; margin:0 0 12px; cursor:pointer; font-size:.92em; }
+.livebar.on { border-left-color:#2e7d32; }
+.livebar.off { border-left-color:#9e9e9e; }
+.livebar:hover { background:#faf7ff; }
+.famchk { display:inline-flex; flex-wrap:wrap; gap:2px; }
+.famchk label { display:inline-flex; align-items:center; gap:3px; font-size:.88em; border:1px solid #ddd; border-radius:4px; padding:2px 7px; cursor:pointer; background:#fafafa; }
+.famchk label.on { background:#e8f5e9; border-color:#81c784; font-weight:600; }
+.unsaved { border-color:#ef6c00 !important; background:#fff8e1 !important; }
+.fambadge { color:#2e7d32; font-weight:600; }
+.outside-note { background:#fff8e1; border-left:3px solid #ef6c00; padding:6px 10px; margin:6px 0; border-radius:4px; font-size:.9em; }
 </style>
 </head>
 <body>
@@ -131,11 +141,16 @@
   <div class="banner err" id="errBanner"></div>
   <div class="banner loading" id="loadingBanner">⏳ 拉取 OKX 期权链…</div>
 </div>
+<div class="livebar" id="liveBar" title="点击展开底部的「🤖 自动策略」">
+  <span id="liveBarText">⚪ 自动策略：未配置</span>
+  <span style="flex:1"></span>
+  <span class="hint">管理自动策略 ▾</span>
+</div>
 <div class="banner warn" id="reminderBanner" style="margin:0 0 12px"></div>
 
-<details class="settings" id="settingsCard">
-  <summary>⚙️ 设置 · 担保自动追加 · 到期巡检</summary>
-  <div class="card" id="paramCard" style="margin-bottom:10px;border:none;padding:10px 0 0;border-radius:0">
+<details class="settings" id="paramSection">
+  <summary>⚙️ 期权参数 · 担保自动追加 · 定价保护线 · 合约选择</summary>
+<div class="card" id="paramCard" style="margin-bottom:10px;border:none;padding:10px 0 0;border-radius:0">
   <div class="ctl">
     <label>⚙️ 担保设置（逐仓自动追加）</label>
     <input type="number" id="mCollRatio" min="0" max="200" step="5" value="100" title="全损担保的百分比">
@@ -184,44 +199,8 @@
   </div>
   <div class="note">候选生成口径（详见 docs/quant-system.md 33.26）：① 到期天数窗口 ② 有买盘（bid&gt;0，否则卖不出去）③ <b>strike ≤ 基准价×(1−距离%)</b> 硬过滤（安全边际优先，不满足的档直接排除）④ delta 带（<b>上限才是风险控制</b>；低 delta = 更安全但保费薄，下限默认 0.05，填 0 / 0 关闭）⑤ <b>扣手续费后无利可图（净权利金 ≤ 0）始终排除</b>，可用「净收益率下限」再抬高门槛 ⑥ 排序。净收益率 = <b>净权利金 ÷ 担保额</b>，净权利金 = bid×面值 − 名义×0.03% 手续费（期权费按名义收）。基准价 = 标的实时现价。</div>
 </div>
-
-<div class="card" id="liveCard" style="border:none;padding:10px 0 0;border-radius:0">
-  <div class="ctl">
-    <label>🟤 自动循环（到期判定 + 卖 put 策略）</label>
-    <input type="checkbox" id="liveEnabled" title="常驻循环：到期判定（OTM 自动关账 / ITM 记赔付）+ 卖 put 策略轮次；AI 不自行开启">
-    <span class="hint">开启</span>
-    <input type="number" id="liveInterval" min="10" max="3600" step="10" value="60" style="width:90px" title="巡检周期（秒）">
-    <span class="hint">秒/轮</span>
-    <label style="color:#c62828" title="勾选 = 只观察不下单（记录「打算卖什么/买回什么」）；取消勾选才会真实下单">🖐 dry-run（不下单）
-      <input type="checkbox" id="liveDryRun" checked>
-    </label>
-    <button class="btn-ghost" id="saveLiveBtn">保存</button>
-    <span class="hint" id="liveStatus"></span>
-  </div>
-  <div class="ctl" style="margin-top:6px">
-    <span class="hint">标的家族</span>
-    <input type="text" id="liveFamilies" style="width:150px" title="逗号分隔，如 SOL-USD_UM,BTC-USD_UM（OKX U 本位 instFamily）">
-    <span class="hint">信号周期</span>
-    <select id="liveTdPeriod" style="width:80px" title="标的 TD 信号周期（5m 为实证主力周期）">
-      <option value="1m">1m</option><option value="5m">5m</option>
-      <option value="15m">15m</option><option value="1H">1H</option>
-    </select>
-    <span class="hint">买9 / CD</span>
-    <input type="number" id="liveEntrySetup" min="1" max="20" style="width:58px" title="setup_buy ≥ 此值触发入场">
-    <input type="number" id="liveEntryCd" min="1" max="20" style="width:58px" title="cd_buy ≥ 此值触发入场">
-    <span class="hint">IV 闸门</span>
-    <input type="number" id="liveIvMin" min="0" max="100" style="width:58px" title="当前 IV 分位低于此值则跳过（恐慌未定价）；0=关；样本不足时放行">
-    <span class="hint">分位·止盈</span>
-    <input type="number" id="liveTp" min="0" max="95" style="width:58px" title="权利金回落此比例即买回（0=关闭止盈）">
-    <span class="hint">%·张数上限</span>
-    <input type="number" id="liveMaxFam" min="0" max="20" style="width:52px" title="单标的在仓张数上限">
-    <input type="number" id="liveMaxAll" min="0" max="50" style="width:52px" title="全局在仓张数上限">
-  </div>
-  <div class="note" id="liveNote">常驻循环每周期两件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 策略</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → 候选选档 → 卖 put；持仓权利金回落超止盈线即买回）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。</div>
-  <div id="liveStrategy"><div class="empty">最近一轮策略：暂无（开启循环后显示决策与原因）</div></div>
-  <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
-  </div>
 </details>
+
 
 <!-- 📊 标的 TD 状态（C24 ⑤）：与自动循环同源的衰竭进度，只读展示 -->
 <div class="card" id="tdCard" style="margin-bottom:12px;padding:10px 14px">
@@ -264,6 +243,7 @@
       <span class="hint" id="candStamp"></span>
       <span class="hint" id="candMeta"></span>
     </div>
+    <div class="outside-note" id="candOutside" style="display:none"></div>
     <div id="candBody"><div class="empty">点「🔄 生成候选」：按当前选择参数（距离 / 到期 / delta 过滤 + 净收益率排序）挑出可卖合约</div></div>
   </div>
   <div class="note" id="priceNote"></div>
@@ -279,6 +259,46 @@
   <h3>🧾 卖 put 台账</h3>
   <div id="ledBody"><div class="empty">加载中…</div></div>
 </div>
+<details class="settings" id="liveSection" open>
+  <summary>🤖 自动策略 · 到期判定 + 卖 put 循环</summary>
+<div class="card" id="liveCard" style="border:none;padding:10px 0 0;border-radius:0">
+  <div class="ctl">
+    <label>🟤 自动循环（到期判定 + 卖 put 策略）</label>
+    <input type="checkbox" id="liveEnabled" title="常驻循环：到期判定（OTM 自动关账 / ITM 记赔付）+ 卖 put 策略轮次；AI 不自行开启">
+    <span class="hint">开启</span>
+    <input type="number" id="liveInterval" min="10" max="3600" step="10" value="60" style="width:90px" title="巡检周期（秒）">
+    <span class="hint">秒/轮</span>
+    <label style="color:#c62828" title="勾选 = 只观察不下单（记录「打算卖什么/买回什么」）；取消勾选才会真实下单">🖐 dry-run（不下单）
+      <input type="checkbox" id="liveDryRun" checked>
+    </label>
+    <button class="btn-ghost" id="saveLiveBtn">保存</button>
+    <span class="hint" id="liveStatus"></span>
+  </div>
+  <div class="ctl" style="margin-top:6px">
+    <span class="hint">标的家族</span>
+    <span id="liveFamilies" class="famchk" title="自动循环在这些标的上跑（可多选）；与顶部「标的」互不影响"></span>
+    <span class="hint">信号周期</span>
+    <select id="liveTdPeriod" style="width:80px" title="标的 TD 信号周期（5m 为实证主力周期）">
+      <option value="1m">1m</option><option value="5m">5m</option>
+      <option value="15m">15m</option><option value="1H">1H</option>
+    </select>
+    <span class="hint">买9 / CD</span>
+    <input type="number" id="liveEntrySetup" min="1" max="20" style="width:58px" title="setup_buy ≥ 此值触发入场">
+    <input type="number" id="liveEntryCd" min="1" max="20" style="width:58px" title="cd_buy ≥ 此值触发入场">
+    <span class="hint">IV 闸门</span>
+    <input type="number" id="liveIvMin" min="0" max="100" style="width:58px" title="当前 IV 分位低于此值则跳过（恐慌未定价）；0=关；样本不足时放行">
+    <span class="hint">分位·止盈</span>
+    <input type="number" id="liveTp" min="0" max="95" style="width:58px" title="权利金回落此比例即买回（0=关闭止盈）">
+    <span class="hint">%·张数上限</span>
+    <input type="number" id="liveMaxFam" min="0" max="20" style="width:52px" title="单标的在仓张数上限">
+    <input type="number" id="liveMaxAll" min="0" max="50" style="width:52px" title="全局在仓张数上限">
+  </div>
+  <div class="note" id="liveNote">常驻循环每周期两件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 策略</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → 候选选档 → 卖 put；持仓权利金回落超止盈线即买回）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。</div>
+  <div id="liveStrategy"><div class="empty">最近一轮策略：暂无（开启循环后显示决策与原因）</div></div>
+  <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
+  </div>
+</details>
+
 
 <!-- 卖 put / 平仓 / 补买 模态 -->
 <div class="overlay" id="modalOverlay">
@@ -1421,6 +1441,19 @@ async function loadCandidates() {
 }
 function renderCandidates(d) {
   const s = d.selector || {}, f = d.filtered || {};
+  // 家族外提示：这里看的是「手动操作上下文」，与自动循环的标的家族互不影响
+  const noteEl = $("candOutside");
+  if (noteEl) {
+    const famNow = String(d.family || "");
+    const inStrategy = liveFamsCache.some(x => String(x).toUpperCase() === famNow.toUpperCase());
+    const show = !!(liveFamsCache.length && famNow && !inStrategy);
+    noteEl.style.display = show ? "block" : "none";
+    if (show) {
+      noteEl.innerHTML = "⚠️ <b>" + esc(famNow) + "</b> 不在自动循环的标的家族内（当前策略家族：" +
+        esc(liveFamsCache.map(x => String(x).replace("-USD_UM", "")).join(" / ")) +
+        "）—— 这里的「卖出」是<b>手动开仓</b>，策略不会管理它的止盈 / 张数上限。";
+    }
+  }
   $("candMeta").textContent = (d.family || "") + " · 基准 " + fmt(d.base_px, 2) + " · 距离 ≥" + fmt(s.min_distance_pct, 1) + "% · 到期 " +
     fmt(s.expiry_min_days, 0) + "–" + fmt(s.expiry_max_days, 0) + " 天 · delta " + fmt(s.delta_min, 2) + "–" + fmt(s.delta_max, 2) +
     " · 过滤[到期 " + (f.expiry || 0) + " · 无买盘 " + (f.no_bid || 0) + " · 距离 " + (f.distance || 0) + " · delta " + (f.delta || 0) +
@@ -1531,16 +1564,66 @@ function renderLiveStrategy(strat) {
     (dry ? "（<b style='color:#c62828'>dry-run：仅记录，未下单</b>）" : "") + "：</div>" +
     (rows.join("") || '<div class="empty">本轮无动作</div>');
 }
+// ── 自动策略：家族多选 + 顶部状态条（策略层沉底，看板层不被夹在中间）──
+let availFams = [];        // 后端 available_families（与顶部「标的」同源）
+let liveFamsCache = [];    // 磁盘上当前配置的家族（用于「未保存」判定）
+
+function renderFamilyChecks(selected) {
+  const box = $("liveFamilies");
+  if (!box) return;
+  const sel = new Set(selected || []);
+  const list = availFams.length ? availFams : [...sel];
+  box.innerHTML = list.map(f =>
+    '<label class="' + (sel.has(f) ? "on" : "") + '">' +
+    '<input type="checkbox" value="' + esc(f) + '"' + (sel.has(f) ? " checked" : "") +
+    ' onchange="familiesChanged()">' + esc(f.replace("-USD_UM", "")) + "</label>"
+  ).join("");
+}
+function readFamilyChecks() {
+  const box = $("liveFamilies");
+  if (!box) return [];
+  return Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
+}
+function familiesChanged() {
+  const box = $("liveFamilies");
+  if (!box) return;
+  Array.from(box.querySelectorAll("label")).forEach(l => {
+    const c = l.querySelector("input");
+    l.classList.toggle("on", !!(c && c.checked));
+  });
+  const cur = readFamilyChecks().slice().sort().join(",");
+  const saved = liveFamsCache.slice().sort().join(",");
+  const dirty = cur !== saved;
+  box.classList.toggle("unsaved", dirty);
+  const btn = $("saveLiveBtn");
+  if (btn) btn.classList.toggle("unsaved", dirty);
+}
+function updateLiveBar(lv, cfg) {
+  const bar = $("liveBar"), txt = $("liveBarText");
+  if (!bar || !txt) return;
+  const s = (cfg && cfg.strategy) || {};
+  const running = !!(lv && lv.running);
+  const fams = (s.families || []).map(f => String(f).replace("-USD_UM", ""));
+  bar.classList.toggle("on", running);
+  bar.classList.toggle("off", !running);
+  txt.innerHTML = (running ? "🟢 循环中" : "⚪ 已停止") +
+    " · 家族 " + (fams.length ? "<b>" + esc(fams.join(" / ")) + "</b>" : "未配置") +
+    (s.dry_run !== false ? " · 🖐 dry-run（不下单）" : ' · <b style="color:#c62828">真实下单</b>') +
+    (lv && lv.last_run ? " · 上次 " + locTs(Date.parse(lv.last_run)) : "");
+}
+
 async function loadLive() {
   try {
     const j = await (await fetch("/config/okx-options/live")).json();
     if (!j.ok) return;
     const lv = j.live, cfg = lv.config || {};
+    if (Array.isArray(j.available_families)) availFams = j.available_families;
     $("liveEnabled").checked = !!cfg.enabled;
     $("liveInterval").value = cfg.interval_s || 60;
     const s = cfg.strategy || {};
     $("liveDryRun").checked = s.dry_run !== false;
-    $("liveFamilies").value = (s.families || []).join(",");
+    liveFamsCache = s.families || [];
+    renderFamilyChecks(liveFamsCache);
     $("liveTdPeriod").value = s.td_period || "5m";
     $("liveEntrySetup").value = s.entry_setup ?? 9;
     $("liveEntryCd").value = s.entry_countdown ?? 13;
@@ -1555,6 +1638,7 @@ async function loadLive() {
     st.push("累计判定 " + lv.total_settled + " 笔 · 策略 " + (lv.total_entries || 0) + " 卖 / " +
             (lv.total_exits || 0) + " 买回");
     $("liveStatus").innerHTML = st.join(" · ");
+    updateLiveBar(lv, cfg);
     renderLiveStrategy(lv.last_strategy);
     renderLiveEvents(j.events || []);
     if (lv.last_error) {
@@ -1573,7 +1657,7 @@ async function saveLive() {
   try {
     const strategy = {
       dry_run: $("liveDryRun").checked,
-      families: $("liveFamilies").value.split(",").map(x => x.trim()).filter(Boolean),
+      families: readFamilyChecks(),
       td_period: $("liveTdPeriod").value,
       entry_setup: parseInt($("liveEntrySetup").value, 10) || 9,
       entry_countdown: parseInt($("liveEntryCd").value, 10) || 13,
@@ -1587,6 +1671,9 @@ async function saveLive() {
     $("liveStatus").textContent = enabled
       ? (strategy.dry_run ? "已保存 · 循环启动中（dry-run，不下单）" : "已保存 · 循环启动中（真实下单）")
       : "已保存 · 循环已停止";
+    $("liveFamilies").classList.remove("unsaved");
+    $("saveLiveBtn").classList.remove("unsaved");
+    liveFamsCache = ((j.config || j.live && j.live.config || {}).strategy || {}).families || [];
     setTimeout(loadLive, 800);
   } catch (e) {
     const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
@@ -1615,6 +1702,18 @@ async function loadTd() {
   }
 }
 
+// 顶部「标的」下拉标注策略范围 —— 让「我现在看的是否在策略里」一眼可见
+function markFamilyOptions(strat) {
+  if (!strat || !strat.size) return;
+  Array.from(famSel.options).forEach(o => {
+    const label = String(o.value).replace("-USD_UM", "");
+    const on = strat.has(String(o.value).toUpperCase());
+    o.textContent = on ? (label + "（策略中）") : label;
+    o.style.fontWeight = on ? "700" : "";
+    o.style.color = on ? "#2e7d32" : "";
+  });
+}
+
 function renderTd(d) {
   const rows = (d && d.rows) || [];
   if (!rows.length) { $("tdBody").innerHTML = '<div class="empty">暂无数据</div>'; return; }
@@ -1627,6 +1726,7 @@ function renderTd(d) {
     famEl.style.color = strat.size ? "#2e7d32" : "#c62828";
     famEl.style.fontWeight = "700";
   }
+  markFamilyOptions(strat);
   let h = '<div style="overflow-x:auto"><table><thead><tr>' +
     "<th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th><th>CD Sell</th>" +
     "<th>Score</th><th>价格</th><th>进度（阈值口径）</th><th>卖 put 信号</th><th>最后 bar</th></tr></thead><tbody>";
@@ -1675,6 +1775,7 @@ loadSelector();
 loadLive();
 loadTd();
 setInterval(loadTd, 10000);   // 标的 TD 状态（与自动循环同源，只读）
+setInterval(loadLive, 30000);  // 自动策略状态（含状态条 / 家族清单刷新）
 </script>
 </body>
 </html>
