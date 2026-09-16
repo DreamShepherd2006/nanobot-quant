@@ -138,6 +138,23 @@ def _patch_executor(monkeypatch, rounds: int = 0):
     monkeypatch.setattr(ol._OkxOptionsRunner, "_build_executor", _build)
 
 
+def test_to_sleeptime_matches_lumibot_parser():
+    """sleeptime 必须是「数字 + 单字母」—— lumibot 用 int(sleeptime[:-1]) 解析。
+
+    实证（2026-09-16 HF Space）：传 "minute" 时 int("minut") 抛 ValueError，
+    策略在 _setup_live_trading_scheduler 就崩了（on_bot_crash）。
+    """
+    assert ol._to_sleeptime(60) == "1m"
+    assert ol._to_sleeptime(300) == "5m"
+    assert ol._to_sleeptime(3600) == "1H"
+    assert ol._to_sleeptime(86400) == "1D"
+    assert ol._to_sleeptime(0) == "1m"      # 下限保护
+    assert ol._to_sleeptime(None) == "1m"    # 脏值保护
+    for s in (ol._to_sleeptime(60), ol._to_sleeptime(300),
+              ol._to_sleeptime(3600), ol._to_sleeptime(86400)):
+        int(s[:-1])                          # 必须能过 lumibot 的解析
+
+
 def test_run_once_appends_event_and_state(_iso, monkeypatch):
     monkeypatch.setattr(ot, "settle_expired_puts",
                         lambda: [_settled_one()])

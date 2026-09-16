@@ -318,17 +318,24 @@ class _OkxOptionsRunner(LiveRunnerBase):
 
 
 def _to_sleeptime(seconds: int) -> str:
-    """秒 → lumibot sleeptime 字符串（最小 minute）。
+    """秒 → lumibot sleeptime 字符串。
 
-    lumibot 内部：字符串 → APScheduler cron（minute="*"）+ 计数门
-    （攒够 cron_count_target 分钟才跑一轮），因此 60s 对应 "minute"、
-    300s 对应 "5minute"。
+    lumibot 的 ``calculate_strategy_trigger`` 用 ``int(sleeptime[:-1])`` 解析，
+    即必须是「数字 + 单字母」形式（1m / 5m / 1H / 1D）；写 ``"minute"`` 会
+    在 ``[:-1]`` 后剩下 ``"minut"`` 而抛 ValueError。
+    单位与 TD live 的 td_sleeptime 写法保持一致（m=分钟、H=小时、D=天）。
     """
     try:
-        n = max(1, int(round(int(seconds) / 60)))
+        secs = max(60, int(seconds))
     except (TypeError, ValueError):
-        n = 1
-    return "minute" if n <= 1 else f"{n}minute"
+        secs = 60
+    if secs % 86400 == 0:
+        return f"{secs // 86400}D"
+    if secs % 3600 == 0:
+        return f"{secs // 3600}H"
+    if secs % 60 == 0:
+        return f"{secs // 60}m"
+    return "1m"
 
 
 _RUNNER: _OkxOptionsRunner | None = None
