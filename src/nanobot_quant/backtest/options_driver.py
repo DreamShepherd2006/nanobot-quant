@@ -184,7 +184,7 @@ class OptionsBacktestDriver:
             payout = (p.strike - settle) * p.lot_coin * p.sz if itm else 0.0
             cash -= payout
             fills.append({
-                "ts": ts, "inst_id": p.inst_id, "side": "settle_itm" if itm else "settle_otm",
+                "ts": str(ts), "inst_id": p.inst_id, "side": "settle_itm" if itm else "settle_otm",
                 "sz": p.sz, "strike": p.strike, "settle_px": settle,
                 "payout_usd": round(payout, 6),
                 "premium_usd": round(p.entry_px * p.lot_coin * p.sz, 6),
@@ -220,7 +220,7 @@ class OptionsBacktestDriver:
             fee = buy_px * p.lot_coin * e.sz * self.fee_rate
             cash -= buy_px * p.lot_coin * e.sz + fee
             fills.append({
-                "ts": ts, "inst_id": p.inst_id, "side": "close",
+                "ts": str(ts), "inst_id": p.inst_id, "side": "close",
                 "sz": e.sz, "strike": p.strike, "strategy_px": p.entry_px,
                 "avg_px": round(buy_px, 6), "fee_usd": round(fee, 6),
                 "reason": f"止盈（回落 {e.drop_pct:.1f}% ≥ {self.tp_pct:g}%）",
@@ -265,7 +265,7 @@ class OptionsBacktestDriver:
             exp_ms=_exp_ms_of(d.inst_id, ts), sz=d.sz, entry_px=sell_px,
             entry_ts=ts, entry_reason=d.entry_reason, lot_coin=lot))
         fills.append({
-            "ts": ts, "inst_id": d.inst_id, "side": "sell_open", "sz": d.sz,
+            "ts": str(ts), "inst_id": d.inst_id, "side": "sell_open", "sz": d.sz,
             "strike": d.strike, "avg_px": round(sell_px, 6),
             "fee_usd": round(sell_px * lot * d.sz * self.fee_rate, 6),
             "iv": d.iv, "delta": d.delta, "days": d.days,

@@ -269,3 +269,18 @@ def test_run_records_open_positions_with_mark(monkeypatch):
                             "collateral_usd", "mark_value_usd", "pnl_pct"}
         assert row["collateral_usd"] == pytest.approx(
             row["strike"] * 0.1 * row["sz"])
+
+
+def test_run_result_is_json_serializable(monkeypatch):
+    """端点返回前必须能 JSON 序列化 —— 曾因 pandas Timestamp 直接 500。
+
+    这条是回归锁：修的是 ``fills[].ts`` 用 ``str(ts)`` 而非 Timestamp 对象。
+    """
+    import json
+
+    d = _driver(tp_pct=999.0)
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+    res = d.run()
+    json.dumps(res)          # 不带 default=，必须原生可序列化
