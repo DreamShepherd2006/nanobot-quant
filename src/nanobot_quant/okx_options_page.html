@@ -227,7 +227,8 @@
 <div class="card" id="tdCard" style="margin-bottom:12px;padding:10px 14px">
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <b>📊 标的 TD 状态</b>
-    <span class="hint" style="margin:0">与自动循环同源：卖 put 触发口径 = Buy Setup ≥ 入场阈值 或 CD Buy ≥ Countdown 阈值</span>
+    <span class="hint" id="tdStrategyFams" style="margin:0">策略家族：—</span>
+    <span class="hint" style="margin:0">｜触发口径 = Buy Setup ≥ 入场阈值 或 CD Buy ≥ Countdown 阈值</span>
     <select id="tdPeriod" style="width:auto">
       <option value="1m">1m</option><option value="3m">3m</option>
       <option value="5m" selected>5m</option><option value="15m">15m</option>
@@ -241,6 +242,7 @@
     <span style="background:#e8f5e9;padding:0 4px;border-radius:3px">绿行 = 已达到阈值（自动循环会在此状态卖 put）</span>
     <span style="background:#fff3e0;padding:0 4px;border-radius:3px;margin-left:6px">橙行 = 临近阈值（差 ≤2）</span>
     <span style="font-weight:700;color:#2e7d32;margin-left:6px">绿色数字 = 该列已达阈值</span>
+    <span style="margin-left:6px;opacity:.7">🔅 行 = 不在策略家族内（仅行情参考，策略不会在此卖 put）</span>
     ｜周期默认跟随「🟤 自动循环」配置（可手动切换）；XAU 走 XAUT-USDT 现货（Tether Gold），K 线取不到时留空
   </div>
 </div>
@@ -1616,6 +1618,15 @@ async function loadTd() {
 function renderTd(d) {
   const rows = (d && d.rows) || [];
   if (!rows.length) { $("tdBody").innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  // 策略家族标记：家族外的行只作行情参考，不给「可卖 put / 临近」这类行动信号
+  const hasScope = Array.isArray(d && d.strategy_families);
+  const strat = new Set((hasScope ? d.strategy_families : []).map(x => String(x).toUpperCase()));
+  const famEl = $("tdStrategyFams");
+  if (famEl && hasScope) {
+    famEl.textContent = strat.size ? ("策略家族：" + [...strat].join(" / ")) : "策略家族：未配置（策略不会交易）";
+    famEl.style.color = strat.size ? "#2e7d32" : "#c62828";
+    famEl.style.fontWeight = "700";
+  }
   let h = '<div style="overflow-x:auto"><table><thead><tr>' +
     "<th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th><th>CD Sell</th>" +
     "<th>Score</th><th>价格</th><th>进度（阈值口径）</th><th>卖 put 信号</th><th>最后 bar</th></tr></thead><tbody>";
@@ -1624,11 +1635,13 @@ function renderTd(d) {
       h += '<tr><td><b>' + esc(r.base) + "</b></td><td colspan='9' class='hint'>" + esc(r.error) + "</td></tr>";
       continue;
     }
-    const bg = r.sell_put_ready ? "#e8f5e9" : (r.near ? "#fff3e0" : "");
-    const sig = r.sell_put_ready ? '<b style="color:#2e7d32">✅ 可卖 put</b>'
-              : (r.near ? '<span style="color:#ef6c00">临近</span>' : '<span class="hint">HOLD</span>');
-    h += '<tr style="background:' + bg + '">' +
-      "<td><b>" + esc(r.base) + "</b></td>" +
+    const outside = hasScope && !strat.has(String(r.family || "").toUpperCase());
+    const bg = outside ? "" : (r.sell_put_ready ? "#e8f5e9" : (r.near ? "#fff3e0" : ""));
+    const sig = outside ? '<span class="hint" title="不在自动循环的标的家族内，策略不会在这里卖 put">—（家族外）</span>'
+              : (r.sell_put_ready ? '<b style="color:#2e7d32">✅ 可卖 put</b>'
+              : (r.near ? '<span style="color:#ef6c00">临近</span>' : '<span class="hint">HOLD</span>'));
+    h += '<tr style="background:' + bg + (outside ? ';opacity:.5' : '') + '">' +
+      "<td>" + (outside ? '🔅 ' : '') + "<b>" + esc(r.base) + "</b></td>" +
       tdCell(r.setup_buy, r.entry_setup) +
       tdCell(r.setup_sell, 9) +
       tdCell(r.cd_buy, r.entry_countdown) +

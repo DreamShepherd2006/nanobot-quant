@@ -114,9 +114,24 @@ def family_td(family: str, period: str | None = None, bars: int | None = None) -
     return row
 
 
-def panel(period: str | None = None, families: tuple[str, ...] | None = None) -> dict[str, Any]:
-    """全部家族的 TD 状态（面板一次请求拿到整张表）。"""
+def panel(period: str | None = None, families: tuple[str, ...] | None = None,
+          strategy_families: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """全部家族的 TD 状态（面板一次请求拿到整张表）。
+
+    ``strategy_families`` = 自动循环当前配置的标的家族。面板渲染的仍是全集
+    （只读参考有价值），但每行带 ``in_strategy`` 标记，前端据此区分「策略真的
+    会在这里卖 put」与「只是行情参考」——否则家族外的行也会显示 HOLD/临近，
+    看起来像可以行动的信号。
+    """
+    fams = list(families or FAMILIES)
+    strat = {str(f).upper() for f in (strategy_families or [])}
+    rows = []
+    for f in fams:
+        row = family_td(f, period)
+        row["in_strategy"] = str(f).upper() in strat
+        rows.append(row)
     return {
         "periods": list(PERIODS),
-        "rows": [family_td(f, period) for f in (families or FAMILIES)],
+        "rows": rows,
+        "strategy_families": sorted(strat),
     }

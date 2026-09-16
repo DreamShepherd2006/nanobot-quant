@@ -851,7 +851,12 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return _deny(err)
         period = (request.query_params.get("period") or "").strip() or None
         try:
-            data = await asyncio.to_thread(otd.panel, period)
+            # 自动循环配置的标的家族——面板用它给家族外的行打标记
+            fams = (ol.live_config().get("strategy") or {}).get("families") or []
+        except Exception:  # noqa: BLE001 —— 配置读不到就退化为「不做家族标记」，不阻展示
+            fams = []
+        try:
+            data = await asyncio.to_thread(otd.panel, period, None, fams)
         except Exception as e:  # noqa: BLE001 —— 展示层，异常回 JSON 不 500
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
         return JSONResponse({"ok": True, "data": data})

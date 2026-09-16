@@ -134,3 +134,45 @@ def test_panel_returns_all_families(monkeypatch):
     data = otd.panel("5m")
     assert [r["family"] for r in data["rows"]] == list(otd.FAMILIES)
     assert data["periods"] == list(otd.PERIODS)
+
+
+def test_panel_marks_strategy_scope(monkeypatch):
+    """家族外的行带 in_strategy=False。
+
+    面板渲染全集（只读参考），但「卖 put 信号」列对家族外的行是误导——策略
+    只在配置的家族里跑。标记由后端给出，前端据此降级显示（2026-09-16）。
+    """
+    from nanobot_quant import okx_options_td as otd
+
+    def fake(family, period=None, bars=None):
+        return {"family": family, "base": family.split("-")[0],
+                "setup_buy": 9, "sell_put_ready": True, "near": False}
+
+    monkeypatch.setattr(otd, "family_td", fake)
+    out = otd.panel(period="5m", strategy_families=("SOL-USD_UM",))
+    by = {r["family"]: r for r in out["rows"]}
+    assert by["SOL-USD_UM"]["in_strategy"] is True
+    assert by["ETH-USD_UM"]["in_strategy"] is False
+    assert by["XAU-USD_UM"]["in_strategy"] is False
+    assert out["strategy_families"] == ["SOL-USD_UM"]
+
+
+def test_panel_without_strategy_marks_all_outside(monkeypatch):
+    """策略家族未配置 → 全行 in_strategy=False（诚实：策略不会在这里交易）。"""
+    from nanobot_quant import okx_options_td as otd
+
+    monkeypatch.setattr(otd, "family_td", lambda f, period=None, bars=None: {"family": f})
+    out = otd.panel(strategy_families=())
+    assert all(r["in_strategy"] is False for r in out["rows"])
+    assert out["strategy_families"] == []
+
+
+def test_panel_signature_positional_three_args(monkeypatch):
+    """handler 按位置传参 panel(period, None, fams) —— 签名顺序不可变。"""
+    from nanobot_quant import okx_options_td as otd
+
+    monkeypatch.setattr(otd, "family_td", lambda f, period=None, bars=None: {"family": f})
+    out = otd.panel("5m", None, ["ETH-USD_UM"])
+    m = {r["family"]: r["in_strategy"] for r in out["rows"]}
+    assert m["ETH-USD_UM"] is True and m["BTC-USD_UM"] is False
+    assert out["strategy_families"] == ["ETH-USD_UM"]
