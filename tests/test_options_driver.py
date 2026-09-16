@@ -1,0 +1,271 @@
+"""``options_driver`` 单测 —— 注入假 fetcher，零网络。
+
+覆盖三条记账路径（卖出开仓 / 止盈买回 / 到期结算）与两条 fail-closed
+（现金担保不足、无 mark 的持仓不动），以及 instId 到期反解。
+
+**为什么不打网络**：驱动只负责「重放 + 记账」，决策全部来自实盘的
+``evaluate_entry`` / ``evaluate_exits``（各自已有单测）。这里要锁的是
+*数据流与记账* 的正确性，用确定性假数据即可；真实拉数由探针与 HF 实测覆盖。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pandas as pd
+import pytest
+
+from nanobot_quant.backtest.options_driver import (
+    OptionsBacktestDriver, SimPosition, _count_skips, _exp_ms_of, _to_ms,
+)
+from nanobot_quant.bs_pricing import bs_price, years_to_expiry
+
+# ── 假数据：标的单调下跌 → TD 买9（下跌衰竭） ─────────────────────────
+
+_N = 80
+_IDX = pd.date_range("2026-09-10 00:00", periods=_N, freq="1h", tz="UTC")
+
+# 信号到位的样子（TD 触发细节由引擎自身单测覆盖，驱动测试关心数据流）
+_SIG = {"setup_buy": 9, "setup_sell": 0, "cd_buy": 0, "cd_sell": 0,
+        "score": 5.0, "price": 88.0}
+
+
+def _closes() -> list[float]:
+    """前段上涨造出**翻转点**，后段连续下跌触发买9 衰竭。
+
+    注意：``td_sequential`` / ``cycle`` 变体带 DeMark 标准的「翻转确认」——
+    必须前一根是反向的才启动计数。全程单调下跌的数据永远数不到 9
+    （只有无翻转确认的 ``futu`` 变体会累加）。真实行情里就是先涨后跌。
+    """
+    up = [100.0 + i * 0.5 for i in range(20)]          # 上涨 20 根
+    down = [up[-1] - (i + 1) * 0.6 for i in range(_N - 20)]   # 下跌 60 根
+    return up + down
+
+
+def _spot_at(i: int) -> float:
+    return _closes()[min(i, _N - 1)]
+
+
+def _kline() -> pd.DataFrame:
+    c = _closes()
+    return pd.DataFrame(
+        {"open": c, "high": [x + 0.05 for x in c],
+         "low": [x - 0.05 for x in c], "close": c, "volume": 1000.0},
+        index=_IDX)
+
+
+def _exp_ms(inst_id: str) -> int:
+    return int(datetime.strptime("20" + inst_id.split("-")[2], "%Y%m%d")
+               .replace(hour=8, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _lifecycle(inst_id: str, bar: str) -> dict:
+    """按 BS 造 mark：现价随 bar 下跌，因此 put 权利金单调**上涨**（天然不触发止盈）。"""
+    try:
+        strike = float(inst_id.split("-")[3])
+    except (IndexError, ValueError):
+        strike = 100.0
+    exp = _exp_ms(inst_id)
+    rows = []
+    for i, t in enumerate(_IDX):
+        t_ms = int(t.timestamp() * 1000)
+        tv = years_to_expiry(t_ms, exp)
+        if tv <= 0:
+            continue
+        px = bs_price(_spot_at(i), strike, tv, 0.6, 0.0, "P")
+        rows.append({"ts": t_ms, "mark_px": max(float(px or 0.0), 0.01),
+                     "ref_px": None})
+    return {"inst_id": inst_id, "lot_coin": 0.1,
+            "list_ms": int(_IDX[0].timestamp() * 1000), "rows": rows}
+
+
+def _fake_chain(ts=None, slippage=0.0) -> dict:
+    """一条最小可用链 —— 直接喂给驱动，不经过枚举/prefetch。
+
+    数据源自己的枚举与 mark 预拉由 ``test_options_chain_dict.py`` 覆盖；
+    这里测的是**驱动把链接给实盘选档、再按选档结果记账**这条链路。
+    """
+    strike, bid = 80.0, 2.0
+    return {
+        "ts": ts, "spot": 88.0, "lot_coin": 0.1,
+        "groups": [{
+            "days": 4.5,
+            "rows": [{"strike": strike, "P": {
+                "inst_id": f"SOL-USD_UM-260918-{int(strike)}-P",
+                "bid": bid, "mark_px": bid, "iv": 0.55, "delta": -0.25,
+                "entry_reason": "buy9(setup_buy=9)"}}],
+        }],
+        "stats": {"total": 1, "kept": 1, "expired": 0,
+                  "no_spot": 0, "no_iv": 0},
+    }
+
+
+def _driver(**kw) -> OptionsBacktestDriver:
+    d = OptionsBacktestDriver(
+        "SOL-USD_UM", timestep="1H",
+        start_ts=int(_IDX[0].timestamp()), end_ts=int(_IDX[-1].timestamp()),
+        td_bars=30, td_params={}, opt_params={"entry_setup": 9, "entry_countdown": 13},
+        **kw)
+    d.data = _build_data_with_fakes(d)
+    return d
+
+
+def _build_data_with_fakes(d: OptionsBacktestDriver):
+    from nanobot_quant.backtest.options_replay_data_source import OptionsReplayDataSource
+
+    ds = OptionsReplayDataSource(
+        family="SOL-USD_UM", timestep="1H",
+        start_ts=d.start_ts, end_ts=d.end_ts, length=d.td_bars,
+        fetcher=lambda inst, bar, s, e: _kline(),
+        lifecycle_fetcher=_lifecycle)
+    ds.prefetch()
+    return ds
+
+
+# ── instId 到期反解（右侧取段，_UM 后缀会破坏左侧假设）────────────────
+
+@pytest.mark.parametrize("inst,expect", [
+    ("SOL-USD_UM-260918-100-P", "2026-09-18 08:00 UTC"),
+    ("SOL-USD_UM-260918-100.5-P", "2026-09-18 08:00 UTC"),
+    ("BTC-USD_UM-261231-56000-C", "2026-12-31 08:00 UTC"),
+])
+def test_exp_ms_of_parses_from_right(inst, expect):
+    ms = _exp_ms_of(inst, _IDX[0])
+    got = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    assert got == expect
+
+
+def test_exp_ms_of_falls_back_on_garbage():
+    """畸形 instId 不抛异常 —— 回退到 ts + 1 天（fail-soft，不炸整轮回测）。"""
+    assert _exp_ms_of("garbage", _IDX[0]) == _to_ms(_IDX[0]) + 86400_000
+
+
+def test_count_skips_buckets_by_prefix():
+    s = _count_skips(["无 TD 衰竭信号（setup_buy=3/9 cd_buy=0/13）",
+                      "无 TD 衰竭信号（setup_buy=5/9 cd_buy=0/13）",
+                      "担保不足：需 100.00 + 已占 0.00 > 可用 50.00"])
+    assert s["无 TD 衰竭信号"] == 2
+    assert s["担保不足"] == 1
+
+
+# ── 记账层 ────────────────────────────────────────────────────────
+
+def test_settle_otm_collects_premium_and_closes():
+    d = _driver()
+    pos = [SimPosition("SOL-USD_UM-260911-50-P", "SOL-USD_UM", 50.0,
+                       _exp_ms("SOL-USD_UM-260911-50-P"), 1, 0.5,
+                       _IDX[0], "buy9(setup_buy=9)", 0.1)]
+    fills: list[dict] = []
+    d.data.seek(_IDX[40])                  # 结算价 = 该时刻标的价格
+    cash = d._settle_expired(_IDX[40], pos, fills, 1000.0)
+    assert pos == []                      # 已平
+    assert cash == 1000.0                 # OTM 零赔付，权利金在开仓时已收
+    assert fills[0]["side"] == "settle_otm"
+    assert fills[0]["pnl_usd"] == pytest.approx(0.5 * 0.1 * 1, rel=1e-9)
+
+
+def test_settle_itm_pays_intrinsic():
+    d = _driver()
+    inst = "SOL-USD_UM-260911-200-P"      # strike 200 >> 现价 → 深度 ITM
+    pos = [SimPosition(inst, "SOL-USD_UM", 200.0, _exp_ms(inst), 2, 1.0,
+                       _IDX[0], "buy9", 0.1)]
+    fills: list[dict] = []
+    d.data.seek(_IDX[40])
+    settle = d.data.price_of()
+    assert 0 < settle < 200               # 前置校验：确实是 ITM 场景
+    cash = d._settle_expired(_IDX[40], pos, fills, 1000.0)
+    payout = (200.0 - settle) * 0.1 * 2
+    assert fills[0]["side"] == "settle_itm"
+    assert cash == pytest.approx(1000.0 - payout, rel=1e-9)
+
+
+def test_check_exits_skips_when_no_mark():
+    """无 mark 的持仓保持不动（fail-safe，不误平）。"""
+    d = _driver()
+    pos = [SimPosition("SOL-USD_UM-260920-NOPE-P", "SOL-USD_UM", 50.0,
+                       _exp_ms("SOL-USD_UM-260920-50-P"), 1, 1.0,
+                       _IDX[0], "buy9", 0.1)]
+    fills: list[dict] = []
+    d.data.seek(_IDX[40])
+    cash = d._check_exits(_IDX[40], pos, fills, 1000.0)
+    assert len(pos) == 1 and cash == 1000.0 and fills == []
+
+
+def test_check_exits_takes_profit_reuses_live_decision():
+    """止盈走实盘 evaluate_exits —— 回落够就买回，记账价含滑点与手续费。"""
+    d = _driver(tp_pct=50.0)
+    inst = next(k for k in d.data._premiums
+                if _exp_ms(k) > _to_ms(_IDX[40]))
+    pos = [SimPosition(inst, "SOL-USD_UM", float(inst.split("-")[3]),
+                       _exp_ms(inst), 1, 999.0, _IDX[0], "buy9", 0.1)]
+    d.data.seek(_IDX[40])
+    mark = d.data.premium_of(inst, _IDX[40])
+    assert mark is not None and mark < 999.0 * 0.5   # 回落过半，必触发止盈
+    fills: list[dict] = []
+    cash = d._check_exits(_IDX[40], pos, fills, 1000.0)
+    assert pos == []
+    assert fills[0]["side"] == "close"
+    buy_px = mark * (1 + d.slippage)
+    assert fills[0]["avg_px"] == pytest.approx(buy_px, rel=1e-9)
+    cost = buy_px * 0.1 * 1 * (1 + d.fee_rate)
+    assert cash == pytest.approx(1000.0 - cost, rel=1e-9)
+
+
+def test_collateral_gate_fails_closed():
+    """现金担保铁律：占用超可用现金 → 不下单（fail-closed）。"""
+    d = _driver(initial_cash=1.0)                 # 少到买不起任何担保
+    d.data.seek(_IDX[-1])
+    pos: list[SimPosition] = []
+    fills: list[dict] = []
+    cash = d._try_entry(_IDX[-1], pos, fills, 1.0)
+    assert pos == [] and fills == [] and cash == 1.0
+
+
+def test_sim_position_collateral_matches_strike_times_lot():
+    p = SimPosition("X", "SOL-USD_UM", 100.0, 0, 3, 1.0, _IDX[0], "buy9", 0.1)
+    assert p.collateral == pytest.approx(100.0 * 0.1 * 3)
+    assert p.as_position_row(2.5) == {"inst_id": "X", "side": "short",
+                                      "pos": 3, "avg_px": 1.0, "mark_px": 2.5}
+
+
+# ── 端到端（假数据全链路） ─────────────────────────────────────────
+
+def test_run_end_to_end_shape(monkeypatch):
+    """整轮跑通：结构完整、信号到位时产生卖开仓、KPI 自洽。
+
+    TD 触发链路依赖 K 线细节（翻转确认、比较长度）——那是引擎自己的单测范围。
+    这里把「信号到位」打桩，专测**数据流与记账**：链→选档→担保校验→记账。
+    """
+    d = _driver(tp_pct=50.0)
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+    res = d.run()
+    assert "error" not in res, res.get("error")
+    for key in ("kpi", "fills", "final_positions", "skips", "bars",
+                "contracts", "notes", "elapsed_s"):
+        assert key in res, key
+    assert res["bars"]["fetched"] >= _N      # 预取可能合并多批，不少于原始根数
+    assert res["bars"]["evaluated"] > 0
+    # 信号到位 + 假链可选档 → 必然卖出开仓
+    assert any(f["side"] == "sell_open" for f in res["fills"]), res["skips"]
+    k = res["kpi"]
+    assert k["fills"] == len(res["fills"])
+    assert k["final_net_usd"] == pytest.approx(
+        res["initial_cash"] * (1 + k["roi_pct"] / 100), rel=1e-6)
+
+
+def test_run_records_open_positions_with_mark(monkeypatch):
+    """期末未平仓按最后 bar 的 mark 折算（「如现在全部买回」口径）。"""
+    d = _driver(tp_pct=999.0)                     # 止盈线不可达 → 必然留下未平仓
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+    res = d.run()
+    opens = res["final_positions"]
+    assert opens, "止盈不可达时必然留下未平仓"
+    for row in opens:
+        assert set(row) >= {"inst_id", "strike", "sz", "entry_px", "mark_px",
+                            "collateral_usd", "mark_value_usd", "pnl_pct"}
+        assert row["collateral_usd"] == pytest.approx(
+            row["strike"] * 0.1 * row["sz"])
