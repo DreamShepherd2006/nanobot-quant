@@ -705,6 +705,20 @@ def probe(
     return out
 
 
+def _deltas_monotonic(pairs: list[tuple[float, float]]) -> Optional[bool]:
+    """put delta 是否随 strike 单调。
+
+    put delta **恒为负**，且随 strike 上升而**递减**
+    （实测 −0.37@100 → −0.74@106）。首版按 call 的递增方向写，
+    在真实数据上直接报 false —— 抽成纯函数 + 单测锁死方向。
+    """
+    if len(pairs) < 2:
+        return None
+    pairs = sorted(pairs)
+    return all(pairs[i][1] >= pairs[i + 1][1] - 1e-9
+               for i in range(len(pairs) - 1))
+
+
 def probe_chain_dict(
     family: str,
     timestep: str = _DEFAULT_BAR,
@@ -778,9 +792,7 @@ def probe_chain_dict(
                     "delta": None if c["delta"] is None else round(float(c["delta"]), 4),
                 })
     deltas.sort()
-    mono = (all(deltas[i][1] <= deltas[i + 1][1] + 1e-9
-                for i in range(len(deltas) - 1))
-            if len(deltas) > 1 else None)
+    mono = _deltas_monotonic(deltas)
     sane_iv = bool(ivs) and all(0.05 <= v <= 3.0 for v in ivs)
     out["chain_dict"] = {
         "ts": ts.isoformat(),

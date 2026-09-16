@@ -263,3 +263,25 @@ def test_select_puts_screenshot_counts_filtered_reasons():
     res = select_puts("SOL-USD_UM", base_px=_SPOT, chain=chain)
     assert set(res["filtered"]) >= {"expiry", "no_bid", "distance", "delta",
                                     "net", "yield"}
+
+
+# ── 探针判据（方向写反过一次，单测锁死）─────────────────────────────
+
+
+def test_deltas_monotonic_put_direction():
+    """put delta 恒为负、随 strike **递减** —— 不能按 call 的递增方向写。
+
+    真实探针实测：100→−0.3723、102→−0.5075、104→−0.6347、106→−0.7386。
+    首版 ``<=`` 判据在真链上直接报 false（数据对、判据错）。
+    """
+    from nanobot_quant.backtest.options_replay_data_source import _deltas_monotonic
+
+    sample = [(100.0, -0.3723), (102.0, -0.5075),
+              (104.0, -0.6347), (106.0, -0.7386)]
+    assert _deltas_monotonic(sample) is True
+    assert _deltas_monotonic(list(reversed(sample))) is True   # 乱序先排序
+    # call 方向（随 strike 递增）不算单调
+    assert _deltas_monotonic([(100.0, -0.5), (102.0, -0.3)]) is False
+    # 单点 / 空 → 无从判断
+    assert _deltas_monotonic([(100.0, -0.5)]) is None
+    assert _deltas_monotonic([]) is None
