@@ -150,3 +150,67 @@ def test_page_has_candidate_ui():
                   'id="selMinYield"', 'id="saveSelBtn"', "function renderCandidates",
                   "function loadCandidates", "loadSelector()"):
         assert token in html, token
+
+
+# ── 期权页布局（方案 A：三层分离，策略层沉底）2026-09-16 ──────────────
+def _page_html() -> str:
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+            / "okx_options_page.html").read_text(encoding="utf-8")
+
+
+def test_page_three_layers_layout():
+    """策略层（🤖 自动策略）沉底 —— 不再夹在看板层（TD/链/台账）中间。
+
+    参数层（担保/定价/合约选择）独立成折叠区，与策略层分开。
+    """
+    h = _page_html()
+    assert h.count("<details") == h.count("</details>") == 2
+    assert 'id="settingsCard"' not in h            # 旧的混合折叠区已拆掉
+
+    i_bar = h.index('id="liveBar"')
+    i_param = h.index('id="paramSection"')
+    i_td = h.index('id="tdCard"')
+    i_chain = h.index('id="chainCard"')
+    i_led = h.index('id="ledCard"')
+    i_live = h.index('id="liveSection"')
+
+    assert i_bar > h.index('id="chainCtl"')        # 状态条在看板设置之后
+    assert i_td < i_live and i_chain < i_live and i_led < i_live   # 看板层在策略层之前
+    assert i_param < i_td                          # 参数层独立、默认收起
+
+
+def test_family_multi_select_replaces_text_input():
+    """标的家族：手填文本框 → 多选（由后端 available_families 渲染）。"""
+    h = _page_html()
+    assert 'type="text" id="liveFamilies"' not in h
+    assert 'id="liveFamilies" class="famchk"' in h
+    for fn in ("renderFamilyChecks", "readFamilyChecks", "familiesChanged"):
+        assert fn in h, fn
+    assert "available_families" in h
+
+
+def test_live_status_bar_and_polling():
+    """顶部状态条 + 自动策略状态 30s 轮询（此前只在页面加载时抓一次）。"""
+    h = _page_html()
+    assert 'id="liveBarText"' in h
+    assert "updateLiveBar" in h
+    assert "setInterval(loadLive, 30000)" in h
+
+
+def test_outside_family_manual_hint():
+    """家族外标的的手动下单提示（候选表提示 + 顶部下拉标注）。"""
+    h = _page_html()
+    assert 'id="candOutside"' in h
+    assert "不在自动循环的标的家族内" in h
+    assert "markFamilyOptions" in h
+    assert "（策略中）" in h
+
+
+def test_live_get_exposes_available_families():
+    """GET /live 暴露 available_families；保存时对未知家族 fail-closed。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+           / "okx_options_handlers.py").read_text(encoding="utf-8")
+    assert '"available_families": list(od.FAMILIES)' in src
+    assert "未知标的家族" in src
