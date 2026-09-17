@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -81,6 +82,7 @@ class OptionsBacktestDriver:
         fee_rate: float = DEFAULT_FEE_RATE,
         tp_pct: Optional[float] = None,
         initial_cash: float = DEFAULT_INITIAL_CASH,
+        progress_cb: Any = None,
     ) -> None:
         self.family = str(family).upper()
         self.timestep = timestep
@@ -94,10 +96,54 @@ class OptionsBacktestDriver:
         self.fee_rate = max(0.0, float(fee_rate))
         self.tp_pct = tp_pct
         self.initial_cash = float(initial_cash)
+        # 进度回调（接入层用来把 progress 写进 run 文件）；日志走 stderr
+        self._progress_cb = progress_cb
 
         self.data = None
         self.notes: list[str] = []
         self.skips: list[str] = []
+
+    # ── 日志 / 进度 ─────────────────────────────────────────
+
+    def _log(self, msg: str) -> None:
+        """回测日志 —— 一律走 stderr。
+
+        与 ``[OPT-LIVE]`` 同规矩：stdout 可能被 MCP stdio / lumibot handler
+        占用，日志只能走 stderr；也必须 flush，否则被管道缓冲吞掉、跑完才
+        一次性吐出来（等于没日志）。
+        """
+        print(f"[OPT-BT] {msg}", file=sys.stderr, flush=True)
+
+    def _progress(self, stage: str, done: int, total: int, extra: str = "") -> None:
+        if self._progress_cb is None:
+            return
+        try:
+            self._progress_cb({
+                "stage": stage, "done": done, "total": total,
+                "pct": round(done * 100.0 / total, 1) if total else 0.0,
+                "extra": extra,
+            })
+        except Exception:  # noqa: BLE001 —— 进度只是 UX，绝不阻塞回测
+            pass
+
+    @staticmethod
+    def _fill_line(f: dict, cash: float) -> str:
+        """一条成交的单行摘要（开仓/平仓/到期三种口径）。"""
+        side = {"sell_open": "开仓 SELL", "sell_close": "平仓 BUY",
+                "settle_otm": "到期作废 OTM", "settle_itm": "到期被行权 ITM"}.get(
+                    f.get("side"), str(f.get("side")))
+        head = (f"{side} {f.get('ts')} {f.get('inst_id')} sz={f.get('sz')} "
+                f"K={f.get('strike')}")
+        if f.get("side") == "sell_open":
+            return (f"{head} px={f.get('avg_px')} iv={f.get('iv')} "
+                    f"delta={f.get('delta')} 剩余={f.get('days')}天 "
+                    f"净收益率={f.get('net_yield_pct')}% "
+                    f"手续费={f.get('fee_usd')} 原因={f.get('reason')}"
+                    f" | cash={cash:.2f}")
+        pnl = f.get("pnl_usd")
+        return (f"{head} px={f.get('avg_px') or f.get('settle_px')} "
+                f"盈亏={pnl} 手续费={f.get('fee_usd')} 原因={f.get('reason')}"
+                f" | cash={cash:.2f}")
 
     # ── 构造 ────────────────────────────────────────────────
 
@@ -241,7 +287,11 @@ class OptionsBacktestDriver:
     def _try_entry(self, ts, positions: list, fills: list,
                    cash: float) -> float:
         """TD 衰竭信号 + 选档 + 记账 —— 复用实盘 ``evaluate_entry()``。"""
-        from nanobot_quant.okx_options_strategy import evaluate_entry
+        from nanobot_quant.okx_options_strategy import (
+            cycle_gate,
+            cycle_mark_bought,
+            evaluate_entry,
+        )
 
         spot = self.data.price_of()
         if spot <= 0:
@@ -249,6 +299,21 @@ class OptionsBacktestDriver:
         sig = self._td_signal_at(ts)
         if sig is None:
             return cash
+
+        # 信号周期门控（与实盘策略同一份纯函数）—— 同一衰竭波只开一次，
+        # 避免 setup 9→10→11 连开多张把样本打虚（实测虚高 1.7 倍）。
+        # 放在选链之前：被门控拦下时不必算链。
+        if not hasattr(self, "_cycle_state"):
+            self._cycle_state: dict = {}
+        gate = cycle_gate(
+            self._cycle_state, self.family, td_signal=sig,
+            params=self._opt_params(),
+            has_position=any(getattr(p, "family", None) == self.family
+                             for p in positions))
+        if gate:
+            self.skips.append(f"周期门控：{gate}")
+            return cash
+
         chain = self.data.chain_dict_at(ts, slippage=self.slippage)
         d, note = evaluate_entry(
             self.family, td_signal=sig, params=self._opt_params(),
@@ -273,6 +338,8 @@ class OptionsBacktestDriver:
             inst_id=d.inst_id, family=self.family, strike=d.strike,
             exp_ms=_exp_ms_of(d.inst_id, ts), sz=d.sz, entry_px=sell_px,
             entry_ts=ts, entry_reason=d.entry_reason, lot_coin=lot))
+        # 建仓即置位 —— 本周期内不再开仓（与实盘同一份纯函数）
+        cycle_mark_bought(self._cycle_state, self.family)
         fills.append({
             "ts": str(ts), "inst_id": d.inst_id, "side": "sell_open", "sz": d.sz,
             "strike": d.strike, "avg_px": round(sell_px, 6),
@@ -288,6 +355,42 @@ class OptionsBacktestDriver:
     def run(self) -> dict:
         t0 = time.time()
         self.skips = []
+        self._log(
+            f"启动 family={self.family} timestep={self.timestep} "
+            f"td_bars={self.td_bars} 初始={self.initial_cash:.2f} "
+            f"滑点={self.slippage * 100:.2f}% 手续费率={self.fee_rate} "
+            f"区间={self.start_ts or '默认'}→{self.end_ts}"
+        )
+        op = self._opt_params()
+        # selector 不在策略参数里（它是 option_params.json 的兄弟字段）——
+        # 统一走 selector_params() 这个唯一入口，没传就用实盘磁盘配置。
+        from nanobot_quant.okx_options_select import selector_params
+
+        sel = selector_params(op)
+        self._log(
+            f"策略参数 entry_setup={op.get('entry_setup')} "
+            f"entry_countdown={op.get('entry_countdown')} "
+            f"td_period={op.get('td_period')} "
+            f"单家族上限={op.get('max_contracts_per_family')} "
+            f"全局上限={op.get('max_contracts_total')} "
+            f"IV闸门={op.get('iv_min_percentile')} 止盈={op.get('take_profit_pct')}%"
+        )
+        self._log(
+            f"选档 最小距离={sel['min_distance_pct']}% "
+            f"delta={sel['delta_min']}~{sel['delta_max']} "
+            f"到期窗={sel['expiry_min_days']}~{sel['expiry_max_days']}天 "
+            f"净收益率下限={sel['min_net_yield_pct']}% "
+            f"top={sel['top_n']} 排序={sel['sort_by']}"
+        )
+        # 两个上限同时存在时取小值 —— 不写出来的话，“设了 5 却只开 3”看着像 bug。
+        try:
+            cap = min(int(op.get("max_contracts_per_family") or 10 ** 6),
+                      int(op.get("max_contracts_total") or 10 ** 6))
+            self._log(f"生效张数上限={cap}（单家族 × ={op.get('max_contracts_per_family')}、"
+                      f"全局 × ={op.get('max_contracts_total')}，取小值）")
+        except (TypeError, ValueError):
+            pass
+        self._progress("prefetch", 0, 1)
         self.data = self._build_data()
         self.data.prefetch()
 
@@ -309,6 +412,7 @@ class OptionsBacktestDriver:
         if not bt:
             out["error"] = "没有标的 K 线"
             out["notes"] = list(self.data.notes)
+            self._log(f"失败：没有标的 K 线 notes={out['notes']}")
             return out
 
         idx = self.data.start_idx
@@ -318,8 +422,19 @@ class OptionsBacktestDriver:
         out["start_ts"] = str(bt[idx])
         out["end_ts"] = str(bt[-1])
         out["bars"]["evaluated"] = len(bt) - idx
+        self._log(
+            f"数据 bar={len(bt)} 预热={idx} 评估={len(bt) - idx} 根 "
+            f"({out['start_ts']} → {out['end_ts']}) "
+            f"合约={out['contracts']['in_archive']} 档、有IV={out['contracts']['with_iv']} "
+            f"参考现货={self.data.ref_inst}"
+        )
+        for n in self.data.notes:
+            self._log(f"数据备注：{n}")
 
-        for ts in bt[idx:]:
+        total = len(bt) - idx
+        step = max(1, total // 20)          # 每 ~5% 打一次进度
+        seen = 0
+        for i, ts in enumerate(bt[idx:], 1):
             self.data.seek(ts)
             if self.data.price_of() <= 0:
                 continue
@@ -327,7 +442,21 @@ class OptionsBacktestDriver:
             cash = self._check_exits(ts, positions, fills, cash)
             cash = self._try_entry(ts, positions, fills, cash)
 
+            # 新成交逐笔上日志（开仓 / 平仓 / 到期三种都经这里落出）
+            while seen < len(fills):
+                self._log(self._fill_line(fills[seen], cash))
+                seen += 1
+
+            if i % step == 0 or i == total:
+                self._log(
+                    f"进度 {i * 100 // total}% ({i}/{total}) "
+                    f"持仓={len(positions)} 成交={len(fills)} 现金={cash:.2f}"
+                )
+                self._progress("replay", i, total,
+                               f"持仓={len(positions)} 成交={len(fills)}")
+
         # 期末市值：未平仓按最后 bar 的 mark 折算（「如现在全部买回」）
+        self._log(f"重放结束，计算期末市值（未平仓 {len(positions)} 笔）…")
         last_ts = bt[-1]
         self.data.seek(last_ts)
         open_value, open_rows = 0.0, []
@@ -365,6 +494,18 @@ class OptionsBacktestDriver:
         }
         out["notes"] = list(self.data.notes) + self.notes
         out["elapsed_s"] = round(time.time() - t0, 1)
+        k = out["kpi"]
+        self._log(
+            f"完成 用时={out['elapsed_s']}s 评估={out['bars']['evaluated']} 根 "
+            f"成交={k['fills']}（盈 {k['wins']} / 亏 {k['losses']}） "
+            f"期末持仓={len(open_rows)} 净值={k['final_net_usd']} "
+            f"ROI={k['roi_pct']}% 权利金={k['premium_income_usd']} 赔付={k['payout_usd']}"
+        )
+        if out["skips"]:
+            self._log(f"SKIP 汇总：{out['skips']}")
+        for n in self.notes:
+            self._log(f"备注：{n}")
+        self._progress("done", 1, 1)
         return out
 
 
