@@ -217,7 +217,8 @@ def test_check_exits_takes_profit_reuses_live_decision():
     rec_px = fills[0]["avg_px"]
     # 记录层把成交价 round 到 6 位（既有设计，不是本次改动引入）
     assert rec_px == pytest.approx(buy_px, abs=1e-6)
-    cost = rec_px * 0.1 * 1 * (1 + d.fee_rate)    # 与驱动同源：按记录价算成本
+    # 期权手续费按名义价值（strike × 面值 × 张数 × 费率），不按权利金比例
+    cost = rec_px * 0.1 * 1 + float(fills[0]["strike"]) * 0.1 * 1 * d.fee_rate
     assert cash == pytest.approx(1000.0 - cost, rel=1e-9)
 
 
