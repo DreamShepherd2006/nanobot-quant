@@ -28,6 +28,7 @@ import secrets
 import time
 
 from starlette.requests import Request
+from fastapi.encoders import jsonable_encoder
 from starlette.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant import okx_options_data as od
@@ -257,7 +258,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             data = await asyncio.to_thread(od.get_ticker_bid_ask, inst)
         except OkxSdkError as e:
             return JSONResponse({"ok": False, "error": str(e)})
-        return JSONResponse({"ok": True, "data": data})
+        # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500
+        return JSONResponse({"ok": True, "data": jsonable_encoder(data)})
 
     async def _sim(request: Request):
         # 盘口吃单模拟（C22a）：sell=卖 put 吃买盘 / buy=平仓吃卖盘
@@ -311,7 +313,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             data = await asyncio.to_thread(od.fetch_lifecycle, inst, bar)
         except (OkxSdkError, RuntimeError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
-        return JSONResponse({"ok": True, "data": data})
+        # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500
+        return JSONResponse({"ok": True, "data": jsonable_encoder(data)})
 
     async def _accounts(request: Request):
         err, ok = _authorized(request, gatekeeper)
@@ -887,7 +890,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
                 backtest_probe, family, timestep, days, length, strike_pct)
         except Exception as e:  # noqa: BLE001 —— 诊断端点不 500
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
-        return JSONResponse({"ok": True, "data": data})
+        # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500
+        return JSONResponse({"ok": True, "data": jsonable_encoder(data)})
 
     async def _td_panel(request: Request):
         # 标的 TD 状态（C24 ⑤）：人工卖 put 前看标的是否临近衰竭，只读展示
@@ -904,7 +908,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             data = await asyncio.to_thread(otd.panel, period, None, fams)
         except Exception as e:  # noqa: BLE001 —— 展示层，异常回 JSON 不 500
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
-        return JSONResponse({"ok": True, "data": data})
+        # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500
+        return JSONResponse({"ok": True, "data": jsonable_encoder(data)})
 
     app.add_api_route("/config/okx-options/td", _td_panel, methods=["GET"])
     app.add_api_route("/config/okx-options/backtest-probe", _backtest_probe, methods=["GET"])
@@ -936,10 +941,67 @@ def register_okx_options_routes(app, gatekeeper) -> None:
                 backtest_probe_chain, family, timestep, days)
         except Exception as e:  # noqa: BLE001 —— 诊断端点不 500
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
-        return JSONResponse({"ok": True, "data": data})
+        # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500
+        return JSONResponse({"ok": True, "data": jsonable_encoder(data)})
 
     app.add_api_route("/config/okx-options/backtest-probe/chain",
                       _backtest_probe_chain, methods=["GET"])
+
+    def _run_options_backtest(family: str, timestep: str, days: int,
+                              tp_pct, cash: float) -> dict:
+        """跑一次真实期权回测（小参数）—— 串起数据源→选档→记账。"""
+        from nanobot_quant.backtest.options_driver import OptionsBacktestDriver
+
+        now = int(time.time())
+        drv = OptionsBacktestDriver(
+            family, timestep=timestep, start_ts=now - max(1, days) * 86400,
+            end_ts=now, td_bars=120, tp_pct=tp_pct, initial_cash=cash)
+        res = drv.run()
+        # 明细可能很长，探针只回摘要；完整结果走 CLI/页面
+        res["fills"] = res.get("fills", [])[:20]
+        res["notes"] = res.get("notes", [])[:8]
+        return res
+
+    async def _backtest_probe_run(request: Request):
+        """真实回测跑一遍（只读，不写任何实盘状态）。
+
+        GET /config/okx-options/backtest-probe/run?family=SOL-USD_UM&days=3
+
+        验证「数据源 → 实盘选档 → 记账」整条链是否跑得通、KPI 是否自洽。
+        小区间（3 天 15m）约 30–60s；大区间请用 CLI 或异步入口。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        q = request.query_params
+        family = (q.get("family") or "SOL-USD_UM").upper()
+        if family not in od.FAMILIES:
+            return JSONResponse(
+                {"ok": False, "error": f"未知标的 {family}，可选 {od.FAMILIES}"})
+        try:
+            days = max(1, min(14, int(q.get("days") or 3)))
+        except (TypeError, ValueError):
+            days = 3
+        try:
+            cash = max(100.0, float(q.get("cash") or 10000.0))
+        except (TypeError, ValueError):
+            cash = 10000.0
+        timestep = (q.get("timestep") or "15m").strip()
+        raw_tp = q.get("tp")
+        try:
+            tp_pct = float(raw_tp) if raw_tp not in (None, "") else None
+        except (TypeError, ValueError):
+            tp_pct = None
+        try:
+            data = await asyncio.to_thread(
+                _run_options_backtest, family, timestep, days, tp_pct, cash)
+        except Exception as e:  # noqa: BLE001 —— 诊断端点不 500
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500
+        return JSONResponse({"ok": True, "data": jsonable_encoder(data)})
+
+    app.add_api_route("/config/okx-options/backtest-probe/run",
+                      _backtest_probe_run, methods=["GET"])
     app.add_api_route("/config/okx-options/covered", _covered, methods=["GET"])
     app.add_api_route("/config/okx-options/preview", _preview, methods=["POST"])
     app.add_api_route("/config/okx-options/sell/start", _sell_start, methods=["POST"])
