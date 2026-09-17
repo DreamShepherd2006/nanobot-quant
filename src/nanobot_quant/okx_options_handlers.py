@@ -886,14 +886,10 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             length = max(1, min(300, int(q.get("length") or 120)))
         except (TypeError, ValueError):
             length = 120
-        try:
-            strike_pct = abs(float(q.get("strike_pct") or 0.20))
-        except (TypeError, ValueError):
-            strike_pct = 0.20
         timestep = (q.get("timestep") or "15m").strip()
         try:
             data = await asyncio.to_thread(
-                backtest_probe, family, timestep, days, length, strike_pct)
+                backtest_probe, family, timestep, days, length)
         except Exception as e:  # noqa: BLE001 —— 诊断端点不 500
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
         # pandas/numpy 类型不是 JSON 原生类型 —— 统一净化，端点永不因序列化 500

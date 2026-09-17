@@ -81,7 +81,6 @@ class OptionsBacktestDriver:
         fee_rate: float = DEFAULT_FEE_RATE,
         tp_pct: Optional[float] = None,
         initial_cash: float = DEFAULT_INITIAL_CASH,
-        strike_pct: float = 0.2,
     ) -> None:
         self.family = str(family).upper()
         self.timestep = timestep
@@ -95,7 +94,6 @@ class OptionsBacktestDriver:
         self.fee_rate = max(0.0, float(fee_rate))
         self.tp_pct = tp_pct
         self.initial_cash = float(initial_cash)
-        self.strike_pct = strike_pct
 
         self.data = None
         self.notes: list[str] = []
@@ -115,7 +113,7 @@ class OptionsBacktestDriver:
         return OptionsReplayDataSource(
             family=self.family, timestep=self.timestep,
             start_ts=int(start), end_ts=self.end_ts,
-            length=self.td_bars, strike_pct=self.strike_pct,
+            length=self.td_bars,
         )
 
     def _strategy_and_params(self) -> tuple[str, dict]:
@@ -217,7 +215,7 @@ class OptionsBacktestDriver:
             if p is None:
                 continue
             buy_px = e.mark_px * (1 + self.slippage)
-            fee = buy_px * p.lot_coin * e.sz * self.fee_rate
+            fee = self._option_fee(p.strike, p.lot_coin, e.sz)
             cash -= buy_px * p.lot_coin * e.sz + fee
             fills.append({
                 "ts": str(ts), "inst_id": p.inst_id, "side": "close",
@@ -229,6 +227,16 @@ class OptionsBacktestDriver:
         if done:
             positions[:] = [p for p in positions if p.inst_id not in done]
         return cash
+
+    def _option_fee(self, strike: float, lot: float, sz: int) -> float:
+        """期权手续费：**按名义价值**收，不是按权利金比例。
+
+        OKX 期权 taker 费率作用于名义（strike × 面值 × 张数）—— 实盘
+        ``okx_options_trade.option_fee_usd()`` 就是这个口径。回测原先写成
+        ``权利金 × fee_rate``，与实盘差 strike/premium 倍（实测 98-P 差 81 倍），
+        手续费被系统性少扣、PnL 高估。
+        """
+        return abs(float(strike) * float(lot) * int(sz)) * self.fee_rate
 
     def _try_entry(self, ts, positions: list, fills: list,
                    cash: float) -> float:
@@ -258,7 +266,8 @@ class OptionsBacktestDriver:
                 f"担保不足：需 {collateral:.2f} + 已占 {occupied:.2f} > 可用 {cash:.2f}")
             return cash
         sell_px = d.bid                     # 已是 mark × (1 − 滑点)，选档成交同口径
-        premium = sell_px * lot * d.sz * (1 - self.fee_rate)
+        fee = self._option_fee(d.strike, lot, d.sz)
+        premium = sell_px * lot * d.sz - fee
         cash += premium
         positions.append(SimPosition(
             inst_id=d.inst_id, family=self.family, strike=d.strike,
@@ -267,7 +276,7 @@ class OptionsBacktestDriver:
         fills.append({
             "ts": str(ts), "inst_id": d.inst_id, "side": "sell_open", "sz": d.sz,
             "strike": d.strike, "avg_px": round(sell_px, 6),
-            "fee_usd": round(sell_px * lot * d.sz * self.fee_rate, 6),
+            "fee_usd": round(fee, 6),
             "iv": d.iv, "delta": d.delta, "days": d.days,
             "net_yield_pct": d.net_yield_pct,
             "reason": d.entry_reason,
@@ -291,8 +300,10 @@ class OptionsBacktestDriver:
             "slippage_pct": self.slippage * 100, "fee_rate": self.fee_rate,
             "td_bars": self.td_bars, "tp_pct": self.tp_pct,
             "bars": {"fetched": len(bt), "evaluated": 0},
-            "contracts": {"enumerated": len(self.data._contracts),
-                          "with_mark": len(self.data._premiums)},
+            "contracts": {"in_archive": len(self.data._contracts),
+                          "with_iv": (len({p.inst_id
+                                           for p in self.data._surface.points})
+                                       if self.data._surface else 0)},
             "fills": [], "final_positions": [], "skips": {},
         }
         if not bt:
@@ -335,7 +346,10 @@ class OptionsBacktestDriver:
                 if p.entry_px else None,
             })
 
-        net = cash + open_value
+        # 卖出开仓收到的权利金已在 ``cash`` 里，而期末持仓是**负债** —— 还欠市场
+        # 一张 put，按「如现在全部买回」的口径应当**扣减** ``open_value``，不是相加。
+        # 原先写成 ``cash + open_value`` 把负债当资产，净值被高估 2 × open_value。
+        net = cash - open_value
         out["fills"] = fills
         out["final_positions"] = open_rows
         out["skips"] = _count_skips(self.skips)
