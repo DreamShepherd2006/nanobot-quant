@@ -63,6 +63,56 @@ def _instruments(family: str) -> list[dict]:
     return _cached(f"inst:{family}", _load)
 
 
+def _expired_raw(family: str, *, pages: int = 20) -> list[dict]:
+    """``delivery-exercise-history`` 原始行（已到期合约，覆盖约 3 个月）。
+
+    参数必须传 ``instFamily``（传 ``uly`` 报 51014 且返回 0 行）；每行含该到期日
+    **全部** strike 的 C/P，字段 ``details[].insId`` / ``px``（结算价）/ ``type``。
+    """
+    out: list[dict] = []
+    after = None
+    for _ in range(max(1, pages)):
+        kw = {"instType": "OPTION", "instFamily": family, "limit": "100"}
+        if after:
+            kw["after"] = str(after)
+        rows = okx_sdk.check(
+            okx_sdk.public().get_delivery_exercise_history(**kw))
+        if not rows:
+            break
+        out.extend(rows)
+        if len(rows) < 100:
+            break
+        after = rows[-1].get("ts")
+        if not after:
+            break
+    return out
+
+
+def expired_instruments(family: str) -> list[str]:
+    """已到期合约 instId —— **包含从未成交过的档位**。"""
+    insts: list[str] = []
+    for row in _expired_raw(family):
+        for det in (row.get("details") or []):
+            iid = det.get("insId")
+            if iid:
+                insts.append(str(iid).upper())
+    return list(dict.fromkeys(insts))
+
+
+def family_contracts(family: str) -> list[str]:
+    """该家族**全部**合约 instId = 在售 ∪ 已到期（回测枚举用）。
+
+    ``get_instruments`` 只返回在售 —— 回测区间内「当时在售」的档位今天早已到期、
+    那里查不到；而只靠归档成交又太稀疏（SOL 日均 ~80 笔，摊到几十个档位后，
+    策略要的「剩 3–7 天 + ≤ −5% OTM」交集常为空，实测 09-14 那一刻链里只有
+    5 个档、全被到期窗口/距离门刷掉）。两份表并集才是真实存在过的全部档位。
+    """
+    insts = [str(r.get("instId") or "").upper() for r in _instruments(family)]
+    insts = [i for i in insts if i]
+    insts.extend(expired_instruments(family))
+    return list(dict.fromkeys(insts))
+
+
 # TD 面板 / 期权策略轮次用的标的 K 线周期（OKX bar 与面板周期名一致）
 TD_BARS = ("1m", "3m", "5m", "15m")
 

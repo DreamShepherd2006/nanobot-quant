@@ -47,8 +47,14 @@ __all__ = [
 
 # IV 观测保鲜期。实测 SOL-USD_UM 一天约 52 笔成交、散在 ~10 个合约上 ——
 # 单合约平均间隔 ~5 小时，6 小时会把一半观测判失效。期权 IV 日内变化本就
-# 远慢于标的价（它衡量的是波动率预期，不是价格），取 24h 与「日」粒度对齐。
-DEFAULT_IV_STALENESS_MS = 24 * 3600 * 1000
+# 远慢于标的价（它衡量的是波动率预期，不是价格）。
+#
+# 但 24h 对**远月**档太短：策略要的「剩 3–7 天」恰好落在成交最稀疏的档位上，
+# 实测一个到期日常常整天无成交 —— 24h 窗口内一个点都没有，微笑为空，链里就
+# 只剩近月那几组（实测每个 bar 只链出 1–4 个到期组，3–7 天窗口恒为空，
+# 回测因此 0 成交）。放宽到 7 天："pts" 仍只取 ts 之前的点，不构成前视。
+_DEFAULT_IV_STALENESS_DAYS = 7
+DEFAULT_IV_STALENESS_MS = _DEFAULT_IV_STALENESS_DAYS * 24 * 3600 * 1000
 
 
 # ──────────────────────────── IV 点 ────────────────────────────
@@ -213,7 +219,8 @@ class IVSurface:
         # IV 观测的保鲜期：超过这个时长的旧成交不再当作「当前 IV」
         self.max_iv_staleness_ms = int(max_iv_staleness_ms)
         self.lookback_ms = lookback_ms
-        self.stats = {"points": 0, "no_point": 0, "stale": 0, "no_spot": 0, "no_t": 0}
+        self.stats = {"points": 0, "no_point": 0, "stale": 0, "no_spot": 0,
+                      "no_t": 0, "term": 0}
 
     # ── 装载 ──
 
@@ -252,11 +259,20 @@ class IVSurface:
             return None
         return p
 
+    def _fresh_points(self, exp_ms: int, ts_ms: int) -> list:
+        """该到期在 ``ts_ms`` 时刻可用的观测（只取过去的点 —— 不构成前视）。"""
+        pts = [p for p in self._by_exp.get(int(exp_ms), ()) if p.ts_ms <= ts_ms]
+        if self.max_iv_staleness_ms > 0:
+            pts = [p for p in pts if ts_ms - p.ts_ms <= self.max_iv_staleness_ms]
+        return pts
+
     def smile_at(self, ts_ms: int, exp_ms: int, *, forward: float) -> Smile:
         """该到期在 ``ts_ms`` 时刻的微笑（按需构建并缓存）。
 
         用「各合约截至 ts 的最近 IV」作为点 —— 期权 IV 日内变化远慢于价格，
         稀疏成交下这是比「只用当根 bar 的成交」务实得多的口径。
+
+        本到期一个点都没有时，退回**期限结构插值**（见 :meth:`_smile_by_term`）。
         """
         key = (int(ts_ms), int(exp_ms))
         hit = self._smile_cache.get(key)
@@ -265,14 +281,71 @@ class IVSurface:
         # 取该到期下「截至 ts」的全部点，同 strike 的多个点交给 fit_smile 取最近 ——
         # 不在这里做逐合约去重：_by_exp 按时间排序，跨合约交错时
         # 「上一条是否同一合约」判断不可靠，交给 fit_smile 统一裁决更稳。
-        pts = [p for p in self._by_exp.get(int(exp_ms), ()) if p.ts_ms <= ts_ms]
-        if self.max_iv_staleness_ms > 0:
-            pts = [p for p in pts if ts_ms - p.ts_ms <= self.max_iv_staleness_ms]
-        smile = fit_smile(pts, forward=forward)
+        smile = fit_smile(self._fresh_points(exp_ms, ts_ms), forward=forward)
+        if smile is None:
+            smile = self._smile_by_term(ts_ms, int(exp_ms), forward=forward)
         if smile is None:
             smile = Smile()                             # 空微笑（缓存住，避免重复扫）
         self._smile_cache[key] = smile
         return smile
+
+    def _smile_by_term(self, ts_ms: int, exp_ms: int, *,
+                       forward: float) -> Optional[Smile]:
+        """本到期无观测时的回退：借邻近到期微笑做总方差（σ²T）插值。
+
+        为何需要：回测在 t 时刻只能看到「已成交过」的合约，而策略要的「剩 3–7 天」
+        恰好是成交最稀疏的一段 —— 实测 09-08 那天，剩 0.8~2.8 天的到期都有观测，
+        剩 3 天以上的一个点都没有，链里因此永远只有近月几组，3–7 天窗口恒为空、
+        回测 0 成交。解法不是放宽到期窗口，而是借邻近到期的微笑。
+
+        单侧有数据时直接用那一侧（同一 σ 平移）；两侧都有时按总方差线性内插 ——
+        这是波动率曲面的标准做法（方差在时间上加性）。
+        """
+        t_years = years_to_expiry(ts_ms, exp_ms)
+        if not t_years:
+            return None
+        lo = hi = None
+        for exp in sorted(self._by_exp):
+            if not self._fresh_points(exp, ts_ms):
+                continue
+            if exp < exp_ms:
+                lo = exp if lo is None else max(lo, exp)
+            elif exp > exp_ms:
+                hi = exp if hi is None else min(hi, exp)
+        if lo is None and hi is None:
+            return None
+        self.stats["term"] = self.stats.get("term", 0) + 1
+        if lo is None or hi is None:
+            base = lo if lo is not None else hi
+            s = fit_smile(self._fresh_points(base, ts_ms), forward=forward)
+            if s is None or not s.strikes:
+                return None
+            return Smile(strikes=list(s.strikes), ivs=list(s.ivs),
+                         forward=forward)
+        s1 = fit_smile(self._fresh_points(lo, ts_ms), forward=forward)
+        s2 = fit_smile(self._fresh_points(hi, ts_ms), forward=forward)
+        if s1 is None or s2 is None or not s1.strikes or not s2.strikes:
+            return None
+        t1 = years_to_expiry(ts_ms, lo) or 0.0
+        t2 = years_to_expiry(ts_ms, hi) or 0.0
+        if t2 <= t1:
+            return None
+        w = min(1.0, max(0.0, (t_years - t1) / (t2 - t1)))
+        out_k: list[float] = []
+        out_iv: list[float] = []
+        for k in sorted(set(s1.strikes) | set(s2.strikes)):
+            v1 = s1.iv(k)
+            v2 = s2.iv(k)
+            if v1 is None and v2 is None:
+                continue
+            v1 = v2 if v1 is None else v1
+            v2 = v1 if v2 is None else v2
+            var = (v1 * v1 * t1) * (1.0 - w) + (v2 * v2 * t2) * w
+            out_k.append(float(k))
+            out_iv.append(math.sqrt(max(var, 1e-12) / t_years))
+        if not out_k:
+            return None
+        return Smile(strikes=out_k, ivs=out_iv, forward=forward)
 
     def price_at(self, inst_id: str, ts_ms: int, spot: float) -> Optional[float]:
         """该合约在 ``ts_ms``、标的价 ``spot`` 下的理论价（每 1 名义币 USD）。"""

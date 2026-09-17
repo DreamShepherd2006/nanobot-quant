@@ -120,7 +120,8 @@ class OptionsReplayDataSource:
         length: 策略窗口长度（默认 120 = min_history）。
         opt_types: 合约类型（默认只看 put）。
         iv_mode: IV 口径（``hybrid`` 默认 / ``trade`` / ``smile``）。
-        max_iv_staleness_ms: IV 观测保鲜期（默认 24h）。
+        max_iv_staleness_ms: IV 观测保鲜期（默认 7 天 —— 远月档成交稀疏，窗口
+            太短会让 3–7 天档的微笑为空）。
         fetcher: 标的 K 线注入点 ``(inst_id, bar, start_ts, end_ts) -> DataFrame``。
         archive_fetcher: 归档成交注入点 ``(start_ms, end_ms) -> list[dict]``。
 
@@ -269,6 +270,36 @@ class OptionsReplayDataSource:
         # ② 归档成交 → IV 曲面（已到期合约的唯一可用来源）
         self._load_archive_iv(start_ts, end_ts)
 
+    def _family_contracts(self) -> dict[str, dict]:
+        """家族全部合约的元数据（在售 ∪ 已到期，含从未成交的档位）。"""
+        from nanobot_quant import okx_options_data as od
+
+        try:
+            inst_ids = od.family_contracts(self._family)
+        except Exception as exc:  # noqa: BLE001 —— 失败必须留痕
+            self.notes.append(f"合约表拉取失败: {type(exc).__name__}: {exc}")
+            return {}
+        out: dict[str, dict] = {}
+        for inst in inst_ids:
+            inst = str(inst).upper()
+            if not inst or inst in out:
+                continue
+            try:
+                m = parse_inst_id(inst)
+            except Exception:  # noqa: BLE001 —— 畸形 instId 直接跳过
+                continue
+            out[inst] = {
+                "inst_id": inst,
+                "exp_ms": int(m["expTime"]),
+                "strike": float(m["stk"]),
+                "right": m["optType"],
+                "opt_type": m["optType"],
+                "family": self._family,
+                "list_ms": 0,
+            }
+        self.notes.append(f"合约表：{len(out)} 个档位（在售 ∪ 已到期）")
+        return out
+
     def _default_archive_fetch(self, start_ms: int, end_ms: int) -> list[dict]:
         """默认归档取数：``options_history``（本地缓存 + 流式解析）。"""
         from nanobot_quant import options_history as oh
@@ -293,28 +324,23 @@ class OptionsReplayDataSource:
             self.notes.append(f"归档成交拉取失败: {type(exc).__name__}: {exc}")
             return
         if not trades:
-            self.notes.append("归档成交为空：区间内该家族无成交（检查区间/家族）")
-            return
+            self.notes.append(
+                "归档成交为空：区间内该家族无成交（检查区间/家族）")
 
-        # ① 合约元数据：从归档 instId 反解（这才是真实存在的合约）
-        contracts: dict[str, dict] = {}
-        for tr in trades:
-            inst = (tr.get("instrument_name") or "").upper()
-            if not inst or inst in contracts:
-                continue
-            try:
-                m = parse_inst_id(inst)
-            except Exception:  # noqa: BLE001 —— 畸形 instId 直接跳过
-                continue
-            contracts[inst] = {
-                "inst_id": inst,
-                "exp_ms": int(m["expTime"]),
-                "strike": float(m["stk"]),
-                "right": m["optType"],
-                "opt_type": m["optType"],
-                "family": self._family,
-                "list_ms": 0,
-            }
+        # ① 合约元数据：官方合约表（在售 ∪ 已到期），**不是**「有成交的合约」
+        #    —— 归档成交太稀疏（SOL 日均 ~80 笔，摊到几十个档位后，策略要的
+        #    「剩 3–7 天 + ≤ −5% OTM」交集常为空：实测 09-14 那一刻链里只有
+        #    5 个档，全被到期窗口/距离门刷掉）。IV 仍只来自真实成交，未成交的
+        #    档由同到期微笑插值补上（hybrid 口径）。
+        contracts = self._family_contracts()
+        if not contracts:
+            self.notes.append("合约表为空：家族既无在售合约、也无历史到期记录")
+            return
+        if not trades:
+            self.notes.append(
+                f"归档成交为空：IV 全部缺失（合约表仍有 {len(contracts)} 个档）")
+            self._contracts = contracts
+            return
 
         # ② 反解 IV（需要成交那一刻的标的价）
         rejected: Counter = Counter()
@@ -330,13 +356,9 @@ class OptionsReplayDataSource:
                 f"剔除统计 {dict(rejected)}")
             return
 
-        # ③ 在售起点 = 该合约首个 IV 观测（归档无上市时间字段）。
-        #    用首个成交代理是安全的：IVSurface 只取 ts 之前的点，上市后无成交的
-        #    时段既无点、也不会被定价，不构成前视。
-        for p in pts:
-            meta = contracts.get(p.inst_id)
-            if meta is not None and not meta["list_ms"]:
-                meta["list_ms"] = p.ts_ms
+        # ③ 上市时间不做推断：``list_ms`` 保持 0（= 历史全程在售），链的有效区间由
+        #    「``t < exp_ms`` 且该时刻能算出价格」共同界定。不构成前视 ——
+        #    IVSurface 的 ``_latest_iv`` / ``smile_at`` 都只取 ts ≤ 当前时刻的观测点。
 
         self._contracts = contracts
         self._surface = IVSurface(self._contracts,
