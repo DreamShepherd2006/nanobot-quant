@@ -759,7 +759,11 @@ function pollOptResult(runId) {
       const r = await fetch(`/config/backtest/options/result?run_id=${encodeURIComponent(runId)}`)
         .then(x => x.json());
       if (r.status === "running") {
-        optMsg(`⏳ 运行中… run_id=${runId}`);
+        const pg = r.progress;
+        const txt = pg
+          ? ` · ${pg.stage} ${pg.pct}%${pg.extra ? " · " + pg.extra : ""}`
+          : "";
+        optMsg(`⏳ 运行中…${txt}　run_id=${runId}`);
       } else if (r.status === "error") {
         optMsg("❌ " + (r.error || "回测失败"), "err");
         $("opt-run-btn").disabled = false;
@@ -885,7 +889,17 @@ async function loadOptRuns() {
     if (!runs.length) { $("opt-runs").innerHTML = `<div class="empty">暂无期权回测记录</div>`; return; }
     $("opt-runs").innerHTML = runs.map(ru =>
       `<div class="run-row"><span class="run-id" onclick="loadOptRun('${ru.run_id}')">${ru.run_id}</span>` +
-      `<span style="color:#888;font-size:.85em;">${fmtTs(ru.ts)}</span></div>`).join("");
+      `<span class="tag ${ru.status}">${ru.status}</span>` +
+      `<span style="color:#999;font-size:.82em">${fmtTs(new Date(ru.ts * 1000).toISOString())}</span></div>`).join("");
+    // 刷新页面 / 重开标签页后自动接回运行中的 run（否则页面显示「尚未运行」，
+    // 而实际后台还在跑 —— 首版实测的困惑点）
+    const live = runs.find(x => x.status === "running");
+    if (live && OPT.runId !== live.run_id) {
+      OPT.runId = live.run_id; OPT.tries = 0;
+      $("opt-run-btn").disabled = true;
+      optMsg(`⏳ 运行中… run_id=${live.run_id}`);
+      pollOptResult(live.run_id);
+    }
   } catch (e) {
     $("opt-runs").innerHTML = `<div class="empty">加载失败</div>`;
   }

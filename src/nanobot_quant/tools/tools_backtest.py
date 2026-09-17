@@ -61,7 +61,11 @@ def _run_guarded(run_id: str, prep, run) -> None:
        the lumibot-dependent modules first, then silence runs;
     3) redirect the runner's own print() progress lines (CLI-facing) to
        stderr; the result is persisted as a value, never via stdout.
+
+    起手先落一条 ``status=running``：否则 run 在跑的那几分钟里，历史记录
+    完全看不到它（结果文件尚未写出），刷新页面后更像「什么都没发生」。
     """
+    _backtest_log(run_id, {"status": "running", "run_id": run_id})
     _saved_stdout = sys.stdout
     try:
         os.environ.setdefault("LUMIBOT_TELEMETRY", "0")
@@ -211,6 +215,16 @@ def _auto_backtest_options(
             OptionsBacktestDriver,
         )
 
+        def _progress(prog):
+            """把 driver 进度写进 run 文件（页面轮询读它）；写盘失败不影响回测。"""
+            try:
+                _backtest_log(
+                    run_id,
+                    {"status": "running", "run_id": run_id, "progress": prog},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
         # 期权 driver 的 start_ts/end_ts 是秒级时间戳（int），与现货 driver
         # 的 datetime 不同 —— 传错会在内部的 int(end_ts) 处报 TypeError。
         d = OptionsBacktestDriver(
@@ -224,6 +238,7 @@ def _auto_backtest_options(
             if slippage is not None and slippage != ""
             else DEFAULT_SLIPPAGE_PCT,
             opt_params=_merge_opt_params(overrides, timestep),
+            progress_cb=_progress,
         )
         return d.run()
 
