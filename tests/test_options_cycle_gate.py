@@ -96,3 +96,24 @@ def test_mark_bought_on_unknown_family_is_noop():
     """对未初始化家族置位不报错（防御）。"""
     state: dict = {}
     cycle_mark_bought(state, "ETH-USD_UM")  # 不抛异常即可
+
+
+def test_mark_bought_consumes_reset_flag():
+    """建仓必须消费掉 reset —— 否则门控永久失效（首版实测的回归）。
+
+    场景：先经历一次计数回落（reset 置位），然后新周期数到 9 建仓 ——
+    建仓后 reset 必须已清，紧接着的 setup=10 才拦得住。
+    """
+    state: dict = {}
+    # 制造计数回落：5 → 1
+    cycle_gate(state, "SOL-USD_UM", td_signal=_sig(5), params=P)
+    cycle_gate(state, "SOL-USD_UM", td_signal=_sig(1), params=P)
+    assert state["SOL-USD_UM"]["reset"] is True
+    # 新周期数到 9 → 放行建仓
+    assert cycle_gate(state, "SOL-USD_UM", td_signal=_sig(9), params=P) is None
+    cycle_mark_bought(state, "SOL-USD_UM")
+    # 建仓后 reset 已清 → 累加期 10 / 11 必须被拦
+    assert state["SOL-USD_UM"]["reset"] is False
+    for su in (10, 11):
+        gate = cycle_gate(state, "SOL-USD_UM", td_signal=_sig(su), params=P)
+        assert gate and "同周期已建仓" in gate, f"setup={su} 应被拦（reset 未消费）"

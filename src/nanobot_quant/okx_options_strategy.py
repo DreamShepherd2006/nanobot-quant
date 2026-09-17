@@ -271,11 +271,19 @@ def cycle_gate(state: dict, family: str, *, td_signal: dict, params: dict,
 
 
 def cycle_mark_bought(state: dict, family: str) -> None:
-    """建仓（含 dry-run 意图）后置位 —— 本周期内不再开仓。"""
+    """建仓（含 dry-run 意图）后置位 —— 本周期内不再开仓。
+
+    ⚠️ ``reset = False`` 不能漏：reset 是「计数变小 → 新周期」的一次性
+    通行证，建仓时必须消费掉。否则 reset 一旦置位就永久保持 True，
+    ``bought and not reset`` 恒为 False —— 门控从第一次计数回落之后就
+    永久失效（期权线首版实测：只拦住 4 次，之后 setup 10/11 全放行）。
+    与现货线 ``td_sequential_strategy`` 建仓处的三行赋值保持一致。
+    """
     st = (state or {}).get(family)
     if st is None:
         return
     st["bought"] = True
+    st["reset"] = False
     st["cd_triggered"] = True
 
 
