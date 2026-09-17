@@ -515,7 +515,10 @@ class OptionsReplayDataSource:
         if t is None:
             return dict(empty)
         t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
-        spot = self.price_of()
+        # spot 必须与「链」取同一时刻。不能走 ``price_of()`` —— 它读的是
+        # ``_current_ts``，传入 ts 但未 seek 时会出现「链是 ts 的、spot 却是上次
+        # seek 的」错配（测试里就撞到了：groups 直接空）。
+        spot = float(self._spot_at_ms(t_ms) or 0.0)
         stats = {"total": 0, "kept": 0, "expired": 0, "no_spot": 0, "no_iv": 0}
         if spot <= 0:
             stats["no_spot"] = 1
