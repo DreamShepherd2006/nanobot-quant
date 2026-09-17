@@ -107,12 +107,16 @@ def validate_selector(raw: dict) -> tuple[dict | None, str | None]:
 
 
 def select_puts(family: str, base_px: float | None = None,
-                selector: dict | None = None, chain: dict | None = None) -> dict:
+                selector: dict | None = None, chain: dict | None = None,
+                exp_ms=None) -> dict:
     """按选择参数挑卖 put 候选。
 
     - ``base_px``：基准价（默认标的实时现价）；
     - ``chain``：注入期权链数据（测试用），None 时按到期窗口拉 OKX 链；
-    - 返回 {family, base_px, spot, lot_coin, selector, candidates, scanned, filtered, note}。
+    - ``exp_ms``：锁定到期档（毫秒时间戳）——候选跟随期权链页当前 tab，指定时
+      只在该到期里挑、跳过「到期天数窗口」（窗口退化为组合档/全部档的默认值）；
+    - 返回 {family, base_px, spot, lot_coin, selector, candidates, scanned, filtered, note,
+      expiry_mode, expiry_locked_ms}。
     """
     from . import okx_options_data as od
     from .okx_options_trade import OPTION_FEE_RATE_TAKER
@@ -120,14 +124,23 @@ def select_puts(family: str, base_px: float | None = None,
     sel = selector_params(selector)
     lo, hi = sel["expiry_min_days"], sel["expiry_max_days"]
     note = ""
+    lock_ms = None
+    if exp_ms not in (None, ""):
+        try:
+            lock_ms = int(exp_ms)
+        except (TypeError, ValueError):
+            lock_ms = None
     if chain is None:
-        exps = od.list_expiries(family)
-        pick = [e for e in exps if lo <= e.get("days", -1) <= hi]
-        if not pick:
-            pick = exps[:3]
-            if pick:
-                note = f"窗口内（{lo:g}–{hi:g} 天）无在售到期，已放宽为最近 {len(pick)} 个到期"
-        chain = od.fetch_chain(family, expiries=[e["exp_ms"] for e in pick])
+        if lock_ms is not None:
+            chain = od.fetch_chain(family, expiries=[lock_ms])     # 锁定到期：跟随链 tab
+        else:
+            exps = od.list_expiries(family)
+            pick = [e for e in exps if lo <= e.get("days", -1) <= hi]
+            if not pick:
+                pick = exps[:3]
+                if pick:
+                    note = f"窗口内（{lo:g}–{hi:g} 天）无在售到期，已放宽为最近 {len(pick)} 个到期"
+            chain = od.fetch_chain(family, expiries=[e["exp_ms"] for e in pick])
 
     spot = chain.get("spot")
     base = float(base_px) if base_px else spot
@@ -139,7 +152,11 @@ def select_puts(family: str, base_px: float | None = None,
                 "no_lot": 0}
     for g in chain.get("groups", []):
         days = g.get("days")
-        if days is None or not (lo <= days <= hi):
+        if lock_ms is not None:
+            if str(g.get("exp_ms")) != str(lock_ms):                # 锁定档：只留该到期
+                filtered["expiry"] += 1
+                continue
+        elif days is None or not (lo <= days <= hi):
             filtered["expiry"] += 1
             continue
         for row in g.get("rows", []):
@@ -213,4 +230,6 @@ def select_puts(family: str, base_px: float | None = None,
         "scanned": len(cands),
         "filtered": filtered,
         "note": note,
+        "expiry_mode": "locked" if lock_ms is not None else "window",
+        "expiry_locked_ms": lock_ms,
     }

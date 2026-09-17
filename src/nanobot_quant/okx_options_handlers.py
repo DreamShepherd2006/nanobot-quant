@@ -220,8 +220,14 @@ def register_okx_options_routes(app, gatekeeper) -> None:
                 base_px = float(q["base_px"])
             except ValueError:
                 return JSONResponse({"ok": False, "error": "base_px 参数非法"})
+        exp_ms = (q.get("exp_ms") or "").strip() or None
+        if exp_ms is not None:
+            try:
+                exp_ms = int(exp_ms)
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "exp_ms 参数非法"})
         try:
-            res = await asyncio.to_thread(osel.select_puts, family, base_px)
+            res = await asyncio.to_thread(osel.select_puts, family, base_px, None, None, exp_ms)
         except OkxSdkError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **res})
