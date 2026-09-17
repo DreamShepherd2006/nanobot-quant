@@ -9,6 +9,13 @@
   body { font-family:-apple-system,sans-serif; background:#f5f5f5; color:#333; padding:20px; max-width:960px; margin:0 auto; }
   h1 { font-size:1.4em; margin-bottom:6px; }
   .subtitle { color:#888; font-size:.88em; margin-bottom:16px; }
+  .tabs { display:flex; gap:4px; margin:0 0 16px; border-bottom:2px solid #e0e0e0; }
+  .tab { background:none; border:none; padding:9px 18px; font-size:.95em; font-weight:600;
+         color:#888; cursor:pointer; border-bottom:3px solid transparent; margin-bottom:-2px;
+         font-family:inherit; }
+  .tab:hover { color:#444; }
+  .tab.on { color:#1976d2; border-bottom-color:#1976d2; }
+  .hide { display:none !important; }
   .card { background:#fff; border-radius:8px; padding:18px 16px; margin-bottom:14px; border:1px solid #e0e0e0; }
   .card h3 { font-size:1em; margin-bottom:10px; color:#444; }
   .field { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 0; border-top:1px solid #f0f0f0; }
@@ -75,6 +82,12 @@
 </head>
 <body>
 <h1>📈 回测</h1>
+<div class="tabs">
+  <button class="tab on" id="tab-spot" onclick="switchTab('spot')">📈 现货回测</button>
+  <button class="tab" id="tab-opt" onclick="switchTab('opt')">🟤 期权回测</button>
+</div>
+
+<div id="pane-spot">
 <p class="subtitle">场景回放引擎（与实盘同一策略决策代码）：Gate CEX 历史 K 线 + 模拟撮合（手续费/滑点/分批）。结果持久化到 legion/backtests/，可回看。</p>
 
 <div class="card">
@@ -156,6 +169,51 @@
   <h3>历史记录</h3>
   <div id="runs"><div class="empty">加载中…</div></div>
 </div>
+</div><!-- /pane-spot -->
+
+<div id="pane-opt" class="hide">
+<p class="subtitle">期权卖 put 策略回测（与实盘期权线同一份决策代码）：OKX 官方归档成交 → 反解 IV 曲面 → BS 重定价 → 逐 bar 重放。结果持久化到 legion/backtests/（opt- 前缀）。覆盖参数只作用于本次回测，不回写实盘配置。</p>
+
+<div class="card">
+  <h3>参数</h3>
+  <div class="field"><span class="f-label">标的家族</span><select id="opt-family"></select><span class="f-hint">策略配置里的家族置顶；非策略家族仅作研究，不参与自动循环</span></div>
+  <div class="field"><span class="f-label">周期</span><select id="opt-timestep"></select><span class="f-hint">1m 历史仅约 7 天（OKX 归档深度限制）</span></div>
+  <div class="field"><span class="f-label">开始时间</span><input type="datetime-local" id="opt-start"><span class="f-hint">留空 = 按结束时间往前推 30 天</span></div>
+  <div class="field"><span class="f-label">结束时间</span><input type="datetime-local" id="opt-end"><span class="f-hint">留空 = 现在</span></div>
+  <div class="field"><span class="f-label">初始资金（USDC）</span><input type="number" id="opt-cash" value="10000" min="100" step="100"><span class="f-hint">纯模拟记账，与实盘子账号完全隔离</span></div>
+  <div class="field"><span class="f-label">TD 窗口（bars）</span><input type="number" id="opt-tdbars" value="120" min="20" max="300"><span class="f-hint">预热 + 重算窗口，改它同时变更回测与实盘语义</span></div>
+  <div class="field"><span class="f-label">滑点（%）</span><input type="number" id="opt-slip" value="0.5" min="0" max="50" step="0.1"><span class="f-hint">在 IV 曲面价上双边加价</span></div>
+
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer;font-size:.9em;font-weight:600;color:#555;padding:6px 0;">策略参数覆盖（留空 = 跟随实盘 option_params）</summary>
+    <div class="field"><span class="f-label">入场 Setup</span><input type="number" id="opt-entry" min="1" max="20" placeholder="跟随实盘"><span class="f-hint">setup_buy ≥ 该值 → 卖 put（实盘现值 9）</span></div>
+    <div class="field"><span class="f-label">入场 Countdown</span><input type="number" id="opt-cd" min="1" max="20" placeholder="跟随实盘"><span class="f-hint">cd_buy ≥ 该值 → 卖 put（实盘现值 13）</span></div>
+    <div class="field"><span class="f-label">张数上限</span><input type="number" id="opt-szlimit" min="1" max="50" placeholder="跟随实盘"><span class="f-hint">同时持有的最大张数（实盘现值 1）</span></div>
+    <div class="field"><span class="f-label">IV 闸门</span><input type="number" id="opt-ivgate" min="0" max="1" step="0.05" placeholder="跟随实盘"><span class="f-hint">IV 分位低于该值不卖（0 = 关（实盘现值 0）</span></div>
+    <div class="field"><span class="f-label">止盈（%）</span><input type="number" id="opt-tp" min="1" max="99" placeholder="跟随实盘"><span class="f-hint">权利金回落多少买回（实盘现值 50）</span></div>
+    <div class="field"><span class="f-label">最小距离（%）</span><input type="number" id="opt-dist" min="0" max="50" step="0.5" placeholder="跟随实盘"><span class="f-hint">strike 必须 ≤ 现价 ×(1−该值)（实盘现值 5）</span></div>
+    <div class="field"><span class="f-label">Delta 带</span><input type="number" id="opt-dmin" min="0.01" max="0.9" step="0.01" placeholder="跟随">～<input type="number" id="opt-dmax" min="0.01" max="0.9" step="0.01" placeholder="跟随"><span class="f-hint">只选该区间的档（实盘现值 0.05～0.35）</span></div>
+    <div class="field"><span class="f-label">到期窗口（天）</span><input type="number" id="opt-emin" min="0.5" max="60" step="0.5" placeholder="跟随">～<input type="number" id="opt-emax" min="0.5" max="60" step="0.5" placeholder="跟随"><span class="f-hint">只选该剩余期限的档（实盘现值 3～7）</span></div>
+    <div class="field"><span class="f-label">净收益率下限（%）</span><input type="number" id="opt-mny" min="0" max="10" step="0.05" placeholder="跟随实盘"><span class="f-hint">净权利金÷担保额低于该值不选（0 = 关）</span></div>
+  </details>
+
+  <div class="actions">
+    <button class="btn-primary" id="opt-run-btn" onclick="startOptBacktest()">▶ 启动回测</button>
+    <span class="f-hint">30 天 / 15m 约需几分钟（归档下载 + 逐 bar 重放），启动后自动轮询</span>
+  </div>
+  <div class="banner msg" id="opt-msg"></div>
+</div>
+
+<div class="card">
+  <h3>结果</h3>
+  <div id="opt-result"><div class="empty">尚未运行。填参数后点「启动回测」，或在下方历史记录中点一个 run_id 回看。</div></div>
+</div>
+
+<div class="card">
+  <h3>历史记录</h3>
+  <div id="opt-runs"><div class="empty">加载中…</div></div>
+</div>
+</div><!-- /pane-opt -->
 
 <script>
 const SCENES = __SCENES__;
@@ -591,6 +649,261 @@ function fillsBox(fills, note) {
   if (!rows) return "";
   return `<h3 style="font-size:.95em;margin:8px 0 2px;">成交明细${note ? `（${note}）` : ""}</h3>` +
     `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+// ══════════════════════════════════════════════════════
+// 分栏切换
+// ══════════════════════════════════════════════════════
+function switchTab(which) {
+  const spot = which === "spot";
+  $("pane-spot").classList.toggle("hide", !spot);
+  $("pane-opt").classList.toggle("hide", spot);
+  $("tab-spot").classList.toggle("on", spot);
+  $("tab-opt").classList.toggle("on", !spot);
+  if (!spot && !OPT.inited) initOptForm();
+}
+
+// ══════════════════════════════════════════════════════
+// 期权回测（与现货同一套 run_id + 轮询契约）
+// ══════════════════════════════════════════════════════
+const OPT = { inited: false, runId: null, tries: 0 };
+
+function optMsg(text, kind) {
+  const el = $("opt-msg");
+  el.className = "banner msg" + (kind ? " " + kind : "");
+  el.textContent = text || "";
+}
+
+async function initOptForm() {
+  OPT.inited = true;
+  try {
+    const r = await fetch("/config/backtest/options/meta").then(x => x.json());
+    if (r.ok) {
+      $("opt-family").innerHTML = (r.families || [])
+        .map(f => `<option value="${f}">${f}</option>`).join("");
+      $("opt-timestep").innerHTML = (r.timesteps || [])
+        .map(t => `<option value="${t}"${t === "15m" ? " selected" : ""}>${t}</option>`).join("");
+    } else {
+      optMsg(r.error || "加载下拉失败", "err");
+    }
+  } catch (e) {
+    optMsg("加载下拉失败（可手动刷新页面重试）", "err");
+  }
+  // 默认区间：结束 = 现在，开始 = 往前 30 天（期权归档可用历史约 4 个月）
+  const now = new Date();
+  const end = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  const start = new Date(end.getTime() - 30 * 86400000);
+  $("opt-start").value = start.toISOString().slice(0, 16);
+  $("opt-end").value = end.toISOString().slice(0, 16);
+  loadOptRuns();
+}
+
+// 覆盖参数：留空 = 跟随实盘 option_params
+const OPT_OV_MAP = {
+  "opt-entry": "entry_setup", "opt-cd": "entry_countdown",
+  "opt-szlimit": "max_contracts_per_family",
+  "opt-ivgate": "iv_min_percentile",
+  "opt-tp": "take_profit_pct", "opt-dist": "min_distance_pct",
+  "opt-dmin": "delta_min", "opt-dmax": "delta_max",
+  "opt-emin": "expiry_min_days", "opt-emax": "expiry_max_days",
+  "opt-mny": "min_net_yield_pct",
+};
+
+function optOverrides() {
+  const o = {};
+  for (const [id, key] of Object.entries(OPT_OV_MAP)) {
+    const raw = $(id).value;
+    if (raw === "") continue;
+    const v = Number(raw);
+    if (!Number.isNaN(v)) o[key] = v;
+  }
+  return o;
+}
+
+async function startOptBacktest() {
+  optMsg("启动中…");
+  $("opt-run-btn").disabled = true;
+  const payload = {
+    family: $("opt-family").value,
+    timestep: $("opt-timestep").value,
+    start: toUtc($("opt-start").value),
+    end: toUtc($("opt-end").value),
+    initial_cash: Number($("opt-cash").value || 10000),
+    td_bars: $("opt-tdbars").value ? Number($("opt-tdbars").value) : null,
+    slippage: $("opt-slip").value === "" ? null : Number($("opt-slip").value),
+    overrides: optOverrides(),
+  };
+  try {
+    const r = await fetch("/config/backtest/options/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(x => x.json());
+    if (!r.ok) {
+      optMsg("❌ " + (r.error || "启动失败"), "err");
+      $("opt-run-btn").disabled = false;
+      return;
+    }
+    OPT.runId = r.run_id; OPT.tries = 0;
+    optMsg(`⏳ 运行中… run_id=${r.run_id}`);
+    pollOptResult(r.run_id);
+  } catch (e) {
+    optMsg("❌ 请求失败：" + e.message, "err");
+    $("opt-run-btn").disabled = false;
+  }
+}
+
+function pollOptResult(runId) {
+  setTimeout(async () => {
+    if (OPT.runId !== runId) return;
+    OPT.tries++;
+    try {
+      const r = await fetch(`/config/backtest/options/result?run_id=${encodeURIComponent(runId)}`)
+        .then(x => x.json());
+      if (r.status === "running") {
+        optMsg(`⏳ 运行中… run_id=${runId}`);
+      } else if (r.status === "error") {
+        optMsg("❌ " + (r.error || "回测失败"), "err");
+        $("opt-run-btn").disabled = false;
+        loadOptRuns();
+        return;
+      } else if (r.result) {
+        optMsg(`✅ 完成（${r.result.elapsed_s}s）run_id=${runId}`, "ok");
+        $("opt-run-btn").disabled = false;
+        $("opt-result").innerHTML = renderOptResult(r.result, runId);
+        loadOptRuns();
+        return;
+      }
+      if (OPT.tries > 900) {   // 约 45 分钟
+        optMsg("⏳ 等待超时，可点历史记录查看结果", "err");
+        $("opt-run-btn").disabled = false;
+        return;
+      }
+    } catch (e) {
+      optMsg("⏳ 轮询失败，重试中…", "err");
+    }
+    pollOptResult(runId);
+  }, 3000);
+}
+
+// 期权成交明细（列与现货不同：合约/张数/IV/delta）
+function optFillRow(f) {
+  const sideTxt = { sell_open: "🟠 卖出开仓", sell_close: "🔵 买回平仓",
+                    settle_otm: "✅ 到期作废", settle_itm: "⚠️ 被行权" }[f.side] || f.side;
+  const px = f.avg_px !== undefined ? fmtN(f.avg_px, 6)
+    : (f.settle_px !== undefined ? fmtN(f.settle_px, 4) : "—");
+  const pnl = f.pnl_usd === undefined || f.pnl_usd === null ? "—" : fmtN(f.pnl_usd, 4);
+  return `<tr><td>${fmtTs(f.ts)}</td><td>${f.inst_id || "—"}</td>` +
+    `<td>${sideTxt}</td><td>${f.sz}</td><td>${f.strike || "—"}</td>` +
+    `<td>${px}</td><td>${pnl}</td>` +
+    `<td>${f.iv ? (f.iv * 100).toFixed(1) + "%" : "—"}</td>` +
+    `<td>${f.delta !== undefined && f.delta !== null ? f.delta.toFixed(4) : "—"}</td>` +
+    `<td>${f.reason || "—"}</td></tr>`;
+}
+
+function renderOptResult(res, runId) {
+  if (res.error && !res.kpi) {
+    return `<div class="empty">❌ ${escapeHtml(res.error)}<br><br>${(res.notes || []).map(escapeHtml).join("<br>")}</div>`;
+  }
+  const k = res.kpi || {};
+  const rows = (res.fills || []).map(optFillRow).join("");
+  let html = `<div style="font-size:.82em;color:#888;margin-bottom:8px;">run_id=${runId}</div>`;
+
+  // ① 生效参数（先看参数再看结论 —— 现货回测同惯例）
+  html += `<h3 style="font-size:.95em;margin:10px 0 4px;">📋 回测参数（实际生效）</h3><table><tbody>`;
+  const p = [
+    ["标的家族", res.family], ["周期", res.timestep + `（bar=${res.bar}）`],
+    ["参考现货", res.ref_inst],
+    ["区间", `${fmtTs(res.start_ts)} → ${fmtTs(res.end_ts)}`],
+    ["评估 bar", `${(res.bars || {}).evaluated} / 拉取 ${(res.bars || {}).fetched}`],
+    ["初始资金", `$${fmtN(res.initial_cash, 2)}`],
+    ["TD 窗口", `${res.td_bars} bars`],
+    ["滑点", `${fmtN(res.slippage_pct, 2)}%`], ["手续费率", `${(res.fee_rate || 0) * 100}%（名义）`],
+    ["合约总数", `${(res.contracts || {}).in_archive} 档 · 有 IV ${(res.contracts || {}).with_iv}`],
+  ];
+  for (const [a, b] of p) html += `<tr><td style="width:150px;color:#666;">${a}</td><td>${b ?? "—"}</td></tr>`;
+  html += `</tbody></table>`;
+
+  // ② KPI
+  html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📊 结果</h3><table><tbody>`;
+  const roi = k.roi_pct || 0;
+  const kpi = [
+    ["期末净值", `$${fmtN(k.final_net_usd, 4)}`],
+    ["ROI", `<b class="${roi < 0 ? "sl-neg" : ""}">${roi >= 0 ? "+" : ""}${fmtN(roi, 4)}%</b>`],
+    ["权利金收入", `$${fmtN(k.premium_income_usd, 4)}`],
+    ["赔付支出", `$${fmtN(k.payout_usd, 4)}`],
+    ["期末持仓市值", `$${fmtN(k.open_mark_value_usd, 4)}（负债，已从净值扣减）`],
+    ["成交笔数", `${k.fills}（盈利 ${k.wins} / 亏损 ${k.losses}）`],
+  ];
+  for (const [a, b] of kpi) html += `<tr><td style="width:150px;color:#666;">${a}</td><td>${b}</td></tr>`;
+  html += `</tbody></table>`;
+
+  // ③ 成交明细
+  html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📒 成交明细（${(res.fills || []).length}）</h3>`;
+  html += rows
+    ? `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>张数</th><th>Strike</th><th>价（每名义币）</th><th>盈亏</th><th>IV</th><th>Delta</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    : `<div class="empty">本次未产生任何成交</div>`;
+
+  // ④ 期末未平仓
+  const opens = res.final_positions || [];
+  if (opens.length) {
+    html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📌 期末未平仓（${opens.length}）</h3>`;
+    html += `<div style="overflow-x:auto;"><table><thead><tr><th>合约</th><th>Strike</th><th>张数</th><th>开仓价</th><th>期末 mark</th><th>担保额</th><th>浮盈%</th></tr></thead><tbody>`;
+    for (const o of opens) {
+      const pn = o.pnl_pct;
+      html += `<tr><td>${o.inst_id}</td><td>${o.strike}</td><td>${o.sz}</td>` +
+        `<td>${fmtN(o.entry_px, 6)}</td><td>${fmtN(o.mark_px, 6)}</td>` +
+        `<td>$${fmtN(o.collateral_usd, 2)}</td>` +
+        `<td class="${pn < 0 ? "sl-neg" : ""}">${pn === null ? "—" : (pn >= 0 ? "+" : "") + fmtN(pn, 2) + "%"}</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+  }
+
+  // ⑤ SKIP 统计
+  const sk = res.skips || {};
+  const skKeys = Object.keys(sk);
+  if (skKeys.length) {
+    html += `<h3 style="font-size:.95em;margin:14px 0 4px;">🚦 SKIP 统计</h3><table><tbody>`;
+    for (const key of skKeys) {
+      const v = sk[key];
+      html += `<tr><td style="width:220px;color:#666;">${escapeHtml(key)}</td><td>${typeof v === "object" ? JSON.stringify(v) : v}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // ⑥ 运行备注（归档下载 / IV 反解统计 / 失败痕迹）
+  const notes = res.notes || [];
+  if (notes.length) {
+    html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📝 运行备注</h3><div class="run-note">` +
+      notes.map(n => escapeHtml(n)).join("<br>") + `</div>`;
+  }
+  return html;
+}
+
+async function loadOptRuns() {
+  try {
+    const r = await fetch("/config/backtest/options/runs").then(x => x.json());
+    const runs = r.runs || [];
+    if (!runs.length) { $("opt-runs").innerHTML = `<div class="empty">暂无期权回测记录</div>`; return; }
+    $("opt-runs").innerHTML = runs.map(ru =>
+      `<div class="run-row"><span class="run-id" onclick="loadOptRun('${ru.run_id}')">${ru.run_id}</span>` +
+      `<span style="color:#888;font-size:.85em;">${fmtTs(ru.ts)}</span></div>`).join("");
+  } catch (e) {
+    $("opt-runs").innerHTML = `<div class="empty">加载失败</div>`;
+  }
+}
+
+async function loadOptRun(runId) {
+  switchTab("opt");
+  optMsg(`加载 ${runId}…`);
+  const r = await fetch(`/config/backtest/options/result?run_id=${encodeURIComponent(runId)}`)
+    .then(x => x.json());
+  if (r.result) {
+    optMsg(`✅ ${runId}`, "ok");
+    $("opt-result").innerHTML = renderOptResult(r.result, runId);
+  } else if (r.status === "running") {
+    optMsg(`⏳ ${runId} 仍在运行`);
+  } else {
+    optMsg("❌ " + (r.error || "读取失败"), "err");
+  }
 }
 </script>
 </body>
