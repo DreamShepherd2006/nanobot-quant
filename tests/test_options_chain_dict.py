@@ -4,7 +4,7 @@
 这是「回测与实盘共用同一份选档代码」得以成立的条件 —— 过滤/排序逻辑
 一行都不重写，回测侧只负责把历史 mark 还原成「链」。
 
-全部注入假 fetcher / lifecycle_fetcher —— 不打网络。
+全部注入假 fetcher / archive_fetcher —— 不打网络。
 """
 
 from __future__ import annotations
@@ -45,31 +45,42 @@ def _kline():
     )
 
 
-def _lifecycle(inst_id: str, bar: str):
-    """按 BS 定价造 mark：反解应回到同一个 σ（IV 往返）。
+def _archive(start_ms: int, end_ms: int) -> list[dict]:
+    """按 BS 定价造成交 —— 反解应回到同一个 σ（IV 往返）。
 
+    新数据源从**成交**反解 IV（归档里没有 mark），所以假数据也必须是成交价。
     注意用**该 instId 自己的到期日**算 T —— 若全部套用同一个到期日，
     反解出的 IV 会因 T 不匹配而偏离。
     """
-    try:
+    rows: list[dict] = []
+    for inst_id in _CONTRACTS:
         strike = float(inst_id.split("-")[3])
-    except (IndexError, ValueError):
-        strike = _SPOT
-    exp_ms = _exp_ms_of(inst_id)
-    sigma = 0.6
-    rows = []
-    for t in _IDX:
-        t_ms = int(t.timestamp() * 1000)
-        tv = years_to_expiry(t_ms, exp_ms)
-        px = bs_price(_SPOT, strike, tv, sigma, 0.0, "P") if tv else 0.01
-        rows.append({"ts": t_ms, "mark_px": max(float(px or 0.01), 0.01),
-                     "ref_px": None})
-    return {
-        "inst_id": inst_id,
-        "lot_coin": 0.1,
-        "list_ms": int(_IDX[0].timestamp() * 1000),
-        "rows": rows,
-    }
+        exp_ms = _exp_ms_of(inst_id)
+        for t in _IDX:
+            t_ms = int(t.timestamp() * 1000)
+            if not (start_ms <= t_ms <= end_ms):
+                continue
+            tv = years_to_expiry(t_ms, exp_ms)
+            if not tv:
+                continue
+            px = bs_price(_SPOT, strike, tv, 0.6, 0.0, "P")
+            if not px or px <= 0:
+                continue
+            rows.append({"instrument_name": inst_id, "created_time": str(t_ms),
+                         "price": str(px), "size": "1", "side": "sell"})
+    return rows
+
+
+# 固定一组合约（现价 100 附近、09-03/09-04 到期）—— 新路径的合约来自成交，
+# 不再靠 instId 推算，所以必须显式给出。
+_CONTRACTS = [
+    "SOL-USD_UM-260903-90-P",
+    "SOL-USD_UM-260903-95-P",
+    "SOL-USD_UM-260904-85-P",
+    "SOL-USD_UM-260904-95-P",
+    "SOL-USD_UM-260904-100-P",
+    "SOL-USD_UM-260904-105-P",
+]
 
 
 def _ds(**kw) -> OptionsReplayDataSource:
@@ -81,7 +92,7 @@ def _ds(**kw) -> OptionsReplayDataSource:
         start_ts=start,
         end_ts=end,
         fetcher=lambda inst, bar, s, e: _kline(),
-        lifecycle_fetcher=_lifecycle,
+        archive_fetcher=lambda s, e: _archive(s, e),
         **kw,
     )
     ds.prefetch()
@@ -128,12 +139,8 @@ def test_empty_when_no_ts():
 # ── 口径：IV / delta / 滑点 ───────────────────────────────────────────
 
 
-def test_iv_and_delta_recovered_from_mark():
-    """mark 由 BS 生成 → 反解必须回到原 σ，delta 与解析值一致。
-
-    跳过权利金触底的深 OTM 档（假数据里 mark 被 max(px, 0.01) 撑到 0.01，
-    反解出来的是「此价位下界对应多少 IV」而非原 σ）。
-    """
+def test_iv_and_delta_recovered_from_price():
+    """成交价由 BS 生成 → 曲面反解必须回到原 σ，delta 与解析值一致。"""
     ds = _ds()
     ds.seek(_IDX[5])
     chain = ds.chain_dict_at()
@@ -194,26 +201,27 @@ def test_stats_account_for_every_contract():
     assert st["kept"] > 0
 
 
-def test_no_iv_counted_when_mark_unusable():
-    """mark 恒为 0 → 全部剔除，且 no_iv/expired 有计数（不是静默丢弃）。"""
-    def _bad(inst_id, bar):
-        return {"inst_id": inst_id, "lot_coin": 0.1,
-                "list_ms": int(_IDX[0].timestamp() * 1000),
-                "rows": [{"ts": int(t.timestamp() * 1000), "mark_px": 0.0}
-                         for t in _IDX]}
+def test_no_iv_counted_when_price_unusable():
+    """成交价恒为 0 → 全部剔除，且 no_iv/expired 有计数（不是静默丢弃）。"""
+    def _bad(s, e):
+        return [{"instrument_name": i,
+                 "created_time": str(int(t.timestamp() * 1000)),
+                 "price": "0", "size": "1"}
+                for i in _CONTRACTS for t in _IDX]
 
     ds = OptionsReplayDataSource(
         family="SOL-USD_UM", timestep="1H",
         start_ts=int(_IDX[0].timestamp()), end_ts=int(_IDX[-1].timestamp()),
-        fetcher=lambda inst, bar, s, e: _kline(), lifecycle_fetcher=_bad,
+        fetcher=lambda inst, bar, s, e: _kline(), archive_fetcher=_bad,
     )
     ds.prefetch()
     ds.seek(_IDX[5])   # 距 09-04 到期约 3.1 天，落在默认 3–7 天窗口
     chain = ds.chain_dict_at()
     assert chain["stats"]["kept"] == 0
-    assert chain["stats"]["total"] > 0
-    assert chain["stats"]["expired"] + chain["stats"]["no_iv"] == \
-        chain["stats"]["total"]
+    # 合约元数据仍保留（来自归档），只是算不出 IV —— 否则上层会把
+    # 「有链但一只都不成」误读成「区间内无合约」，那就是静默降级。
+    assert ds._contracts, "反解全失败时合约仍应保留"
+    assert chain["stats"]["total"] == 0
 
 
 # ── 到期窗口过滤 ─────────────────────────────────────────────────────

@@ -81,7 +81,6 @@ class OptionsBacktestDriver:
         fee_rate: float = DEFAULT_FEE_RATE,
         tp_pct: Optional[float] = None,
         initial_cash: float = DEFAULT_INITIAL_CASH,
-        strike_pct: float = 0.2,
     ) -> None:
         self.family = str(family).upper()
         self.timestep = timestep
@@ -95,7 +94,6 @@ class OptionsBacktestDriver:
         self.fee_rate = max(0.0, float(fee_rate))
         self.tp_pct = tp_pct
         self.initial_cash = float(initial_cash)
-        self.strike_pct = strike_pct
 
         self.data = None
         self.notes: list[str] = []
@@ -115,7 +113,7 @@ class OptionsBacktestDriver:
         return OptionsReplayDataSource(
             family=self.family, timestep=self.timestep,
             start_ts=int(start), end_ts=self.end_ts,
-            length=self.td_bars, strike_pct=self.strike_pct,
+            length=self.td_bars,
         )
 
     def _strategy_and_params(self) -> tuple[str, dict]:
@@ -291,8 +289,10 @@ class OptionsBacktestDriver:
             "slippage_pct": self.slippage * 100, "fee_rate": self.fee_rate,
             "td_bars": self.td_bars, "tp_pct": self.tp_pct,
             "bars": {"fetched": len(bt), "evaluated": 0},
-            "contracts": {"enumerated": len(self.data._contracts),
-                          "with_mark": len(self.data._premiums)},
+            "contracts": {"in_archive": len(self.data._contracts),
+                          "with_iv": (len({p.inst_id
+                                           for p in self.data._surface.points})
+                                       if self.data._surface else 0)},
             "fills": [], "final_positions": [], "skips": {},
         }
         if not bt:

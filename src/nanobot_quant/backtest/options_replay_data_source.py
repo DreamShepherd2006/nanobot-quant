@@ -5,14 +5,21 @@
 ``[ts−length+1, ts]`` 最近窗口。区别在于期权线除了标的 K 线，还要承载：
 
   ① 标的 K 线（OKX 现货成交价 —— 与期权链/策略/td_kline 同源，见「期权线一律取 OKX」）
-  ② 候选合约枚举（按到期日 × strike 带，instId 规整可推算）
-  ③ 每合约 mark 价全生命周期（复用 ``okx_options_data.fetch_lifecycle``）
+  ② 归档逐笔成交（含已到期合约 —— 实时端点对它们全是 ``51001``）
+  ③ 成交价反解 IV → 按到期建微笑 → BS 重定价任意档（``iv_surface``）
 
 驱动在每个 bar 上向数据源问三件事：
 
     price_of(family)        → 标的当前价（TD 信号 + 选档用）
-    chain_at(ts)            → 该时刻「在售」合约及 mark 价（选档用）
-    premium_of(inst_id)     → 某合约当前 mark（撮合 / 止盈判断用）
+    chain_at(ts)            → 该时刻「在售」合约及理论价（选档用）
+    premium_of(inst_id)     → 某合约当前理论价（撮合 / 止盈判断用）
+
+为什么不能像现货那样直接拉历史价
+--------------------------------
+已到期 OKX 期权合约的一切实时端点都返回 ``51001``（``candles`` /
+``mark-price-candles`` / ``ticker`` / ``history-trades`` 逐个实测），而回测的合约
+全是已到期合约。唯一可用来源是官方每日归档，且归档里**只有成交** —— 所以历史价
+只能反解 IV 后重定价，见 ``nanobot_quant.iv_surface``。
 
 设计原则（对齐现货）：**历史数据全离线、零网络轮询、确定性**——网络只发生在
 ``prefetch()``；驱动重放阶段纯内存。
@@ -22,37 +29,29 @@
 
 from __future__ import annotations
 
+import bisect
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import pandas as pd
 
-from nanobot_quant.bs_pricing import bs_delta, implied_vol, years_to_expiry
+from nanobot_quant.bs_pricing import bs_delta, years_to_expiry
+from nanobot_quant.iv_surface import (
+    DEFAULT_IV_STALENESS_MS,
+    IVSurface,
+    iv_points_from_trades,
+)
 from nanobot_quant.okx_options_data import (
     FAMILIES,
     _OKX_BAR_MAP,
     _OKX_BAR_UNAVAILABLE,
     _ref_inst,
-    fetch_lifecycle,
+    parse_inst_id,
 )
 
 _DEFAULT_BAR = "15m"
-
-# 合约枚举默认参数：strike 带 ±20%、按 1 美元步进（SOL 档位实测为整数档）
-_DEFAULT_STRIKE_PCT = 0.20
-_DEFAULT_STRIKE_STEP = 1.0
-
-# 枚举上限：防止 strike 带 × 到期日 组合爆炸（超限截断并记 note）
-_MAX_CONTRACTS = 400
-
-# 到期日枚举尾窗（天）：区间末尾持有的 put 往往在 end_ts 之后才到期
-# （选档要求剩 3–7 天），若只枚举到 end_ts，回测尾部将无链可卖。
-_ENUM_TAIL_DAYS = 7
-
-# 合约并发拉取数（网络密集；单合约失败不阻塞）
-_PREFETCH_WORKERS = 6
 
 _OKX_BARS = ("1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H",
              "6H", "12H", "1D", "3D", "1W", "1M")
@@ -119,13 +118,13 @@ class OptionsReplayDataSource:
         timestep: 周期（``"5m"`` / ``"15min"`` / ``"1H"`` …，映射 OKX bar）。
         start_ts / end_ts: 回测区间（unix 秒；缺省 = 标的可用历史全量）。
         length: 策略窗口长度（默认 120 = min_history）。
-        strike_pct: strike 枚举带（现价 ±pct，默认 0.20）。
-        strike_step: strike 步进（默认 1.0）。
-        opt_types: 合约类型（默认只枚举 put）。
+        opt_types: 合约类型（默认只看 put）。
+        iv_mode: IV 口径（``hybrid`` 默认 / ``trade`` / ``smile``）。
+        max_iv_staleness_ms: IV 观测保鲜期（默认 24h）。
         fetcher: 标的 K 线注入点 ``(inst_id, bar, start_ts, end_ts) -> DataFrame``。
-        lifecycle_fetcher: 合约生命周期注入点 ``(inst_id, bar) -> dict``。
+        archive_fetcher: 归档成交注入点 ``(start_ms, end_ms) -> list[dict]``。
 
-    ``fetcher`` / ``lifecycle_fetcher`` 为单测注入点（不打网络），
+    ``fetcher`` / ``archive_fetcher`` 为单测注入点（不打网络），
     与现货 ``ReplayDataSource.fetcher`` 同款设计。
     """
 
@@ -141,11 +140,11 @@ class OptionsReplayDataSource:
         start_ts: Optional[int] = None,
         end_ts: Optional[int] = None,
         length: int = 120,
-        strike_pct: float = _DEFAULT_STRIKE_PCT,
-        strike_step: float = _DEFAULT_STRIKE_STEP,
         opt_types: tuple[str, ...] = ("P",),
+        iv_mode: str = "hybrid",
+        max_iv_staleness_ms: int = DEFAULT_IV_STALENESS_MS,
         fetcher: Optional[Callable[[str, str, int, int], pd.DataFrame]] = None,
-        lifecycle_fetcher: Optional[Callable[[str, str], dict]] = None,
+        archive_fetcher: Optional[Callable[[int, int], list[dict]]] = None,
     ):
         if family not in FAMILIES:
             raise ValueError(f"未知标的家族 {family}，可选 {FAMILIES}")
@@ -155,9 +154,9 @@ class OptionsReplayDataSource:
         self._user_start_ts = _to_ts(start_ts)
         self._end_ts = _to_ts(end_ts)
         self._length = max(1, int(length))
-        self._strike_pct = max(0.0, float(strike_pct))
-        self._strike_step = max(0.0, float(strike_step))
         self._opt_types = tuple(t.upper() for t in opt_types) or ("P",)
+        self._iv_mode = str(iv_mode or "hybrid")
+        self._max_iv_staleness_ms = int(max_iv_staleness_ms)
 
         self._ref_inst, self._ref_kind = _ref_inst(family)
         if not self._ref_inst:
@@ -172,16 +171,34 @@ class OptionsReplayDataSource:
             )
 
         self._fetcher = fetcher or self._default_fetch
-        self._lifecycle_fetcher = lifecycle_fetcher or (
-            lambda inst_id, bar: fetch_lifecycle(inst_id, bar)
-        )
+        self._archive_fetcher = archive_fetcher or self._default_archive_fetch
 
         self._underlying: Optional[pd.DataFrame] = None
         self._bar_times: list = []
         self._current_ts = None
         self._contracts: dict[str, dict] = {}
-        self._premiums: dict[str, dict[int, float]] = {}
+        self._surface: Optional[IVSurface] = None
+        self._spot_ts: list[int] = []
+        self._spot_px: list[float] = []
         self.notes: list[str] = []
+
+    # ── 标的价索引 ────────────────────────────────────────
+
+    def _index_spot(self) -> None:
+        """标的收盘价索引（毫秒升序 + 平行价格数组）—— IV 反解按 ts 二分取价。"""
+        idx = self._underlying.index
+        self._spot_ts = [int(t.timestamp() * 1000) for t in idx]
+        self._spot_px = [float(v) for v in self._underlying["close"].astype(float)]
+
+    def _spot_at_ms(self, ts_ms: int) -> Optional[float]:
+        """该毫秒时刻的标的收盘价（取 ≤ ts 的最近 bar）；无数据 → None。
+
+        反解 IV 必须用「成交那一刻」的标的价 —— 用当前 bar 的价会直接污染 IV。
+        """
+        if not self._spot_ts:
+            return None
+        j = bisect.bisect_right(self._spot_ts, int(ts_ms)) - 1
+        return self._spot_px[j] if j >= 0 else None
 
     # ── 数据预拉 ──────────────────────────────────────────────
 
@@ -247,115 +264,88 @@ class OptionsReplayDataSource:
         self._bar_times = list(self._underlying.index)
         if not self._bar_times:
             return
+        self._index_spot()
 
-        # ② 合约枚举（strike 带 = 区间内标的价 ±pct）
-        self._enumerate_contracts(start_ts, end_ts)
+        # ② 归档成交 → IV 曲面（已到期合约的唯一可用来源）
+        self._load_archive_iv(start_ts, end_ts)
 
-        # ③ 每合约 mark（并发；单合约失败只记录）
-        if self._contracts:
-            self._prefetch_premiums()
+    def _default_archive_fetch(self, start_ms: int, end_ms: int) -> list[dict]:
+        """默认归档取数：``options_history``（本地缓存 + 流式解析）。"""
+        from nanobot_quant import options_history as oh
 
-    def _enumerate_contracts(self, start_ts: int, end_ts: int) -> None:
-        """按 instId 规则枚举回测区间内的候选合约。
+        paths = oh.fetch_range(start_ms, end_ms, progress=self.notes.append)
+        return oh.load_trades(paths, family=self._family)
 
-        OKX 期权 **每日到期**（08:00 UTC），instId 形如
-        ``SOL-USD_UM-260906-101-P``（yymmdd / strike / P|C），故可推算。
-        strike 带 = 区间内标的价 [min×(1−pct), max×(1+pct)]，按 step 取整。
+    def _load_archive_iv(self, start_ts: int, end_ts: int) -> None:
+        """归档逐笔成交 → IV 曲面（取代旧的「枚举 instId + 逐合约拉 mark」）。
+
+        旧路径两头落空：自己推算出来的合约**大多不存在或已下架**（已到期合约的
+        实时端点一律 51001），而真正有成交的合约又可能被 400 个枚举上限截断 ——
+        实测枚举 400 个、只有 14 个拿到 mark。新路径反过来：**合约列表来自真实
+        成交**，IV 由成交价反解，价格由 IV 重算。
         """
-        base = self._family.split("-")[0]
-        closes = self._underlying["close"].astype(float)
-        if closes.empty:
+        lo_ms = int(start_ts or 0) * 1000
+        hi_ms = int(end_ts or time.time()) * 1000
+
+        try:
+            trades = self._archive_fetcher(lo_ms, hi_ms)
+        except Exception as exc:  # noqa: BLE001 —— 失败原因必须留痕，不静默降级
+            self.notes.append(f"归档成交拉取失败: {type(exc).__name__}: {exc}")
             return
-        lo_px = float(closes.min()) * (1.0 - self._strike_pct)
-        hi_px = float(closes.max()) * (1.0 + self._strike_pct)
+        if not trades:
+            self.notes.append("归档成交为空：区间内该家族无成交（检查区间/家族）")
+            return
 
-        step = self._strike_step or 1.0
-        strikes: list[float] = []
-        k = int(lo_px / step)
-        while k * step <= hi_px:
-            if k > 0:
-                strikes.append(round(k * step, 6))
-            k += 1
-
-        # 到期日：区间内每天 08:00 UTC。上限延伸 _ENUM_TAIL_DAYS 天 —— 区间末尾
-        # 持有的 put 常在 end_ts 之后才到期，只枚举到 end_ts 会让回测尾部无链可卖。
-        day = 86400
-        t = ((start_ts or 0) // day) * day
-        expiries: list[int] = []
-        limit_ts = (self._end_ts or int(time.time())) + _ENUM_TAIL_DAYS * day
-        while t <= limit_ts:
-            exp_ms = (t + 8 * 3600) * 1000
-            if exp_ms > (start_ts or 0) * 1000:
-                expiries.append(exp_ms)
-            t += day
-
-        truncated = False
-        for exp_ms in expiries:
-            dt = datetime.fromtimestamp(exp_ms // 1000 - 8 * 3600, tz=timezone.utc)
-            yymmdd = dt.strftime("%y%m%d")
-            for strike in strikes:
-                for opt in self._opt_types:
-                    if len(self._contracts) >= _MAX_CONTRACTS:
-                        truncated = True
-                        break
-                    inst = f"{base}-USD_UM-{yymmdd}-{_fmt_strike(strike)}-{opt}"
-                    self._contracts[inst] = {
-                        "inst_id": inst,
-                        "exp_ms": exp_ms,
-                        "strike": strike,
-                        "opt_type": opt,
-                        "family": self._family,
-                    }
-                if truncated:
-                    break
-            if truncated:
-                break
-        if truncated:
-            self.notes.append(
-                f"合约枚举达上限 {_MAX_CONTRACTS}（截断）：建议缩小区间或 strike 带"
-            )
-
-    def _prefetch_premiums(self) -> None:
-        """并发拉取各合约 mark 生命周期，本地裁剪到回测区间。"""
-        lo_ms = int(self._prefetch_start_ts or 0) * 1000
-        hi_ms = int(self._end_ts or time.time()) * 1000
-        ok_cnt = fail = 0
-        errors: list[str] = []
-
-        def _one(inst_id: str):
-            life = self._lifecycle_fetcher(inst_id, self._bar)
-            marks = {
-                int(r["ts"]): float(r["mark_px"])
-                for r in life.get("rows", [])
-                if r.get("mark_px") is not None
+        # ① 合约元数据：从归档 instId 反解（这才是真实存在的合约）
+        contracts: dict[str, dict] = {}
+        for tr in trades:
+            inst = (tr.get("instrument_name") or "").upper()
+            if not inst or inst in contracts:
+                continue
+            try:
+                m = parse_inst_id(inst)
+            except Exception:  # noqa: BLE001 —— 畸形 instId 直接跳过
+                continue
+            contracts[inst] = {
+                "inst_id": inst,
+                "exp_ms": int(m["expTime"]),
+                "strike": float(m["stk"]),
+                "right": m["optType"],
+                "opt_type": m["optType"],
+                "family": self._family,
+                "list_ms": 0,
             }
-            return marks, life
 
-        with ThreadPoolExecutor(max_workers=_PREFETCH_WORKERS) as pool:
-            futs = {pool.submit(_one, i): i for i in self._contracts}
-            for fut in as_completed(futs):
-                inst_id = futs[fut]
-                try:
-                    marks, life = fut.result()
-                except Exception as exc:  # noqa: BLE001 —— 失败原因分类留痕
-                    fail += 1
-                    if len(errors) < 3:
-                        errors.append(f"{inst_id} → {type(exc).__name__}: {exc}")
-                    continue
-                win = {ts: px for ts, px in marks.items() if lo_ms <= ts <= hi_ms}
-                if not win:
-                    fail += 1
-                    if len(errors) < 3:
-                        errors.append(
-                            f"{inst_id} → 区间内无 mark（全量 {len(marks)} 根）")
-                    continue
-                self._premiums[inst_id] = win
-                self._contracts[inst_id]["lot_coin"] = life.get("lot_coin")
-                self._contracts[inst_id]["list_ms"] = life.get("list_ms")
-                ok_cnt += 1
-        msg = f"合约 mark 预拉：成功 {ok_cnt} / 失败 {fail}（枚举 {len(self._contracts)}）"
-        if errors:
-            msg += "｜样本 " + " ｜ ".join(errors)
+        # ② 反解 IV（需要成交那一刻的标的价）
+        rejected: Counter = Counter()
+        pts = iv_points_from_trades(
+            trades, spot_at=self._spot_at_ms, contracts=contracts,
+            on_reject=lambda why, _inst: rejected.update([why]))
+        if not pts:
+            # 合约仍然保留 —— 否则上层看不到「有链但一只都算不出 IV」，
+            # 会被误读成「区间内无合约」（静默降级）。
+            self._contracts = contracts
+            self.notes.append(
+                f"IV 反解全失败（{len(trades)} 笔 / {len(contracts)} 合约）："
+                f"剔除统计 {dict(rejected)}")
+            return
+
+        # ③ 在售起点 = 该合约首个 IV 观测（归档无上市时间字段）。
+        #    用首个成交代理是安全的：IVSurface 只取 ts 之前的点，上市后无成交的
+        #    时段既无点、也不会被定价，不构成前视。
+        for p in pts:
+            meta = contracts.get(p.inst_id)
+            if meta is not None and not meta["list_ms"]:
+                meta["list_ms"] = p.ts_ms
+
+        self._contracts = contracts
+        self._surface = IVSurface(self._contracts,
+                                  max_iv_staleness_ms=self._max_iv_staleness_ms)
+        self._surface.add_points(pts)
+        msg = (f"IV 曲面：成交 {len(trades)} 笔 → 合约 {len(contracts)} 个 "
+               f"（{len({p.exp_ms for p in pts})} 个到期）→ 反解成功 {len(pts)}")
+        if rejected:
+            msg += f"｜剔除 {dict(rejected)}"
         self.notes.append(msg)
 
     # ── 驱动辅助 ─────────────────────────────────────────────
@@ -407,21 +397,22 @@ class OptionsReplayDataSource:
             return 0.0
 
     def premium_of(self, inst_id: str, ts=None) -> Optional[float]:
-        """某合约在 ``ts``（缺省=当前重放时间）的 mark 价；无数据 → None。
+        """某合约在 ``ts``（缺省=当前重放时间）的理论价；无 IV → None。
 
-        mark 可能因粒度差异缺某个 bar → 回退到不超过 ts 的最近一笔。
+        对外语义与旧实现一致（一次价格查询），但数据来源已换：旧版查「逐合约
+        mark 历史」，新版走「成交反解 IV → 微笑 → BS 重定价」—— 因为已到期
+        合约的 mark 历史根本不存在（实时端点逐个实测均为 51001）。
         """
-        marks = self._premiums.get(str(inst_id).upper())
-        if not marks:
+        if self._surface is None:
             return None
         t = ts or self._current_ts
         if t is None:
             return None
         t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
-        if t_ms in marks:
-            return marks[t_ms]
-        prior = [k for k in marks if k <= t_ms]
-        return marks[max(prior)] if prior else None
+        spot = self._spot_at_ms(t_ms)
+        if not spot:
+            return None
+        return self._surface.price_at(str(inst_id).upper(), t_ms, spot)
 
     def chain_at(self, ts=None, opt_type: Optional[str] = None) -> list[dict]:
         """该时刻「在售」合约及其 mark 价（选档输入）。
@@ -520,7 +511,11 @@ class OptionsReplayDataSource:
                 stats["expired"] += 1
                 continue
             tv = years_to_expiry(t_ms, exp_ms)
-            iv = implied_vol(mark, spot, strike, tv, right) if tv else None
+            # IV 直接取曲面值（含插值）—— 不再从 mark 反解：mark 本身就是用它算出来
+            # 的，反解一圈只会引入数值误差，且两者必须一致（口径自洽）。
+            iv = None
+            if tv and self._surface is not None:
+                iv = self._surface.iv_for(str(c.get("inst_id") or ""), t_ms)
             if iv is None:
                 stats["no_iv"] += 1
                 continue
@@ -560,12 +555,13 @@ class OptionsReplayDataSource:
                 "stats": stats}
 
     def contracts(self) -> list[dict]:
-        """全部预拉成功的合约（附 mark 覆盖 bar 数）。"""
-        return [
-            {**meta, "mark_bars": len(self._premiums.get(inst_id, {}))}
-            for inst_id, meta in self._contracts.items()
-            if inst_id in self._premiums
-        ]
+        """全部有 IV 覆盖的合约（附 IV 观测点数）。"""
+        if self._surface is None:
+            return []
+        cnt = Counter(p.inst_id for p in self._surface.points)
+        return [{**meta, "iv_points": cnt.get(inst_id, 0)}
+                for inst_id, meta in self._contracts.items()
+                if cnt.get(inst_id, 0) > 0]
 
     # ── lumibot DataSource 接口 ──────────────────────────────
 
@@ -615,16 +611,17 @@ def probe(
     timestep: str = _DEFAULT_BAR,
     days: int = 3,
     length: int = 120,
-    strike_pct: float = _DEFAULT_STRIKE_PCT,
     end_ts: Optional[int] = None,
 ) -> dict:
     """期权回测数据层一次性诊断（**真实拉数**，非模拟）。
 
-    回答两个未经实测的假设：
+    回答两个问题：
       ① OKX ``history-candles`` 分页能否按区间拉到标的 K 线
-      ② 期权「每日到期 + 整数 strike」的 instId 推算是否成立（看 mark 命中率）
+      ② 归档成交能否覆盖到合约、并从成交价反解出 IV（看反解成功率）
 
-    命中率为 0 说明枚举规则需修正（例如实际按周到期 / strike 非整数档）。
+    **2026-09-17 修订**：原先的 ② 是「每日到期 + 整数 strike 的 instId 推算是否
+    成立」—— 该路线已被实测证伪（枚举 400 个只有 14 个拿到 mark，因为已到期合约
+    的实时端点一律 51001）。现改走官方每日归档：合约列表来自真实成交，不再推算。
     ``end_ts`` 缺省为当前时间；显式传入可诊断历史区间。
     """
     t0 = time.time()
@@ -642,7 +639,7 @@ def probe(
         ds = OptionsReplayDataSource(
             family=family, timestep=timestep,
             start_ts=start, end_ts=end,
-            length=length, strike_pct=strike_pct,
+            length=length,
         )
     except Exception as exc:  # noqa: BLE001 —— 探针不抛，错误进结果
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -672,16 +669,17 @@ def probe(
     out["underlying"] = und
     out["hypotheses"]["okx_history_candles"] = bool(bt)
 
-    # ② 合约枚举命中率
-    enum_n = len(ds._contracts)
-    ok_n = len(ds._premiums)
+    # ② 归档 → 合约 + IV
+    iv_n = len(ds._surface.points) if ds._surface is not None else 0
+    ok_n = len({p.inst_id for p in ds._surface.points}) if ds._surface else 0
     out["contracts"] = {
-        "enumerated": enum_n,
-        "with_mark": ok_n,
-        "hit_rate": round(ok_n / enum_n, 4) if enum_n else 0.0,
+        "in_archive": len(ds._contracts),
+        "with_iv": ok_n,
+        "iv_points": iv_n,
+        "hit_rate": round(ok_n / len(ds._contracts), 4) if ds._contracts else 0.0,
         "samples": list(ds._contracts)[:3],
     }
-    out["hypotheses"]["daily_expiry_integer_strike"] = ok_n > 0
+    out["hypotheses"]["archive_iv_recovered"] = iv_n > 0
 
     # 区间中点时刻的「在售链」快照
     if bt:
@@ -724,7 +722,6 @@ def probe_chain_dict(
     timestep: str = _DEFAULT_BAR,
     days: int = 3,
     length: int = 120,
-    strike_pct: float = _DEFAULT_STRIKE_PCT,
     end_ts: Optional[int] = None,
 ) -> dict:
     """``chain_dict_at`` 真实性校验（**真实拉数**，只读）。
@@ -746,7 +743,7 @@ def probe_chain_dict(
         ds = OptionsReplayDataSource(
             family=family, timestep=timestep,
             start_ts=start, end_ts=end,
-            length=length, strike_pct=strike_pct,
+            length=length,
         )
     except Exception as exc:  # noqa: BLE001 —— 探针不抛
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -762,8 +759,10 @@ def probe_chain_dict(
 
     bt = ds.bar_times
     out["bars"] = len(bt)
-    out["contracts"] = {"enumerated": len(ds._contracts),
-                        "with_mark": len(ds._premiums)}
+    out["contracts"] = {
+        "in_archive": len(ds._contracts),
+        "with_iv": len({p.inst_id for p in ds._surface.points}) if ds._surface else 0,
+    }
     if not bt:
         out["error"] = "没有标的 K 线，无法选时刻"
         return out

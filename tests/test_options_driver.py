@@ -59,30 +59,38 @@ def _exp_ms(inst_id: str) -> int:
                .replace(hour=8, tzinfo=timezone.utc).timestamp() * 1000)
 
 
-def _lifecycle(inst_id: str, bar: str) -> dict:
-    """按 BS 造 mark：现价随 bar 下跌，因此 put 权利金单调**上涨**（天然不触发止盈）。"""
-    try:
+# 固定一组合约（新路径的合约来自成交，不再靠 instId 推算）
+_CONTRACTS = [f"SOL-USD_UM-260918-{k}-P" for k in (80, 85, 88, 90, 95, 100)]
+
+
+def _archive(start_ms: int, end_ms: int) -> list[dict]:
+    """按 BS 造成交：现价随 bar 下跌，因此 put 权利金单调**上涨**（天然不触发止盈）。
+
+    新数据源从**成交**反解 IV（归档里没有 mark），所以假数据也必须是成交价。
+    """
+    out: list[dict] = []
+    for inst_id in _CONTRACTS:
         strike = float(inst_id.split("-")[3])
-    except (IndexError, ValueError):
-        strike = 100.0
-    exp = _exp_ms(inst_id)
-    rows = []
-    for i, t in enumerate(_IDX):
-        t_ms = int(t.timestamp() * 1000)
-        tv = years_to_expiry(t_ms, exp)
-        if tv <= 0:
-            continue
-        px = bs_price(_spot_at(i), strike, tv, 0.6, 0.0, "P")
-        rows.append({"ts": t_ms, "mark_px": max(float(px or 0.0), 0.01),
-                     "ref_px": None})
-    return {"inst_id": inst_id, "lot_coin": 0.1,
-            "list_ms": int(_IDX[0].timestamp() * 1000), "rows": rows}
+        exp = _exp_ms(inst_id)
+        for i, t in enumerate(_IDX):
+            t_ms = int(t.timestamp() * 1000)
+            if not (start_ms <= t_ms <= end_ms):
+                continue
+            tv = years_to_expiry(t_ms, exp)
+            if tv <= 0:
+                continue
+            px = bs_price(_spot_at(i), strike, tv, 0.6, 0.0, "P")
+            if not px or px <= 0:
+                continue
+            out.append({"instrument_name": inst_id, "created_time": str(t_ms),
+                        "price": str(px), "size": "1", "side": "sell"})
+    return out
 
 
 def _fake_chain(ts=None, slippage=0.0) -> dict:
     """一条最小可用链 —— 直接喂给驱动，不经过枚举/prefetch。
 
-    数据源自己的枚举与 mark 预拉由 ``test_options_chain_dict.py`` 覆盖；
+    数据源自己的合约装载与 IV 曲面由 ``test_options_chain_dict.py`` 覆盖；
     这里测的是**驱动把链接给实盘选档、再按选档结果记账**这条链路。
     """
     strike, bid = 80.0, 2.0
@@ -117,7 +125,7 @@ def _build_data_with_fakes(d: OptionsBacktestDriver):
         family="SOL-USD_UM", timestep="1H",
         start_ts=d.start_ts, end_ts=d.end_ts, length=d.td_bars,
         fetcher=lambda inst, bar, s, e: _kline(),
-        lifecycle_fetcher=_lifecycle)
+        archive_fetcher=lambda s, e: _archive(s, e))
     ds.prefetch()
     return ds
 
@@ -194,7 +202,7 @@ def test_check_exits_skips_when_no_mark():
 def test_check_exits_takes_profit_reuses_live_decision():
     """止盈走实盘 evaluate_exits —— 回落够就买回，记账价含滑点与手续费。"""
     d = _driver(tp_pct=50.0)
-    inst = next(k for k in d.data._premiums
+    inst = next(k for k in d.data._contracts
                 if _exp_ms(k) > _to_ms(_IDX[40]))
     pos = [SimPosition(inst, "SOL-USD_UM", float(inst.split("-")[3]),
                        _exp_ms(inst), 1, 999.0, _IDX[0], "buy9", 0.1)]
@@ -206,8 +214,10 @@ def test_check_exits_takes_profit_reuses_live_decision():
     assert pos == []
     assert fills[0]["side"] == "close"
     buy_px = mark * (1 + d.slippage)
-    assert fills[0]["avg_px"] == pytest.approx(buy_px, rel=1e-9)
-    cost = buy_px * 0.1 * 1 * (1 + d.fee_rate)
+    rec_px = fills[0]["avg_px"]
+    # 记录层把成交价 round 到 6 位（既有设计，不是本次改动引入）
+    assert rec_px == pytest.approx(buy_px, abs=1e-6)
+    cost = rec_px * 0.1 * 1 * (1 + d.fee_rate)    # 与驱动同源：按记录价算成本
     assert cash == pytest.approx(1000.0 - cost, rel=1e-9)
 
 
