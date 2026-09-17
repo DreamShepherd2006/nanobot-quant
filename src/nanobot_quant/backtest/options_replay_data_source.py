@@ -726,11 +726,15 @@ def probe(
 
 
 def _deltas_monotonic(pairs: list[tuple[float, float]]) -> Optional[bool]:
-    """put delta 是否随 strike 单调。
+    """**同一到期内** put delta 是否随 strike 单调。
 
     put delta **恒为负**，且随 strike 上升而**递减**
     （实测 −0.37@100 → −0.74@106）。首版按 call 的递增方向写，
     在真实数据上直接报 false —— 抽成纯函数 + 单测锁死方向。
+
+    注意：只能喂**同一到期**的档位。不同到期的 delta 水平本就不同
+    （同样一张 85-P，剩 3 天与剩 6 天的 delta 差一倍），跨到期混在一起
+    再判单调必然为 false。
     """
     if len(pairs) < 2:
         return None
@@ -795,8 +799,9 @@ def probe_chain_dict(
 
     rows: list[dict] = []
     ivs: list[float] = []
-    deltas: list[tuple[float, float]] = []
+    group_deltas: list[list[tuple[float, float]]] = []
     for g in ch["groups"]:
+        deltas: list[tuple[float, float]] = []
         for r in g["rows"]:
             c = r["P"]
             if c["iv"] is not None:
@@ -812,8 +817,11 @@ def probe_chain_dict(
                     "iv": None if c["iv"] is None else round(float(c["iv"]), 4),
                     "delta": None if c["delta"] is None else round(float(c["delta"]), 4),
                 })
-    deltas.sort()
-    mono = _deltas_monotonic(deltas)
+        group_deltas.append(deltas)
+    # 逐到期组判定：不同到期的 delta 水平不同，跨组混排必然不单调
+    per_group = [m for m in (
+        _deltas_monotonic(sorted(gd)) for gd in group_deltas) if m is not None]
+    mono = all(per_group) if per_group else None
     sane_iv = bool(ivs) and all(0.05 <= v <= 3.0 for v in ivs)
     out["chain_dict"] = {
         "ts": ts.isoformat(),
