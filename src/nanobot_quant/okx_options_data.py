@@ -290,6 +290,12 @@ def _parse_inst_id(inst_id: str) -> dict:
     }
 
 
+# 公开别名：供 options_history（历史归档）复用同一条反解路径。
+# 已到期合约不在官方 in-sale instruments 列表里，strike/到期只能从 instId 反解 ——
+# 两处各写一份实现会漂移，这里显式转出。
+parse_inst_id = _parse_inst_id
+
+
 def _mark_candle_pages(inst_id: str, bar: str) -> tuple[dict[int, float], bool]:
     """某期权合约 mark 价全生命周期（ts → close，升序合并）。
 
