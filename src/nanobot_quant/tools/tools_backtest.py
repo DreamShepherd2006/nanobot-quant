@@ -211,11 +211,13 @@ def _auto_backtest_options(
             OptionsBacktestDriver,
         )
 
+        # 期权 driver 的 start_ts/end_ts 是秒级时间戳（int），与现货 driver
+        # 的 datetime 不同 —— 传错会在内部的 int(end_ts) 处报 TypeError。
         d = OptionsBacktestDriver(
             family,
             timestep=timestep or "15m",
-            start_ts=_parse_ts(start),
-            end_ts=_parse_ts(end),
+            start_ts=_opt_ts_seconds(start),
+            end_ts=_opt_ts_seconds(end),
             td_bars=int(td_bars) if td_bars else _DEFAULT_OPT_TD_BARS,
             initial_cash=float(initial_cash or DEFAULT_INITIAL_CASH),
             slippage_pct=float(slippage)
@@ -229,6 +231,17 @@ def _auto_backtest_options(
 
 
 _DEFAULT_OPT_TD_BARS = 120
+
+
+def _opt_ts_seconds(value: str | None) -> int | None:
+    """ISO 字符串 → 秒级时间戳（期权 driver 的口径）。
+
+    现货 driver 吃 datetime，期权 driver 直接 ``int(end_ts or time.time())``
+    —— 两者单位不同，传错就是在引擎内部报一个看不出根因的 TypeError（首版
+    实测：``int() argument must be a string ... not 'datetime.datetime'``）。
+    """
+    d = _parse_ts(value)
+    return int(d.timestamp()) if d else None
 
 # 期权回测可覆盖的策略参数键（数值型；键名对齐 DEFAULT_STRATEGY）
 _OPT_NUM_KEYS = (
@@ -252,6 +265,10 @@ def _merge_opt_params(overrides: dict | None, timestep: str | None = None) -> di
 
     ``timestep`` 同时写进 ``td_period``：策略算 TD 用的信号周期必须与重放 bar
     粒度一致，否则回测跑的是「15m bar 上算 5m 信号」的错配组合。
+
+    另注单位陷阱：期权 driver 的 ``start_ts`` / ``end_ts`` 是**秒级 int**
+    （内部直接 ``int(end_ts)``），现货 driver 用 datetime —— 转换由调用方
+    ``_auto_backtest_options`` 负责。
     """
     from nanobot_quant.okx_options_live import _strategy_params, live_config
 

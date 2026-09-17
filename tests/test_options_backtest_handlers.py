@@ -128,6 +128,29 @@ def test_merge_opt_params_does_not_mutate_live_config():
     assert after == before
 
 
+def test_opt_ts_seconds_returns_seconds_not_datetime():
+    """期权 driver 的 start_ts/end_ts 是秒级 int。
+
+    首版传 datetime 进去，在引擎里的 int(end_ts) 报 TypeError，报错信息完全
+    看不出根因（"not 'datetime.datetime'"）—— 用这个测试把单位锁住。
+    """
+    from datetime import datetime, timezone
+
+    v = tb._opt_ts_seconds("2026-09-17T15:49:00.000Z")
+    assert isinstance(v, int)
+    assert v == int(datetime(2026, 9, 17, 15, 49, tzinfo=timezone.utc).timestamp())
+    assert v < 10**11, "秒级（毫秒会是 13 位）"
+    assert tb._opt_ts_seconds(None) is None
+    assert tb._opt_ts_seconds("") is None
+
+
+def test_parse_ts_still_returns_datetime_for_spot_engine():
+    """现货 driver 吃 datetime —— 两个单位不能混。"""
+    from datetime import datetime
+
+    assert isinstance(tb._parse_ts("2026-09-17T15:49:00Z"), datetime)
+
+
 # ── 引擎分派 ──────────────────────────────────────────────────────────
 
 
