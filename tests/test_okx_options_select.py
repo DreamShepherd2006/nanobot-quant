@@ -185,3 +185,57 @@ def test_window_relaxed_note_when_no_expiry_in_range(monkeypatch):
     r = osel.select_puts("SOL-USD_UM")
     assert "放宽" in r["note"]
     assert r["candidates"] == []               # 放宽后仍受到期窗口过滤（1 天不在 3–7 天）
+
+
+def test_locked_expiry_skips_window_filter():
+    """锁定到期档（跟随链 tab）：只在该档里挑，哪怕它不在「天窗口」内。"""
+    chain = _chain(groups=[
+        _group(2, 111, [{"strike": 95.0, "P": _put("a", 0.5, -0.25)}]),     # 2 天，窗口外
+        _group(20, 222, [{"strike": 95.0, "P": _put("b", 0.5, -0.25)}]),    # 20 天，窗口外
+    ])
+    r = osel.select_puts("SOL-USD_UM", chain=chain, exp_ms=111)
+    assert r["expiry_mode"] == "locked"
+    assert r["expiry_locked_ms"] == 111
+    assert [c["inst_id"] for c in r["candidates"]] == ["a"]
+    assert r["filtered"]["expiry"] == 1          # 另一个到期被排除
+
+
+def test_locked_expiry_fetches_only_that_expiry(monkeypatch):
+    """锁定档拉链时只请求该到期（跟随 tab），不回退天窗口。"""
+    import nanobot_quant.okx_options_data as od
+
+    seen = {}
+
+    def _fc(fam, expiries=None):
+        seen["expiries"] = list(expiries or [])
+        return _chain(groups=[_group(4, 333, [{"strike": 95.0, "P": _put("z", 0.5, -0.25)}])])
+
+    def _no_list(fam):
+        raise AssertionError("锁定档不该查到期列表")
+
+    monkeypatch.setattr(od, "fetch_chain", _fc)
+    monkeypatch.setattr(od, "list_expiries", _no_list)
+    r = osel.select_puts("SOL-USD_UM", exp_ms="333")
+    assert seen["expiries"] == [333]
+    assert r["expiry_mode"] == "locked"
+    assert [c["inst_id"] for c in r["candidates"]] == ["z"]
+
+
+def test_window_mode_default_unchanged():
+    """不传 exp_ms（组合档）→ 保持原「天窗口」语义。"""
+    chain = _chain(groups=[
+        _group(2, 111, [{"strike": 95.0, "P": _put("a", 0.5, -0.25)}]),
+        _group(5, 222, [{"strike": 94.0, "P": _put("b", 0.5, -0.25)}]),
+    ])
+    r = osel.select_puts("SOL-USD_UM", chain=chain)
+    assert r["expiry_mode"] == "window"
+    assert r["expiry_locked_ms"] is None
+    assert [c["inst_id"] for c in r["candidates"]] == ["b"]
+
+
+def test_bad_exp_ms_falls_back_to_window():
+    """非法 exp_ms 值退化为组合档（底层防御；接口层已挡）。"""
+    chain = _chain(groups=[_group(5, 222, [{"strike": 94.0, "P": _put("b", 0.5, -0.25)}])])
+    r = osel.select_puts("SOL-USD_UM", chain=chain, exp_ms="abc")
+    assert r["expiry_mode"] == "window"
+    assert r["expiry_locked_ms"] is None
