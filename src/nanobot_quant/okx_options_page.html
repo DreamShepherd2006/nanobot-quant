@@ -449,6 +449,30 @@ async function loadExpiries() {
     buildExpTabs();
     loadChain();
   }
+  syncExpSel(selExp);
+}
+// 到期选择只有一个状态源 selExp；下拉 expSel 必须与它保持同步，否则会丢事件：
+// 点 tab 只改 selExp、下拉 value 仍停在 ""，用户再选「近 3 个到期（组合）」时
+// value 没有变化 → change 不触发 → 表现为「点了没反应」。
+function syncExpSel(v) {
+  if (!expSel) return;
+  Array.from(expSel.querySelectorAll("option[data-dyn]")).forEach(o => o.remove());
+  if (v) {
+    const e = (expiryList || []).find(x => String(x.exp_ms) === String(v));
+    const o = document.createElement("option");
+    o.value = String(v);
+    o.dataset.dyn = "1";
+    o.textContent = "当前 tab：" + (e ? e.date : "已选到期");
+    expSel.insertBefore(o, expSel.options[1] || null);
+  }
+  expSel.value = v ? String(v) : "";
+}
+// 到期切换唯一入口：tab / 下拉 / 候选回跳都走这里，保证下拉与 selExp 不脱节
+function setSelExp(v) {
+  selExp = String(v || "");
+  syncExpSel(selExp);
+  buildExpTabs();
+  loadChain();
 }
 function buildExpTabs() {
   const bar = $("expTabs");
@@ -462,7 +486,7 @@ function buildExpTabs() {
     b.className = "exp-tab" + (cur === String(e.exp_ms) ? " on" : "");
     b.textContent = e.date.slice(5) + "（" + e.days + "d）";
     b.title = e.date + " · " + e.days + " 天后到期";
-    b.onclick = () => { selExp = String(e.exp_ms); buildExpTabs(); loadChain(); };
+    b.onclick = () => { setSelExp(String(e.exp_ms)); };
     bar.appendChild(b);
   }
   updateSelExpInfo();
@@ -488,7 +512,7 @@ function jumpToExpiry(expMs) {
   // 自动切到指定到期（生成候选后调用）；目标不在 tabs 列表时不切、返回 false
   if (!expiryList.some(e => String(e.exp_ms) === String(expMs))) return false;
   if (String(selExp) === String(expMs)) return true;
-  selExp = String(expMs); buildExpTabs(); loadChain();
+  setSelExp(String(expMs));
   return true;
 }
 
@@ -1789,7 +1813,7 @@ $("tdRefreshBtn").addEventListener("click", loadTd);
 
 // ── 事件绑定 / 启动 ───────────────────────────────────
 famSel.addEventListener("change", () => { loadExpiries(); loadCandidates(); });
-expSel.addEventListener("change", () => { selExp = expSel.value; buildExpTabs(); loadChain(); });
+expSel.addEventListener("change", () => { setSelExp(expSel.value); });
 hvSel.addEventListener("change", loadChain);
 rngSel.addEventListener("change", loadChain);
 btn.addEventListener("click", loadChain);
