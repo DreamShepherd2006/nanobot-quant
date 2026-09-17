@@ -211,6 +211,74 @@ def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT) -> list[ExitDec
     return out
 
 
+def cycle_gate(state: dict, family: str, *, td_signal: dict, params: dict,
+               has_position: bool = False) -> "str | None":
+    """信号周期门控（纯函数，状态由调用方持有）。
+
+    同一 TD 信号周期内同一家族只开一次仓 —— 与现货线
+    ``td_sequential_strategy`` 的 ``_cycle_state`` 同规则：setup 计数单调
+    不减（9→10→11）视为同周期 → 跳过；计数变小（12→8 / 9→1）标记 reset
+    → 新周期放行。``cd_triggered`` 单独成位：setup 翻转但 countdown 仍在
+    累积（cd_buy 未归 0）时保持，阻止「setup 买9 + 几根 bar 后 cd13 再补
+    一张」的重复建仓。
+
+    背景（期权线回测实测 2026-09-17）：首版无此门控，同一个「setup_buy
+    9 → 10 → 11」的衰竭波里连开三张（其中两张同合约），31 天里 7 个独立
+    信号被记成 12 次开仓 —— 样本虚高 1.7 倍，与用户「不追连续信号」原则
+    相背。
+
+    抽成纯函数是为了**实盘与回测共用同一份决策代码**（回测 driver 直接
+    调决策函数、不经过 lumibot Strategy 类，门控写在类里回测就看不到）。
+
+    Args:
+        state: ``{family: {...}}`` 状态字典，调用方持有（策略类实例 /
+            driver 实例）；首次见到的 family 由本函数初始化。
+        family: 标的家族（如 ``SOL-USD_UM``）。
+        has_position: 该家族当前是否已有持仓 —— 重启边界用：有仓视为
+            本周期已建仓（保守不追，避免 setup 累加期重启后立即再开）。
+
+    Returns:
+        None = 放行；否则返回拦截原因（调用方落日志）。
+    """
+    st = state.get(family)
+    if st is None:
+        st = {"bought": False, "prev_setup": 0, "reset": False,
+              "cd_triggered": False}
+        if has_position:
+            st["bought"] = True
+            st["cd_triggered"] = True
+        state[family] = st
+
+    setup_buy = int(_f((td_signal or {}).get("setup_buy")) or 0)
+    cd_buy = int(_f((td_signal or {}).get("cd_buy")) or 0)
+    p = params or {}
+    entry_setup = int(_f(p.get("entry_setup")) or 9)
+    entry_cd = int(_f(p.get("entry_countdown")) or 13)
+
+    if setup_buy < st["prev_setup"]:
+        st["reset"] = True              # 计数变小 → 新信号周期
+    st["prev_setup"] = setup_buy
+    if st["reset"] and cd_buy == 0:
+        st["cd_triggered"] = False
+
+    if not (setup_buy >= entry_setup or cd_buy >= entry_cd):
+        return None                      # 没信号，门控不参与
+    if st["bought"] and not st["reset"]:
+        return f"同周期已建仓（setup_buy={setup_buy} 未重置）"
+    if st["cd_triggered"] and cd_buy >= entry_cd:
+        return f"同 countdown 周期已建仓（cd_buy={cd_buy}）"
+    return None
+
+
+def cycle_mark_bought(state: dict, family: str) -> None:
+    """建仓（含 dry-run 意图）后置位 —— 本周期内不再开仓。"""
+    st = (state or {}).get(family)
+    if st is None:
+        return
+    st["bought"] = True
+    st["cd_triggered"] = True
+
+
 def contracts_by_family(positions) -> dict[str, int]:
     """按标的统计在仓张数（张数上限判定用）。"""
     out: dict[str, int] = {}

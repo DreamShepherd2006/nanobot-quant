@@ -100,7 +100,7 @@ class OkxOptionsPutStrategy(Strategy):
         self._log(f"当前持仓 | 在仓合约数={total} 分家族={counts or '{}'} "
                   f"明细={[(x.get('inst_id'), x.get('pos')) for x in positions]}")
 
-        entries = self._entries(account, p, dry, counts, total)
+        entries = self._entries(account, p, dry, counts, total, positions)
         exits = self._exits(account, p, dry, positions)
 
         self._finish(settled, {"entries": entries, "exits": exits, "counts": counts},
@@ -148,8 +148,28 @@ class OkxOptionsPutStrategy(Strategy):
 
     # ══════════════════════ ② 入场 ══════════════════════
 
+    # ══════════════════ ⓪ 信号周期门控 ══════════════════
+
+    def _cycle_gate(self, family: str, sig: dict, p: dict,
+                    positions: list) -> "str | None":
+        """信号周期门控 —— 逻辑在 ``okx_options_strategy.cycle_gate()``。
+
+        抽成纯函数是为了**实盘与回测共用同一份决策代码**：回测 driver 直接
+        调决策函数、不经过本策略类，门控写在类里回测就看不到。
+        """
+        if not hasattr(self, "_cycle_state"):
+            self._cycle_state: dict[str, dict] = {}
+        has_pos = any(str(x.get("family") or "") == family
+                      for x in (positions or []))
+        return st.cycle_gate(self._cycle_state, family, td_signal=sig,
+                             params=p, has_position=has_pos)
+
+    def _cycle_mark_bought(self, family: str, sig: dict) -> None:
+        """建仓（含 dry-run 意图）后置位 —— 本周期内不再开仓。"""
+        st.cycle_mark_bought(getattr(self, "_cycle_state", None) or {}, family)
+
     def _entries(self, account: str, p: dict, dry: bool,
-                 counts: dict, total: int) -> list[dict]:
+                 counts: dict, total: int, positions: list) -> list[dict]:
         out: list[dict] = []
         for family in (p.get("families") or []):
             base = str(family).split("-")[0]
@@ -162,6 +182,12 @@ class OkxOptionsPutStrategy(Strategy):
                       f"cd_buy={sig.get('cd_buy')}/{p.get('entry_countdown')} "
                       f"setup_sell={sig.get('setup_sell')} cd_sell={sig.get('cd_sell')} "
                       f"price={sig.get('price')} rec={sig.get('recommendation')}")
+
+            gate = self._cycle_gate(family, sig, p, positions)
+            if gate:
+                self._log(f"{base} → 周期门控拦截：{gate}")
+                out.append({"family": base, "status": "cycle_wait", "note": gate})
+                continue
 
             dec, note = st.evaluate_entry(
                 family, td_signal=sig, params=p,
@@ -191,6 +217,8 @@ class OkxOptionsPutStrategy(Strategy):
                     total += dec.sz
                     self._log(f"{base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
             out.append(rec)
+            # 建仓（含 dry-run 意图）即置位 —— 之后同周期不再开仓
+            self._cycle_mark_bought(family, sig)
             self._record({"type": "entry", **rec})
         return out
 

@@ -287,7 +287,11 @@ class OptionsBacktestDriver:
     def _try_entry(self, ts, positions: list, fills: list,
                    cash: float) -> float:
         """TD 衰竭信号 + 选档 + 记账 —— 复用实盘 ``evaluate_entry()``。"""
-        from nanobot_quant.okx_options_strategy import evaluate_entry
+        from nanobot_quant.okx_options_strategy import (
+            cycle_gate,
+            cycle_mark_bought,
+            evaluate_entry,
+        )
 
         spot = self.data.price_of()
         if spot <= 0:
@@ -295,6 +299,21 @@ class OptionsBacktestDriver:
         sig = self._td_signal_at(ts)
         if sig is None:
             return cash
+
+        # 信号周期门控（与实盘策略同一份纯函数）—— 同一衰竭波只开一次，
+        # 避免 setup 9→10→11 连开多张把样本打虚（实测虚高 1.7 倍）。
+        # 放在选链之前：被门控拦下时不必算链。
+        if not hasattr(self, "_cycle_state"):
+            self._cycle_state: dict = {}
+        gate = cycle_gate(
+            self._cycle_state, self.family, td_signal=sig,
+            params=self._opt_params(),
+            has_position=any(getattr(p, "family", None) == self.family
+                             for p in positions))
+        if gate:
+            self.skips.append(f"周期门控：{gate}")
+            return cash
+
         chain = self.data.chain_dict_at(ts, slippage=self.slippage)
         d, note = evaluate_entry(
             self.family, td_signal=sig, params=self._opt_params(),
@@ -319,6 +338,8 @@ class OptionsBacktestDriver:
             inst_id=d.inst_id, family=self.family, strike=d.strike,
             exp_ms=_exp_ms_of(d.inst_id, ts), sz=d.sz, entry_px=sell_px,
             entry_ts=ts, entry_reason=d.entry_reason, lot_coin=lot))
+        # 建仓即置位 —— 本周期内不再开仓（与实盘同一份纯函数）
+        cycle_mark_bought(self._cycle_state, self.family)
         fills.append({
             "ts": str(ts), "inst_id": d.inst_id, "side": "sell_open", "sz": d.sz,
             "strike": d.strike, "avg_px": round(sell_px, 6),
@@ -341,7 +362,11 @@ class OptionsBacktestDriver:
             f"区间={self.start_ts or '默认'}→{self.end_ts}"
         )
         op = self._opt_params()
-        sel = dict(op.get("selector") or {})
+        # selector 不在策略参数里（它是 option_params.json 的兄弟字段）——
+        # 统一走 selector_params() 这个唯一入口，没传就用实盘磁盘配置。
+        from nanobot_quant.okx_options_select import selector_params
+
+        sel = selector_params(op)
         self._log(
             f"策略参数 entry_setup={op.get('entry_setup')} "
             f"entry_countdown={op.get('entry_countdown')} "
@@ -351,11 +376,20 @@ class OptionsBacktestDriver:
             f"IV闸门={op.get('iv_min_percentile')} 止盈={op.get('take_profit_pct')}%"
         )
         self._log(
-            f"选档 最小距离={sel.get('min_distance_pct')}% "
-            f"delta={sel.get('delta_min')}~{sel.get('delta_max')} "
-            f"到期窗={sel.get('expiry_min_days')}~{sel.get('expiry_max_days')}天 "
-            f"净收益率下限={sel.get('min_net_yield_pct')}% top={sel.get('top_n')}"
+            f"选档 最小距离={sel['min_distance_pct']}% "
+            f"delta={sel['delta_min']}~{sel['delta_max']} "
+            f"到期窗={sel['expiry_min_days']}~{sel['expiry_max_days']}天 "
+            f"净收益率下限={sel['min_net_yield_pct']}% "
+            f"top={sel['top_n']} 排序={sel['sort_by']}"
         )
+        # 两个上限同时存在时取小值 —— 不写出来的话，“设了 5 却只开 3”看着像 bug。
+        try:
+            cap = min(int(op.get("max_contracts_per_family") or 10 ** 6),
+                      int(op.get("max_contracts_total") or 10 ** 6))
+            self._log(f"生效张数上限={cap}（单家族 × ={op.get('max_contracts_per_family')}、"
+                      f"全局 × ={op.get('max_contracts_total')}，取小值）")
+        except (TypeError, ValueError):
+            pass
         self._progress("prefetch", 0, 1)
         self.data = self._build_data()
         self.data.prefetch()
