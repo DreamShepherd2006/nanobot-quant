@@ -291,3 +291,31 @@ def test_get_backtest_result_survives_render_failure(tmp_path, monkeypatch):
     out = tools_backtest.get_backtest_result("opt-y")
     assert "markdown" not in out["result"]
     assert out["result"]["kpi"]["fills"] == 21         # 结果本身完好
+
+
+# ── 生效张数上限（回测以页面参数为准）─────────────────────────────
+
+def test_max_contracts_shows_effective_and_both_inputs():
+    """「页面填 10 却只开 3」这类闷棍 —— 生效值与两个原始值都要写出来。"""
+    res = _opt_result()
+    res["max_contracts"] = {"effective": 3, "per_family": 10, "total": 3}
+    md = render_markdown(res)
+    assert "张数上限" in md
+    assert "3 张（单家族 10 / 全局 3，取小值）" in md
+
+
+def test_max_contracts_degrades_when_absent():
+    """旧记录没有该字段 —— 降级为 —，不能报错。"""
+    res = _opt_result()
+    res.pop("max_contracts", None)
+    md = render_markdown(res)
+    assert "张数上限" in md
+    assert "张数上限 | —" in md
+
+
+def test_max_contracts_tolerates_partial_values():
+    """只有生效值、原始值缺一个时仍能渲染。"""
+    res = _opt_result()
+    res["max_contracts"] = {"effective": 5, "per_family": None, "total": 3}
+    md = render_markdown(res)
+    assert "5 张（单家族 — / 全局 3，取小值）" in md

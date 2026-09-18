@@ -102,6 +102,8 @@ class OptionsBacktestDriver:
         self.data = None
         self.notes: list[str] = []
         self.skips: list[str] = []
+        self._opt_cache: Optional[dict] = None
+        self._effective_cap: Optional[int] = None
 
     # ── 日志 / 进度 ─────────────────────────────────────────
 
@@ -175,7 +177,13 @@ class OptionsBacktestDriver:
         return name, params
 
     def _opt_params(self) -> dict:
-        """实盘同一份策略参数（entry_setup / 张数上限 / selector / IV 闸门）。"""
+        """实盘同一份策略参数（entry_setup / 张数上限 / selector / IV 闸门）。
+
+        缓存 —— 该函数一次回测里会被多处调用（入场评估 / 选档 / 参数日志），
+        重复读配置既慢又会让 notes 重复。
+        """
+        if self._opt_cache is not None:
+            return self._opt_cache
         p = dict(self.opt_params or {})
         if not p:
             try:
@@ -184,6 +192,22 @@ class OptionsBacktestDriver:
                 p = _strategy_params(live_config())
             except Exception as exc:  # noqa: BLE001 —— 配置缺失不阻塞回测
                 self.notes.append(f"策略参数回退默认（读取失败：{type(exc).__name__}）")
+        # 张数上限：实盘有两个值 —— 单家族 ``max_contracts_per_family`` 与跨家族
+        # 总量 ``max_contracts_total``，策略取小者生效。回测基本只跑一个家族，
+        # 后者在此只会无谓地卡住页面设的值（实盘默认 3 → 页面填 10 也会被吃成 3）。
+        # 因此：页面上填的单家族上限更大时，把总量一并抬到同值 —— 回测以页面参数为准。
+        try:
+            per = int(p.get("max_contracts_per_family") or 0)
+            tot = int(p.get("max_contracts_total") or 0)
+            if per > 0 and per > tot:
+                self.notes.append(
+                    f"张数上限：跨家族总量 {tot or '未设'} → {per}"
+                    f"（回测单家族，跟随单家族上限）"
+                )
+                p["max_contracts_total"] = per
+        except (TypeError, ValueError):
+            pass
+        self._opt_cache = p
         return p
 
     # ── 每 bar 的三件事 ─────────────────────────────────────
@@ -386,9 +410,11 @@ class OptionsBacktestDriver:
             f"top={sel['top_n']} 排序={sel['sort_by']}"
         )
         # 两个上限同时存在时取小值 —— 不写出来的话，“设了 5 却只开 3”看着像 bug。
+        self._effective_cap = None
         try:
             cap = min(int(op.get("max_contracts_per_family") or 10 ** 6),
                       int(op.get("max_contracts_total") or 10 ** 6))
+            self._effective_cap = cap
             self._log(f"生效张数上限={cap}（单家族 × ={op.get('max_contracts_per_family')}、"
                       f"全局 × ={op.get('max_contracts_total')}，取小值）")
         except (TypeError, ValueError):
@@ -494,6 +520,12 @@ class OptionsBacktestDriver:
         out["fills"] = fills
         out["final_positions"] = open_rows
         out["skips"] = _count_skips(self.skips)
+        # 生效张数上限（页面/日志同源）—— 「填了 10 却只开 3」这类闷棍靠它显形
+        out["max_contracts"] = {
+            "effective": self._effective_cap,
+            "per_family": op.get("max_contracts_per_family"),
+            "total": op.get("max_contracts_total"),
+        }
         out["kpi"] = {
             "final_net_usd": round(net, 4),
             "roi_pct": round((net - self.initial_cash) / self.initial_cash * 100, 4),
