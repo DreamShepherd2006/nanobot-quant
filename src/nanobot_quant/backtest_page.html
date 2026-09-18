@@ -804,6 +804,14 @@ function pollOptResult(runId) {
 }
 
 // 期权成交明细（列与现货不同：合约/张数/IV/delta）
+function maxContractsTxt(res) {
+  const mc = res.max_contracts || {};
+  if (mc.effective == null) return "—";
+  const per = mc.per_family == null ? "—" : mc.per_family;
+  const tot = mc.total == null ? "—" : mc.total;
+  return `${mc.effective} 张（单家族 ${per} / 全局 ${tot}，取小值）`;
+}
+
 function optFillRow(f) {
   const sideTxt = { sell_open: "🟠 卖出开仓", sell_close: "🔵 买回平仓",
                     settle_otm: "✅ 到期作废", settle_itm: "⚠️ 被行权" }[f.side] || f.side;
@@ -842,6 +850,7 @@ function renderOptResult(res, runId) {
     ["评估 bar", `${(res.bars || {}).evaluated} / 拉取 ${(res.bars || {}).fetched}`],
     ["初始资金", `$${fmtN(res.initial_cash, 2)}`],
     ["TD 窗口", `${res.td_bars} bars`],
+    ["张数上限", maxContractsTxt(res)],
     ["滑点", `${fmtN(res.slippage_pct, 2)}%`], ["手续费率", `${(res.fee_rate || 0) * 100}%（名义）`],
     ["合约总数", `${(res.contracts || {}).in_archive} 档 · 有 IV ${(res.contracts || {}).with_iv}`],
   ];

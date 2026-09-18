@@ -132,6 +132,47 @@ def _build_data_with_fakes(d: OptionsBacktestDriver):
 
 # ── instId 到期反解（右侧取段，_UM 后缀会破坏左侧假设）────────────────
 
+# ── 张数上限：回测以页面参数为准 ─────────────────────────────
+
+def _driver_with_opt_params(params: dict) -> OptionsBacktestDriver:
+    """构造 driver 后替换 opt_params —— ``_driver()`` 已固定传入一份，不能重复传。"""
+    d = _driver()
+    d.opt_params = params
+    d._opt_cache = None      # 丢掉构造阶段可能已缓存的旧值
+    return d
+
+
+def test_opt_params_lifts_total_to_family_cap():
+    """页面填单家族 10、实盘全局 3 → 全局抬到 10。
+
+    否则 min(per_family, total) 会把用户设的值吃成 3（实盘默认值），
+    页面上「填了 10 却只开 3」无法解释。
+    """
+    d = _driver_with_opt_params({"entry_setup": 9, "max_contracts_per_family": 10,
+                                 "max_contracts_total": 3})
+    p = d._opt_params()
+    assert p["max_contracts_total"] == 10
+    assert p["max_contracts_per_family"] == 10
+    assert any("张数上限" in n for n in d.notes)
+
+
+def test_opt_params_keeps_total_when_not_smaller():
+    """单家族 1（跟随实盘）、全局 3 → 全局不动，实盘语义原样保留。"""
+    d = _driver_with_opt_params({"entry_setup": 9, "max_contracts_per_family": 1,
+                                 "max_contracts_total": 3})
+    p = d._opt_params()
+    assert p["max_contracts_total"] == 3
+    assert not any("张数上限" in n for n in d.notes)
+
+
+def test_opt_params_cached_no_duplicate_notes():
+    """多处调用只读一次配置 —— 否则 notes 会重复刷屏。"""
+    d = _driver_with_opt_params({"max_contracts_per_family": 10, "max_contracts_total": 3})
+    a, b = d._opt_params(), d._opt_params()
+    assert a is b
+    assert len([n for n in d.notes if "张数上限" in n]) == 1
+
+
 @pytest.mark.parametrize("inst,expect", [
     ("SOL-USD_UM-260918-100-P", "2026-09-18 08:00 UTC"),
     ("SOL-USD_UM-260918-100.5-P", "2026-09-18 08:00 UTC"),

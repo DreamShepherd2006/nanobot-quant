@@ -99,6 +99,21 @@ def _spot_extremes(res: dict) -> str:
     return f"最高 ${hi:g} / 最低 ${lo:g}"
 
 
+def _max_contracts_txt(res: dict) -> str:
+    """生效张数上限 —— 单家族 / 跨家族取小者。
+
+    两个值都写出来，「页面填 10 却只开了 3」这类闷棍才能一眼看出被谁卡住。
+    """
+    mc = res.get("max_contracts")
+    if not isinstance(mc, dict) or mc.get("effective") is None:
+        return "—"
+    per = mc.get("per_family")
+    tot = mc.get("total")
+    per_s = "—" if per is None else str(per)
+    tot_s = "—" if tot is None else str(tot)
+    return f"{mc['effective']} 张（单家族 {per_s} / 全局 {tot_s}，取小值）"
+
+
 def _ts_local(v: Any) -> str:
     """ISO 时间串 → 本地（Asia/Shanghai）``YYYY/M/D HH:MM:SS``，与页面显示一致。
 
@@ -223,6 +238,7 @@ def _options_md(res: dict) -> str:
         ("评估 bar", f"{bars.get('evaluated', 0)} / 拉取 {bars.get('fetched', 0)}"),
         ("初始资金", f"${_num(res.get('initial_cash'), 2)}"),
         ("TD 窗口", f"{res.get('td_bars')} bars"),
+        ("张数上限", _max_contracts_txt(res)),
         ("滑点", _pct(res.get('slippage_pct'))),
         ("手续费率", _pct((res.get('fee_rate') or 0) * 100)),
         ("止盈线", _pct(res.get('tp_pct'), 0)),
