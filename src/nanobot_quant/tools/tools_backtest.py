@@ -425,6 +425,14 @@ def get_backtest_result(run_id: str) -> dict:
     one-click copy and agents can read the summary directly.  Rendering
     failures never affect the result itself, and running/errored payloads
     get no ``markdown`` key.
+
+    Note the persisted file has two shapes and both must work:
+
+    * background runs (the common case) write
+      ``{"status": "done", "run_id": ..., "result": {...}}`` — the markdown
+      belongs on the **inner** ``result`` dict, because that is what the
+      WebUI feeds to its renderer and what agents read as the outcome.
+    * bare result dicts (older records / other callers) get it at top level.
     """
     try:
         from nanobot_quant.onchainos_cli import backtests_dir
@@ -435,17 +443,20 @@ def get_backtest_result(run_id: str) -> dict:
                 "error": f"no backtest result for run_id={run_id}",
                 "hint": "The backtest may still be running, or the run_id is wrong.",
             }
-        result = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(result, dict):
-            result.setdefault("run_id", run_id)
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload.setdefault("run_id", run_id)
+            inner = payload.get("result")
+            target = inner if isinstance(inner, dict) else payload
+            target.setdefault("run_id", run_id)
             try:
                 from nanobot_quant.backtest_markdown import render_markdown
 
-                md = render_markdown(result)
+                md = render_markdown(target)
                 if md:
-                    result["markdown"] = md
+                    target["markdown"] = md
             except Exception:  # noqa: BLE001  # markdown 只是 UX 增强
                 pass
-        return result
+        return payload
     except Exception as exc:  # noqa: BLE001
         return {"error": f"failed to read backtest result for {run_id}: {exc}"}

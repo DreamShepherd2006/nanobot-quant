@@ -186,19 +186,34 @@ def test_time_is_rendered_in_shanghai_timezone():
 
 # ── get_backtest_result 注入 ──────────────────────────────────────────
 
-def test_get_backtest_result_attaches_markdown(tmp_path, monkeypatch):
+def test_get_backtest_result_attaches_markdown_to_inner_result(tmp_path, monkeypatch):
+    """后台任务的落盘形态是 {status, run_id, result}，markdown 必须挂在内层。"""
     from nanobot_quant import onchainos_cli
     from nanobot_quant.tools import tools_backtest
 
     monkeypatch.setattr(onchainos_cli, "backtests_dir", lambda: tmp_path)
-    payload = _opt_result()
+    payload = {"status": "done", "run_id": "opt-x", "result": _opt_result()}
     (tmp_path / "opt-x.json").write_text(json.dumps(payload), encoding="utf-8")
 
     out = tools_backtest.get_backtest_result("opt-x")
-    assert out["run_id"] == "opt-x"          # 落盘 payload 里没有 run_id，由读取方补
-    assert out["markdown"].startswith("## 🟤 期权回测")
-    # 原字段原样保留（不被 markdown 改写）
-    assert out["kpi"]["roi_pct"] == 1.3633
+    assert out["status"] == "done"
+    # 前端把 out["result"] 直接喂给渲染器 —— markdown 就在这一层
+    assert out["result"]["markdown"].startswith("## 🟤 期权回测")
+    assert out["result"]["kpi"]["roi_pct"] == 1.3633   # 原字段不被改写
+    assert "markdown" not in out                       # 外层不加，避免冗余
+
+
+def test_get_backtest_result_handles_bare_result(tmp_path, monkeypatch):
+    """裸 result 形态（旧记录 / 其他调用方）也要能渲染。"""
+    from nanobot_quant import onchainos_cli
+    from nanobot_quant.tools import tools_backtest
+
+    monkeypatch.setattr(onchainos_cli, "backtests_dir", lambda: tmp_path)
+    (tmp_path / "bare.json").write_text(json.dumps(_spot_result()), encoding="utf-8")
+
+    out = tools_backtest.get_backtest_result("bare")
+    assert out["run_id"] == "bare"
+    assert out["markdown"].startswith("## 📈 现货回测")
 
 
 def test_get_backtest_result_skips_markdown_when_running(tmp_path, monkeypatch):
@@ -207,7 +222,8 @@ def test_get_backtest_result_skips_markdown_when_running(tmp_path, monkeypatch):
 
     monkeypatch.setattr(onchainos_cli, "backtests_dir", lambda: tmp_path)
     (tmp_path / "run1.json").write_text(
-        json.dumps({"status": "running", "progress": {"pct": 10.0}}), encoding="utf-8")
+        json.dumps({"status": "running", "run_id": "run1",
+                    "progress": {"pct": 10.0}}), encoding="utf-8")
 
     out = tools_backtest.get_backtest_result("run1")
     assert "markdown" not in out
@@ -222,8 +238,10 @@ def test_get_backtest_result_survives_render_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(onchainos_cli, "backtests_dir", lambda: tmp_path)
     monkeypatch.setattr(bm, "render_markdown",
                         lambda _r: (_ for _ in ()).throw(RuntimeError("boom")))
-    (tmp_path / "opt-y.json").write_text(json.dumps(_opt_result()), encoding="utf-8")
+    (tmp_path / "opt-y.json").write_text(
+        json.dumps({"status": "done", "run_id": "opt-y", "result": _opt_result()}),
+        encoding="utf-8")
 
     out = tools_backtest.get_backtest_result("opt-y")
-    assert "markdown" not in out
-    assert out["kpi"]["fills"] == 21         # 结果本身完好
+    assert "markdown" not in out["result"]
+    assert out["result"]["kpi"]["fills"] == 21         # 结果本身完好
