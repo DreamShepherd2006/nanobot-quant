@@ -419,6 +419,12 @@ def get_backtest_result(run_id: str) -> dict:
 
     Reads ``{data_root}/legion/backtests/<run_id>.json``.  Returns a hint
     when the file is not there yet (still running / never started).
+
+    Also attaches a ``markdown`` field with the same outcome rendered as
+    markdown (``nanobot_quant.backtest_markdown``) so the WebUI can offer a
+    one-click copy and agents can read the summary directly.  Rendering
+    failures never affect the result itself, and running/errored payloads
+    get no ``markdown`` key.
     """
     try:
         from nanobot_quant.onchainos_cli import backtests_dir
@@ -429,6 +435,17 @@ def get_backtest_result(run_id: str) -> dict:
                 "error": f"no backtest result for run_id={run_id}",
                 "hint": "The backtest may still be running, or the run_id is wrong.",
             }
-        return json.loads(p.read_text(encoding="utf-8"))
+        result = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(result, dict):
+            result.setdefault("run_id", run_id)
+            try:
+                from nanobot_quant.backtest_markdown import render_markdown
+
+                md = render_markdown(result)
+                if md:
+                    result["markdown"] = md
+            except Exception:  # noqa: BLE001  # markdown 只是 UX 增强
+                pass
+        return result
     except Exception as exc:  # noqa: BLE001
         return {"error": f"failed to read backtest result for {run_id}: {exc}"}
