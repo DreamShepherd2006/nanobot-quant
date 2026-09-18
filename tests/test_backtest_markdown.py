@@ -30,16 +30,16 @@ def _opt_result() -> dict:
         },
         "fills": [
             {"ts": "2026-08-23T13:15:00+00:00", "inst_id": "SOL-USD_UM-260828-88-P",
-             "side": "sell_open", "sz": 1, "strike": 88, "avg_px": 1.4498,
-             "fee_usd": 0.0026, "iv": 79.4, "delta": -0.262, "days": 5.0,
-             "net_yield_pct": 1.5, "reason": "buy9(setup_buy=9)"},
+             "side": "sell_open", "sz": 1, "strike": 88.0, "avg_px": 1.4498,
+             "fee_usd": 0.0026, "iv": 0.7942063020062438, "delta": -0.2620272030831562,
+             "days": 5.0, "net_yield_pct": 1.5, "reason": "buy9(setup_buy=9)"},
             {"ts": "2026-09-16T16:00:00+00:00", "inst_id": "SOL-USD_UM-260916-97-P",
-             "side": "settle_itm", "sz": 1, "strike": 97, "settle_px": 96.61,
+             "side": "settle_itm", "sz": 1, "strike": 97.0, "settle_px": 96.61,
              "payout_usd": 0.039, "premium_usd": 0.0628, "pnl_usd": 0.0428,
              "reason": "到期被行权"},
         ],
         "final_positions": [
-            {"inst_id": "SOL-USD_UM-260918-94-P", "strike": 94, "sz": 1,
+            {"inst_id": "SOL-USD_UM-260918-94-P", "strike": 94.0, "sz": 1,
              "entry_px": 0.890335, "mark_px": 0.002683, "collateral_usd": 9.4,
              "mark_value_usd": 0.000268, "pnl_pct": 99.7},
         ],
@@ -182,6 +182,52 @@ def test_time_is_rendered_in_shanghai_timezone():
     md = render_markdown(_opt_result())
     # 2026-08-23T13:15Z → 北京 21:15
     assert "2026/8/23 21:15:00" in md
+
+
+def test_iv_shown_as_percent_and_strike_without_trailing_zero():
+    """IV 内部是小数（0.794）、展示要 ×100；strike 88.0 不该带 .0 尾巴。"""
+    md = render_markdown(_opt_result())
+    assert "| 79.4% |" in md          # IV 0.7942… → 79.4%
+    assert "| 88 |" in md            # strike 88.0 → 88
+    assert "| 88.0 |" not in md
+    assert "| 0.8% |" not in md      # 回归：曾经把 0.794 当成 0.8%
+
+
+def test_missing_numbers_render_dash_not_dash_percent():
+    """缺值应是 ``—``，不能出现 ``—%`` 这种拼接残留。"""
+    res = _opt_result()
+    res["tp_pct"] = None
+    res["fills"][1]["iv"] = None
+    md = render_markdown(res)
+    assert "| 止盈线 | — |" in md
+    assert "—%" not in md
+
+
+def test_archive_summary_line_is_not_duplicated():
+    """原始 notes 自带的「归档共 N 天」应与我们生成的摘要合并成一条。"""
+    md = render_markdown(_opt_result())
+    assert md.count("归档") == 1
+    assert "归档 2 天：2026-08-17 ~ 2026-08-18（0.2 MB）" in md
+
+
+def test_spot_price_shows_level_and_per_fill_price():
+    """只写标的代码看不出价格水平 —— 区间与每笔现货价都要给。"""
+    res = _opt_result()
+    res["spot_range"] = {"first": 100.79, "last": 106.53,
+                         "high": 107.2, "low": 98.4}
+    res["fills"][0]["spot"] = 100.79
+    md = render_markdown(res)
+    assert "SOL-USDT（$100.79 → $106.53）" in md
+    assert "最高 $107.2 / 最低 $98.4" in md
+    assert "| 现货价 |" in md
+    assert "| 100.79 |" in md
+
+def test_spot_fields_degrade_when_absent():
+    """缺现货数据时列仍在、值为 —（不报错、不整段消失）。"""
+    md = render_markdown(_opt_result())
+    assert "| 现货区间 | — |" in md
+    assert "现货价" in md
+    assert "| SOL-USDT（" not in md     # 无 spot_range 时不拼价格
 
 
 # ── get_backtest_result 注入 ──────────────────────────────────────────

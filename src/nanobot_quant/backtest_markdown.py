@@ -46,6 +46,59 @@ def _num(v: Any, nd: int = 4, suffix: str = "") -> str:
         return _esc(v)
 
 
+def _pct(v: Any, nd: int = 2) -> str:
+    """百分比显示。缺值返回 ``—`` 而不是 ``—%``（调用方可能传 None）。"""
+    if v is None or v == "":
+        return "—"
+    try:
+        return f"{float(v):.{nd}f}%"
+    except (TypeError, ValueError):
+        return _esc(v)
+
+
+def _iv(v: Any) -> str:
+    """IV 内部是小数（0.794 = 79.4%），与页面显示口径对齐。"""
+    if v is None or v == "":
+        return "—"
+    try:
+        return f"{float(v) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return _esc(v)
+
+
+def _intish(v: Any) -> str:
+    """88.0 → 88，88.5 → 88.5。Strike 这类不该带 ``.0`` 尾巴。"""
+    if v is None or v == "":
+        return "—"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return _esc(v)
+    return str(int(f)) if f == int(f) else f"{f:g}"
+
+
+def _spot_ref(res: dict) -> str:
+    """``SOL-USDT（$100.79 → $106.53）`` —— 只给标的代码看不出价格水平。"""
+    ref = _esc(res.get("ref_inst") or "—")
+    rng = res.get("spot_range")
+    if not isinstance(rng, dict):
+        return ref
+    first, last = rng.get("first"), rng.get("last")
+    if first is None or last is None:
+        return ref
+    return f"{ref}（${first:g} → ${last:g}）"
+
+
+def _spot_extremes(res: dict) -> str:
+    rng = res.get("spot_range")
+    if not isinstance(rng, dict):
+        return "—"
+    hi, lo = rng.get("high"), rng.get("low")
+    if hi is None or lo is None:
+        return "—"
+    return f"最高 ${hi:g} / 最低 ${lo:g}"
+
+
 def _ts_local(v: Any) -> str:
     """ISO 时间串 → 本地（Asia/Shanghai）``YYYY/M/D HH:MM:SS``，与页面显示一致。
 
@@ -80,6 +133,8 @@ def _kv_table(pairs: list[tuple[str, Any]]) -> str:
 
 
 _ARCHIVE_RE = re.compile(r"^\[\d+/\d+\]\s+\S+\s+→\s+(\S+)\s+\(([\d.]+)\s*MB\)\s*$")
+# 原始 notes 里的归档汇总行（我们自己会生成等效摘要，保留会重复）
+_ARCHIVE_SUMMARY_RE = re.compile(r"^归档共\s*\d+\s*天")
 
 
 # SKIP 原因键 → 展示名。与 ``backtest_page.html`` 的 ``SKIP_LABELS`` 保持同步。
@@ -123,6 +178,7 @@ def _compress_notes(notes: list[Any]) -> list[str]:
             continue
         if s:
             kept.append(s)
+    kept = [k for k in kept if not _ARCHIVE_SUMMARY_RE.match(k)]
     if days:
         kept.insert(
             0,
@@ -161,21 +217,22 @@ def _options_md(res: dict) -> str:
     md.append(_kv_table([
         ("标的家族", res.get("family")),
         ("周期", f"{res.get('timestep')}（bar={res.get('bar')}）"),
-        ("参考现货", res.get("ref_inst")),
+        ("参考现货", _spot_ref(res)),
+        ("现货区间", _spot_extremes(res)),
         ("区间", f"{_ts_local(res.get('start_ts'))} → {_ts_local(res.get('end_ts'))}"),
         ("评估 bar", f"{bars.get('evaluated', 0)} / 拉取 {bars.get('fetched', 0)}"),
         ("初始资金", f"${_num(res.get('initial_cash'), 2)}"),
         ("TD 窗口", f"{res.get('td_bars')} bars"),
-        ("滑点", f"{_num(res.get('slippage_pct'), 2)}%"),
-        ("手续费率", f"{_num((res.get('fee_rate') or 0) * 100, 2)}%（名义）"),
-        ("止盈线", f"{_num(res.get('tp_pct'), 0)}%"),
+        ("滑点", _pct(res.get('slippage_pct'))),
+        ("手续费率", _pct((res.get('fee_rate') or 0) * 100)),
+        ("止盈线", _pct(res.get('tp_pct'), 0)),
         ("合约总数", f"{contracts.get('in_archive', 0)} 档 · 有 IV {contracts.get('with_iv', 0)}"),
     ]))
 
     md.append("\n**📊 结果**\n")
     md.append(_kv_table([
         ("期末净值", f"${_num(kpi.get('final_net_usd'), 4)}"),
-        ("ROI", f"{_num(kpi.get('roi_pct'), 4, '%')}"),
+        ("ROI", _pct(kpi.get('roi_pct'), 4)),
         ("权利金收入", f"${_num(kpi.get('premium_income_usd'), 4)}"),
         ("赔付支出", f"${_num(kpi.get('payout_usd'), 4)}"),
         ("期末持仓市值", f"${_num(kpi.get('open_mark_value_usd'), 4)}（负债，已从净值扣减）"),
@@ -188,24 +245,24 @@ def _options_md(res: dict) -> str:
     for f in fills:
         rows.append([
             _ts_local(f.get("ts")), f.get("inst_id", ""), _opt_side(f),
-            f.get("sz", ""), f.get("strike", ""),
+            f.get("sz", ""), _intish(f.get("strike")), _num(f.get("spot"), 2),
             _num(f.get("avg_px") or f.get("strategy_px"), 6),
             _num(f.get("pnl_usd"), 4),
-            _num(f.get("iv"), 1, "%"),
+            _iv(f.get("iv")),
             _num(f.get("delta"), 4),
             f.get("reason", ""),
         ])
     md.append(_table(
-        ["时间", "合约", "方向", "张数", "Strike", "价（每名义币）", "盈亏", "IV", "Delta", "原因"],
+        ["时间", "合约", "方向", "张数", "Strike", "现货价", "价（每名义币）", "盈亏", "IV", "Delta", "原因"],
         rows,
     ))
 
     md.append(f"\n**📌 期末未平仓（{len(final_positions)}）**\n")
     md.append(_table(
         ["合约", "Strike", "张数", "开仓价", "期末 mark", "担保额", "浮盈%"],
-        [[p.get("inst_id", ""), p.get("strike", ""), p.get("sz", ""),
+        [[p.get("inst_id", ""), _intish(p.get("strike")), p.get("sz", ""),
           _num(p.get("entry_px"), 6), _num(p.get("mark_px"), 6),
-          f"${_num(p.get('collateral_usd'), 2)}", _num(p.get("pnl_pct"), 2, "%")]
+          f"${_num(p.get('collateral_usd'), 2)}", _pct(p.get("pnl_pct"))]
          for p in final_positions],
     ))
 
@@ -251,20 +308,20 @@ def _spot_md(res: dict) -> str:
         ("出场 setup", cfg.get("exit_setup")),
         ("出场 countdown", cfg.get("exit_countdown")),
         ("最短持有期", cfg.get("min_hold_bars")),
-        ("止损", _num((cfg.get("stop_loss_pct") or 0) * 100, 2, "%")),
-        ("止盈", _num((cfg.get("take_profit_pct") or 0) * 100, 2, "%")),
-        ("滑点", _num((cfg.get("slippage") if cfg.get("slippage") is not None else None), 2, "%")),
-        ("手续费率", _num((cfg.get("fee_rate") or 0) * 100, 2, "%")),
+        ("止损", _pct((cfg.get("stop_loss_pct") or 0) * 100)),
+        ("止盈", _pct((cfg.get("take_profit_pct") or 0) * 100)),
+        ("滑点", _pct(cfg.get("slippage"))),
+        ("手续费率", _pct((cfg.get("fee_rate") or 0) * 100)),
     ]))
 
     md.append("\n**📊 结果**\n")
     md.append(_kv_table([
         ("期末净值", _num(res.get("final_net"), 4)),
-        ("ROI", _num((res.get("roi") or 0) * 100, 4, "%")),
+        ("ROI", _pct((res.get("roi") or 0) * 100, 4)),
         ("成交笔数", res.get("fills", 0)),
         ("单边周转率", _num(cap.get("turnover"), 2)),
         ("双边周转率", _num(cap.get("turnover_two_side"), 2)),
-        ("平均资金利用率", _num((cap.get("utilization") or 0) * 100, 2, "%")),
+        ("平均资金利用率", _pct((cap.get("utilization") or 0) * 100)),
         ("总资金", _num(cap.get("total_funds"), 2)),
     ]))
 

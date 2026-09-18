@@ -230,6 +230,7 @@ class OptionsBacktestDriver:
             fills.append({
                 "ts": str(ts), "inst_id": p.inst_id, "side": "settle_itm" if itm else "settle_otm",
                 "sz": p.sz, "strike": p.strike, "settle_px": settle,
+                "spot": round(self.data.price_of() or 0.0, 4),
                 "payout_usd": round(payout, 6),
                 "premium_usd": round(p.entry_px * p.lot_coin * p.sz, 6),
                 "pnl_usd": round(p.entry_px * p.lot_coin * p.sz - payout, 6),
@@ -267,6 +268,7 @@ class OptionsBacktestDriver:
                 "ts": str(ts), "inst_id": p.inst_id, "side": "close",
                 "sz": e.sz, "strike": p.strike, "strategy_px": p.entry_px,
                 "avg_px": round(buy_px, 6), "fee_usd": round(fee, 6),
+                "spot": round(self.data.price_of() or 0.0, 4),
                 "reason": f"止盈（回落 {e.drop_pct:.1f}% ≥ {self.tp_pct:g}%）",
             })
             done.append(e.inst_id)
@@ -344,6 +346,7 @@ class OptionsBacktestDriver:
             "ts": str(ts), "inst_id": d.inst_id, "side": "sell_open", "sz": d.sz,
             "strike": d.strike, "avg_px": round(sell_px, 6),
             "fee_usd": round(fee, 6),
+            "spot": round(spot, 4),
             "iv": d.iv, "delta": d.delta, "days": d.days,
             "net_yield_pct": d.net_yield_pct,
             "reason": d.entry_reason,
@@ -415,6 +418,13 @@ class OptionsBacktestDriver:
             self._log(f"失败：没有标的 K 线 notes={out['notes']}")
             return out
 
+        stats = None
+        try:
+            stats = self.data.window_spot_stats()
+        except Exception:  # noqa: BLE001  # 现货统计只是报告增强
+            stats = None
+        if stats:
+            out["spot_range"] = {k: round(v, 4) for k, v in stats.items()}
         idx = self.data.start_idx
         positions: list[SimPosition] = []
         fills: list[dict] = []
@@ -427,6 +437,8 @@ class OptionsBacktestDriver:
             f"({out['start_ts']} → {out['end_ts']}) "
             f"合约={out['contracts']['in_archive']} 档、有IV={out['contracts']['with_iv']} "
             f"参考现货={self.data.ref_inst}"
+            + (f"（{out['spot_range']['first']:g} → {out['spot_range']['last']:g}）"
+               if out.get("spot_range") else "")
         )
         for n in self.data.notes:
             self._log(f"数据备注：{n}")

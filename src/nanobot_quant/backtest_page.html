@@ -812,6 +812,7 @@ function optFillRow(f) {
   const pnl = f.pnl_usd === undefined || f.pnl_usd === null ? "—" : fmtN(f.pnl_usd, 4);
   return `<tr><td>${fmtTs(f.ts)}</td><td>${f.inst_id || "—"}</td>` +
     `<td>${sideTxt}</td><td>${f.sz}</td><td>${f.strike || "—"}</td>` +
+    `<td>${f.spot !== undefined && f.spot !== null ? fmtN(f.spot, 2) : "—"}</td>` +
     `<td>${px}</td><td>${pnl}</td>` +
     `<td>${f.iv ? (f.iv * 100).toFixed(1) + "%" : "—"}</td>` +
     `<td>${f.delta !== undefined && f.delta !== null ? f.delta.toFixed(4) : "—"}</td>` +
@@ -828,9 +829,15 @@ function renderOptResult(res, runId) {
 
   // ① 生效参数（先看参数再看结论 —— 现货回测同惯例）
   html += `<h3 style="font-size:.95em;margin:10px 0 4px;">📋 回测参数（实际生效）</h3><table><tbody>`;
+  const sr = res.spot_range || {};
+  const spotTxt = sr.first != null && sr.last != null
+    ? `${res.ref_inst}（$${fmtN(sr.first, 2)} → $${fmtN(sr.last, 2)}）` : (res.ref_inst || "—");
+  const spotRange = sr.high != null && sr.low != null
+    ? `最高 $${fmtN(sr.high, 2)} / 最低 $${fmtN(sr.low, 2)}` : "—";
   const p = [
     ["标的家族", res.family], ["周期", res.timestep + `（bar=${res.bar}）`],
-    ["参考现货", res.ref_inst],
+    ["参考现货", spotTxt],
+    ["现货区间", spotRange],
     ["区间", `${fmtTs(res.start_ts)} → ${fmtTs(res.end_ts)}`],
     ["评估 bar", `${(res.bars || {}).evaluated} / 拉取 ${(res.bars || {}).fetched}`],
     ["初始资金", `$${fmtN(res.initial_cash, 2)}`],
@@ -858,7 +865,7 @@ function renderOptResult(res, runId) {
   // ③ 成交明细
   html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📒 成交明细（${(res.fills || []).length}）</h3>`;
   html += rows
-    ? `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>张数</th><th>Strike</th><th>价（每名义币）</th><th>盈亏</th><th>IV</th><th>Delta</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    ? `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>张数</th><th>Strike</th><th>现货价</th><th>价（每名义币）</th><th>盈亏</th><th>IV</th><th>Delta</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`
     : `<div class="empty">本次未产生任何成交</div>`;
 
   // ④ 期末未平仓
