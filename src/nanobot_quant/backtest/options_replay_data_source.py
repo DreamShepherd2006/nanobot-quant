@@ -201,6 +201,30 @@ class OptionsReplayDataSource:
         j = bisect.bisect_right(self._spot_ts, int(ts_ms)) - 1
         return self._spot_px[j] if j >= 0 else None
 
+    def window_spot_stats(self) -> Optional[dict]:
+        """评估区间的标的价统计：首 / 尾 / 最高 / 最低。
+
+        回测报告里只写 ``SOL-USDT`` 这种标的代码，读的人无从判断那些 put
+        到底虚值多少 —— 价格水平必须随报告一起给出。
+        """
+        u = self._underlying
+        if u is None or u.empty or not self._bar_times:
+            return None
+        try:
+            start, end = self._bar_times[self.start_idx], self._bar_times[-1]
+        except (AttributeError, IndexError):
+            return None
+        w = u.loc[start:end]
+        if w.empty:
+            return None
+        out = {"first": float(w["close"].iloc[0]),
+               "last": float(w["close"].iloc[-1])}
+        if "high" in w.columns:
+            out["high"] = float(w["high"].max())
+        if "low" in w.columns:
+            out["low"] = float(w["low"].min())
+        return out
+
     # ── 数据预拉 ──────────────────────────────────────────────
 
     def _default_fetch(self, inst_id: str, bar: str, start_ts: int,

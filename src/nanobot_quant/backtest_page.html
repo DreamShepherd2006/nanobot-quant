@@ -78,6 +78,21 @@
   .ov-item label { font-size:.76em; color:#64748b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .ov-item input, .ov-item select { font-size:.84em; padding:3px 6px; border:1px solid #cbd5e1; border-radius:4px; width:100%; box-sizing:border-box; }
   code { background:#eef; padding:1px 5px; border-radius:3px; font-size:.85em; }
+
+/* 回测结果 ─ 📋 复制 Markdown（现货 / 期权共用） */
+.md-bar { display:flex; align-items:center; gap:10px; margin:0 0 10px; }
+.md-btn { cursor:pointer; font:inherit; font-size:.85em; padding:5px 12px; border-radius:6px;
+  border:1px solid #d0d7de; background:#f6f8fa; }
+.md-btn:hover { background:#eef1f4; }
+.md-hint { font-size:.78em; color:#999; }
+.md-fallback { position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.45);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; }
+.md-fallback-head { width:min(900px,92vw); box-sizing:border-box; background:#fff; padding:10px 14px;
+  border-radius:6px 6px 0 0; font-size:.85em; display:flex; align-items:center;
+  justify-content:space-between; gap:16px; }
+.md-fallback textarea { width:min(900px,92vw); height:60vh; box-sizing:border-box; padding:10px;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.78em; white-space:pre;
+  border:1px solid #d0d7de; border-top:none; border-radius:0 0 6px 6px; resize:none; }
 </style>
 </head>
 <body>
@@ -523,7 +538,7 @@ function renderResult(res, runId) {
   const roiCls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
   const fills = res.fills_detail || [];
   const rows = fills.map(fillRow).join("");
-  box.innerHTML = `
+  box.innerHTML = mdButton(res, runId) + `
     ${paramsBox(res)}
     <div class="kpis">
       <div class="kpi"><div class="v">${fmtN(res.initial_total, 2)} USDT</div><div class="k">初始资金（${res.batches} slot × ${fmtN(res.initial_quote, 2)}）</div></div>
@@ -797,6 +812,7 @@ function optFillRow(f) {
   const pnl = f.pnl_usd === undefined || f.pnl_usd === null ? "—" : fmtN(f.pnl_usd, 4);
   return `<tr><td>${fmtTs(f.ts)}</td><td>${f.inst_id || "—"}</td>` +
     `<td>${sideTxt}</td><td>${f.sz}</td><td>${f.strike || "—"}</td>` +
+    `<td>${f.spot !== undefined && f.spot !== null ? fmtN(f.spot, 2) : "—"}</td>` +
     `<td>${px}</td><td>${pnl}</td>` +
     `<td>${f.iv ? (f.iv * 100).toFixed(1) + "%" : "—"}</td>` +
     `<td>${f.delta !== undefined && f.delta !== null ? f.delta.toFixed(4) : "—"}</td>` +
@@ -809,13 +825,19 @@ function renderOptResult(res, runId) {
   }
   const k = res.kpi || {};
   const rows = (res.fills || []).map(optFillRow).join("");
-  let html = `<div style="font-size:.82em;color:#888;margin-bottom:8px;">run_id=${runId}</div>`;
+  let html = mdButton(res, runId) + `<div style="font-size:.82em;color:#888;margin-bottom:8px;">run_id=${runId}</div>`;
 
   // ① 生效参数（先看参数再看结论 —— 现货回测同惯例）
   html += `<h3 style="font-size:.95em;margin:10px 0 4px;">📋 回测参数（实际生效）</h3><table><tbody>`;
+  const sr = res.spot_range || {};
+  const spotTxt = sr.first != null && sr.last != null
+    ? `${res.ref_inst}（$${fmtN(sr.first, 2)} → $${fmtN(sr.last, 2)}）` : (res.ref_inst || "—");
+  const spotRange = sr.high != null && sr.low != null
+    ? `最高 $${fmtN(sr.high, 2)} / 最低 $${fmtN(sr.low, 2)}` : "—";
   const p = [
     ["标的家族", res.family], ["周期", res.timestep + `（bar=${res.bar}）`],
-    ["参考现货", res.ref_inst],
+    ["参考现货", spotTxt],
+    ["现货区间", spotRange],
     ["区间", `${fmtTs(res.start_ts)} → ${fmtTs(res.end_ts)}`],
     ["评估 bar", `${(res.bars || {}).evaluated} / 拉取 ${(res.bars || {}).fetched}`],
     ["初始资金", `$${fmtN(res.initial_cash, 2)}`],
@@ -843,7 +865,7 @@ function renderOptResult(res, runId) {
   // ③ 成交明细
   html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📒 成交明细（${(res.fills || []).length}）</h3>`;
   html += rows
-    ? `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>张数</th><th>Strike</th><th>价（每名义币）</th><th>盈亏</th><th>IV</th><th>Delta</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    ? `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>合约</th><th>方向</th><th>张数</th><th>Strike</th><th>现货价</th><th>价（每名义币）</th><th>盈亏</th><th>IV</th><th>Delta</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`
     : `<div class="empty">本次未产生任何成交</div>`;
 
   // ④ 期末未平仓
@@ -919,6 +941,57 @@ async function loadOptRun(runId) {
     optMsg("❌ " + (r.error || "读取失败"), "err");
   }
 }
+
+// ── 📋 回测结果 Markdown 一键复制（现货 / 期权共用）────────────────────
+// markdown 由后端 render_markdown() 生成、随结果 JSON 一起下发（res.markdown）。
+// 后端没给（旧记录 / 仍在运行）就不渲染按钮。
+const __mdCache = {};
+
+function mdButton(res, runId) {
+  if (!res || !res.markdown) return "";
+  __mdCache[runId] = res.markdown;
+  return '<div class="md-bar">' +
+    `<button type="button" class="md-btn" data-run-id="${escapeHtml(String(runId))}">📋 复制 Markdown</button>` +
+    '<span class="md-hint">点一下复制，直接粘给助手即可</span></div>';
+}
+
+function mdToast(text, kind) {
+  // 两个 tab 各有一个 banner，都写一遍 —— 谁可见谁生效，无副作用
+  try { setMsg(text, kind); } catch (_) {}
+  try { optMsg(text, kind); } catch (_) {}
+}
+
+function showMdFallback(md) {
+  let d = document.getElementById("md-fallback");
+  if (!d) {
+    d = document.createElement("div");
+    d.id = "md-fallback";
+    d.className = "md-fallback";
+    d.innerHTML =
+      '<div class="md-fallback-head"><span>👇 浏览器未授权剪贴板，请手动全选复制（Ctrl/Cmd + C）</span>' +
+      '<button type="button" id="md-fallback-close">关闭</button></div>' +
+      '<textarea id="md-fallback-ta" readonly spellcheck="false"></textarea>';
+    document.body.appendChild(d);
+    d.querySelector("#md-fallback-close").addEventListener("click", () => d.remove());
+  }
+  const ta = d.querySelector("#md-fallback-ta");
+  ta.value = md;
+  ta.focus();
+  ta.select();
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest(".md-btn") : null;
+  if (!btn) return;
+  const md = __mdCache[btn.dataset.runId] || "";
+  if (!md) { mdToast("⚠️ 该结果没有 markdown（旧记录或仍在运行）", "err"); return; }
+  try {
+    await navigator.clipboard.writeText(md);
+    mdToast("✅ 已复制 Markdown，直接粘给助手即可", "ok");
+  } catch (err) {
+    showMdFallback(md);
+  }
+});
 </script>
 </body>
 </html>
