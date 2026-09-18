@@ -53,7 +53,7 @@ RUN pip install --break-system-packages \
 RUN echo "[bust=52]" && pip install --break-system-packages \
         git+https://github.com/DreamShepherd2006/nanobot-legion.git@fdecf582 \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @fdecf582 (upstream staging — PR #51 业务管理 chat 分组重排, bust=48)"
+    && echo "✅ nanobot-legion @fdecf582 (upstream staging — PR #52 业务 chat 分组重排, bust=52)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
@@ -86,11 +86,11 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=594]" && pip install --break-system-packages \
+RUN echo "[bust=602]" && pip install --break-system-packages \
         'mcp<2' \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@ac8ad5e \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@8c953c0 \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @ac8ad5e (upstream main — 期权回测数据层改走官方归档成交 + IV 曲面重定价, PR #360; bust=592) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @8c953c0 (upstream main — 回测 markdown 一键复制 + 报告补现货价格, PR #365; bust=602) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
