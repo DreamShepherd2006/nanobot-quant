@@ -119,7 +119,7 @@ def select_puts(family: str, base_px: float | None = None,
       expiry_mode, expiry_locked_ms}。
     """
     from . import okx_options_data as od
-    from .okx_options_trade import OPTION_FEE_RATE_TAKER
+    from .okx_options_trade import OPTION_FEE_CAP_RATIO, OPTION_FEE_RATE_TAKER
 
     sel = selector_params(selector)
     lo, hi = sel["expiry_min_days"], sel["expiry_max_days"]
@@ -184,7 +184,9 @@ def select_puts(family: str, base_px: float | None = None,
                 continue
             notional = strike * lot
             prem = bid * lot
-            fee = notional * f_rate
+            # 官方口径：Min(名义费率, 7% 权利金) —— 薄权利金合约受 cap 保护，
+            # 不套 cap 会系统性压低这类合约的净收益率排名
+            fee = min(notional * f_rate, OPTION_FEE_CAP_RATIO * prem)
             net = prem - fee
             if net <= 0:                          # 扣手续费后无利可图（薄权利金）
                 filtered["net"] += 1

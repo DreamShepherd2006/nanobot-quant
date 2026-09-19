@@ -286,7 +286,7 @@ class OptionsBacktestDriver:
             if p is None:
                 continue
             buy_px = e.mark_px * (1 + self.slippage)
-            fee = self._option_fee(p.strike, p.lot_coin, e.sz)
+            fee = self._option_fee(p.strike, p.lot_coin, e.sz, premium_px=buy_px)
             cash -= buy_px * p.lot_coin * e.sz + fee
             fills.append({
                 "ts": str(ts), "inst_id": p.inst_id, "side": "close",
@@ -300,15 +300,24 @@ class OptionsBacktestDriver:
             positions[:] = [p for p in positions if p.inst_id not in done]
         return cash
 
-    def _option_fee(self, strike: float, lot: float, sz: int) -> float:
-        """期权手续费：**按名义价值**收，不是按权利金比例。
+    def _option_fee(self, strike: float, lot: float, sz: int,
+                    premium_px: float | None = None) -> float:
+        """期权手续费 = Min(名义价值 × fee_rate, 7% × 权利金)。
 
         OKX 期权 taker 费率作用于名义（strike × 面值 × 张数）—— 实盘
-        ``okx_options_trade.option_fee_usd()`` 就是这个口径。回测原先写成
+        ``okx_options_trade.option_fee_est()`` 就是这个口径。回测原先写成
         ``权利金 × fee_rate``，与实盘差 strike/premium 倍（实测 98-P 差 81 倍），
         手续费被系统性少扣、PnL 高估。
+
+        ``premium_px`` 传入时再套官方 cap（7% 权利金）——薄权利金合约受其保护，
+        不套会让回测扣费高于实盘、ROI 被低估（与实盘口径同步）。
         """
-        return abs(float(strike) * float(lot) * int(sz)) * self.fee_rate
+        from nanobot_quant.okx_options_trade import OPTION_FEE_CAP_RATIO
+        fee = abs(float(strike) * float(lot) * int(sz)) * self.fee_rate
+        if premium_px is not None:
+            premium = abs(float(premium_px)) * float(lot) * int(sz)
+            fee = min(fee, OPTION_FEE_CAP_RATIO * premium)
+        return fee
 
     def _try_entry(self, ts, positions: list, fills: list,
                    cash: float) -> float:
@@ -357,7 +366,7 @@ class OptionsBacktestDriver:
                 f"担保不足：需 {collateral:.2f} + 已占 {occupied:.2f} > 可用 {cash:.2f}")
             return cash
         sell_px = d.bid                     # 已是 mark × (1 − 滑点)，选档成交同口径
-        fee = self._option_fee(d.strike, lot, d.sz)
+        fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px)
         premium = sell_px * lot * d.sz - fee
         cash += premium
         positions.append(SimPosition(

@@ -1255,9 +1255,27 @@ def test_fee_usd_fields_normalises_ccy():
     assert f["fee"] == 0.0 and f["fee_usd"] == 0.0
 
 
+def test_option_fee_est_applies_seven_pct_cap():
+    """官方规则：手续费 = Min(名义价值 × 费率, 7% × 权利金)。
+
+    2026-09-19 实盘 94-P（普通用户 0.03%）验证：名义费 0.00315 > 7%×0.00175，
+    账单实收恰为 cap 值 0.00175 —— 这个断言就是那把尺子。
+    """
+    # 名义 94×0.1×0.03% = 0.00282 > 7%×(0.25×0.1) = 0.00175 → 取 cap
+    assert ot.option_fee_est(94, 0.1, 1, premium_px=0.25) == pytest.approx(0.00175, rel=1e-3)
+    # 权利金厚 → 不触发 cap，回到名义口径
+    assert ot.option_fee_est(95, 0.1, 1, premium_px=5.0) == pytest.approx(0.00285, rel=1e-9)
+    # 不传权利金 → 纯名义口径（向后兼容，老调用点不受影响）
+    assert ot.option_fee_est(94, 0.1, 1) == pytest.approx(0.00282, rel=1e-9)
+    assert ot.option_fee_est(94, 0.1, 1, premium_px=None) == pytest.approx(0.00282, rel=1e-9)
+    # 边界：零权利金 → 零手续费，不炸
+    assert ot.option_fee_est(94, 0.1, 1, premium_px=0) == 0.0
+
+
 def test_preview_open_put_reports_net_premium():
     p = ot.preview_open_put("BTC-USD_UM-260904-80000-P", 1, "limit", px=110.0)
-    fee = ot.option_fee_est(80000, 0.01, 1)
+    # 名义 800 × 0.03% = 0.24 > 7%×110×0.01 = 0.077 → cap 生效
+    fee = ot.option_fee_est(80000, 0.01, 1, premium_px=110.0)
     notional = 80000 * 0.01
     assert p["fee_est_usd"] == pytest.approx(round(fee, 4))
     assert p["net_premium_usd"] == pytest.approx(round(1.1 - fee, 4))
