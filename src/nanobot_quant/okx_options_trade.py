@@ -331,11 +331,28 @@ FAMILY_LOT = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XAU": 0.01}
 #: 实际手续费以订单详情 fee 字段为准并记入台账。
 OPTION_FEE_RATE_TAKER = 0.0003
 
+#: 手续费上限系数（OKX 官方规则）：实收 = Min(费率 × 名义价值, cap × 权利金)。
+#: 2026-09-19 实盘 94-P 验证（普通用户 0.03%）：名义费 0.00315 > 7%×权利金
+#: 0.00175，账单实收恰为 cap 值 —— **薄权利金合约受此保护，权利金越薄越明显**
+#: （px 0.25 时领先 1.6 倍、px 0.01 时领先 40 倍）。
+#: 触发线：px < strike / (费率/cap) —— 吃单 0.03% 时为 strike / 233。
+OPTION_FEE_CAP_RATIO = 0.07
 
-def option_fee_est(strike: float, lot: float, sz: int) -> float:
-    """期权吃单手续费预估（USD）= 名义价值 × 吃单费率。"""
+
+def option_fee_est(strike: float, lot: float, sz: int,
+                   premium_px: float | None = None) -> float:
+    """期权吃单手续费预估（USD）= Min(名义价值 × 吃单费率, cap × 权利金)。
+
+    ``premium_px``（每名义币的权利金，与 strike 同尺度）为 None 时退化为纯名义
+    口径（向后兼容）；调用方拿得到权利金时**务必传入**，否则薄权利金合约的
+    手续费会被高估（实测最高 40 倍），进而低估其净收益率、埋没优质的薄权利金档。
+    """
     try:
-        return max(0.0, float(strike) * float(lot) * int(sz) * OPTION_FEE_RATE_TAKER)
+        fee = float(strike) * float(lot) * int(sz) * OPTION_FEE_RATE_TAKER
+        if premium_px is not None:
+            premium = abs(float(premium_px)) * float(lot) * int(sz)
+            fee = min(fee, OPTION_FEE_CAP_RATIO * premium)
+        return max(0.0, fee)
     except (TypeError, ValueError):
         return 0.0
 
@@ -550,7 +567,7 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
         fill_px = ref_px
     prem = fill_px * lot * sz
     collat = spec["strike"] * lot * sz
-    fee_est = option_fee_est(spec["strike"], lot, sz)
+    fee_est = option_fee_est(spec["strike"], lot, sz, premium_px=fill_px)
     ratio = collateral_ratio_pct()
     exp_iso = _exp_str(spec["exp_ms"])
     return {
@@ -619,7 +636,6 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
         raise OkxSdkError("期权限价类订单需提供价格 px")
     ref_px = px
     notional = spec["strike"] * lot * sz
-    fee_est = option_fee_est(spec["strike"], lot, sz)
     exp_iso = _exp_str(spec["exp_ms"])
     try:
         sim = simulate_fill(inst_id, "sell", int(sz))
@@ -632,6 +648,7 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
     except (TypeError, ValueError):
         fill_px = ref_px
     prem = fill_px * lot * sz
+    fee_est = option_fee_est(spec["strike"], lot, sz, premium_px=fill_px)
     gate = None
     if cost_basis is not None:
         cb = float(cost_basis)

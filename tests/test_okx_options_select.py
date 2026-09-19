@@ -62,15 +62,25 @@ def test_net_premium_and_yield_use_bid_minus_fee():
     assert c["net_yield_pct"] == pytest.approx((0.05 - notional * FEE) / notional * 100, rel=1e-3)
 
 
-def test_net_non_positive_filtered_out():
-    """扣手续费后无利可图的档必须排除（薄权利金防御）。"""
+def test_cap_keeps_thin_premium_alive():
+    """7% 权利金 cap 让薄权利金档不再被「扣费后无利可图」误杀。
+
+    cap 前：strike 90、bid 0.001 → 名义费 0.0027 > 权利金 0.0001，净为负被丢弃；
+    cap 后：费 = min(0.0027, 7%×0.0001) = 0.000007，净 +0.000093 > 0，保留。
+
+    实盘依据（2026-09-19，普通用户 0.03%）：94-P 名义费 0.00315 > 7%×0.00175，
+    账单实收恰为 cap 值 0.00175。
+    """
     chain = _chain(groups=[_group(5, 2, [
-        {"strike": 90.0, "P": _put("a", 0.001, -0.20)},   # 权利金 0.0001 < 费 0.0027
-        {"strike": 95.0, "P": _put("b", 0.50, -0.25)},    # ✅
+        {"strike": 90.0, "P": _put("thin", 0.001, -0.20)},
+        {"strike": 95.0, "P": _put("fat", 0.50, -0.25)},
     ])])
     r = osel.select_puts("SOL-USD_UM", chain=chain)
-    assert [c["inst_id"] for c in r["candidates"]] == ["b"]
-    assert r["filtered"]["net"] == 1
+    assert [c["inst_id"] for c in r["candidates"]] == ["fat", "thin"]   # 按净收益率降序
+    assert r["filtered"]["net"] == 0                                   # 不再有任何档被费走
+    thin = next(c for c in r["candidates"] if c["inst_id"] == "thin")
+    assert thin["fee_usd"] == pytest.approx(0.000007, rel=1e-6)
+    assert thin["net_premium_usd"] > 0
 
 
 def test_min_net_yield_filter():

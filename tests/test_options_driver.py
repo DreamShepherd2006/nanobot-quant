@@ -258,8 +258,12 @@ def test_check_exits_takes_profit_reuses_live_decision():
     rec_px = fills[0]["avg_px"]
     # 记录层把成交价 round 到 6 位（既有设计，不是本次改动引入）
     assert rec_px == pytest.approx(buy_px, abs=1e-6)
-    # 期权手续费按名义价值（strike × 面值 × 张数 × 费率），不按权利金比例
-    cost = rec_px * 0.1 * 1 + float(fills[0]["strike"]) * 0.1 * 1 * d.fee_rate
+    # 期权手续费 = Min(名义价值 × 费率, 7% 权利金)——官方口径（2026-09-19 实盘验证）
+    strike = float(fills[0]["strike"])
+    nominal_fee = strike * 0.1 * 1 * d.fee_rate
+    cap_fee = 0.07 * rec_px * 0.1 * 1
+    assert fills[0]["fee_usd"] == pytest.approx(round(min(nominal_fee, cap_fee), 6))
+    cost = rec_px * 0.1 * 1 + fills[0]["fee_usd"]
     assert cash == pytest.approx(1000.0 - cost, rel=1e-9)
 
 
