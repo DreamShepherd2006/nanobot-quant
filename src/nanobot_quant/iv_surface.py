@@ -27,7 +27,9 @@ OKX 期权归档是**成交级**数据（0.22MB/天），而已到期合约的�
 * **范围外不外推**：取最近点的 IV 作常数延拓。线性外推会在深虚端算出负 IV，
   而这恰恰是卖 put 最关心的区域。
 * 同一到期同一时刻的 call/put 理论上 IV 相等，因此**两侧的点共用一条微笑**
-  （``Smile`` 不区分 right）；这是套利约束，不是简化。
+  （``Smile`` 不区分 right）；这是套利约束，不是简化。但**同一 strike 两侧都有
+  观测时以虚值侧为准** —— 套利约束说的是「真值相等」，不等于「两个估计同样可靠」：
+  实值侧 vega 塌陷，反解对现货价误差极度敏感（实测见「反解质量门」）。
 * 无效输入一律返回 ``None``（fail-closed），由调用方计数留痕 ——
   与 :mod:`nanobot_quant.bs_pricing` 同一约定，禁止静默降级。
 """
@@ -43,6 +45,7 @@ from nanobot_quant.bs_pricing import bs_delta, bs_price, implied_vol, years_to_e
 __all__ = [
     "IVPoint", "Smile", "IVSurface",
     "iv_points_from_trades", "fit_smile", "DEFAULT_IV_STALENESS_MS",
+    "DEFAULT_MAX_ABS_DELTA", "DEFAULT_MAX_IV",
 ]
 
 # IV 观测保鲜期。实测 SOL-USD_UM 一天约 52 笔成交、散在 ~10 个合约上 ——
@@ -55,6 +58,31 @@ __all__ = [
 # 回测因此 0 成交）。放宽到 7 天："pts" 仍只取 ts 之前的点，不构成前视。
 _DEFAULT_IV_STALENESS_DAYS = 7
 DEFAULT_IV_STALENESS_MS = _DEFAULT_IV_STALENESS_DAYS * 24 * 3600 * 1000
+
+
+# ───────────────────────── 反解质量门 ─────────────────────────
+#
+# 为什么需要（2026-09-19 定位）：深实值观测的 IV 不可信。vega 在深实值端塌陷、
+# 价格对 σ 不敏感 —— 反过来就是「σ 对现货价误差极度敏感」。实测
+# ETH-USD_UM-260904-2050-C：实值 17%、剩 9 天，成交价 536.6 里时间价值只剩 116，
+# 现货差 0.2% 就能把 IV 从 50% 推到 **202.5%**。
+#
+# 危害不在于「这个点错了」，而在于**它污染整条微笑**：该 strike 上没有 put 成交时
+# （深虚 put 常年无人交易），这个 202% 会被拿去给同 strike 的 **put** 定价 ——
+# 回测据此卖出深虚 put，报价虚高 26 倍（ETH 那次 5.01% ROI 里 62% 的权利金来自此处）。
+#
+# 两道门（实测分工，2026-09-19）：
+#
+# * ``max_iv`` —— **主力**。ETH 那笔反解 197% 直接越线，一挡一个准。
+# * ``max_abs_delta`` —— **补充**，不是主力。乍看深实值该配高 delta，但病态点恰恰
+#   不是：为了让虚高的价格（536.6）成立，反解必须把 σ 推到 2 —— 而 σ 一大
+#   d1 反而回落，delta 只剩 **0.78**，在 delta 门上畅通无阻。
+#   **病态点不会自我标榜成「高 delta」**，这就是为什么单靠 delta 判据不够。
+#   它兜的是另一类：期限稍长、IV 尚在常区间但已深度实值/虚值（vega 塌陷区）。
+#
+# 两个阈值都有默认值，传 0 即关闭。
+DEFAULT_MAX_ABS_DELTA = 0.95
+DEFAULT_MAX_IV = 1.5
 
 
 # ──────────────────────────── IV 点 ────────────────────────────
@@ -78,6 +106,8 @@ def iv_points_from_trades(
     spot_at: Callable[[int], Optional[float]],
     contracts: dict[str, dict],
     r: float = 0.0,
+    max_abs_delta: float = DEFAULT_MAX_ABS_DELTA,
+    max_iv: float = DEFAULT_MAX_IV,
     on_reject: Optional[Callable[[str, str], None]] = None,
 ) -> list[IVPoint]:
     """逐笔成交 → IV 观测点。
@@ -88,6 +118,9 @@ def iv_points_from_trades(
     ``contracts`` 是 ``instId → 元数据``（``strike`` / ``exp_ms`` / ``right``），
     由调用方从 instId 反解后传入 —— 本模块不 import ``okx_options_data``，
     保持「只依赖 math 与 bs_pricing」。
+
+    反解质量门 ``max_iv`` / ``max_abs_delta`` 见模块顶部说明；命中分别计入
+    ``on_reject("extreme_iv")`` 与 ``on_reject("deep_itm")``，传 0 关闭。
     """
     out: list[IVPoint] = []
     for tr in trades:
@@ -119,6 +152,17 @@ def iv_points_from_trades(
             if on_reject:
                 on_reject("iv", inst)
             continue
+        if max_iv and iv > max_iv:
+            if on_reject:
+                on_reject("extreme_iv", inst)
+            continue
+        if max_abs_delta:
+            d = bs_delta(spot, float(meta["strike"]), t, iv, r,
+                         meta.get("right", "P"))
+            if d is not None and abs(d) > max_abs_delta:
+                if on_reject:
+                    on_reject("deep_itm", inst)
+                continue
         out.append(IVPoint(ts_ms=ts, inst_id=inst, strike=float(meta["strike"]),
                            exp_ms=int(meta["exp_ms"]), right=meta.get("right", "P"),
                            iv=float(iv), price=px, spot=float(spot)))
@@ -182,14 +226,43 @@ class Smile:
         return self.ivs[-1]
 
 
+def _on_otm_side(right: str, strike: float, forward: float) -> bool:
+    """该观测是否落在**虚值侧**。
+
+    虚值侧的价格几乎全是时间价值，vega 大、反解远比实值侧稳；同一 strike 两侧
+    都有观测时必须以此为准 —— 否则一条深实值 call 的最新成交会顶掉同 strike 上
+    原本可靠的 put 观测（2026-09-19 ETH 那笔 202.5% 正是这样进微笑的）。
+
+    ``forward`` 缺失（≤0）时无从判断，一律返回 ``True``（不做取舍，退回按时间取最近）。
+    """
+    if not forward or forward <= 0:
+        return True
+    return (right == "P" and strike <= forward) or (right == "C" and strike >= forward)
+
+
 def fit_smile(points: Sequence[IVPoint], *, forward: float) -> Optional[Smile]:
-    """同一到期的 IV 点 → 微笑。同一 strike 取**时间最近**的那个点。"""
+    """同一到期的 IV 点 → 微笑。
+
+    同一 strike 有多个观测时的裁决顺序：
+
+    ① **虚值侧优先**（:func:`_on_otm_side`）—— 两侧 IV 真值相等，但估计质量差得多，
+       实值侧的反解经不起现货误差；
+    ② 同为虚值侧（或同样判不出来）时取**时间最近**的那个点。
+    """
     if not points:
         return None
     by_strike: dict[float, IVPoint] = {}
     for p in points:
         cur = by_strike.get(p.strike)
-        if cur is None or p.ts_ms > cur.ts_ms:
+        if cur is None:
+            by_strike[p.strike] = p
+            continue
+        p_otm = _on_otm_side(p.right, p.strike, forward)
+        cur_otm = _on_otm_side(cur.right, cur.strike, forward)
+        if p_otm != cur_otm:
+            if p_otm:                       # 只有虚值侧能顶掉实值侧
+                by_strike[p.strike] = p
+        elif p.ts_ms > cur.ts_ms:
             by_strike[p.strike] = p
     ks = sorted(by_strike)
     f = forward if forward and forward > 0 else ks[len(ks) // 2]
