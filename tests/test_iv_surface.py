@@ -252,3 +252,148 @@ def test_surface_smile_cache_returns_same_object():
     a = s.smile_at(TS0, TS0 + 5 * DAY_MS, forward=100.0)
     b = s.smile_at(TS0, TS0 + 5 * DAY_MS, forward=100.0)
     assert a is b
+
+
+# ═══════════ 反解质量门 + 虚值侧优先（2026-09-19）═══════════
+#
+# 背景：ETH-USD_UM-260904-2050-C（实值 17%、剩 9 天）成交价 536.6 反解出
+# **202.5%**；该 strike 上没有 put 成交，这条 202% 就被拿去给同 strike 的
+# 深虚 put 定价，回测报价虚高 26 倍（ETH 那次 5.01% ROI 里 62% 权利金来自此处）。
+#
+# 下面三条锁定最基本的行为：
+# ① 病态观测被门挡下（复现 ETH 那笔）
+# ② 长到期的深实值不该被误伤（BTC 那笔 51.7% 正常）
+# ③ 落地到微笑：被挡下后深虚 put 改由邻近 strike 外推，拿不到 202%
+
+# 真实参数（2026-08-26 19:55 UTC 的归档成交）
+_ETH_SPOT, _ETH_K, _ETH_PX, _ETH_DAYS = 2470.80, 2050.0, 536.60, 9
+
+
+def _trade(inst: str, ts: int, px: float) -> dict:
+    return {"instrument_name": inst, "created_time": str(ts), "price": str(px)}
+
+
+def test_iv_points_rejects_deep_itm_call_eth_case():
+    """复现：ETH 那笔深实值 call 必须被质量门挡下。"""
+    exp = TS0 + _ETH_DAYS * DAY_MS
+    inst = "ETH-USD_UM-260904-2050-C"
+    rejects: list[tuple[str, str]] = []
+    pts = iv_points_from_trades(
+        [_trade(inst, TS0, _ETH_PX)], spot_at=lambda ts: _ETH_SPOT,
+        contracts={inst: _meta(_ETH_K, exp, "C")},
+        on_reject=lambda w, i: rejects.append((w, i)))
+    assert pts == []
+    assert len(rejects) == 1 and rejects[0][1] == inst
+    assert rejects[0][0] in ("extreme_iv", "deep_itm")
+
+
+def test_iv_points_eth_case_is_what_the_gate_catches():
+    """关掉两道门就是原来那个病态值 —— 证明病态来自反解本身，不是门误判。"""
+    exp = TS0 + _ETH_DAYS * DAY_MS
+    inst = "ETH-USD_UM-260904-2050-C"
+    pts = iv_points_from_trades(
+        [_trade(inst, TS0, _ETH_PX)], spot_at=lambda ts: _ETH_SPOT,
+        contracts={inst: _meta(_ETH_K, exp, "C")},
+        max_abs_delta=0, max_iv=0)
+    assert len(pts) == 1
+    assert pts[0].iv > 1.5                      # ≈1.97，与归档实测的 202.5% 同量级
+    # 两道门的分工（关键）：|delta| 只有 0.78 —— 为了圆上那个虚高价格，σ 被推到 2，
+    # σ 一大 d1 反而回落、delta 跟着回落。**病态点不会自我标榜成高 delta**，
+    # 所以只靠 delta 判据会漏过它，真正拦住它的是 IV 绝对上限。
+    d = bs_delta(_ETH_SPOT, _ETH_K, years_to_expiry(TS0, exp), pts[0].iv, 0.0, "C")
+    assert abs(d) < 0.95
+    args = dict(spot_at=lambda ts: _ETH_SPOT,
+                contracts={inst: _meta(_ETH_K, exp, "C")})
+    assert len(iv_points_from_trades([_trade(inst, TS0, _ETH_PX)],
+                                    max_iv=0, **args)) == 1     # 只开 delta 门 → 漏过
+    assert iv_points_from_trades([_trade(inst, TS0, _ETH_PX)],
+                                 max_abs_delta=0, **args) == []  # 只开 IV 门 → 拦住
+
+
+def test_iv_points_keeps_long_dated_deep_call():
+    """BTC-260925-64000-C：实值 18% 但剩 27 天，IV 51.7% 正常 —— 不得误伤。"""
+    spot, k, iv, days = 77690.0, 64000.0, 0.517, 27
+    exp = TS0 + days * DAY_MS
+    px = bs_price(spot, k, years_to_expiry(TS0, exp), iv, 0.0, "C")
+    inst = "BTC-USD_UM-260925-64000-C"
+    pts = iv_points_from_trades(
+        [_trade(inst, TS0, px)], spot_at=lambda ts: spot,
+        contracts={inst: _meta(k, exp, "C")})
+    assert len(pts) == 1
+    assert pts[0].iv == pytest.approx(iv, abs=1e-4)
+
+
+def test_iv_points_delta_gate_alone_blocks_deep_itm_put():
+    """只开 delta 门（max_iv=0）：反解本身正常，但 |delta|>0.95 仍要挡。"""
+    spot, k, iv, days = 100.0, 175.0, 0.6, 90
+    exp = TS0 + days * DAY_MS
+    px = bs_price(spot, k, years_to_expiry(TS0, exp), iv, 0.0, "P")
+    inst = "X-175-P"
+    args = dict(spot_at=lambda ts: spot, contracts={inst: _meta(k, exp, "P")})
+    ok = iv_points_from_trades([_trade(inst, TS0, px)], max_abs_delta=0, max_iv=0,
+                               **args)                    # 关掉门 → 正常反解
+    assert len(ok) == 1 and ok[0].iv == pytest.approx(iv, abs=1e-4)
+    rejects: list[str] = []
+    pts = iv_points_from_trades([_trade(inst, TS0, px)], max_iv=0, **args,
+                               on_reject=lambda w, i: rejects.append(w))
+    assert pts == [] and rejects == ["deep_itm"]
+
+
+def test_iv_points_iv_gate_alone_blocks_extreme_far_otm():
+    """只开 IV 门（max_abs_delta=0）：深虚 put 的 |delta| 很小，只有 IV 门能挡。"""
+    spot, k, iv, days = 100.0, 50.0, 2.0, 30
+    exp = TS0 + days * DAY_MS
+    px = bs_price(spot, k, years_to_expiry(TS0, exp), iv, 0.0, "P")
+    inst = "X-50-P"
+    rejects: list[str] = []
+    pts = iv_points_from_trades(
+        [_trade(inst, TS0, px)], spot_at=lambda ts: spot,
+        contracts={inst: _meta(k, exp, "P")}, max_abs_delta=0,
+        on_reject=lambda w, i: rejects.append(w))
+    assert pts == [] and rejects == ["extreme_iv"]
+
+
+# ─────────────────── fit_smile 虚值侧优先 ───────────────────
+
+def test_fit_smile_prefers_otm_side_regardless_of_arrival_order():
+    """同 strike 两侧都有：虚值侧优先，且与到达顺序无关。"""
+    itm_call = _pt(100, 2050.0, 2.025, right="C")     # ts 更早，但在实值侧
+    otm_put = _pt(50, 2050.0, 0.55, right="P")        # ts 更晚，虚值侧
+    fwd = 2400.0                                       # K=2050 < F → put 侧
+    for seq in ([itm_call, otm_put], [otm_put, itm_call]):
+        sm = fit_smile(seq, forward=fwd)
+        assert sm.iv(2050.0) == pytest.approx(0.55)
+
+
+def test_fit_smile_same_side_keeps_latest():
+    a = _pt(100, 95.0, 0.70, right="P")
+    b = _pt(200, 95.0, 0.66, right="P")
+    assert fit_smile([a, b], forward=100.0).iv(95.0) == pytest.approx(0.66)
+    assert fit_smile([b, a], forward=100.0).iv(95.0) == pytest.approx(0.66)
+
+
+def test_fit_smile_without_forward_falls_back_to_latest():
+    """forward 缺失时判不出虚值侧，退回「按时间取最近」（原行为）。"""
+    sm = fit_smile([_pt(100, 95.0, 0.70, right="P"),
+                    _pt(200, 95.0, 2.0, right="C")], forward=0.0)
+    assert sm.iv(95.0) == pytest.approx(2.0)
+
+
+def test_fit_smile_keeps_sole_observation_even_if_itm():
+    """只有一侧观测时不做取舍 —— 否则会把整个到期从链上剔空。"""
+    sm = fit_smile([_pt(100, 95.0, 0.7, right="C")], forward=100.0)
+    assert sm.strikes == [95.0]
+    assert sm.iv(95.0) == pytest.approx(0.7)
+
+
+def test_surface_eth_case_no_longer_poisons_deep_put():
+    """落地到微笑：2050 的病态 call 被门挡下后，深虚 put 改由邻近 strike 外推。"""
+    exp = TS0 + _ETH_DAYS * DAY_MS
+    contracts = {"P2300": _meta(2300.0, exp, "P"),
+                 "P2400": _meta(2400.0, exp, "P")}
+    s = IVSurface(contracts)
+    s.add_points([_pt(TS0 - 1000, 2300.0, 0.577, exp, inst="P2300"),
+                  _pt(TS0 - 1000, 2400.0, 0.487, exp, inst="P2400")])
+    sm = s.smile_at(TS0, exp, forward=2470.0)
+    assert 2050.0 not in sm.strikes
+    assert sm.iv(2050.0) == pytest.approx(0.577)     # 左端常数延拓，不是 2.025
