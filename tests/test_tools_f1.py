@@ -138,6 +138,25 @@ def test_trigger_stats_requires_room_for_horizon():
     assert T._trigger_stats(arr, counts, +1, k=3, threshold=9) is None
 
 
+def test_trigger_stats_all_bars_counts_every_bar_over_threshold():
+    """累加期口径：连续 >=9 的每一根都算触发，n 明显大于首次穿越。"""
+    arr = np.linspace(10, 20, 120)
+    counts = np.array([0] * 10 + [9, 10, 11, 12, 13] + [0] * 105)
+    assert len(counts) == len(arr)
+    first = T._trigger_stats(arr, counts, +1, k=3, threshold=9)
+    allb = T._trigger_stats(arr, counts, +1, k=3, threshold=9, mode="all_bars")
+    assert first is not None and first["n"] == 1      # 只有首次穿越那一根
+    assert allb is not None and allb["n"] == 5        # 9/10/11/12/13 全算
+    assert allb["n"] > first["n"]
+
+
+def test_trigger_stats_all_bars_still_needs_horizon_room():
+    """切换口径不能绕过「后面还得有 k 根」这个约束。"""
+    arr = np.arange(10, dtype=float)
+    counts = np.array([0] * 8 + [9, 10])
+    assert T._trigger_stats(arr, counts, +1, k=3, threshold=9, mode="all_bars") is None
+
+
 # ── analyze_f1_td ──────────────────────────────────────────────────
 
 def _patch_source(monkeypatch, close_arr):
@@ -227,3 +246,22 @@ def test_analyze_f1_td_results_are_json_safe(monkeypatch):
     _patch_source(monkeypatch, close)
     out = T.analyze_f1_td(symbols=["600519"], periods=["1H"], limit=900)
     json.dumps(out)             # raises TypeError if numpy types leaked
+
+
+def test_analyze_f1_td_reports_both_trigger_modes(monkeypatch):
+    """主字段 = 首次穿越，*_all = 累加期全计，两种口径同时给出。
+
+    2026-09-20 在 A股日线上实测：同一份数据下首次穿越只得到 n=2–3，
+    累加期口径 n=15–40 —— 只报道一种会让“信号到底多密”失真，
+    所以两边一起给，并在 note 里解释差别。
+    """
+    rng = np.random.default_rng(7)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.004, 900)))
+    _patch_source(monkeypatch, close)
+    out = T.analyze_f1_td(symbols=["600519"], periods=["1H"], limit=900)
+    rec = out["results"][0]
+    assert rec["status"] == "ok"
+    for key in ("f1_buy9_all", "f1_sell9_all", "price_buy9_all", "price_sell9_all"):
+        assert key in rec, key        # 值可为 None，但字段必须在
+    assert "首次穿越" in out["note"]
+    assert "_all" in out["note"]

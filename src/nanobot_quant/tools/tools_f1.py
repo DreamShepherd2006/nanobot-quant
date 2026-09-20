@@ -118,6 +118,7 @@ def _trigger_stats(
     threshold: int,
     ntrials: int = 200,
     seed: int = 42,
+    mode: str = "first_cross",
 ) -> Optional[dict]:
     """Stats for ``threshold``-crossing triggers: median move / hit rate / p.
 
@@ -125,16 +126,26 @@ def _trigger_stats(
     rise afterwards), ``sign=-1`` for sell setups.  The p-value comes from a
     200-sample random-position null so a bare median is never reported
     without its baseline.
+
+    ``mode`` picks which bars count as triggers:
+
+    * ``"first_cross"`` — only the bar where the count first reaches
+      ``threshold``.  Non-overlapping, the stricter reading of "a TD 9".
+    * ``"all_bars"`` — every bar with ``count >= threshold``, i.e. the whole
+      exhaustion run including 10/11/12… .  Larger n but overlapping windows.
     """
     n = len(vals)
     if n <= k:
         return None
     idx: list[int] = []
-    prev = 0
-    for i, v in enumerate(counts):
-        if v >= threshold and prev < threshold and i + k < n:
-            idx.append(i)
-        prev = v
+    if mode == "all_bars":
+        idx = [i for i, v in enumerate(counts) if v >= threshold and i + k < n]
+    else:
+        prev = 0
+        for i, v in enumerate(counts):
+            if v >= threshold and prev < threshold and i + k < n:
+                idx.append(i)
+            prev = v
     if not idx:
         return None
 
@@ -256,8 +267,11 @@ def analyze_f1_td(
                 bars=int(len(df)),
                 days=round(float(days), 1),
                 cv=round(cv, 4),
+                # 主字段 = 首次穿越（更严格）；*_all = 累加期全计（样本更多）
                 f1_buy9=_trigger_stats(f1v, fb, +1, k, threshold),
                 f1_sell9=_trigger_stats(f1v, fs, -1, k, threshold),
+                f1_buy9_all=_trigger_stats(f1v, fb, +1, k, threshold, mode="all_bars"),
+                f1_sell9_all=_trigger_stats(f1v, fs, -1, k, threshold, mode="all_bars"),
                 cv_hint=_cv_hint(cv),
             )
             if include_price_td:
@@ -265,6 +279,8 @@ def analyze_f1_td(
                 pb, ps = _td_counts(df["Close"])
                 rec["price_buy9"] = _trigger_stats(px, pb, +1, k, threshold)
                 rec["price_sell9"] = _trigger_stats(px, ps, -1, k, threshold)
+                rec["price_buy9_all"] = _trigger_stats(px, pb, +1, k, threshold, mode="all_bars")
+                rec["price_sell9_all"] = _trigger_stats(px, ps, -1, k, threshold, mode="all_bars")
             results.append(rec)
 
     ok = [r for r in results if r.get("status") == "ok"]
@@ -290,5 +306,10 @@ def analyze_f1_td(
             "TD 跑在 F1 序列上（非价格）。median/hit/p 对应阈值触发后 k 根的变化，"
             "sign 已按衰竭方向取正（buy9 期望回升、sell9 期望回落）。"
             "p 来自 200 次随机位置对照。价格 TD 为同数据基线。"
+            "**两种触发口径都给出**：主字段（f1_buy9/f1_sell9/price_*）只取"
+            "「计数首次穿越阈值」的那一根（样本不重叠、更严格，但 n 常常只有 2–3）；"
+            "`*_all` 后缀字段把「计数 ≥ 阈值」的每一根都算一次触发"
+            "（含 10/11/12… 累加期，n 常到 15–40，代价是窗口重叠）。"
+            "两者样本量差异很大时以 *_all 为参考、以主字段为准绳，并一起看。"
         ),
     }
