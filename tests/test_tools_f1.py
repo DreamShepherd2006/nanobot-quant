@@ -77,8 +77,8 @@ def test_calculate_series_normalises_lowercase_columns():
 @pytest.mark.parametrize(
     "symbol,expected",
     [
-        ("600519", "eastmoney"),
-        ("588000", "eastmoney"),
+        ("600519", "sina"),
+        ("588000", "sina"),
         ("AAPL", "eastmoney"),
         ("BTC-USDT", "okx_cex"),
     ],
@@ -163,6 +163,57 @@ def _patch_source(monkeypatch, close_arr):
     monkeypatch.setattr(T, "get_data_source", lambda name: _FakeSpec(close_arr))
 
 
+def test_fetch_with_fallback_switches_source_on_failure(monkeypatch):
+    """A 股首选源取数失败 → 自动换兄弟源，并留日志（不静默降级）。"""
+    rng = np.random.default_rng(3)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.004, 400)))
+    calls: list[str] = []
+
+    class _DeadSpec:
+        bars = ("1H",)
+
+        def fetch_kline(self, *a, **k):
+            raise RuntimeError("sina down")
+
+    def fake_get(name):
+        calls.append(name)
+        return _FakeSpec(close)
+
+    monkeypatch.setattr(T, "get_data_source", fake_get)
+    df, used = T._fetch_with_fallback(_DeadSpec(), "sina", "600519", "1H", 400)
+    assert used == "eastmoney"
+    assert calls == ["eastmoney"]   # 只给兄弟源发请求，不重试已死的源
+    assert len(df) > 0
+
+
+def test_fetch_with_fallback_reraises_when_no_alt(monkeypatch):
+    """没有兄弟源的源（okx_cex）失败时必须原样抛出，不吞异常。"""
+
+    class _Boom:
+        bars = ("1H",)
+
+        def fetch_kline(self, *a, **k):
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        T._fetch_with_fallback(_Boom(), "okx_cex", "BTC-USDT", "1H", 300)
+
+
+def test_fetch_with_fallback_reraises_when_alt_lacks_period(monkeypatch):
+    """兄弟源不支持该周期时不发第二发请求，直接冒原始异常。"""
+
+    class _Boom:
+        bars = ("1H",)
+
+        def fetch_kline(self, *a, **k):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(T, "get_data_source",
+                        lambda name: type("S", (), {"bars": ("1D",)})())
+    with pytest.raises(RuntimeError, match="boom"):
+        T._fetch_with_fallback(_Boom(), "sina", "600519", "1H", 300)
+
+
 def test_analyze_f1_td_happy_path(monkeypatch):
     rng = np.random.default_rng(7)
     n = 900
@@ -170,7 +221,7 @@ def test_analyze_f1_td_happy_path(monkeypatch):
     _patch_source(monkeypatch, close)
 
     out = T.analyze_f1_td(symbols=["600519"], periods=["1H"], limit=n)
-    assert out["data_source"] == "eastmoney"
+    assert out["data_source"] == "sina"
     assert len(out["results"]) == 1
     rec = out["results"][0]
     assert rec["status"] == "ok"

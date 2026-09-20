@@ -27,7 +27,8 @@ TD Sequential 隐含依赖波动率、却从不显式处理它：setup 用绝对
 并附上同一数据上「价格 TD」的对照，最后按 CV 给出可用性建议。
 
 数据源走 ``data_sources`` 注册表（``get_data_source(...).fetch_kline``），
-所以在 HF Space 上会自动使用东财（那边连通、容器内不连通）。
+所以在 HF Space 上会自动使用新浪（云端唯一可用的 A 股源；东财被 IP 封禁，
+两者互为备胎、失败时自动回退）。
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ def _resolve_source(symbols: list[str], source: str) -> str:
         raise ValueError("symbols 为空")
     s = symbols[0]
     if s.isdigit() and len(s) == 6:
-        return "eastmoney"
+        return "sina"
     if s.upper().endswith("-USDT") or "/" in s:
         return "okx_cex"
     if s.replace(".", "").isalpha():
@@ -71,6 +72,31 @@ def _resolve_source(symbols: list[str], source: str) -> str:
     raise ValueError(
         f"无法从 {s!r} 推断数据源，请显式传 source=（可选：{list_data_sources()}）"
     )
+
+
+# A 股东西双源：新浪与东财互为备胎。云端（HF Space / 容器）东财会被
+# IP 封禁直接断连，新浪实测可用且深度更好（5m 约 5 个月、日线 24 年）。
+_CN_FALLBACK = {"sina": "eastmoney", "eastmoney": "sina"}
+
+
+def _fetch_with_fallback(spec, src_name: str, sym: str, period: str, limit: int):
+    """取数；失败时换兄弟源重试一次，返回 ``(df, 实际源名)``。
+
+    A 股两个源在不同网络环境下各有一边通——云端东财被 IP 封、自建环境
+    新浪未必可达——所以互为备胎而非二选一。回退必须留日志（不静默降级），
+    回退后仍失败则把原始异常抛给调用方。
+    """
+    try:
+        return spec.fetch_kline(sym, bar=period, limit=limit), src_name
+    except Exception as exc:  # noqa: BLE001 — 换源重试，最终仍失败则抛出
+        alt_name = _CN_FALLBACK.get(src_name)
+        if not alt_name:
+            raise
+        alt_spec = get_data_source(alt_name)
+        if period not in (alt_spec.bars or ()):
+            raise
+        _log(f"{src_name} 取数失败（{type(exc).__name__}），回退 {alt_name}: {sym} {period}")
+        return alt_spec.fetch_kline(sym, bar=period, limit=limit), alt_name
 
 
 def _atr(df: pd.DataFrame, n: int) -> pd.Series:
@@ -236,7 +262,8 @@ def analyze_f1_td(
         for sym in symbols:
             rec: dict = {"symbol": sym, "period": period, "lookback_bars": lb}
             try:
-                df = spec.fetch_kline(sym, bar=period, limit=limit)
+                df, used_src = _fetch_with_fallback(spec, src_name, sym, period, limit)
+                rec["source"] = used_src
             except Exception as exc:  # noqa: BLE001 — one bad symbol must not kill the batch
                 rec.update(status="error", error=f"取数失败: {type(exc).__name__}: {exc}")
                 results.append(rec)

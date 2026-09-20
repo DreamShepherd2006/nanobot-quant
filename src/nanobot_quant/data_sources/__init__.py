@@ -17,7 +17,14 @@ from nanobot_quant.data_sources.base import (
     register,
     research_sources,
 )
-from nanobot_quant.data_sources import eastmoney, gate_cex, okx_cex, onchainos, yfinance
+from nanobot_quant.data_sources import (
+    eastmoney,
+    gate_cex,
+    okx_cex,
+    onchainos,
+    sina,
+    yfinance,
+)
 
 register(DataSourceSpec(
     name="gate_cex",
@@ -65,6 +72,16 @@ register(DataSourceSpec(
     kind="research",
     fetch_kline=eastmoney.fetch_kline,
     bars=("1m", "5m", "15m", "1H", "1D", "1W"),
+))
+# 新浪：数据中心 IP 可用的 A 股源，深度远好于 yfinance（5m 约 5 个月、
+# 日线 24 年），且不受东财那种 IP 封禁影响（2026-09-20 实测）。
+register(DataSourceSpec(
+    name="sina",
+    display="股票（新浪）",
+    kind="research",
+    fetch_kline=sina.fetch_kline,
+    get_price=sina.get_price,
+    bars=("5m", "15m", "30m", "1H", "1D"),
 ))
 register(DataSourceSpec(
     name="yfinance",
