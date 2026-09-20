@@ -45,6 +45,7 @@ EXPECTED_TOOLS = {
     "wallet_switch",
     "cex_sub_order",
     "options_broker_selftest",
+    "analyze_f1_td",
 }
 
 
@@ -52,7 +53,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_initialize_and_list_20_tools():
+def test_initialize_and_list_tools():
     async def scenario():
         async with stdio_client(SERVER_PARAMS) as (read, write):
             async with ClientSession(read, write) as session:
@@ -73,7 +74,6 @@ def test_initialize_and_list_20_tools():
 
 
 def test_call_get_chain_result_unknown_run():
-    """Side-effect-free tool call: get_chain_result must return parseable JSON."""
 
     async def scenario():
         async with stdio_client(SERVER_PARAMS) as (read, write):
@@ -106,5 +106,22 @@ def test_call_execute_signal_rejects_bad_json():
                 assert (
                     "invalid" in text.lower() or "error" in text.lower()
                 ), text[:200]
+
+    _run(scenario())
+
+
+def test_call_analyze_f1_td_rejects_bad_symbol():
+    """analyze_f1_td must reject an unresolvable symbol before any network I/O."""
+
+    async def scenario():
+        async with stdio_client(SERVER_PARAMS) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                res = await session.call_tool(
+                    "analyze_f1_td", {"symbols": ["@@@"], "periods": ["1H"]}
+                )
+                assert res.isError
+                text = res.content[0].text if res.content else ""
+                assert "traceback" not in text.lower()
 
     _run(scenario())

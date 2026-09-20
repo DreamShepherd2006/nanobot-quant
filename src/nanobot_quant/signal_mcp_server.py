@@ -7,6 +7,7 @@ Tool implementations live in tools/:
   tools_wallet.py      wallet_setup, wallet_login_status, wallet_login_init, ...
   tools_analysis.py    run_td_sequential
   tools_backtest.py    run_backtest
+  tools_f1.py          analyze_f1_td
   tools_structurize.py structurize_signal
   tools_execute.py     execute_signal
 """
@@ -75,6 +76,7 @@ from nanobot_quant.tools.tools_execute import (
     get_execution_outcome,
 )
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
+from nanobot_quant.tools.tools_f1 import analyze_f1_td
 
 # ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
 # import time through a stdout-bound StreamHandler, BEFORE any handler
@@ -217,6 +219,17 @@ _TOOL_DESCRIPTIONS = {
         "Asset↔instId 与每张面值 multiplier（lumibot fork patch 是否生效）、"
         "期权子账号配置与余额、当前期权持仓。返回 status=ok/partial/error + checks。"
     ),
+    "analyze_f1_td": (
+        "把波动率序列 F1（= ATR_n / ATR_n[lookback]，lookback 按 3 小时语义随周期"
+        "换算：1m→180、15m→12、1H→3）喂给 TD Sequential，检验 setup 达到阈值"
+        "（默认 9）之后的衰竭表现。对每个 标的×周期 输出：K线数/CV、F1 的 buy9 与"
+        "sell9 的（信号数 n / 中位幅度 / 方向命中率 / 200 次随机对照 p 值），以及"
+        "同一数据上「价格 TD」对照组。适用判据：CV≤27% 时衰竭语义成立，CV>35% 时"
+        "TD 在 F1 上退化为趋势指标（9 之后倾向继续原方向）。标的可为 A股/ETF"
+        "（588000、600519）、美股（AAPL）或加密（BTC-USDT）；数据源按标的自动判断"
+        "（A股/美股→东财、*-USDT→OKX），也可显式 source= 指定。"
+        "只读分析工具：不下单、不改任何配置。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -230,6 +243,7 @@ _TOOL_DISPATCH = {
     "get_backtest_result": get_backtest_result,
     "cex_sub_order": cex_sub_order,
     "options_broker_selftest": options_broker_selftest,
+    "analyze_f1_td": analyze_f1_td,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,
