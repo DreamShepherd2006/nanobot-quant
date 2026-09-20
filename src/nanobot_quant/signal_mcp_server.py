@@ -7,6 +7,7 @@ Tool implementations live in tools/:
   tools_wallet.py      wallet_setup, wallet_login_status, wallet_login_init, ...
   tools_analysis.py    run_td_sequential
   tools_backtest.py    run_backtest
+  tools_f1.py          analyze_f1_td, analyze_f1_drawdown
   tools_structurize.py structurize_signal
   tools_execute.py     execute_signal
 """
@@ -75,6 +76,7 @@ from nanobot_quant.tools.tools_execute import (
     get_execution_outcome,
 )
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
+from nanobot_quant.tools.tools_f1 import analyze_f1_td, analyze_f1_drawdown
 
 # ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
 # import time through a stdout-bound StreamHandler, BEFORE any handler
@@ -217,6 +219,34 @@ _TOOL_DESCRIPTIONS = {
         "Asset↔instId 与每张面值 multiplier（lumibot fork patch 是否生效）、"
         "期权子账号配置与余额、当前期权持仓。返回 status=ok/partial/error + checks。"
     ),
+    "analyze_f1_td": (
+        "把波动率序列 F1（= ATR_n / ATR_n[lookback]，lookback 按 3 小时语义随周期"
+        "换算：1m→180、15m→12、1H→3）喂给 TD Sequential，检验 setup 达到阈值"
+        "（默认 9）之后的**衰竭方向**——触发后 k 根终值比起点涨/跌了多少"
+        "（信号数 n / 中位幅度 / 方向命中率 / 随机对照 p 值），以及同一数据上"
+        "「价格 TD」对照组。注意：本工具量的是「会不会收回来」，**不量回撤深度**；"
+        "要看「中间跌多深 / 尾部风险」用 analyze_f1_drawdown。标的可为 A股/ETF"
+        "（588000、600519）、美股（AAPL）或加密（BTC-USDT）；数据源按标的自动判断"
+        "（A股/美股→东财、*-USDT→OKX），也可显式 source= 指定。"
+        "**显著性必须看主字段（first_cross）；`*_all` 是累加期重复计数，"
+        "只作参考，不可用它判显著。**"
+        "只读分析工具：不下单、不改任何配置。"
+    ),
+    "analyze_f1_drawdown": (
+        "F1 上的 TD 触发后 **回撤有多深**（ATR 单位比值口径），用来回答"
+        "「这个信号的尾部风险如何」。三项指标：整段（min(low) 传统口径）、"
+        "单根（最坏的那一根 bar，即插针）、插针次数（单根跌<−2% 的根数）。"
+        "每项对比同段随机位置，输出**比值**：<1 = 触发后更浅，>1 = 更深。"
+        "支持 F1 分位过滤（qmin/qmax）、多 horizon（ks）、时间样本外切分（split）、"
+        "价格 TD 对照组。\n"
+        "**实证已定论（详见 docs/quant-system.md §33.33/§33.34）**："
+        "加密 15m/1H 上 buy9 使回撤幅度系统变浅（0.828/0.712，6 标的 36/36），"
+        "**加 Q3（0.6–0.8）分位过滤压到 0.612**；sell9 严格镜像（Q3 = 1.461）。"
+        "但**幅度收窄 ≠ 尾部风险降低**：插针次数不降（1.0–1.2）。"
+        "分布是**倒 U**（Q3 最安全 0.62，Q0/Q4 ≈ 1），**绝不可用「F1 越低越安全」**。"
+        "A股 结论不同：日线样本不足、30m 无方向、5m 反向，仅 15m 宽基有微弱迹象。\n"
+        "只读分析工具：不下单、不改任何配置。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -230,6 +260,8 @@ _TOOL_DISPATCH = {
     "get_backtest_result": get_backtest_result,
     "cex_sub_order": cex_sub_order,
     "options_broker_selftest": options_broker_selftest,
+    "analyze_f1_td": analyze_f1_td,
+    "analyze_f1_drawdown": analyze_f1_drawdown,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,

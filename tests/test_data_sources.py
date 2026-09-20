@@ -24,14 +24,14 @@ from nanobot_quant.data_sources.periods import (
 # ── 注册表形状 ────────────────────────────────────────────────────────
 
 
-def test_registry_contains_all_five_sources():
+def test_registry_contains_all_sources():
     names = set(list_data_sources())
-    assert names == {"gate_cex", "onchainos", "okx_cex", "eastmoney", "yfinance"}
+    assert names == {"gate_cex", "onchainos", "okx_cex", "eastmoney", "sina", "yfinance"}
 
 
 def test_kind_split():
     assert executable_sources() == ["gate_cex", "onchainos"]
-    assert set(research_sources()) == {"okx_cex", "eastmoney", "yfinance"}
+    assert set(research_sources()) == {"okx_cex", "eastmoney", "sina", "yfinance"}
 
 
 def test_okx_cex_is_research_until_execution_integrated():

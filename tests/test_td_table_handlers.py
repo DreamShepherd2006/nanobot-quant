@@ -662,9 +662,10 @@ def test_bars_for_source_follows_registry():
     assert "30m" not in mod._bars_for_source("onchainos")
     assert "4H" in mod._bars_for_source("onchainos")
     assert mod._bars_for_source("okx_cex") == mod._bars_for_source("onchainos")
-    # 股票（东财）：6 周期（无 4H）
-    assert len(mod._bars_for_source("stock")) == 6
+    # 股票（新浪）：5 周期（5m/15m/30m/1H/1D；接口不支持 1m/4H/1W）
+    assert len(mod._bars_for_source("stock")) == 5
     assert "4H" not in mod._bars_for_source("stock")
+    assert "1m" not in mod._bars_for_source("stock")
     # 未知 source 回退 fallback（与旧硬编码一致的 7 周期）
     assert len(mod._bars_for_source("bogus")) == 7
     assert "4H" in mod._bars_for_source("bogus")

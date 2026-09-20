@@ -57,7 +57,7 @@ _PAGE_SOURCE_TO_SOURCE = {
     "onchainos": "onchainos",
     "cex": "gate_cex",
     "okx_cex": "okx_cex",
-    "stock": "eastmoney",
+    "stock": "sina",
 }
 
 
@@ -123,22 +123,18 @@ def _fetch_stock_kline(
 ) -> pd.DataFrame:
     """Real-stock candles via the data-source registry.
 
-    Primary source is EastMoney (push2his.eastmoney.com, no API key, works
-    from datacenter IPs); Yahoo Finance (yfinance) is the fallback because
-    Yahoo rate-limits datacenter IPs (429). 4H is unsupported for stocks.
-    Both feeds are registered research sources (不参与执行).
+    三级回退：新浪 → 东财 → yfinance。云端（HF Space / 容器）东财被 IP 封禁、
+    yfinance 对 A 股分钟只给约 15–20 个交易日，新浪两边都能用且深度最好
+    （5m 约 5 个月、日线 24 年）；自建环境若新浪不可达，东财顶上。
+    三者均 kind=research（不参与执行）。4H 对股票不支持。
     """
     errors: list[str] = []
-    try:
-        return get_data_source("eastmoney").fetch_kline(
-            ticker, bar=bar, limit=limit, start=start, end=end)
-    except Exception as exc:
-        errors.append("东财: %s" % exc)
-    try:
-        return get_data_source("yfinance").fetch_kline(
-            ticker, bar=bar, limit=limit, start=start, end=end)
-    except Exception as exc:
-        errors.append("yfinance: %s" % exc)
+    for name, label in (("sina", "新浪"), ("eastmoney", "东财"), ("yfinance", "yfinance")):
+        try:
+            return get_data_source(name).fetch_kline(
+                ticker, bar=bar, limit=limit, start=start, end=end)
+        except Exception as exc:
+            errors.append("%s: %s" % (label, exc))
     raise RuntimeError("；".join(errors) or "股票数据获取失败")
 
 
@@ -428,7 +424,7 @@ def _form(tab: str, ticker: str, bar: str, limit: int, start: str, end: str, sou
         '<option value="onchainos"%s>链上 DEX (OnchainOS)</option>'
         '<option value="cex"%s>Gate CEX (执行同源)</option>'
         '<option value="okx_cex"%s>OKX CEX (回测/展示)</option>'
-        '<option value="stock"%s>股票 (东财/yfinance)</option></select>'
+        '<option value="stock"%s>股票 (新浪/东财/yfinance)</option></select>'
         % (" selected" if source == "onchainos" else "",
            " selected" if source == "cex" else "",
            " selected" if source == "okx_cex" else "",

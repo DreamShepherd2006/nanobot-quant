@@ -20,6 +20,38 @@ import pandas as pd
 from nanobot_quant.td_params import DEFAULT_TD_PARAMS, load_td_params
 
 
+def calculate_series(
+    df: pd.DataFrame,
+    news_count: int = 0,
+    params: dict | None = None,
+    engine_cls=None,
+) -> pd.DataFrame:
+    """Run all DeMark calculations and return the FULL per-bar series.
+
+    Same column normalisation / engine selection as :func:`calculate`, but
+    returns the engine's whole DataFrame (one row per input bar, plus the
+    derived columns ``buy_setup_count``/``sell_setup_count``/``cd_buy``/
+    ``cd_sell``/``tdst_support``/``score``/...) instead of a latest-bar
+    summary dict.
+
+    Research tooling (``analyze_f1_td``) needs the setup/countdown
+    trajectory of an entire sequence, which the summary form cannot express.
+    Pass ``params=DEFAULT_TD_PARAMS`` explicitly when the analysis must not
+    depend on the operator's persisted live parameters.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.droplevel(1)
+    df = df.rename(columns=lambda c: {
+        "open": "Open", "high": "High", "low": "Low",
+        "close": "Close", "volume": "Volume",
+    }.get(c, c))
+    if params is None:
+        params = load_td_params()
+    engine = (engine_cls or _DeMarkEngine)(df, params)
+    return engine.run_all(news_count)
+
+
 def calculate(
     df: pd.DataFrame,
     news_count: int = 0,

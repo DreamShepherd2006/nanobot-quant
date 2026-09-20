@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.okx.com"
 _CANDLES_PATH = "/api/v5/market/candles"
+# 历史 K 线专用端点：只有它能向前翻页（``candles`` 恒返回最近 300 根，
+# 无论传什么游标）。用法：``after=<本批最早 ts>`` = 往更早翻。
+# **实证（2026-09-20）**：旧实现用 ``candles`` + ``before`` 只能拿到首屏
+# （请求 90 天 15m 实际只回 242 根 = 3 天）。
+_HISTORY_PATH = "/api/v5/market/history-candles"
 
 # Rate control: OKX allows ~20 req / 2 s on public endpoints.
 # We use a conservative 150 ms inter-request delay.
@@ -397,10 +402,11 @@ def fetch_kline_range(
     start_ms = int(start_dt.timestamp() * 1000)
 
     _sess = session or requests
-    url = f"{_BASE_URL}{_CANDLES_PATH}"
+    # 必须用 history-candles：`candles` 端点恒返回最近 300 根、游标无效。
+    url = f"{_BASE_URL}{_HISTORY_PATH}"
 
     frames: list[pd.DataFrame] = []
-    before: int | None = None  # None on first call → latest candles
+    after: int | None = None  # None on first call → latest candles
 
     while True:
         time.sleep(_RATE_DELAY)
@@ -409,8 +415,9 @@ def fetch_kline_range(
             "bar": bar_okx,
             "limit": 300,
         }
-        if before is not None:
-            params["before"] = before
+        if after is not None:
+            # OKX 语义：after = 返回早于该 ts 的数据（与多数交易所相反）
+            params["after"] = after
         resp = _sess.get(url, params=params, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
@@ -458,7 +465,7 @@ def fetch_kline_range(
         if earliest_ts is None or earliest_ts <= start_ms:
             break
 
-        before = earliest_ts
+        after = earliest_ts
 
     if not frames:
         logger.warning("fetch_kline_range(%s): no data %s→%s", inst_id, start, end)

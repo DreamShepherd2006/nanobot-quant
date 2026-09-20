@@ -20,6 +20,41 @@ import pandas as pd
 _EM_KLTS = {"1m": "1", "5m": "5", "15m": "15", "1H": "60", "1D": "101", "1W": "102"}
 _SPAN = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "1D": 86400, "1W": 604800}
 
+# 同一个 REST 接口的多个 CDN 入口。东财对「裸脚本流量」会直接断连
+# （短 UA 的 urllib GET 得到 RemoteDisconnected），所以除了发完整浏览器头，
+# 还要能换入口重试。2026-09-20 在 HF Space 与 Nightly 容器上双双复现。
+_EM_HOSTS = (
+    "push2his.eastmoney.com",
+    "82.push2his.eastmoney.com",
+    "1.push2his.eastmoney.com",
+)
+_EM_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+    "Referer": "https://quote.eastmoney.com/",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Connection": "keep-alive",
+}
+
+
+def _fetch_json(query: str) -> dict:
+    """GET the kline endpoint, trying each EastMoney host in turn.
+
+    Raises with **every** attempt's error attached so a total failure is never
+    silent (and never mistaken for "no data").
+    """
+    errors: list[str] = []
+    for host in _EM_HOSTS:
+        url = f"https://{host}/api/qt/stock/kline/get?{query}"
+        try:
+            req = urllib.request.Request(url, headers=_EM_HEADERS)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 — 逐入口收集，最后一次性报出
+            errors.append(f"{host}: {type(exc).__name__}: {exc}")
+    raise RuntimeError("东财取数失败（已尝试全部入口）→ " + " | ".join(errors))
+
 
 def stock_secid(ticker: str) -> str:
     """Map a symbol to an EastMoney secid.
@@ -51,15 +86,12 @@ def fetch_kline(ticker: str, bar: str = "1D", limit: int = 60,
         span = _SPAN.get(bar, 86400) * max(limit, 10) * 2
         start = now - timedelta(seconds=span)
         end = now
-    url = (
-        "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+    query = (
         f"secid={stock_secid(ticker)}&fields1=f1,f2,f3,f4,f5&"
         "fields2=f51,f52,f53,f54,f55,f56&"
         f"klt={klt}&fqt=1&beg={start.strftime('%Y%m%d')}&end={end.strftime('%Y%m%d')}"
     )
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        payload = json.loads(r.read().decode("utf-8"))
+    payload = _fetch_json(query)
     klines = (payload.get("data") or {}).get("klines") or []
     if not klines:
         raise RuntimeError(f"东财无数据: {ticker}")
