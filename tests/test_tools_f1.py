@@ -98,12 +98,22 @@ def test_resolve_source_rejects_unknown_shape():
 
 # ── _cv_hint ───────────────────────────────────────────────────────
 
-@pytest.mark.parametrize(
-    "cv,keyword",
-    [(0.10, "可用"), (0.27, "可用"), (0.30, "临界"), (0.40, "退化")],
-)
-def test_cv_hint_boundaries(cv, keyword):
-    assert keyword in T._cv_hint(cv)
+def test_cv_is_descriptive_only():
+    """CV 已不再作可用性判据（2026-09-20 实证推翻），只作序列描述。
+
+    旧行为：CV≤0.27 判「可用」、0.27–0.35「临界」、>0.35「退化」。
+    新行为：无论 CV 多大，输出一律是描述 + 显式否定判据用途。
+    """
+    for cv in (0.10, 0.27, 0.30, 0.40, 0.99):
+        s = T._cv_hint(cv)
+        assert isinstance(s, str)
+        assert "不可用作可用性判据" in s, f"CV={cv} 的输出未声明不作判据: {s}"
+        assert f"{cv:.3f}" in s, f"CV={cv} 的数值未出现在描述中: {s}"
+    # 不得再出现旧的三档判词
+    for cv in (0.10, 0.30, 0.40):
+        s = T._cv_hint(cv)
+        assert "可用" not in s.replace("不可用作可用性判据", "")
+        assert "退化" not in s
 
 
 # ── _trigger_stats ─────────────────────────────────────────────────
