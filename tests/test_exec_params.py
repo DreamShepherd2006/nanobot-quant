@@ -102,7 +102,7 @@ def test_meta_covers_all_defaults_and_three_groups():
     assert set(PARAM_META) == flat_keys | scene_flat_keys | {"sub_accounts"} | set(
         SCENE_THRESHOLD_FIELDS) | set(SCENE_ONLY_FIELDS)
     groups = {m["group"] for m in PARAM_META.values()}
-    assert groups == {"risk", "exec", "td", "scene"}
+    assert groups == {"risk", "exec", "td", "scene", "f1gate"}
     # td_bars：固定窗口，范围 20-300（onchainos CLI 单次上限）
     bars = PARAM_META["td_bars"]
     assert bars["min"] == 20 and bars["max"] == 300 and bars["std"] == 120
@@ -648,11 +648,14 @@ def test_grouping_scheme2():
     assert {"quantity_mode", "td_quantity", "td_fixed_amount", "td_batches",
             "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
             "td_symbols", "td_sleeptime", "sub_accounts"} <= scene_group
-    # ③ 只剩全局循环运行（K线窗口 + 并发拉取 + 监控刷新 + 最短持有期 + 趋势周期 + 贝叶斯闸门）
+    # ③ 只剩全局循环运行（K线窗口 + 并发拉取 + 监控刷新 + 最短持有期 + 趋势周期）
     assert td_group == {"td_bars", "kline_concurrency", "td_ui_refresh_s",
-                        "position_display_min_usd", "min_hold_bars", "trend_period",
-                        "gate_enabled", "gate_red_min"}
+                        "position_display_min_usd", "min_hold_bars", "trend_period"}
+    # ⑤ F1 闸门独立成组（贝叶斯 gate_enabled/gate_red_min 从 ③ 提拔，零行为变化）
+    f1_group = {k for k, v in PARAM_META.items() if v["group"] == "f1gate"}
+    assert f1_group == {"gate_enabled", "gate_red_min"}
     assert "scene" in GROUP_TITLES
+    assert "f1gate" in GROUP_TITLES
     assert "batch" not in GROUP_TITLES
 
 

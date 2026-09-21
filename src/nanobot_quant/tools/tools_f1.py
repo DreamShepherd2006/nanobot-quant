@@ -1,30 +1,42 @@
 """``analyze_f1_td`` — 把波动率（F1）序列喂给 TD 的衰竭检验工具。
 
-研究背景（2026-09-19 / 09-20 实证，docs/quant-system.md §33 待落档）
---------------------------------------------------------------------
+研究背景（2026-09-19 ~ 09-21 实证，见 docs/quant-system.md §33.33/§33.34）
+------------------------------------------------------------------
 TD Sequential 隐含依赖波动率、却从不显式处理它：setup 用绝对价格比较
 （``close < close[i-4]``）、countdown 用相对极值（``close <= Low[i-2]``）、
 而 9/13 这些常数把「典型波动率」假设固化了下来 —— 这正是它在日线
 （DeMark 原始场景）鲁棒、在分钟级失效的原因。
 
 把 F1 = ``ATR_n[t] / ATR_n[t-lookback]``（波动率扩张率，lookback 按
-「3 小时语义」随周期换算）作为 TD 的**输入序列**后，实测（跨市场）：
+「3 小时语义」随周期换算）作为 TD 的**输入序列**后，已校准的实证结论：
 
-* 加密蓝筹 1H（BTC/ETH/SOL/BNB/XRP/DOGE，300 天）：buy9 / sell9 均显著
-* A股 日线（10 标的 × 20 年）：sell9 10/10 显著，buy9 8/10 显著
-* A股 5m / 15m（6 标的 × 60 天）：buy9 显著（+16%~+32%）
-* 美股 1H（10 标的 × 1064 天）：sell9 显著（但样本偏少）
-* 对照组「价格 TD」在**六类资产**上均无入场优势（幅度 ±0.5% 内、命中≈50%）
+* **F1 是波动率状态读数，不是方向信号**——加密 6 标的 × 300 天（15m/1H）
+  扩样：buy9 后「ATR 单位回撤比」中位 0.83（36/36 更浅、样本外一致），
+  但**价格方向随机（p=0.945）**；F1 buy9 的真实含义是「波动率被压缩到
+  极致 → 预测释放」，唯一可用场景 = 加密现货 TD buy9 的入场质量过滤 +
+  期权卖方时点（**不降低**尾部插针概率）。
+* A股：**日线 first_cross 样本仅 0–3 个，不可行**（C36 ⑤ 结案）；5m/15m/30m
+  无跨周期、跳标稳定性；1H 有效但数据通道不足（新浪 1H 仅约 1500 根）。
+* 对照组「价格 TD」在六类资产上均无入场优势（幅度 ±0.5% 内、命中≈50%）。
 
-**适用范围由 CV（F1 的变异系数）决定**：
-``CV ≲ 27%`` → 衰竭语义成立；``CV ≳ 35%`` → TD 在 F1 上退化为趋势指标
-（9 之后继续原方向）。这条线在加密 / A股 / 美股上都成立。
+**已撤回的旧结论（勿再引用）**：A股 日线「sell9 10/10 显著、buy9 8/10 显著」
+出自 ``*_all``（累加期）口径的重复计数，改用 first_cross 后独立样本只剩 0–3。
+
+**口径（2026-09-21 修正）**：本工具的 F1 行以**价格**为被测量对象——信号取自
+F1 序列上的 TD 计数，看的是价格的反应；``f1_self_*`` 行量 F1 序列自身
+（波动率均值回归，仅作参考、不含交易含义）。修正前误把 F1 自身当被测量对象，
+会得到「p=0.000 显著」的同义反复。
+
+**CV 不可用作可用性判据**（2026-09-20 证伪）：CV 是「周期 × 窗口长度」的
+函数而非标的属性（同一标的跳周期单调下降约 10 倍），且与中位幅度正相关
+（+0.595），与「CV 低 = 可用」的预期方向相反。CV 仅作数据描述。
 
 工具职责
 --------
 给一组标的 × 周期，拉 K 线 → 算 F1 → 在 F1 上跑 TD → 统计 setup 达到
-阈值（默认 9）之后的衰竭表现（中位幅度 / 命中率 / 随机对照 p 值），
-并附上同一数据上「价格 TD」的对照，最后按 CV 给出可用性建议。
+阈值（默认 9）之后**价格**的衰竭表现（中位幅度 / 命中率 / 随机对照 p 值），
+并附上同一数据上「价格 TD」的对照与 F1 自反应参考行。回撤深度与尾部风险
+请用 ``analyze_f1_drawdown``（两个工具量的是不同物理量）。
 
 数据源走 ``data_sources`` 注册表（``get_data_source(...).fetch_kline``），
 所以在 HF Space 上会自动使用新浪（云端唯一可用的 A 股源；东财被 IP 封禁，
@@ -33,6 +45,7 @@ TD Sequential 隐含依赖波动率、却从不显式处理它：setup 用绝对
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -463,20 +476,29 @@ def analyze_f1_td(
             f1v = f1.values
 
             fb, fs = _td_counts(f1)
+            # 价格必须按 **F1 的索引** 对齐：_f1_series 会 dropna（ATR 预热 +
+            # 零 ATR bar），长度短于 df；直接拿 df["Close"].values 会让信号点位
+            # 整体错位（k 根窗口偏移），所以按 f1.index 重新取价。
+            px_f1 = df["Close"].reindex(f1.index).values
+            px = df["Close"].values
             rec.update(
                 status="ok",
                 bars=int(len(df)),
                 days=round(float(days), 1),
                 cv=round(cv, 4),
+                # 信号取自 F1 序列的 TD 计数；**被测量对象是价格**（2026-09-21 修正：
+                # 此前传 f1v → 量的是 F1 自身回升，属波动率均值回归的同义反复）
                 # 主字段 = 首次穿越（更严格）；*_all = 累加期全计（样本更多）
-                f1_buy9=_trigger_stats(f1v, fb, +1, k, threshold),
-                f1_sell9=_trigger_stats(f1v, fs, -1, k, threshold),
-                f1_buy9_all=_trigger_stats(f1v, fb, +1, k, threshold, mode="all_bars"),
-                f1_sell9_all=_trigger_stats(f1v, fs, -1, k, threshold, mode="all_bars"),
+                f1_buy9=_trigger_stats(px_f1, fb, +1, k, threshold),
+                f1_sell9=_trigger_stats(px_f1, fs, -1, k, threshold),
+                f1_buy9_all=_trigger_stats(px_f1, fb, +1, k, threshold, mode="all_bars"),
+                f1_sell9_all=_trigger_stats(px_f1, fs, -1, k, threshold, mode="all_bars"),
+                # 参考口径：F1 序列自反应（仅描述「波动率压缩 → 释放」，无交易含义）
+                f1_self_buy9=_trigger_stats(f1v, fb, +1, k, threshold),
+                f1_self_sell9=_trigger_stats(f1v, fs, -1, k, threshold),
                 cv_hint=_cv_hint(cv),
             )
             if include_price_td:
-                px = df["Close"].values
                 pb, ps = _td_counts(df["Close"])
                 rec["price_buy9"] = _trigger_stats(px, pb, +1, k, threshold)
                 rec["price_sell9"] = _trigger_stats(px, ps, -1, k, threshold)
@@ -490,12 +512,18 @@ def analyze_f1_td(
     px_bad = [r for r in ok
               if (r.get("price_buy9") or {}).get("p") is not None
               and (r["price_buy9"] or {}).get("p", 1) >= 0.05] if include_price_td else []
+    self_sig = [r for r in ok
+                if (r.get("f1_self_buy9") or {}).get("p", 1) < 0.05
+                or (r.get("f1_self_sell9") or {}).get("p", 1) < 0.05]
 
     summary = (
         f"数据源={src_name}；{len(ok)}/{len(results)} 个 标的×周期 成功；"
-        f"其中 {len(usable)} 个 F1 的 TD 显著（first_cross 口径，p<0.05）；"
-        + (f"价格 TD 对照组不显著 {len(px_bad)}/{len(ok)}。" if include_price_td else "")
-        + " 本工具量的是**衰竭方向**（会不会收回来），不量回撤深度——"
+        f"其中 {len(usable)} 个「F1 信号 → 价格反应」显著（first_cross 口径，p<0.05）"
+        + (f"；价格 TD 对照（价格信号 → 价格反应）不显著 {len(px_bad)}/{len(ok)}"
+           if include_price_td else "")
+        + f"；F1 序列自反应显著 {len(self_sig)}/{len(ok)}"
+        "（参考口径，仅描述波动率聚合，不含交易含义）。"
+        " 本工具量的是**衰竭方向**（会不会收回来），不量回撤深度——"
         "要看回撤/尾部用 analyze_f1_drawdown。"
     )
     return {
@@ -505,7 +533,11 @@ def analyze_f1_td(
         "summary": summary,
         "note": (
             "F1 = ATR_n[t]/ATR_n[t-lookback]，lookback 按 3 小时语义换算；"
-            "TD 跑在 F1 序列上（非价格）。median/hit/p 对应阈值触发后 k 根的变化，"
+            "TD 跑在 F1 序列上（非价格），但**被测量对象是价格**——即「F1 出信号、"
+            "看价格反应」（2026-09-21 口径修正：修正前误把 F1 自身当被测量对象，"
+            "会得出 p=0.000 的同义反复；f1_self_* 行保留该量，仅作参考、"
+            "不含交易含义）。median/hit/p 对应阈值触发后 k 根的变化（k 按**根**计、"
+            "非时间：12 根 5m = 1 小时，12 根 1H = 3 个交易日），"
             "sign 已按衰竭方向取正（buy9 期望回升、sell9 期望回落）。"
             "p 来自 200 次随机位置对照。价格 TD 为同数据基线（已实证六类资产均失效）。"
             "**两种触发口径都给出**：主字段（f1_buy9/f1_sell9/price_*）只取"
@@ -759,3 +791,156 @@ def analyze_f1_drawdown(
             "只读分析工具：不下单、不改任何配置。"
         ),
     }
+
+
+# ───────────────────────────────────────────────────────────────
+# 异步契约（WebUI「📊 F1 模式回测」分栏 / 长任务）
+# ───────────────────────────────────────────────────────────────
+# 设计（§33.36 S1）：F1 分析在 WebUI 上可能是多标的 × 多周期，单次
+# 超过 MCP stdio 的 30s 硬超时 —— 与现货/期权回测同款 run_id + 轮询
+# 契约。结果落 ``{data_root}/legion/backtests/<run_id>.json``，前缀
+# ``f1-`` 与现货（``YYYYMMDD-...``）/ 期权（``opt-``）区分，页面历史
+# 分开列（见 ``_f1_runs``）。
+#
+# 与回测的关键差异：F1 分析**不 import lumibot**，所以不需要
+# ``_run_guarded`` 那套 stdio 守护 —— 但保留 running/done/error 三段
+# 状态机，否则run 进行中的几分钟里页面会看起来「什么都没发生」。
+#
+# 覆盖参数只作用于本次运行，**绝不回写任何实盘配置**（同 2026-08-30
+# 拍板口径；F1 分析本身也不写任何参数文件）。
+
+F1_RUN_PREFIX = "f1-"
+_F1_KINDS = ("f1_td", "f1_drawdown")
+
+
+def _f1_write(run_id: str, payload: dict) -> None:
+    """持久化到 ``{data_root}/legion/backtests/<run_id>.json``。
+
+    与回测共用目录（页面历史统一），靠 run_id 前缀区分来源。
+    写失败只记 stderr —— 落盘失败不得影响分析本身。
+    """
+    try:
+        from nanobot_quant.onchainos_cli import backtests_dir
+
+        out_dir = backtests_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{run_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log(f"_f1_write failed for {run_id}: {exc}")
+
+
+def _f1_guarded(run_id: str, kind: str, kwargs: dict) -> None:
+    """后台线程：跑分析 → 落盘 done/error。
+
+    先落一条 ``status=running``，否则长分析期间的页面历史空白（与
+    ``_run_guarded`` 同一理由）。
+    """
+    _f1_write(run_id, {"status": "running", "run_id": run_id, "kind": kind})
+    try:
+        fn = analyze_f1_td if kind == "f1_td" else analyze_f1_drawdown
+        result = fn(**kwargs)
+        if isinstance(result, dict):
+            result["kind"] = kind
+        _f1_write(run_id, {"status": "done", "run_id": run_id, "result": result})
+        _log(f"{run_id} done kind={kind}")
+    except Exception as exc:  # noqa: BLE001 — 单次失败不得杀死线程外的任何东西
+        _f1_write(run_id, {"status": "error", "run_id": run_id, "error": str(exc)})
+        _log(f"{run_id} error kind={kind}: {exc}")
+
+
+def run_f1_analysis(
+    kind: str = "f1_td",
+    symbols: Optional[list[str]] = None,
+    periods: Optional[list[str]] = None,
+    source: str = "",
+    **kwargs,
+) -> dict:
+    """起一轮 F1 分析（后台线程），返回 ``{status, run_id}``。
+
+    Args:
+        kind: ``"f1_td"``（触发统计）或 ``"f1_drawdown"``（回撤诊断）。
+        symbols: 标的列表，如 ``["601127"]`` / ``["SOL", "ETH"]``。
+        periods: 周期列表，如 ``["1D"]`` / ``["15m", "1H"]``。
+                 可用性由数据源决定（新浪无 1m；东财云端不可达）。
+        source: 数据源名（``gate_cex`` / ``okx_cex`` / ``sina`` /
+                ``eastmoney``）；留空则按标的形式自动推断。
+        **kwargs: 透传给对应分析函数（``k`` / ``atr_n`` / ``threshold`` /
+                  ``ks`` / ``qmin`` / ``qmax`` / ``split`` / ``limit`` /
+                  ``include_price_td`` / ``include_tail`` …）。
+
+    Returns:
+        ``{"status": "started", "run_id": "f1-..."}``；参数不合法时
+        返回 ``{"error": ...}``。用 ``get_f1_result(run_id)`` 轮询。
+    """
+    kind = str(kind or "f1_td").strip().lower()
+    if kind not in _F1_KINDS:
+        return {
+            "error": f"未知 kind={kind!r}",
+            "hint": f"可用：{' / '.join(_F1_KINDS)}",
+        }
+    syms = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+    if not syms:
+        return {"error": "至少需要一个标的", "hint": "如 symbols=['601127']"}
+    pers = [str(p).strip() for p in (periods or []) if str(p).strip()] or ["1D"]
+
+    params = {
+        "symbols": syms,
+        "periods": pers,
+        "source": source or "",
+        **{k: v for k, v in kwargs.items() if v is not None},
+    }
+
+    import threading
+    from uuid import uuid4
+
+    run_id = (
+        f"{F1_RUN_PREFIX}"
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
+    )
+    _log(
+        f"start {run_id} kind={kind} symbols={syms} periods={pers} "
+        f"source={source or 'auto'} extra={sorted(k for k in params if k not in ('symbols','periods','source'))}"
+    )
+    threading.Thread(
+        target=_f1_guarded, args=(run_id, kind, params), daemon=True
+    ).start()
+    return {"status": "started", "run_id": run_id, "kind": kind}
+
+
+def get_f1_result(run_id: str) -> dict:
+    """读 F1 分析结果，并附上 ``markdown``（页面复制按钮 / agent 直读）。
+
+    与 ``tools_backtest.get_backtest_result`` 同形：后台 run 写的是
+    ``{status, run_id, result}`` 包装，markdown 挂到**内层 result**；
+    裸 result（旧记录）挂顶层。running/error 不加 markdown。
+    """
+    if not run_id:
+        return {"error": "缺少 run_id"}
+    try:
+        from nanobot_quant.onchainos_cli import backtests_dir
+
+        p = backtests_dir() / f"{run_id}.json"
+        if not p.is_file():
+            return {
+                "error": f"no f1 result for run_id={run_id}",
+                "hint": "分析可能仍在运行，或 run_id 有误。",
+            }
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload.setdefault("run_id", run_id)
+            inner = payload.get("result")
+            target = inner if isinstance(inner, dict) else payload
+            target.setdefault("run_id", run_id)
+            try:
+                from nanobot_quant.f1_markdown import render_markdown
+
+                md = render_markdown(target)
+                if md:
+                    target["markdown"] = md
+            except Exception:  # noqa: BLE001 — markdown 只是 UX 增强
+                pass
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"failed to read f1 result for {run_id}: {exc}"}

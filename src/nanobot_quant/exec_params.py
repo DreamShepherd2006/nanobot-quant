@@ -322,12 +322,12 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "hint": "TD 趋势状态（涨势/跌势/弹簧）按该周期 K 线计算，用于大周期方向过滤（单向闸门，Step 3 接入交易；当前仅展示，默认 1H）。15m 更灵敏、4H/1D 更钝；只读展示阶段零交易影响",
     },
     "gate_enabled": {
-        "group": "td", "type": "bool", "std": False,
+        "group": "f1gate", "type": "bool", "std": False,
         "label": "贝叶斯闸门（回测）",
         "hint": "回测 BUY 接入 F1×时段贝叶斯闸门：后验 P(被套|F1,时段) ≥ 阈值禁买（负反馈只拦不买，SELL/止损/止盈不碰）。默认关=回测与原版完全一致；实盘 TD 不消费此开关，实盘接入待回测裁决后另行讨论（2026-08-31）",
     },
     "gate_red_min": {
-        "group": "td", "min": 0.05, "max": 0.9, "step": 0.05, "std": 0.45,
+        "group": "f1gate", "min": 0.05, "max": 0.9, "step": 0.05, "std": 0.45,
         "label": "闸门禁买阈值",
         "hint": "后验 P(被套) ≥ 该值禁买。0.45=red-only（只拦高危组合，样本外被套率 34%+）；0.20=yellow+red（拦所有高于平均风险组合）；回测裁决两档对比后定默认",
     },
@@ -437,6 +437,7 @@ GROUP_TITLES = {
     "exec": "② 执行通道与质量（WebUI 锁死 — LLM 不可改）",
     "td": "③ TD 循环运行（全局）",
     "scene": "④ 多场景（多时间框架）",
+    "f1gate": "⑤ F1 闸门（贝叶斯 — 仅回测）",
 }
 
 

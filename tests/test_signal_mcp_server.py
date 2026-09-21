@@ -46,6 +46,9 @@ EXPECTED_TOOLS = {
     "cex_sub_order",
     "options_broker_selftest",
     "analyze_f1_td",
+    "analyze_f1_drawdown",
+    "run_f1_analysis",
+    "get_f1_result",
 }
 
 
