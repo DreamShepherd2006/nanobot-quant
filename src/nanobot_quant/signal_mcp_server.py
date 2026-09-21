@@ -76,7 +76,12 @@ from nanobot_quant.tools.tools_execute import (
     get_execution_outcome,
 )
 from nanobot_quant.tools.tools_research_chain import get_chain_result, run_research_chain
-from nanobot_quant.tools.tools_f1 import analyze_f1_td, analyze_f1_drawdown
+from nanobot_quant.tools.tools_f1 import (
+    analyze_f1_drawdown,
+    analyze_f1_td,
+    get_f1_result,
+    run_f1_analysis,
+)
 
 # ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
 # import time through a stdout-bound StreamHandler, BEFORE any handler
@@ -247,6 +252,22 @@ _TOOL_DESCRIPTIONS = {
         "A股 结论不同：日线样本不足、30m 无方向、5m 反向，仅 15m 宽基有微弱迹象。\n"
         "只读分析工具：不下单、不改任何配置。"
     ),
+    "run_f1_analysis": (
+        "**异步**启动一轮 F1 分析（WebUI「📊 F1 模式回测」分栏同款契约）："
+        "kind='f1_td'（触发统计，同 analyze_f1_td）或 'f1_drawdown'（回撤诊断，"
+        "同 analyze_f1_drawdown）；symbols / periods / source 必填，其余参数"
+        "（k / ks / atr_n / threshold / limit / qmin / qmax / split）透传。"
+        "立即返回 {status: started, run_id}，用 get_f1_result(run_id) 轮询。"
+        "**为什么异步**：多标的 × 多周期会超 30s MCP 硬超时。只读，不下单。"
+        "周期可用性由源决定：sina 无 1m、eastmoney 云端不可达（会报错）。"
+    ),
+    "get_f1_result": (
+        "轮询 run_f1_analysis 的结果。返回 {status, run_id, result}；"
+        "status=running 时 result 未出，done 时完整，error 时带原因。"
+        "result 里带 **markdown** 字段（已渲染好的三段报告：参数快照 / 触发统计 /"
+        "回撤诊断），可直接拷贝给用户看；回撤诊断的三列（段回撤比 / 单根比 /"
+        "插针比）必须一起读——**幅度可预测 ≠ 风险可降**。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -262,6 +283,8 @@ _TOOL_DISPATCH = {
     "options_broker_selftest": options_broker_selftest,
     "analyze_f1_td": analyze_f1_td,
     "analyze_f1_drawdown": analyze_f1_drawdown,
+    "run_f1_analysis": run_f1_analysis,
+    "get_f1_result": get_f1_result,
     "wallet_login_init": wallet_login_init,
     "wallet_login_poll": wallet_login_poll,
     "wallet_payment_set": wallet_payment_set,

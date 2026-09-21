@@ -33,6 +33,7 @@ TD Sequential 隐含依赖波动率、却从不显式处理它：setup 用绝对
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -759,3 +760,156 @@ def analyze_f1_drawdown(
             "只读分析工具：不下单、不改任何配置。"
         ),
     }
+
+
+# ───────────────────────────────────────────────────────────────
+# 异步契约（WebUI「📊 F1 模式回测」分栏 / 长任务）
+# ───────────────────────────────────────────────────────────────
+# 设计（§33.36 S1）：F1 分析在 WebUI 上可能是多标的 × 多周期，单次
+# 超过 MCP stdio 的 30s 硬超时 —— 与现货/期权回测同款 run_id + 轮询
+# 契约。结果落 ``{data_root}/legion/backtests/<run_id>.json``，前缀
+# ``f1-`` 与现货（``YYYYMMDD-...``）/ 期权（``opt-``）区分，页面历史
+# 分开列（见 ``_f1_runs``）。
+#
+# 与回测的关键差异：F1 分析**不 import lumibot**，所以不需要
+# ``_run_guarded`` 那套 stdio 守护 —— 但保留 running/done/error 三段
+# 状态机，否则run 进行中的几分钟里页面会看起来「什么都没发生」。
+#
+# 覆盖参数只作用于本次运行，**绝不回写任何实盘配置**（同 2026-08-30
+# 拍板口径；F1 分析本身也不写任何参数文件）。
+
+F1_RUN_PREFIX = "f1-"
+_F1_KINDS = ("f1_td", "f1_drawdown")
+
+
+def _f1_write(run_id: str, payload: dict) -> None:
+    """持久化到 ``{data_root}/legion/backtests/<run_id>.json``。
+
+    与回测共用目录（页面历史统一），靠 run_id 前缀区分来源。
+    写失败只记 stderr —— 落盘失败不得影响分析本身。
+    """
+    try:
+        from nanobot_quant.onchainos_cli import backtests_dir
+
+        out_dir = backtests_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{run_id}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log(f"_f1_write failed for {run_id}: {exc}")
+
+
+def _f1_guarded(run_id: str, kind: str, kwargs: dict) -> None:
+    """后台线程：跑分析 → 落盘 done/error。
+
+    先落一条 ``status=running``，否则长分析期间的页面历史空白（与
+    ``_run_guarded`` 同一理由）。
+    """
+    _f1_write(run_id, {"status": "running", "run_id": run_id, "kind": kind})
+    try:
+        fn = analyze_f1_td if kind == "f1_td" else analyze_f1_drawdown
+        result = fn(**kwargs)
+        if isinstance(result, dict):
+            result["kind"] = kind
+        _f1_write(run_id, {"status": "done", "run_id": run_id, "result": result})
+        _log(f"{run_id} done kind={kind}")
+    except Exception as exc:  # noqa: BLE001 — 单次失败不得杀死线程外的任何东西
+        _f1_write(run_id, {"status": "error", "run_id": run_id, "error": str(exc)})
+        _log(f"{run_id} error kind={kind}: {exc}")
+
+
+def run_f1_analysis(
+    kind: str = "f1_td",
+    symbols: Optional[list[str]] = None,
+    periods: Optional[list[str]] = None,
+    source: str = "",
+    **kwargs,
+) -> dict:
+    """起一轮 F1 分析（后台线程），返回 ``{status, run_id}``。
+
+    Args:
+        kind: ``"f1_td"``（触发统计）或 ``"f1_drawdown"``（回撤诊断）。
+        symbols: 标的列表，如 ``["601127"]`` / ``["SOL", "ETH"]``。
+        periods: 周期列表，如 ``["1D"]`` / ``["15m", "1H"]``。
+                 可用性由数据源决定（新浪无 1m；东财云端不可达）。
+        source: 数据源名（``gate_cex`` / ``okx_cex`` / ``sina`` /
+                ``eastmoney``）；留空则按标的形式自动推断。
+        **kwargs: 透传给对应分析函数（``k`` / ``atr_n`` / ``threshold`` /
+                  ``ks`` / ``qmin`` / ``qmax`` / ``split`` / ``limit`` /
+                  ``include_price_td`` / ``include_tail`` …）。
+
+    Returns:
+        ``{"status": "started", "run_id": "f1-..."}``；参数不合法时
+        返回 ``{"error": ...}``。用 ``get_f1_result(run_id)`` 轮询。
+    """
+    kind = str(kind or "f1_td").strip().lower()
+    if kind not in _F1_KINDS:
+        return {
+            "error": f"未知 kind={kind!r}",
+            "hint": f"可用：{' / '.join(_F1_KINDS)}",
+        }
+    syms = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+    if not syms:
+        return {"error": "至少需要一个标的", "hint": "如 symbols=['601127']"}
+    pers = [str(p).strip() for p in (periods or []) if str(p).strip()] or ["1D"]
+
+    params = {
+        "symbols": syms,
+        "periods": pers,
+        "source": source or "",
+        **{k: v for k, v in kwargs.items() if v is not None},
+    }
+
+    import threading
+    from uuid import uuid4
+
+    run_id = (
+        f"{F1_RUN_PREFIX}"
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
+    )
+    _log(
+        f"start {run_id} kind={kind} symbols={syms} periods={pers} "
+        f"source={source or 'auto'} extra={sorted(k for k in params if k not in ('symbols','periods','source'))}"
+    )
+    threading.Thread(
+        target=_f1_guarded, args=(run_id, kind, params), daemon=True
+    ).start()
+    return {"status": "started", "run_id": run_id, "kind": kind}
+
+
+def get_f1_result(run_id: str) -> dict:
+    """读 F1 分析结果，并附上 ``markdown``（页面复制按钮 / agent 直读）。
+
+    与 ``tools_backtest.get_backtest_result`` 同形：后台 run 写的是
+    ``{status, run_id, result}`` 包装，markdown 挂到**内层 result**；
+    裸 result（旧记录）挂顶层。running/error 不加 markdown。
+    """
+    if not run_id:
+        return {"error": "缺少 run_id"}
+    try:
+        from nanobot_quant.onchainos_cli import backtests_dir
+
+        p = backtests_dir() / f"{run_id}.json"
+        if not p.is_file():
+            return {
+                "error": f"no f1 result for run_id={run_id}",
+                "hint": "分析可能仍在运行，或 run_id 有误。",
+            }
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload.setdefault("run_id", run_id)
+            inner = payload.get("result")
+            target = inner if isinstance(inner, dict) else payload
+            target.setdefault("run_id", run_id)
+            try:
+                from nanobot_quant.f1_markdown import render_markdown
+
+                md = render_markdown(target)
+                if md:
+                    target["markdown"] = md
+            except Exception:  # noqa: BLE001 — markdown 只是 UX 增强
+                pass
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"failed to read f1 result for {run_id}: {exc}"}
