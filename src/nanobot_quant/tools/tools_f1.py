@@ -476,6 +476,10 @@ def analyze_f1_td(
             f1v = f1.values
 
             fb, fs = _td_counts(f1)
+            # 价格必须按 **F1 的索引** 对齐：_f1_series 会 dropna（ATR 预热 +
+            # 零 ATR bar），长度短于 df；直接拿 df["Close"].values 会让信号点位
+            # 整体错位（k 根窗口偏移），所以按 f1.index 重新取价。
+            px_f1 = df["Close"].reindex(f1.index).values
             px = df["Close"].values
             rec.update(
                 status="ok",
@@ -485,10 +489,10 @@ def analyze_f1_td(
                 # 信号取自 F1 序列的 TD 计数；**被测量对象是价格**（2026-09-21 修正：
                 # 此前传 f1v → 量的是 F1 自身回升，属波动率均值回归的同义反复）
                 # 主字段 = 首次穿越（更严格）；*_all = 累加期全计（样本更多）
-                f1_buy9=_trigger_stats(px, fb, +1, k, threshold),
-                f1_sell9=_trigger_stats(px, fs, -1, k, threshold),
-                f1_buy9_all=_trigger_stats(px, fb, +1, k, threshold, mode="all_bars"),
-                f1_sell9_all=_trigger_stats(px, fs, -1, k, threshold, mode="all_bars"),
+                f1_buy9=_trigger_stats(px_f1, fb, +1, k, threshold),
+                f1_sell9=_trigger_stats(px_f1, fs, -1, k, threshold),
+                f1_buy9_all=_trigger_stats(px_f1, fb, +1, k, threshold, mode="all_bars"),
+                f1_sell9_all=_trigger_stats(px_f1, fs, -1, k, threshold, mode="all_bars"),
                 # 参考口径：F1 序列自反应（仅描述「波动率压缩 → 释放」，无交易含义）
                 f1_self_buy9=_trigger_stats(f1v, fb, +1, k, threshold),
                 f1_self_sell9=_trigger_stats(f1v, fs, -1, k, threshold),

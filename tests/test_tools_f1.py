@@ -270,11 +270,16 @@ def test_f1_rows_measure_price_not_the_f1_series(monkeypatch):
     out = T.analyze_f1_td(symbols=["600519"], periods=["1H"], limit=n)
     assert out["results"][0]["status"] == "ok"
     assert len(seen) >= 6
+    # _f1_series 会 dropna（ATR 预热）：F1 行与自反应行都比价格短，
+    # 且必须按 F1 的索引对齐（尾部取价，非头部）
+    f1_len = len(seen[4])
+    assert f1_len < len(close)
     for vals in seen[:4]:                       # F1 行（含累加期）→ 价格
-        assert np.allclose(vals, close)
+        assert len(vals) == f1_len
+        assert np.allclose(vals, close[-f1_len:])
     for vals in seen[4:6]:                      # 自反应参考行 → F1 序列（非价格）
-        assert len(vals) == len(close)
-        assert not np.isclose(np.nanmax(np.abs(vals[-200:] - close[-200:])), 0.0)
+        assert len(vals) == f1_len
+        assert not np.allclose(vals, close[-f1_len:])
 
 
 def test_f1_series_drops_infinite_ratio():
