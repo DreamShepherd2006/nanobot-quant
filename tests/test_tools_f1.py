@@ -241,7 +241,40 @@ def test_analyze_f1_td_happy_path(monkeypatch):
     assert "cv_hint" in rec
     # price-TD control group is present by default
     assert "price_buy9" in rec and "price_sell9" in rec
+    # 自反应参考行（口径修正后新增）
+    assert "f1_self_buy9" in rec and "f1_self_sell9" in rec
     assert "summary" in out and "note" in out
+
+
+def test_f1_rows_measure_price_not_the_f1_series(monkeypatch):
+    """口径回归（2026-09-21）：F1 行以**价格**为被测量对象。
+
+    修正前 ``f1_buy9`` 传的是 F1 数组，量的是波动率均值回归本身（同义反复，
+    必然得到 p≈0 的「显著」）。现要求 F1 行（前 4 次调用）传价格，只有
+    自反应参考行（第 5、6 次）才传 F1 序列。
+    """
+    rng = np.random.default_rng(11)
+    n = 900
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.004, n)))
+    _patch_source(monkeypatch, close)
+
+    seen: list[np.ndarray] = []
+    real = T._trigger_stats
+
+    def spy(vals, counts, sign, k, threshold, ntrials=200, seed=42, mode="first_cross"):
+        seen.append(np.asarray(vals, dtype=float))
+        return real(vals, counts, sign, k, threshold,
+                    ntrials=ntrials, seed=seed, mode=mode)
+
+    monkeypatch.setattr(T, "_trigger_stats", spy)
+    out = T.analyze_f1_td(symbols=["600519"], periods=["1H"], limit=n)
+    assert out["results"][0]["status"] == "ok"
+    assert len(seen) >= 6
+    for vals in seen[:4]:                       # F1 行（含累加期）→ 价格
+        assert np.allclose(vals, close)
+    for vals in seen[4:6]:                      # 自反应参考行 → F1 序列（非价格）
+        assert len(vals) == len(close)
+        assert not np.isclose(np.nanmax(np.abs(vals[-200:] - close[-200:])), 0.0)
 
 
 def test_f1_series_drops_infinite_ratio():

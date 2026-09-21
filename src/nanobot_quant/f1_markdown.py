@@ -31,15 +31,18 @@ from __future__ import annotations
 from typing import Any, Optional
 
 # analyze_f1_td：口径键 → 展示名（顺序即表内顺序）
+# 2026-09-21 口径修正：F1 行以**价格**为被测量对象（F1 出信号、看价格反应）
 _TD_ROWS: tuple[tuple[str, str], ...] = (
-    ("f1_buy9", "F1 buy9"),
-    ("f1_sell9", "F1 sell9"),
-    ("f1_buy9_all", "F1 buy9（累加期）"),
-    ("f1_sell9_all", "F1 sell9（累加期）"),
+    ("f1_buy9", "F1 buy9 → 价格"),
+    ("f1_sell9", "F1 sell9 → 价格"),
+    ("f1_buy9_all", "F1 buy9 → 价格（累加期）"),
+    ("f1_sell9_all", "F1 sell9 → 价格（累加期）"),
     ("price_buy9", "价格 buy9（对照）"),
     ("price_sell9", "价格 sell9（对照）"),
     ("price_buy9_all", "价格 buy9（累加期）"),
     ("price_sell9_all", "价格 sell9（累加期）"),
+    ("f1_self_buy9", "F1 buy9 → F1（自反应·参考）"),
+    ("f1_self_sell9", "F1 sell9 → F1（自反应·参考）"),
 )
 
 # analyze_f1_drawdown：口径键 → 展示名
@@ -163,8 +166,11 @@ def render_td_markdown(payload: dict) -> str:
         lines += [
             f"### 📈 {r.get('symbol')} · {r.get('period')} 触发统计",
             "",
-            "> median / hit / p 对应阈值触发后 k 根的变化，sign 已按衰竭方向取正"
-            "（buy9 期望回升、sell9 期望回落）。p 来自 200 次随机位置对照。",
+            "> median / hit / p 对应阈值触发后 k 根的变化（k 按**根**计、非时间："
+            "12 根 5m = 1 小时，12 根 1H = 3 个交易日），sign 已按衰竭方向取正"
+            "（buy9 期望回升、sell9 期望回落）。p 来自 200 次随机位置对照。"
+            "**F1 行以价格为被测量对象**（F1 出信号、看价格反应）；「自反应」行"
+            "量 F1 序列自身回升（波动率均值回归，仅参考、不含交易含义）。",
             "",
             "| 口径 | n | 中位 | 命中率 | p |",
             "|:--|--:|--:|--:|--:|",
@@ -180,7 +186,11 @@ def render_td_markdown(payload: dict) -> str:
     lines += _err_lines(results)
     lines.append(
         "> ⚠️ **本工具量的是「衰竭方向」（会不会收回来），不量回撤深度。**"
-        "要看回撤/尾部请用 `analyze_f1_drawdown`。"
+        "要看回撤/尾部请用 `analyze_f1_drawdown`。\n"
+        ">\n"
+        "> 口径说明（2026-09-21 修正）：F1 行此前误把 F1 自身当被测量对象，"
+        "会得出 p=0.000 的同义反复（波动率均值回归）；现改为看**价格**反应。"
+        "「自反应」行仍量 F1 自身，仅供参考。"
     )
     return "\n".join(lines)
 
