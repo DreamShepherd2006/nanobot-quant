@@ -353,8 +353,12 @@ def _md_params_rows(params, strategy_name, entry_setup, exit_setup, exit_cd):
     )
 
 
-def _md_notes(ticker: str, source: str) -> list[str]:
-    """markdown 尾部的口径说明（用户拍板：口径写进 markdown，粘给助手时自明）。"""
+def _md_notes(ticker: str, source: str, bar: str = "") -> list[str]:
+    """markdown 尾部的口径说明（用户拍板：口径写进 markdown，粘给助手时自明）。
+
+    A股 切分说明必须与展示层同一判据（``_session_split_enabled``）——
+    1D 不切分、日内周期才切，文案不得与实际口径脱节。
+    """
     notes = [
         "信号判定与执行层同口径：`setup_buy ≥ entry_setup` → BUY；"
         "`setup_sell ≥ exit_setup` 或 `cd_sell ≥ exit_countdown` → SELL；"
@@ -362,7 +366,7 @@ def _md_notes(ticker: str, source: str) -> list[str]:
         "空值口径：Setup/Countdown 为 0 时留空；涨跌%/TDST/Score 缺失留空；"
         "预热区 F1 值显示「—」。数字格式与页面一致（价格 6 位有效数字、Score 2 位小数）。",
     ]
-    if source == "stock" and str(ticker).isdigit() and len(str(ticker)) == 6:
+    if _session_split_enabled(source, str(ticker), bar):
         notes.append("A股：TD 计数按交易日切分（不跨午休/隔夜/周末）。")
     return notes
 
@@ -1557,7 +1561,7 @@ def _render_f1(ticker, bar, limit, source, trend_text=""):
             "sell9 = 回撤放大。参数与现货 TD 独立，不参与任何交易决策。",
             "分位只在同周期内可比（窗口 = 根数 ÷ 2，上限 500 / 下限 20）。",
         ] + ([ "A股：TD 计数按交易日切分（不跨午休/隔夜/周末）。" ]
-             if source == "stock" and str(ticker).isdigit() and len(str(ticker)) == 6 else []),
+             if _session_split_enabled(source, str(ticker), bar) else []),
     )
     return _md_block("TD F1", md) + head
 
@@ -1643,7 +1647,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
             "当前信号": str(last["recommendation"]) if str(last["recommendation"]) != "HOLD" else "—",
             "最新 bar 时间": f"{last['_time']} / UTC {last['_time_utc']}",
         },
-        disp=disp, setup=setup, notes=_md_notes(ticker, source),
+        disp=disp, setup=setup, notes=_md_notes(ticker, source, bar),
     )
     return _md_block("实时快照", md) + status + hint + table
 
@@ -1729,7 +1733,7 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
             "信号数（count == Setup 周期）": f"{len(rows)}",
             "Setup 周期": f"{setup}",
         },
-        disp=disp, setup=setup, stats=(rows, agg), notes=_md_notes(ticker, source),
+        disp=disp, setup=setup, stats=(rows, agg), notes=_md_notes(ticker, source, bar),
     )
     return _md_block("历史区间", md) + hint + table + stats
 

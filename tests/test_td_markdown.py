@@ -89,7 +89,7 @@ def test_md_table_align_and_escape():
 
 def test_params_snapshot_rows_sources():
     params = {"setup_period": 9, "countdown_period": 13, "compare_length": 4,
-              "recycle_threshold": 18, "score_threshold": 0, "tdst_filter": False,
+              "recycle_threshold": 18, "score_threshold": 0.0, "tdst_filter": False,
               "entry_setup": 9, "exit_setup": 9, "exit_countdown": 13}
     rows = params_snapshot_rows(params, "td_sequential", entry_setup=9,
                                 exit_setup=9, exit_cd=13, trend_period="15m",
@@ -99,6 +99,8 @@ def test_params_snapshot_rows_sources():
     assert any("15m|exec_params.trend_period" in r for r in flat)
     assert any("gate|exec_params.execution_channel" in r for r in flat)
     assert any("9 / 13" in r for r in flat)
+    # 整数型数值不留小数点（0.0 → 0）
+    assert any(r.startswith("Score 阈值") and "|0 / 关|" in r for r in flat)
 
 
 def test_render_bars_markdown_structure():
@@ -123,7 +125,6 @@ def test_render_bars_markdown_structure():
     assert "TDST 突破仅展示、不触发下单" in md     # 口径说明写入
     # HOLD → —（与页面同口径）
     assert "| 8 |  |" in md
-
 
 def test_render_bars_markdown_stats_block():
     agg = {"BUY": {3: {"rate": 72.5, "win": 29, "n": 40}},
@@ -165,6 +166,17 @@ def test_render_f1_markdown_nan_renders_dash():
     assert body[1].split("|")[3].strip() == ""  # 预热区 F1 值 → 空（页面显示 —）
 
 
+def test_md_notes_split_predicate_matches_display():
+    """A股 切分说明只在真正切分时出现（1D 不切、日内切）——与展示层同一判据。"""
+    def has_note(ticker, source, bar):
+        return any("按交易日切分" in n for n in _md_notes(ticker, source, bar))
+
+    assert has_note("588000", "stock", "30m")     # A股 日内 → 切分
+    assert has_note("510050", "stock", "5m")
+    assert not has_note("588000", "stock", "1D")  # A股 日线 → 不切（与页面标注一致）
+    assert not has_note("SOL", "cex", "1D")       # 非 A股
+
+
 def test_md_block_and_notes():
     html = _md_block("实时快照", "## t\n| a | b |\n|:--|:--|\n| <script> | 1 |")
     assert 'data-md-copy="1"' in html
@@ -173,5 +185,5 @@ def test_md_block_and_notes():
     assert "&lt;script&gt;" in html            # markdown 原文做 HTML 转义
     assert "navigator.clipboard.writeText" in html
     assert _md_block("x", "") == ""            # 空 markdown 不渲染区块
-    assert any("A股" in n for n in _md_notes("588000", "stock"))
-    assert not any("A股" in n for n in _md_notes("SOL", "cex"))
+    assert any("A股" in n for n in _md_notes("588000", "stock", "30m"))
+    assert not any("A股" in n for n in _md_notes("SOL", "cex", "1D"))

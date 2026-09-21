@@ -68,6 +68,17 @@ def fmt_score(v) -> str:
     return f"{f:.2f}"
 
 
+def _num(v) -> str:
+    """整数型数值去掉小数点（``0.0`` → ``0``），其余原样。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f != f:
+        return str(v)
+    return str(int(f)) if f == int(f) else str(v)
+
+
 def md_table(headers: list[str], rows: list[list[str]]) -> str:
     """markdown 表格（数值列右对齐）。空 headers → 空串。"""
     if not headers:
@@ -104,15 +115,15 @@ def params_snapshot_rows(
     rows = [
         ["策略", str(strategy_name), "strategy.json"],
         ["Setup 周期 / Countdown 周期",
-         f"{p.get('setup_period', 9)} / {p.get('countdown_period', 13)}", src],
+         f"{_num(p.get('setup_period', 9))} / {_num(p.get('countdown_period', 13))}", src],
         ["比较长度 / 回收阈值",
-         f"{p.get('compare_length', 4)} / {p.get('recycle_threshold', 18)}", src],
+         f"{_num(p.get('compare_length', 4))} / {_num(p.get('recycle_threshold', 18))}", src],
         ["Score 阈值 / TDST 方向过滤",
-         f"{p.get('score_threshold', 0)} / "
+         f"{_num(p.get('score_threshold', 0))} / "
          f"{'开' if p.get('tdst_filter') else '关'}", src],
-        ["入场阈值 entry_setup", str(entry_setup), src],
+        ["入场阈值 entry_setup", _num(entry_setup), src],
         ["出场阈值 exit_setup / exit_countdown",
-         f"{exit_setup} / {exit_cd}", src],
+         f"{_num(exit_setup)} / {_num(exit_cd)}", src],
     ]
     if trend_period:
         rows.append(["大周期趋势周期", str(trend_period), "exec_params.trend_period"])
