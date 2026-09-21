@@ -50,10 +50,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=54]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-legion.git@c287903 \
+RUN echo "[bust=56]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-legion.git@0e201efa \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @c287903 (CD fork feat/f1-mode-routes — F1 分析路由挂载, bust=54) 【验证 pin，合并后切回上游】"
+    && echo "✅ nanobot-legion @0e201efa (F1 分析路由挂载, bust=56)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
