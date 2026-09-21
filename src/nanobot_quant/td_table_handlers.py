@@ -25,6 +25,7 @@ import html as _html
 import json
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -40,6 +41,11 @@ from nanobot_quant.strategies.registry import get_strategy, load_selected, resol
 from nanobot_quant.strategies.td_trend import MIN_BARS as _TREND_MIN_BARS
 from nanobot_quant.strategies.td_trend import compute_trend_state
 from nanobot_quant.td_params import load_td_params
+from nanobot_quant.td_markdown import (
+    params_snapshot_rows,
+    render_bars_markdown,
+    render_f1_markdown,
+)
 
 _TEMPLATE_PATH = Path(__file__).with_name("td_table_page.html")
 _TZ = "Asia/Shanghai"
@@ -181,6 +187,29 @@ def _session_split_enabled(source: str, ticker: str, bar: str) -> bool:
     return source == "stock" and bar not in _SESSION_SPLIT_SKIP_BARS and _is_a_share(ticker)
 
 
+def _session_capacity_note(df, params: dict, source: str, ticker: str, bar: str) -> str:
+    """切分后每组 bar 数 < TD 比较窗口时的**结构性**提示（fail-visible，不静默）。
+
+    实例（2026-09-21 用户实测）：A股 1H 每天仅 4 根 bar（10:30/11:30/14:00/15:00），
+    而 setup 要求 ``close[i]`` 与 ``close[i-compare_length]`` 比较（需
+    compare_length+1 根）——切分后每组永远凑不齐窗口，setup/countdown 恒 0。
+    这不是「没有信号」而是「该周期 × 切分口径下 TD 结构无法形成」，页面/markdown
+    必须显式说明，否则全 0 表格看起来像数据缺失或信号枯竭。
+    """
+    try:
+        if not _session_split_enabled(source, ticker, bar) or df is None or not len(df):
+            return ""
+        need = int(params.get("compare_length", 4)) + 1
+        mx = max(Counter(_session_labels(df.index)).values())
+        if mx >= need:
+            return ""
+        return (f"⚠️ 该周期在 A股 交易日切分下每组最多 {mx} 根 bar，少于 TD 比较窗口"
+                f"所需的 {need} 根（compare_length={need - 1}）——setup/countdown 无法形成，"
+                f"本表空白属结构性结果；建议改用 5m/15m/30m 或 1D。")
+    except Exception:  # noqa: BLE001 — 提示层失败不得阻塞主视图
+        return ""
+
+
 def _session_labels(index) -> list:
     """按 Asia/Shanghai 日期给每根 bar 打交易日标签。
 
@@ -281,6 +310,94 @@ def _fmt_price(v) -> str:
     if f == 0:
         return "0"
     return f"{f:.6g}"
+
+
+def _fmt_price_dash(v) -> str:
+    """NaN/None → 「—」（预热区缺值）；其余同 ``_fmt_price``。"""
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+    except (TypeError, ValueError):
+        return "—"
+    return _fmt_price(v) or "—"
+
+
+# ── markdown 复制区块（用户拍板 2026-09-21：粘给助手看） ────────────────
+
+_MD_SCRIPT = (
+    '(function(){'
+    'document.querySelectorAll("[data-md-copy]").forEach(function(b){'
+    'if(b.dataset.mdBound){return;}b.dataset.mdBound="1";'
+    'b.addEventListener("click",function(){'
+    'var w=b.closest(".mdwrap");var pre=w?w.querySelector("pre.md-src"):null;'
+    'var txt=pre?pre.textContent:"";'
+    'function done(ok){b.textContent=ok?"✅ 已复制到剪贴板":"⚠️ 复制失败，请在原文框内手动全选复制";'
+    'setTimeout(function(){b.textContent=b.dataset.mdLabel||"📋 复制 Markdown";},1800);}'
+    'if(navigator.clipboard&&navigator.clipboard.writeText){'
+    'navigator.clipboard.writeText(txt).then(function(){done(true);},function(){done(false);});'
+    '}else{done(false);}'
+    '});});})();'
+)
+
+
+def _cap_banner(note: str) -> str:
+    """切分容量提示横幅（有提示才输出）。"""
+    return ('<div class="banner warn">%s</div>' % _esc(note)) if note else ""
+
+
+def _md_block(label: str, md: str) -> str:
+    """markdown 复制区块：复制按钮 + 可展开原文（内容随页面下发，复制=页面所见）。"""
+    if not md:
+        return ""
+    btn_label = f"📋 复制 Markdown（{label}）"
+    return (
+        '<div class="mdwrap" style="margin:10px 0 14px;">'
+        f'<button type="button" class="md-btn" data-md-copy="1" data-md-label="{_esc(btn_label)}"'
+        ' style="padding:6px 12px;border:1px solid #c9c9d1;border-radius:6px;background:#f7f7f8;'
+        'cursor:pointer;font-size:13px;">' + _esc(btn_label) + '</button>'
+        '<span style="color:#888;margin-left:8px;font-size:12px;">'
+        '含参数快照 · 复制后直接粘给助手即可</span>'
+        '<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:12px;color:#666;">'
+        '查看 markdown 原文</summary>'
+        f'<pre class="md-src" style="max-height:320px;overflow:auto;background:#fafafb;'
+        f'border:1px solid #e2e2e6;border-radius:6px;padding:8px;font-size:12px;'
+        f'white-space:pre-wrap;">{_esc(md)}</pre></details>'
+        '</div>'
+        f'<script>{_MD_SCRIPT}</script>'
+    )
+
+
+def _md_params_rows(params, strategy_name, entry_setup, exit_setup, exit_cd):
+    """参数快照行（含 exec_params 侧的趋势周期/执行通道）。"""
+    trend_period, channel = "", ""
+    try:
+        ep = load_exec_params()
+        trend_period = str(ep.get("trend_period", "") or "")
+        channel = str(ep.get("execution_channel", "") or "")
+    except Exception:  # noqa: BLE001 — 参数快照缺失不影响主视图
+        pass
+    return params_snapshot_rows(
+        params, strategy_name, entry_setup=entry_setup, exit_setup=exit_setup,
+        exit_cd=exit_cd, trend_period=trend_period, execution_channel=channel,
+    )
+
+
+def _md_notes(ticker: str, source: str, bar: str = "") -> list[str]:
+    """markdown 尾部的口径说明（用户拍板：口径写进 markdown，粘给助手时自明）。
+
+    A股 切分说明必须与展示层同一判据（``_session_split_enabled``）——
+    1D 不切分、日内周期才切，文案不得与实际口径脱节。
+    """
+    notes = [
+        "信号判定与执行层同口径：`setup_buy ≥ entry_setup` → BUY；"
+        "`setup_sell ≥ exit_setup` 或 `cd_sell ≥ exit_countdown` → SELL；"
+        "TDST 突破仅展示、不触发下单。",
+        "空值口径：Setup/Countdown 为 0 时留空；涨跌%/TDST/Score 缺失留空；"
+        "预热区 F1 值显示「—」。数字格式与页面一致（价格 6 位有效数字、Score 2 位小数）。",
+    ]
+    if _session_split_enabled(source, str(ticker), bar):
+        notes.append("A股：TD 计数按交易日切分（不跨午休/隔夜/周末）。")
+    return notes
 
 
 # ── 信号回溯统计（Tab ② 核心增量） ───────────────────────────────────
@@ -583,14 +700,18 @@ def td_table_page(request: Request) -> HTMLResponse:
     banner = ""
     content = ""
     frag = q.get("frag") == "1"
+    # 大周期趋势只取一次数，页面块与 markdown 共用（避开双份拉取）
+    trend_html, trend_text = "", ""
+    if tab in ("snapshot", "history") or series == "f1":
+        trend_html, trend_text = _trend_state(ticker, source)
     if tab == "history":
-        content = _render_history(ticker, bar, start, end, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source)
+        content = _render_history(ticker, bar, start, end, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source, trend_text)
     elif tab == "live":
         content = _render_live(with_script=not frag, tq=q, entry_setup=entry_setup, exit_setup=exit_setup, exit_cd=exit_cd)
     elif series == "f1":
-        content = _render_f1(ticker, bar, limit, source)
+        content = _render_f1(ticker, bar, limit, source, trend_text)
     else:
-        content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source)
+        content = _render_snapshot(ticker, bar, limit, strategy_name, params, setup, entry_setup, exit_setup, exit_cd, source, trend_text)
 
     if isinstance(content, tuple):  # (error_html,)
         banner = content[0]
@@ -612,18 +733,17 @@ def td_table_page(request: Request) -> HTMLResponse:
     page = page.replace("{start}", _esc(start))
     page = page.replace("{end}", _esc(end))
     page = page.replace("{form}", _form(tab, ticker, bar, limit, start, end, source, series))
-    page = page.replace("{trend}", _render_trend_block(ticker, source))
+    page = page.replace("{trend}", trend_html)
     page = page.replace("{banner}", banner)
     page = page.replace("{content}", content)
     return HTMLResponse(page)
 
 
-def _render_trend_block(ticker: str, source: str) -> str:
-    """大周期趋势状态区块（只读展示，不参与交易；Step 3 接入单向闸门）。
+def _trend_state(ticker: str, source: str) -> tuple[str, str]:
+    """大周期趋势状态 → (html, 纯文本摘要)（一次取数供页面与 markdown 共用）。
 
     按 exec_params.trend_period（默认 1H）拉 K 线 → compute_trend_state。
     取数失败/数据不足 → 显示原因（不静默降级成「—」），不影响页面主体。
-    仅 snapshot/history tab 渲染。
     """
     trend_period = "1H"
     try:
@@ -634,14 +754,26 @@ def _render_trend_block(ticker: str, source: str) -> str:
         df = get_data_source(ds_name).fetch_kline(ticker, bar=trend_period, limit=120)
         if df is None or len(df) < _TREND_MIN_BARS:
             got = 0 if df is None else len(df)
-            return _trend_html(
-                trend_period, "数据不足", f"K 线 {got} < {_TREND_MIN_BARS} 根"
+            return (
+                _trend_html(trend_period, "数据不足", f"K 线 {got} < {_TREND_MIN_BARS} 根"),
+                f"大周期趋势（{trend_period}）：数据不足（K 线 {got} < {_TREND_MIN_BARS} 根）",
             )
         st = compute_trend_state(_norm_cols(df))
         detail = f"setup_buy={st['setup_buy']} · setup_sell={st['setup_sell']}"
-        return _trend_html(trend_period, st["label"], detail)
+        return (
+            _trend_html(trend_period, st["label"], detail),
+            f"大周期趋势（{trend_period}）：{st['label']} {detail}（只读展示，不参与交易）",
+        )
     except Exception as exc:  # noqa: BLE001 — 展示层失败不阻塞页面，但必须可见
-        return _trend_html(trend_period, "取数失败", f"{type(exc).__name__}: {exc}")
+        return (
+            _trend_html(trend_period, "取数失败", f"{type(exc).__name__}: {exc}"),
+            f"大周期趋势（{trend_period}）：取数失败 {type(exc).__name__}: {exc}",
+        )
+
+
+def _render_trend_block(ticker: str, source: str) -> str:
+    """兼容保留：仅返回 HTML（新调用方应用 ``_trend_state``）。"""
+    return _trend_state(ticker, source)[0]
 
 
 def _trend_html(period: str, label: str, detail: str) -> str:
@@ -1328,7 +1460,7 @@ def _f1_series_df(df: pd.DataFrame, bar: str) -> tuple[pd.DataFrame, int]:
     return out, lb
 
 
-def _render_f1(ticker, bar, limit, source):
+def _render_f1(ticker, bar, limit, source, trend_text=""):
     """TD F1 模式：F1 序列表格 + F1 上的 TD 计数（只读诊断，不下单）。
 
     用户拍板：F1 参数与现货 TD/期权交集近零，因此作为并列大类；
@@ -1382,6 +1514,7 @@ def _render_f1(ticker, bar, limit, source):
     params = load_td_params(strategy_name)
     try:
         eng = _engine_run_session(f1df, strategy_name, params, source, ticker, bar)
+        cap_note = _session_capacity_note(f1df, params, source, ticker, bar)
     except Exception as exc:
         return '<div class="banner err">F1 上的 TD 计算失败：%s</div>' % _esc(exc)
 
@@ -1413,7 +1546,8 @@ def _render_f1(ticker, bar, limit, source):
         td = ["<tr%s>" % cls,
               '<td class="time">%s</td>' % _esc(disp["_time"].iloc[i]),
               '<td class="time utc">%s</td>' % _esc(disp["_time_utc"].iloc[i]),
-              '<td class="num">%s</td>' % _fmt_price(f1df["Close"].iloc[i]),
+              # 预热区 ATR 不足 → 「—」（之前会打出字面量 nan）
+              '<td class="num">%s</td>' % _fmt_price_dash(f1df["Close"].iloc[i]),
               '<td class="num">%s</td>' % ("%.1f%%" % (p * 100) if pd.notna(p) else ""),
               _setup_cell(eng, i, "buy_setup_count", setup),
               _setup_cell(eng, i, "sell_setup_count", setup)]
@@ -1436,12 +1570,36 @@ def _render_f1(ticker, bar, limit, source):
         % (lb, src_label, _esc(bar), len(f1df), win,
            "".join("<th>%s</th>" % h for h in heads), "".join(rows))
     )
-    return head
+    md = render_f1_markdown(
+        title="📊 TD 序列分析 · TD F1（只读诊断）",
+        meta=[
+            ("数据源", src_label), ("序列", "F1（ATR20 扩张率）"), ("标的", ticker),
+            ("周期", bar), ("根数", f"{len(f1df)}"),
+            ("lookback", f"{lb} 根（≈3h 语义）"), ("分位窗口", f"{win} 根"),
+            ("时间列", "Asia/Shanghai + UTC"),
+        ],
+        params_rows=_md_params_rows(
+            params, strategy_name,
+            int(params.get("entry_setup", 9)), int(params.get("exit_setup", 9)),
+            int(params.get("exit_countdown", 13)),
+        ),
+        trend_line=trend_text,
+        disp=disp, eng=eng, pct=pct, setup=setup, lb=lb, win=win, has_cd=has_cd,
+        notes=[
+            f"F1 = ATR20 扩张率，lookback 按 3h 语义换算（本页 lookback={lb} 根）。",
+            "F1 只读诊断：buy9 = 波动率压缩到极致（预测释放，不预测方向）；"
+            "sell9 = 回撤放大。参数与现货 TD 独立，不参与任何交易决策。",
+            "分位只在同周期内可比（窗口 = 根数 ÷ 2，上限 500 / 下限 20）。",
+        ] + ([ "A股：TD 计数按交易日切分（不跨午休/隔夜/周末）。" ]
+             if _session_split_enabled(source, str(ticker), bar) else [])
+          + ([cap_note] if cap_note else []),
+    )
+    return _cap_banner(cap_note) + _md_block("TD F1", md) + head
 
 
 def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
                      entry_setup=None, exit_setup=None, exit_cd=None,
-                     source="onchainos"):
+                     source="onchainos", trend_text=""):
     if source == "stock":
         try:
             df = _fetch_stock_kline(ticker, bar=bar, limit=limit)
@@ -1484,6 +1642,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
         src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
     seq = _engine_run_session(df, strategy_name, params, source, ticker, bar)
+    cap_note = _session_capacity_note(df, params, source, ticker, bar)
     disp = _display(seq)
     if entry_setup is None:
         entry_setup = int(params.get("entry_setup", 9))
@@ -1501,12 +1660,33 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
     hint = ('<div class="banner info">最近 %d 根 %s · 数据来源 %s。'
             '当前策略参数来自 td_params.json（%s 独立保存）。</div>'
             % (len(disp), _esc(bar), src_label, _esc(strategy_name)))
-    return status + hint + table
+    last = disp.iloc[-1]
+    md = render_bars_markdown(
+        title="📊 TD 序列分析 · 实时快照（TD 价格）",
+        meta=[
+            ("数据源", src_label), ("序列", "TD 价格"), ("标的", ticker),
+            ("周期", bar), ("根数", f"{len(disp)}（最近）"),
+            ("时间列", "Asia/Shanghai + UTC"),
+        ],
+        params_rows=_md_params_rows(params, strategy_name, entry_setup, exit_setup, exit_cd),
+        trend_line=trend_text,
+        status={
+            "策略": strategy_name,
+            "最新收盘": _fmt_price(last["Close"]),
+            "Buy Setup": f"{int(last['buy_setup_count'])}/{setup}（≥{entry_setup} 触发）",
+            "Sell Setup": (f"{int(last['sell_setup_count'])}/{setup}"
+                           f"（≥{exit_setup} 或 CD≥{exit_cd} 触发）"),
+            "当前信号": str(last["recommendation"]) if str(last["recommendation"]) != "HOLD" else "—",
+            "最新 bar 时间": f"{last['_time']} / UTC {last['_time_utc']}",
+        },
+        disp=disp, setup=setup, notes=_md_notes(ticker, source, bar) + ([cap_note] if cap_note else []),
+    )
+    return _cap_banner(cap_note) + _md_block("实时快照", md) + status + hint + table
 
 
 def _render_history(ticker, bar, start, end, strategy_name, params, setup,
                     entry_setup=None, exit_setup=None, exit_cd=None,
-                    source="onchainos"):
+                    source="onchainos", trend_text=""):
     try:
         start_dt = datetime.strptime(start, "%Y-%m-%d")
         end_dt = datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)
@@ -1555,6 +1735,7 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
         src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
     seq = _engine_run_session(df, strategy_name, params, source, ticker, bar)
+    cap_note = _session_capacity_note(df, params, source, ticker, bar)
     disp = _display(seq)
     if entry_setup is None:
         entry_setup = int(params.get("entry_setup", 9))
@@ -1571,7 +1752,23 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
     stats = _render_stats_table(rows, agg)
     hint = ('<div class="banner info">%s ~ %s 共 %d 根 %s K 线 · 数据来源 %s · %d 信号 %d 个 · 胜率统计仅含区间内可观察完整后续的信号。</div>'
             % (_esc(start), _esc(end), len(disp), _esc(bar), src_label, setup, len(rows)))
-    return hint + table + stats
+    md = render_bars_markdown(
+        title="📊 TD 序列分析 · 历史区间分析（TD 价格）",
+        meta=[
+            ("数据源", src_label), ("序列", "TD 价格"), ("标的", ticker),
+            ("周期", bar), ("区间", f"{start} ~ {end}（{len(disp)} 根）"),
+            ("时间列", "Asia/Shanghai + UTC"),
+        ],
+        params_rows=_md_params_rows(params, strategy_name, entry_setup, exit_setup, exit_cd),
+        trend_line=trend_text,
+        status={
+            "策略": strategy_name,
+            "信号数（count == Setup 周期）": f"{len(rows)}",
+            "Setup 周期": f"{setup}",
+        },
+        disp=disp, setup=setup, stats=(rows, agg), notes=_md_notes(ticker, source, bar) + ([cap_note] if cap_note else []),
+    )
+    return _cap_banner(cap_note) + _md_block("历史区间", md) + hint + table + stats
 
 
 # ── 路由注册（legion gatekeeper 调用） ───────────────────────────────
