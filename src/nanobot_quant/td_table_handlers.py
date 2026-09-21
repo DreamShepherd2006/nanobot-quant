@@ -25,6 +25,7 @@ import html as _html
 import json
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -186,6 +187,29 @@ def _session_split_enabled(source: str, ticker: str, bar: str) -> bool:
     return source == "stock" and bar not in _SESSION_SPLIT_SKIP_BARS and _is_a_share(ticker)
 
 
+def _session_capacity_note(df, params: dict, source: str, ticker: str, bar: str) -> str:
+    """切分后每组 bar 数 < TD 比较窗口时的**结构性**提示（fail-visible，不静默）。
+
+    实例（2026-09-21 用户实测）：A股 1H 每天仅 4 根 bar（10:30/11:30/14:00/15:00），
+    而 setup 要求 ``close[i]`` 与 ``close[i-compare_length]`` 比较（需
+    compare_length+1 根）——切分后每组永远凑不齐窗口，setup/countdown 恒 0。
+    这不是「没有信号」而是「该周期 × 切分口径下 TD 结构无法形成」，页面/markdown
+    必须显式说明，否则全 0 表格看起来像数据缺失或信号枯竭。
+    """
+    try:
+        if not _session_split_enabled(source, ticker, bar) or df is None or not len(df):
+            return ""
+        need = int(params.get("compare_length", 4)) + 1
+        mx = max(Counter(_session_labels(df.index)).values())
+        if mx >= need:
+            return ""
+        return (f"⚠️ 该周期在 A股 交易日切分下每组最多 {mx} 根 bar，少于 TD 比较窗口"
+                f"所需的 {need} 根（compare_length={need - 1}）——setup/countdown 无法形成，"
+                f"本表空白属结构性结果；建议改用 5m/15m/30m 或 1D。")
+    except Exception:  # noqa: BLE001 — 提示层失败不得阻塞主视图
+        return ""
+
+
 def _session_labels(index) -> list:
     """按 Asia/Shanghai 日期给每根 bar 打交易日标签。
 
@@ -314,6 +338,11 @@ _MD_SCRIPT = (
     '}else{done(false);}'
     '});});})();'
 )
+
+
+def _cap_banner(note: str) -> str:
+    """切分容量提示横幅（有提示才输出）。"""
+    return ('<div class="banner warn">%s</div>' % _esc(note)) if note else ""
 
 
 def _md_block(label: str, md: str) -> str:
@@ -1485,6 +1514,7 @@ def _render_f1(ticker, bar, limit, source, trend_text=""):
     params = load_td_params(strategy_name)
     try:
         eng = _engine_run_session(f1df, strategy_name, params, source, ticker, bar)
+        cap_note = _session_capacity_note(f1df, params, source, ticker, bar)
     except Exception as exc:
         return '<div class="banner err">F1 上的 TD 计算失败：%s</div>' % _esc(exc)
 
@@ -1561,9 +1591,10 @@ def _render_f1(ticker, bar, limit, source, trend_text=""):
             "sell9 = 回撤放大。参数与现货 TD 独立，不参与任何交易决策。",
             "分位只在同周期内可比（窗口 = 根数 ÷ 2，上限 500 / 下限 20）。",
         ] + ([ "A股：TD 计数按交易日切分（不跨午休/隔夜/周末）。" ]
-             if _session_split_enabled(source, str(ticker), bar) else []),
+             if _session_split_enabled(source, str(ticker), bar) else [])
+          + ([cap_note] if cap_note else []),
     )
-    return _md_block("TD F1", md) + head
+    return _cap_banner(cap_note) + _md_block("TD F1", md) + head
 
 
 def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
@@ -1611,6 +1642,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
         src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
     seq = _engine_run_session(df, strategy_name, params, source, ticker, bar)
+    cap_note = _session_capacity_note(df, params, source, ticker, bar)
     disp = _display(seq)
     if entry_setup is None:
         entry_setup = int(params.get("entry_setup", 9))
@@ -1647,9 +1679,9 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
             "当前信号": str(last["recommendation"]) if str(last["recommendation"]) != "HOLD" else "—",
             "最新 bar 时间": f"{last['_time']} / UTC {last['_time_utc']}",
         },
-        disp=disp, setup=setup, notes=_md_notes(ticker, source, bar),
+        disp=disp, setup=setup, notes=_md_notes(ticker, source, bar) + ([cap_note] if cap_note else []),
     )
-    return _md_block("实时快照", md) + status + hint + table
+    return _cap_banner(cap_note) + _md_block("实时快照", md) + status + hint + table
 
 
 def _render_history(ticker, bar, start, end, strategy_name, params, setup,
@@ -1703,6 +1735,7 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
         src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
     seq = _engine_run_session(df, strategy_name, params, source, ticker, bar)
+    cap_note = _session_capacity_note(df, params, source, ticker, bar)
     disp = _display(seq)
     if entry_setup is None:
         entry_setup = int(params.get("entry_setup", 9))
@@ -1733,9 +1766,9 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
             "信号数（count == Setup 周期）": f"{len(rows)}",
             "Setup 周期": f"{setup}",
         },
-        disp=disp, setup=setup, stats=(rows, agg), notes=_md_notes(ticker, source, bar),
+        disp=disp, setup=setup, stats=(rows, agg), notes=_md_notes(ticker, source, bar) + ([cap_note] if cap_note else []),
     )
-    return _md_block("历史区间", md) + hint + table + stats
+    return _cap_banner(cap_note) + _md_block("历史区间", md) + hint + table + stats
 
 
 # ── 路由注册（legion gatekeeper 调用） ───────────────────────────────

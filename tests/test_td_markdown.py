@@ -24,6 +24,7 @@ from nanobot_quant.td_table_handlers import (
     _fmt_price_dash,
     _md_block,
     _md_notes,
+    _session_capacity_note,
 )
 
 
@@ -175,6 +176,28 @@ def test_md_notes_split_predicate_matches_display():
     assert has_note("510050", "stock", "5m")
     assert not has_note("588000", "stock", "1D")  # A股 日线 → 不切（与页面标注一致）
     assert not has_note("SOL", "cex", "1D")       # 非 A股
+
+
+def test_session_capacity_note_flags_1h_a_share():
+    """A股 1H（每天 4 根）切分后凑不齐 TD 比较窗口 → 必须显式提示（不静默）。"""
+    idx = pd.to_datetime([
+        "2026-09-01 10:30", "2026-09-01 11:30",
+        "2026-09-01 14:00", "2026-09-01 15:00",
+        "2026-09-02 10:30", "2026-09-02 11:30",
+        "2026-09-02 14:00", "2026-09-02 15:00",
+    ])
+    df = pd.DataFrame({"Close": list(range(8))}, index=idx)
+    note = _session_capacity_note(df, {"compare_length": 4}, "stock", "588000", "1H")
+    assert "每组最多 4 根" in note
+    assert "compare_length=4" in note
+    assert "结构性结果" in note
+    # 15m：每天 16 根 → 能形成结构，不提示
+    idx15 = pd.date_range("2026-09-01 09:45", periods=32, freq="15min")
+    df15 = pd.DataFrame({"Close": list(range(32))}, index=idx15)
+    assert _session_capacity_note(df15, {"compare_length": 4}, "stock", "588000", "15m") == ""
+    # 1D 不切分 / 非 A股 → 不提示
+    assert _session_capacity_note(df, {"compare_length": 4}, "stock", "588000", "1D") == ""
+    assert _session_capacity_note(df, {"compare_length": 4}, "cex", "SOL", "1H") == ""
 
 
 def test_md_block_and_notes():
