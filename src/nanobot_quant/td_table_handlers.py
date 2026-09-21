@@ -150,6 +150,73 @@ def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFr
     return engine.df
 
 
+# ── A股 日内按交易日切分（用户拍板 2026-09-21）────────────────────────
+
+_SESSION_SPLIT_SKIP_BARS = ("1D", "1W")
+
+
+def _is_a_share(ticker: str) -> bool:
+    """6 位纯数字 = A 股代码（沪 6/9/5、深 0/2/3）；美股为字母代码。"""
+    t = (ticker or "").strip()
+    return len(t) == 6 and t.isdigit()
+
+
+def _session_split_enabled(source: str, ticker: str, bar: str) -> bool:
+    """A股 + 日内周期才按交易日切分。
+
+    日线/周线一根 bar 就是一个交易日，切了永远无信号；加密 24/7 不存在时段
+    断点；美股（字母代码）本次不做（口径见 docs/quant-system.md §33.36）。
+    """
+    return source == "stock" and bar not in _SESSION_SPLIT_SKIP_BARS and _is_a_share(ticker)
+
+
+def _session_labels(index) -> list:
+    """按 Asia/Shanghai 日期给每根 bar 打交易日标签。
+
+    A股 数据源（新浪/东财）为北京时区；naive 索引按北京时区解释，盘中时段
+    （09:30–15:00）不存在跨日风险。
+    """
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is None:
+        idx = idx.tz_localize("Asia/Shanghai")
+    else:
+        idx = idx.tz_convert("Asia/Shanghai")
+    return [ts.strftime("%Y-%m-%d") for ts in idx]
+
+
+def _split_by_session_run(df: pd.DataFrame, strategy_name: str, params: dict,
+                          sessions: list) -> pd.DataFrame:
+    """按交易日分段算 TD 后按原顺序拼回。
+
+    A股 日内 bar 在午休/隔夜处并非连续：不切分时 ``close[i-4]`` 会跨过午休
+    （甚至周末）与上一个交易时段的 bar 比较，产生「跨时段」计数。切分后每个
+    交易日从 0 重新数（setup 与 countdown 同时归零）；午休不切（同一交易日）。
+    """
+    parts = []
+    start = 0
+    for i in range(1, len(df) + 1):
+        if i == len(df) or sessions[i] != sessions[start]:
+            parts.append(_engine_run(df.iloc[start:i], strategy_name, params))
+            start = i
+    return parts[0] if len(parts) == 1 else pd.concat(parts)
+
+
+def _engine_run_session(df: pd.DataFrame, strategy_name: str, params: dict,
+                        source: str, ticker: str, bar: str) -> pd.DataFrame:
+    """展示层统一入口：命中「A股 + 日内」时按交易日切分，否则直通引擎。"""
+    if not _session_split_enabled(source, ticker, bar):
+        return _engine_run(df, strategy_name, params)
+    return _split_by_session_run(df, strategy_name, params, _session_labels(df.index))
+
+
+def _stock_src_label(ticker: str, bar: str) -> str:
+    """股票来源标注；命中交易日切分时显式标出（口径可见）。"""
+    label = "股票（%s）" % _esc(ticker)
+    if _session_split_enabled("stock", ticker, bar):
+        label += " · 按交易日切分"
+    return label
+
+
 def _display(df: pd.DataFrame, fallback_tz: str = "UTC") -> pd.DataFrame:
     """Add Asia/Shanghai + UTC display-time columns and pct-change.
 
@@ -1259,7 +1326,7 @@ def _render_f1(ticker, bar, limit, source):
             return '<div class="banner err">股票数据获取失败：%s</div>' % _esc(exc)
         if df.empty:
             return '<div class="banner err">%s 无 %s 股票 K 线数据。</div>' % (_esc(ticker), _esc(bar))
-        src_label = "股票（%s）" % _esc(ticker)
+        src_label = _stock_src_label(ticker, bar)
     elif source == "cex":
         try:
             df = _fetch_cex_kline(ticker, bar=bar, limit=limit)
@@ -1298,11 +1365,12 @@ def _render_f1(ticker, bar, limit, source):
     strategy_name = load_selected()
     params = load_td_params(strategy_name)
     try:
-        eng = _engine_run(f1df, strategy_name, params)
+        eng = _engine_run_session(f1df, strategy_name, params, source, ticker, bar)
     except Exception as exc:
         return '<div class="banner err">F1 上的 TD 计算失败：%s</div>' % _esc(exc)
 
-    # ④ 分位（滚动 500 根；不足则用全样本）—— 定位“当前 F1 在历史上算高还是低”
+    # ④ 分位（窗口 = 根数 ÷2，上限 500 / 下限 20）——用户拍板方案 A：跟随
+    # 「K 线数」输入；窗口写进表头，避免跨设置对比时误读。
     win = min(500, max(20, len(f1df) // 2))
     pct = f1df["Close"].rolling(win, min_periods=max(20, win // 4)).rank(pct=True)
 
@@ -1344,11 +1412,12 @@ def _render_f1(ticker, bar, limit, source):
     heads.append("信号")
     head = (
         '<div class="banner">🔍 <b>TD F1</b> · 序列 = F1（ATR20 扩张率，lookback=%d 根 ≈3h）· '
-        '来源 %s · %s · %d 根</div>'
+        '来源 %s · %s · %d 根 · 分位窗口 %d 根</div>'
         '<table class="td-table"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
         '<div class="hint">F1 只读诊断：buy9 = 波动率压缩到极致（预测释放，不预测方向）；'
-        'sell9 = 回撤放大。参数与现货 TD 独立，不参与任何交易决策。</div>'
-        % (lb, src_label, _esc(bar), len(f1df),
+        'sell9 = 回撤放大。参数与现货 TD 独立，不参与任何交易决策。'
+        '分位只在同周期内可比。</div>'
+        % (lb, src_label, _esc(bar), len(f1df), win,
            "".join("<th>%s</th>" % h for h in heads), "".join(rows))
     )
     return head
@@ -1365,7 +1434,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
         if df.empty:
             return ('<div class="banner err">%s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(bar))), None
-        src_label = "股票（%s）" % _esc(ticker)
+        src_label = _stock_src_label(ticker, bar)
     elif source == "cex":
         try:
             df = _fetch_cex_kline(ticker, bar=bar, limit=limit)
@@ -1398,7 +1467,7 @@ def _render_snapshot(ticker, bar, limit, strategy_name, params, setup,
                     % (_esc(ticker), _esc(bar))), None
         src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
-    seq = _engine_run(df, strategy_name, params)
+    seq = _engine_run_session(df, strategy_name, params, source, ticker, bar)
     disp = _display(seq)
     if entry_setup is None:
         entry_setup = int(params.get("entry_setup", 9))
@@ -1435,7 +1504,7 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
         if df.empty:
             return ('<div class="banner err">%s 在 %s ~ %s 无 %s 股票 K 线数据（yfinance）。</div>'
                     % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
-        src_label = "股票（%s）" % _esc(ticker)
+        src_label = _stock_src_label(ticker, bar)
     elif source == "okx_cex":
         try:
             df = _fetch_okx_cex_kline(ticker, bar=bar, start=start_dt, end=end_dt)
@@ -1469,7 +1538,7 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
                     % (_esc(ticker), _esc(start), _esc(end), _esc(bar))), None
         src_label = "OnchainOS（%s/%s）" % (_esc(resolved["chain"]), _esc(resolved["address"]))
 
-    seq = _engine_run(df, strategy_name, params)
+    seq = _engine_run_session(df, strategy_name, params, source, ticker, bar)
     disp = _display(seq)
     if entry_setup is None:
         entry_setup = int(params.get("entry_setup", 9))
