@@ -138,13 +138,24 @@ def _fetch_stock_kline(
     raise RuntimeError("；".join(errors) or "股票数据获取失败")
 
 
-def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFrame:
-    """Normalise column names (lowercase → Title), run the engine, return
-    the per-bar sequence DataFrame (same preprocessing as ``calculate``)."""
-    df = df.rename(columns={
+def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """列名归一化：小写 → Title。
+
+    各数据源列名大小写不一致（gate_cex 大写，sina/onchainos 小写），而 TD 引擎
+    与趋势状态机都要求 Title 列名。所有消费方统一走这里——2026-09-21 修正：
+    大周期趋势区块曾直接把原始 df 喂给 ``compute_trend_state``，股票/小写源下
+    抛 ``KeyError: 'Close'`` 并被 ``except`` 静默吞成「—」（看着像「无趋势」）。
+    """
+    return df.rename(columns={
         "open": "Open", "high": "High", "low": "Low",
         "close": "Close", "volume": "Volume",
     })
+
+
+def _engine_run(df: pd.DataFrame, strategy_name: str, params: dict) -> pd.DataFrame:
+    """Normalise column names (lowercase → Title), run the engine, return
+    the per-bar sequence DataFrame (same preprocessing as ``calculate``)."""
+    df = _norm_cols(df)
     engine = resolve_engine_cls(strategy_name)(df, params)
     engine.run_all()
     return engine.df
@@ -611,8 +622,10 @@ def _render_trend_block(ticker: str, source: str) -> str:
     """大周期趋势状态区块（只读展示，不参与交易；Step 3 接入单向闸门）。
 
     按 exec_params.trend_period（默认 1H）拉 K 线 → compute_trend_state。
-    取数失败/数据不足 → 显示 —，不影响页面主体。仅 snapshot/history tab 渲染。
+    取数失败/数据不足 → 显示原因（不静默降级成「—」），不影响页面主体。
+    仅 snapshot/history tab 渲染。
     """
+    trend_period = "1H"
     try:
         from nanobot_quant.exec_params import load_exec_params
 
@@ -620,12 +633,15 @@ def _render_trend_block(ticker: str, source: str) -> str:
         ds_name = _PAGE_SOURCE_TO_SOURCE.get(source, "onchainos")
         df = get_data_source(ds_name).fetch_kline(ticker, bar=trend_period, limit=120)
         if df is None or len(df) < _TREND_MIN_BARS:
-            return _trend_html(trend_period, "数据不足", "K 线 < 30 根")
-        st = compute_trend_state(df)
+            got = 0 if df is None else len(df)
+            return _trend_html(
+                trend_period, "数据不足", f"K 线 {got} < {_TREND_MIN_BARS} 根"
+            )
+        st = compute_trend_state(_norm_cols(df))
         detail = f"setup_buy={st['setup_buy']} · setup_sell={st['setup_sell']}"
         return _trend_html(trend_period, st["label"], detail)
-    except Exception:
-        return _trend_html("1H", "—", "")
+    except Exception as exc:  # noqa: BLE001 — 展示层失败不阻塞页面，但必须可见
+        return _trend_html(trend_period, "取数失败", f"{type(exc).__name__}: {exc}")
 
 
 def _trend_html(period: str, label: str, detail: str) -> str:

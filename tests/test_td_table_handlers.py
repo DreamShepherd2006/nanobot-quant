@@ -62,6 +62,46 @@ def test_engine_run_normalises_columns():
     assert "combined_score" in out.columns
 
 
+def test_trend_block_normalises_lowercase_columns(monkeypatch):
+    """小写列名源（sina/onchainos）下趋势区块必须给出真实状态。
+
+    2026-09-21 回归：曾直接吃原始 df → KeyError: 'Close' 被 except 吞成「—」。
+    """
+    from nanobot_quant import td_table_handlers as th
+
+    closes = [200 - i for i in range(40)]
+    df = pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+
+    class _DS:
+        def fetch_kline(self, ticker, bar=None, limit=None):
+            return df
+
+    monkeypatch.setattr(th, "get_data_source", lambda name: _DS())
+    html = th._render_trend_block("588000", "stock")
+    assert "取数失败" not in html
+    assert "数据不足" not in html
+    assert "只读展示" in html
+
+
+def test_trend_block_surfaces_failure_reason(monkeypatch):
+    """取数失败必须显示原因（静默降级成「—」不可接受）。"""
+    from nanobot_quant import td_table_handlers as th
+
+    class _Boom:
+        def fetch_kline(self, *a, **kw):
+            raise RuntimeError("网络不可达")
+
+    monkeypatch.setattr(th, "get_data_source", lambda name: _Boom())
+    html = th._render_trend_block("588000", "stock")
+    assert "取数失败" in html
+    assert "网络不可达" in html
+
+
 def test_signal_stats_counts_and_forward_returns():
     seq = _seq_df()
     rows, agg = signal_stats(seq, 9)
