@@ -1309,13 +1309,16 @@ def _render_f1(ticker, bar, limit, source):
     # ⑤ 渲染（纯表格，新行在上）——时间列复用 _display 的双时区口径
     disp = _display(f1df)
     setup = int(params.get("setup_period", 9))
+    # 引擎输出列名是 buy_setup_count / buy_countdown_count（**非**信号 dict 的
+    # setup_buy / cd_buy 键）——列名口径与 _build_rows/_build_headers 保持一致；
+    # 变体不计 countdown 时（全 0）该两列不渲染，与价格 TD 表格同行为。
+    has_cd = "buy_countdown_count" in eng.columns and eng["buy_countdown_count"].abs().sum() > 0
     rows = []
     for i in range(len(disp) - 1, -1, -1):
-        row = eng.iloc[i] if i < len(eng) else None
-        sb = int(row.get("setup_buy", 0) or 0) if row is not None else 0
-        cb = int(row.get("cd_buy", 0) or 0) if row is not None else 0
-        ss = int(row.get("setup_sell", 0) or 0) if row is not None else 0
-        cs = int(row.get("cd_sell", 0) or 0) if row is not None else 0
+        sb = int(eng["buy_setup_count"].iloc[i])
+        ss = int(eng["sell_setup_count"].iloc[i])
+        cb = int(eng["buy_countdown_count"].iloc[i]) if has_cd else 0
+        cs = int(eng["sell_countdown_count"].iloc[i]) if has_cd else 0
         if ss >= setup or cs >= 13:
             sig, cls = "SELL", ' class="sig-sell"'
         elif sb >= setup or cb >= 13:
@@ -1323,28 +1326,30 @@ def _render_f1(ticker, bar, limit, source):
         else:
             sig, cls = "", ""
         p = pct.iloc[i]
-        rows.append(
-            "<tr%s><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-            % (cls, _esc(disp["_time"].iloc[i]), _esc(disp["_time_utc"].iloc[i]),
-               _fmt_price(f1df["Close"].iloc[i]),
-               "%.1f%%" % (p * 100) if pd.notna(p) else "—",
-               _setup_cell(eng, i, "setup_buy", setup),
-               _setup_cell(eng, i, "cd_buy", 13),
-               _setup_cell(eng, i, "setup_sell", setup),
-               _setup_cell(eng, i, "cd_sell", 13),
-               sig)
-        )
+        td = ["<tr%s>" % cls,
+              '<td class="time">%s</td>' % _esc(disp["_time"].iloc[i]),
+              '<td class="time utc">%s</td>' % _esc(disp["_time_utc"].iloc[i]),
+              '<td class="num">%s</td>' % _fmt_price(f1df["Close"].iloc[i]),
+              '<td class="num">%s</td>' % ("%.1f%%" % (p * 100) if pd.notna(p) else ""),
+              _setup_cell(eng, i, "buy_setup_count", setup),
+              _setup_cell(eng, i, "sell_setup_count", setup)]
+        if has_cd:
+            td.append('<td class="num">%s</td>' % (cb if cb else ""))
+            td.append('<td class="num">%s</td>' % (cs if cs else ""))
+        td.append('<td class="sig">%s</td></tr>' % sig)
+        rows.append("".join(td))
+    heads = ["时间", "UTC 时间", "F1 值", "F1 分位", "Buy Setup", "Sell Setup"]
+    if has_cd:
+        heads += ["Buy CD", "Sell CD"]
+    heads.append("信号")
     head = (
         '<div class="banner">🔍 <b>TD F1</b> · 序列 = F1（ATR20 扩张率，lookback=%d 根 ≈3h）· '
         '来源 %s · %s · %d 根</div>'
-        '<table class="td-table"><thead><tr>'
-        '<th>时间</th><th>UTC 时间</th><th>F1 值</th><th>F1 分位</th>'
-        '<th>Buy Setup</th><th>Buy CD</th><th>Sell Setup</th><th>Sell CD</th><th>信号</th>'
-        '</tr></thead><tbody>%s</tbody></table>'
+        '<table class="td-table"><thead><tr>%s</tr></thead><tbody>%s</tbody></table>'
         '<div class="hint">F1 只读诊断：buy9 = 波动率压缩到极致（预测释放，不预测方向）；'
         'sell9 = 回撤放大。参数与现货 TD 独立，不参与任何交易决策。</div>'
-        % (lb, src_label, _esc(bar), len(f1df), "".join(rows))
+        % (lb, src_label, _esc(bar), len(f1df),
+           "".join("<th>%s</th>" % h for h in heads), "".join(rows))
     )
     return head
 

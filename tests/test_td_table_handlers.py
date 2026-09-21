@@ -755,3 +755,105 @@ def test_bar_validation_follows_source(monkeypatch):
                                       "limit": "60", "source": "onchainos"})).body.decode()
     assert 'value="1D" selected' in body
     assert 'value="30m"' not in body
+
+
+# --------------------------------------------------------------------------- #
+# TD F1 模式（series=f1）
+# --------------------------------------------------------------------------- #
+
+def _f1_kline_df(n: int = 120) -> pd.DataFrame:
+    """先单边下跌（ATR 放大）后窄幅震荡（ATR 收缩）→ F1 序列本身有起伏。"""
+    closes = [100 - 0.5 * i for i in range(n // 2)]
+    closes += [closes[-1] + (i % 3) * 0.1 for i in range(n // 2)]
+    return pd.DataFrame(
+        {"open": closes, "high": [c + 1 for c in closes],
+         "low": [c - 1 for c in closes], "close": closes,
+         "volume": [1_000_000] * len(closes)},
+        index=pd.date_range("2026-01-01", periods=len(closes), freq="D"),
+    )
+
+
+def _patch_f1(monkeypatch, df, strategy: str = "td_sequential"):
+    import nanobot_quant.td_table_handlers as mod
+
+    class _FakeSource:
+        def fetch_kline(self, ticker, bar="1D", limit=120, start=None, end=None):
+            return df
+
+    _orig = mod.get_data_source  # 先抓原始引用，否则 fallback 会自递归
+    monkeypatch.setattr(
+        mod, "get_data_source",
+        lambda name: _FakeSource() if name == "onchainos" else _orig(name))
+    monkeypatch.setattr(mod, "_fetch_stock_kline", lambda *a, **k: df)
+    monkeypatch.setattr(mod, "load_td_params", lambda s=None: {"setup_period": 9, "compare_length": 4})
+    monkeypatch.setattr(mod, "load_selected", lambda: strategy)
+    return mod
+
+
+def test_render_f1_uses_engine_columns(monkeypatch):
+    """回归：F1 渲染必须取引擎列名（buy_setup_count…），不是信号 dict 键（setup_buy）。
+
+    曾把 "setup_buy" 传给 _setup_cell → KeyError: 'setup_buy'
+    → GET /config/td-table?series=f1 返回 500（2026-09-21 线上实测）。
+    """
+    df = _f1_kline_df()
+    mod = _patch_f1(monkeypatch, df)
+
+    f1df, _lb = mod._f1_series_df(df, "1D")
+    eng = mod._engine_run(f1df, "td_sequential", {"setup_period": 9, "compare_length": 4})
+    last_buy = int(eng["buy_setup_count"].iloc[-1])
+    last_sell = int(eng["sell_setup_count"].iloc[-1])
+
+    has_cd = bool(eng["buy_countdown_count"].abs().sum())
+
+    html = mod._render_f1("SOL", "1D", 120, "onchainos")
+    assert "TD F1" in html
+    assert "F1 分位" in html
+    assert html.count("<tr") == len(f1df) + 1  # 每根一行 + 表头
+    # 计数取的是引擎列：末行 setup 单元格与引擎输出一致
+    if last_buy:
+        assert '<td class="setup buy">%d</td>' % last_buy in html
+    if last_sell:
+        assert '<td class="setup sell">%d</td>' % last_sell in html
+    # 与价格 TD 表格同行为：窗口内无 countdown 则不渲染 CD 列
+    assert ("Buy CD" in html) is has_cd
+
+
+def test_page_renders_f1_series(monkeypatch):
+    """series=f1 走完整页面路由（不再 500），且序列下拉记住选中。"""
+    df = _f1_kline_df()
+    mod = _patch_f1(monkeypatch, df)
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    body = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "SOL", "bar": "1D",
+                                      "limit": "120", "series": "f1"})).body.decode()
+    assert "TD F1" in body
+    assert 'value="f1" selected' in body
+    assert "Sell Setup" in body
+
+
+def test_page_renders_f1_with_stock_source(monkeypatch):
+    """A 股/ETF 源 + F1（用户实测 510050 日线的路径）不再 500。"""
+    df = _f1_kline_df()
+    mod = _patch_f1(monkeypatch, df)
+    monkeypatch.setattr(mod, "get_strategy",
+                        lambda n: type("S", (), {"label": "TD Sequential（原版）"})())
+
+    body = td_table_page(FakeRequest({"tab": "snapshot", "ticker": "510050", "bar": "1D",
+                                      "limit": "120", "source": "stock",
+                                      "series": "f1"})).body.decode()
+    assert "TD F1" in body
+    assert "股票（510050）" in body
+
+
+def test_render_f1_hides_countdown_columns_when_absent(monkeypatch):
+    """cycle/futu 变体不计 countdown → 与价格 TD 表格同行为：不渲染 CD 两列。"""
+    df = _f1_kline_df()
+    mod = _patch_f1(monkeypatch, df, strategy="td_sequential_cycle")
+
+    html = mod._render_f1("SOL", "1D", 120, "onchainos")
+    assert "TD F1" in html
+    assert "Sell Setup" in html
+    assert "Buy CD" not in html
+    assert "Sell CD" not in html
