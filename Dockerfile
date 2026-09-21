@@ -51,9 +51,9 @@ RUN pip install --break-system-packages \
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
 RUN echo "[bust=54]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherdCD/nanobot-legion.git@4f5ae5a0 \
+        git+https://github.com/DreamShepherdCD/nanobot-legion.git@c287903 \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @4f5ae5a0 (CD fork feat/f1-mode-routes — F1 分析路由挂载, bust=54) 【验证 pin，合并后切回上游】"
+    && echo "✅ nanobot-legion @c287903 (CD fork feat/f1-mode-routes — F1 分析路由挂载, bust=54) 【验证 pin，合并后切回上游】"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
