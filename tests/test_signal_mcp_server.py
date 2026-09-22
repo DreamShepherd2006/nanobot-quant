@@ -49,6 +49,7 @@ EXPECTED_TOOLS = {
     "analyze_f1_drawdown",
     "run_f1_analysis",
     "get_f1_result",
+    "analyze_iv_leadlag",
 }
 
 
