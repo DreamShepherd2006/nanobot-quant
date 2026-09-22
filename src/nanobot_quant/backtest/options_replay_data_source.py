@@ -50,6 +50,7 @@ from nanobot_quant.okx_options_data import (
     _ref_inst,
     parse_inst_id,
 )
+from nanobot_quant.options_history import contract_meta
 
 _DEFAULT_BAR = "15m"
 
@@ -305,22 +306,10 @@ class OptionsReplayDataSource:
             return {}
         out: dict[str, dict] = {}
         for inst in inst_ids:
-            inst = str(inst).upper()
-            if not inst or inst in out:
+            meta = contract_meta(inst, family=self._family)
+            if meta is None:
                 continue
-            try:
-                m = parse_inst_id(inst)
-            except Exception:  # noqa: BLE001 —— 畸形 instId 直接跳过
-                continue
-            out[inst] = {
-                "inst_id": inst,
-                "exp_ms": int(m["expTime"]),
-                "strike": float(m["stk"]),
-                "right": m["optType"],
-                "opt_type": m["optType"],
-                "family": self._family,
-                "list_ms": 0,
-            }
+            out[meta["inst_id"].upper()] = {**meta, "inst_id": meta["inst_id"].upper()}
         self.notes.append(f"合约表：{len(out)} 个档位（在售 ∪ 已到期）")
         return out
 

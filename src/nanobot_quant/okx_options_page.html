@@ -305,6 +305,38 @@
   </div>
 </details>
 
+<!-- 📼 盘口采集（研究用 · 只读）：验证「realized → implied 方向性」与「价差/深度作为流动性代理」 -->
+<details class="settings" id="tapeSection">
+<summary>📼 盘口采集（只读 · 研究用）</summary>
+<div class="card" id="tapeCard" style="border:none;padding:10px 0 0;border-radius:0">
+  <div class="ctl">
+    <label>📼 盘口采集</label>
+    <input type="checkbox" id="tapeEnabled" title="只调公开行情端点采样 bid/ask/档位量/标记 IV；不读持仓、不下单、不参与任何交易决策；默认关">
+    <span class="hint">开启</span>
+    <input type="number" id="tapeInterval" min="10" max="3600" step="10" value="60" style="width:90px" title="采样周期（秒）">
+    <span class="hint">秒/采样</span>
+    <label title="额外对每家族最近到期、最贴近现货的 1 put + 1 call 取多档盘口（额外 2 次请求/家族）">多档盘口
+      <input type="checkbox" id="tapeDepth">
+    </label>
+    <input type="number" id="tapeDepthLevels" min="1" max="10" value="5" style="width:60px" title="多档盘口档数">
+    <span class="hint">档</span>
+    <button class="btn-ghost" id="saveTapeBtn">保存</button>
+    <span class="hint" id="tapeStatus"></span>
+  </div>
+  <div class="ctl" style="margin-top:6px">
+    <span class="hint">标的家族</span>
+    <span id="tapeFamilies" class="famchk" title="采集这些家族的期权盘口（可多选）"></span>
+    <span class="hint">到期档</span>
+    <input type="number" id="tapeExpiries" min="1" max="10" value="3" style="width:58px" title="最近 N 个未到期档">
+    <span class="hint">带宽 ±%</span>
+    <input type="number" id="tapeBand" min="1" max="50" step="1" value="12" style="width:58px" title="strike 相对现货的窗口">
+    <span class="hint">每侧上限</span>
+    <input type="number" id="tapeMaxSide" min="1" max="30" value="8" style="width:58px" title="每到期档每侧最多收录多少个行权价（按贴近现货排序）">
+  </div>
+  <div class="note">一行一次采样，落在持久卷 <code>option_tape/tape_YYYYMMDD.jsonl</code>（一天一文件、跨重启保留）。记录：bid/ask、最优档挂单量、markVol（OKX 官方口径 IV）、delta、现货价。用途：验证 <b>crypto 的 realized → implied 方向性</b> 与 <b>价差/深度作为流动性代理</b>（docs/quant-system.md §33.37）。<b>空间重建后需点一次「保存」才会拉起采集</b>（与自动循环同一机制）。</div>
+</div>
+</details>
+
 
 <!-- 卖 put / 平仓 / 补买 模态 -->
 <div class="overlay" id="modalOverlay">
@@ -1733,6 +1765,75 @@ async function saveLive() {
   }
 }
 
+// ── 📼 盘口采集（只读研究采集）：独立于策略循环的启停 ──────
+function renderTapeFams(selected) {
+  const box = $("tapeFamilies");
+  if (!box) return;
+  const sel = new Set(selected || []);
+  const list = availFams.length ? availFams : [...sel];
+  box.innerHTML = list.map(f =>
+    '<label class="' + (sel.has(f) ? "on" : "") + '">' +
+    '<input type="checkbox" value="' + esc(f) + '"' + (sel.has(f) ? " checked" : "") +
+    ' onchange="tapeFamsChanged()">' + esc(f.replace("-USD_UM", "")) + "</label>"
+  ).join("");
+}
+function readTapeFams() {
+  const box = $("tapeFamilies");
+  if (!box) return [];
+  return Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
+}
+function tapeFamsChanged() {
+  const box = $("tapeFamilies");
+  if (!box) return;
+  Array.from(box.querySelectorAll("label")).forEach(l => {
+    const c = l.querySelector("input");
+    l.classList.toggle("on", !!(c && c.checked));
+  });
+}
+async function loadTape() {
+  try {
+    const j = await (await fetch("/config/okx-options/tape")).json();
+    if (!j.ok) return;
+    const cfg = j.config || {}, st = j.state || {}, stats = st.stats || {};
+    if (Array.isArray(j.available_families) && !availFams.length) availFams = j.available_families;
+    $("tapeEnabled").checked = !!cfg.enabled;
+    $("tapeInterval").value = cfg.interval_s || 60;
+    $("tapeDepth").checked = !!cfg.depth;
+    $("tapeDepthLevels").value = cfg.depth_levels ?? 5;
+    $("tapeExpiries").value = cfg.expiries ?? 3;
+    $("tapeBand").value = cfg.band_pct ?? 12;
+    $("tapeMaxSide").value = cfg.max_per_side ?? 8;
+    renderTapeFams(cfg.families || []);
+    const bits = [];
+    bits.push(st.running ? "🟢 采集中" : (cfg.enabled ? "⚠ 已开启但线程未起（点保存拉起）" : "⚪ 已停止"));
+    if (st.last_run) bits.push("上次 " + locTs(Date.parse(st.last_run)));
+    bits.push("今日 " + (stats.samples || 0) + " 次 / " + (stats.rows || 0) + " 行");
+    $("tapeStatus").innerHTML = bits.join(" · ");
+    if (st.last_error) $("tapeStatus").innerHTML += ' · <span style="color:#c62828">⚠ ' + esc(st.last_error) + "</span>";
+  } catch (e) { /* 静默 */ }
+}
+async function saveTape() {
+  const interval_s = parseInt($("tapeInterval").value, 10);
+  if (isNaN(interval_s) || interval_s < 10 || interval_s > 3600) { showErr("采样周期须为 10–3600 秒"); return; }
+  try {
+    const j = await jpost("/config/okx-options/tape", {
+      enabled: $("tapeEnabled").checked,
+      interval_s,
+      depth: $("tapeDepth").checked,
+      depth_levels: parseInt($("tapeDepthLevels").value, 10) || 5,
+      families: readTapeFams(),
+      expiries: parseInt($("tapeExpiries").value, 10) || 3,
+      band_pct: parseFloat($("tapeBand").value) || 12,
+      max_per_side: parseInt($("tapeMaxSide").value, 10) || 8,
+    });
+    if (!j.ok) { showErr(j.error || "保存失败"); return; }
+    $("tapeStatus").textContent = $("tapeEnabled").checked ? "已保存 · 采集启动中" : "已保存 · 采集已停止";
+    setTimeout(loadTape, 800);
+  } catch (e) {
+    const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
+  }
+}
+
 // ── 📊 标的 TD 状态（C24 ⑤）：与自动循环同源，只读 ──────────
 const tdSel = $("tdPeriod");
 
@@ -1820,15 +1921,18 @@ btn.addEventListener("click", loadChain);
 accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions(); });
 $("saveParamsBtn").addEventListener("click", saveParams);
 $("saveLiveBtn").addEventListener("click", saveLive);
+$("saveTapeBtn").addEventListener("click", saveTape);
 loadAccounts();
 loadExpiries();   // 内部负责首次默认最近到期后的 loadChain
 loadReminder();
 loadParams();
 loadSelector();
 loadLive();
+loadTape();
 loadTd();
 setInterval(loadTd, 10000);   // 标的 TD 状态（与自动循环同源，只读）
 setInterval(loadLive, 30000);  // 自动策略状态（含状态条 / 家族清单刷新）
+setInterval(loadTape, 30000);  // 盘口采集状态（只读）
 </script>
 </body>
 </html>

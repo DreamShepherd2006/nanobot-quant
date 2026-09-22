@@ -36,6 +36,7 @@ from nanobot_quant import okx_options_live as ol
 from nanobot_quant import okx_options_select as osel
 from nanobot_quant import okx_options_td as otd
 from nanobot_quant import okx_options_trade as ot
+from nanobot_quant import option_tape as otp
 from nanobot_quant.backtest.options_replay_data_source import probe as backtest_probe
 from nanobot_quant.backtest.options_replay_data_source import (
     probe_chain_dict as backtest_probe_chain,
@@ -431,6 +432,49 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         return JSONResponse({"ok": True, "live": state, "config": ol.live_config()})
 
     # ── 撤单 / 当前委托（单步，撤单无资金流）────────────
+
+    # ── 盘口采集（研究用 · 只读）────────────────────
+
+    async def _tape_get(request: Request):
+        """采集器配置 + 运行状态 + 当天落盘统计（只读）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        return JSONResponse({"ok": True, "config": otp.tape_config(),
+                             "state": otp.state(),
+                             "defaults": otp.DEFAULT_TAPE,
+                             "available_families": list(od.FAMILIES)})
+
+    async def _tape_set(request: Request):
+        """保存采集参数并启/停采集（只读采样，不涉及任何交易开关）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return _deny(err)
+        body, jerr = await _json_body(request)
+        if jerr:
+            return JSONResponse({"ok": False, "error": jerr})
+        b = body or {}
+        families = b.get("families")
+        if families is not None:
+            if not isinstance(families, (list, tuple)):
+                return JSONResponse({"ok": False, "error": "families 需数组"})
+            unknown = [f for f in families if f not in od.FAMILIES]
+            if unknown:
+                return JSONResponse(
+                    {"ok": False,
+                     "error": f"未知标的家族 {unknown}；可选：{list(od.FAMILIES)}"})
+        cur = otp.tape_config()
+        for k, v in b.items():
+            if k in otp.DEFAULT_TAPE:
+                cur[k] = v
+        try:
+            config = await asyncio.to_thread(otp.save_tape_config, **cur)
+            await asyncio.to_thread(otp.sync)
+            state = otp.state()
+        except Exception as e:  # noqa: BLE001 —— 采集参数问题不应 500
+            return JSONResponse({"ok": False,
+                                 "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, "config": config, "state": state})
 
     async def _pending(request: Request):
         err, ok = _authorized(request, gatekeeper)
@@ -862,6 +906,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
     app.add_api_route("/config/okx-options/params", _params_save, methods=["POST"])
     app.add_api_route("/config/okx-options/live", _live_get, methods=["GET"])
     app.add_api_route("/config/okx-options/live", _live_set, methods=["POST"])
+    app.add_api_route("/config/okx-options/tape", _tape_get, methods=["GET"])
+    app.add_api_route("/config/okx-options/tape", _tape_set, methods=["POST"])
     async def _backtest_probe(request: Request):
         """期权回测数据层诊断（只读，真实拉数）。
 

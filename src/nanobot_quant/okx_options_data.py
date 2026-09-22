@@ -47,6 +47,17 @@ def _ref_inst(family: str) -> tuple[str | None, str]:
     return None, ""
 
 
+def spot_ref_of(family: str) -> str | None:
+    """家族 → 现货参考 instId（公开包装，避免跨模块直接摸私有函数）。
+
+    仅返回现货家族（``spot``）的参考对；index 家族返回 None（期权线取价
+    不用指数）。**映射的唯一来源是 ``_SPOT`` 表**——消费方一律经此取，
+    不另建一份，避免两处漂移。
+    """
+    inst, kind = _ref_inst(family)
+    return inst if (inst and kind == "spot") else None
+
+
 def _cached(key: str, producer):
     item = _cache.get(key)
     if item and time.time() - item[0] < _CACHE_TTL:
