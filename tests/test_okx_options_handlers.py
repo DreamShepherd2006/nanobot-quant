@@ -165,7 +165,8 @@ def test_page_three_layers_layout():
     参数层（担保/定价/合约选择）独立成折叠区，与策略层分开。
     """
     h = _page_html()
-    assert h.count("<details") == h.count("</details>") == 2
+    # 三个折叠区：参数层（paramSection）+ 自动策略层（liveSection）+ 盘口采集层（tapeSection）
+    assert h.count("<details") == h.count("</details>") == 3
     assert 'id="settingsCard"' not in h            # 旧的混合折叠区已拆掉
 
     i_bar = h.index('id="liveBar"')
@@ -174,10 +175,12 @@ def test_page_three_layers_layout():
     i_chain = h.index('id="chainCard"')
     i_led = h.index('id="ledCard"')
     i_live = h.index('id="liveSection"')
+    i_tape = h.index('id="tapeSection"')
 
     assert i_bar > h.index('id="chainCtl"')        # 状态条在看板设置之后
     assert i_td < i_live and i_chain < i_live and i_led < i_live   # 看板层在策略层之前
     assert i_param < i_td                          # 参数层独立、默认收起
+    assert i_live < i_tape                         # 采集层沉底（研究用，不干扰看板/策略）
 
 
 def test_family_multi_select_replaces_text_input():
@@ -214,3 +217,74 @@ def test_live_get_exposes_available_families():
            / "okx_options_handlers.py").read_text(encoding="utf-8")
     assert '"available_families": list(od.FAMILIES)' in src
     assert "未知标的家族" in src
+
+
+# ── 📼 盘口采集（研究用只读，2026-09-22）：路由 / UI / 只读边界 ──
+
+
+def _handlers_src() -> str:
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+            / "okx_options_handlers.py").read_text(encoding="utf-8")
+
+
+def _tape_block() -> str:
+    src = _handlers_src()
+    start = src.index("async def _tape_get")
+    end = src.index("async def _pending")
+    return src[start:end]
+
+
+def test_tape_routes_registered():
+    """盘口采集：GET 看状态 / POST 保存并启停。"""
+    class _App:
+        def __init__(self):
+            self.routes = []
+
+        def add_api_route(self, path, fn, methods=None):
+            self.routes.append(type("R", (), {"path": path})())
+
+    app = _App()
+
+    class _GK:
+        pass
+
+    oh.register_okx_options_routes(app, _GK())
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/config/okx-options/tape" in paths
+
+
+def test_tape_endpoint_validates_families_fail_closed():
+    """未知家族拒绝写入（fail-closed，与自动循环同口径）。"""
+    blk = _tape_block()
+    assert "未知标的家族" in blk
+    assert 'if k in otp.DEFAULT_TAPE' in blk      # 只接受采集白名单字段
+    assert "otp.state()" in blk and "otp.sync" in blk
+
+
+def test_tape_endpoint_is_not_a_trading_switch():
+    """采集保存不得触碰 live 段/交易开关（只写 option_params 的 tape 段）。"""
+    blk = _tape_block()
+    for forbidden in ("save_option_params(live", "ol.sync",
+                      "set_order", "set_margin_balance", "open_put"):
+        assert forbidden not in blk, f"采集端点出现交易相关调用：{forbidden}"
+
+
+def test_tape_ui_present_and_polled():
+    """页面：📼 采集小节 + 独立保存按钮 + 30s 只读状态轮询。"""
+    h = _page_html()
+    for token in ('id="tapeEnabled"', 'id="saveTapeBtn"', 'id="tapeFamilies"',
+                  'id="tapeStatus"', 'id="tapeDepth"',
+                  "setInterval(loadTape, 30000)", "loadTape()"):
+        assert token in h, f"页面缺少 {token}"
+    assert "不参与任何交易决策" in h or "不读持仓、不下单、不参与任何交易决策" in h
+
+
+def test_live_sync_also_syncs_tape_without_breaking_strategy(monkeypatch):
+    """策略循环 sync 同时拉起采集；采集报错不得影响策略循环。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+           / "okx_options_live.py").read_text(encoding="utf-8")
+    assert "from . import option_tape as _tape" in src
+    assert "_tape.sync()" in src
+    assert "不影响策略循环" in src        # 异常吞噪，但打 stderr 可查

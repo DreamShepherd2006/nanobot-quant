@@ -330,6 +330,33 @@ def _family_of(inst_id: str) -> str:
     return "-".join(parts[:-3]) if len(parts) >= 5 else ""
 
 
+def contract_meta(inst_id: str, *, family: str = "") -> dict | None:
+    """instId → 合约元数据（**单一来源**：所有消费 ``iv_surface`` 的路径共用）。
+
+    形状（与回放数据源、分析模块共用，勿另建一份）::
+
+        {"inst_id", "exp_ms", "strike", "right", "opt_type", "family", "list_ms"}
+
+    畸形 instId 返回 None（调用方自行跳过）。
+    """
+    inst = str(inst_id or "").strip()
+    if not inst:
+        return None
+    try:
+        m = parse_inst_id(inst)
+    except Exception:  # noqa: BLE001 —— 畸形 instId 直接跳过
+        return None
+    return {
+        "inst_id": inst,
+        "exp_ms": int(m["expTime"]),
+        "strike": float(m["stk"]),
+        "right": m["optType"],
+        "opt_type": m["optType"],
+        "family": family or m.get("instFamily", ""),
+        "list_ms": 0,
+    }
+
+
 def load_trades(paths: Union[str, Path, Sequence[Union[str, Path]]], *,
                 family: Optional[str] = None,
                 limit: Optional[int] = None) -> list[dict]:

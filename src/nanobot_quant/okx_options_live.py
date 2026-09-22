@@ -399,8 +399,17 @@ def sync() -> dict:
 
     运行中且配置未变 → 不动；运行中配置变（interval / strategy / enabled）→ 重启；
     enabled=false → 停。
+
+    同时同步**盘口采集器**（研究用只读采集，见 option_tape）：两者共用一个启停入口
+    （期权页保存），但各自独立线程、各自 enabled 门控 —— 采集失败不影响策略循环。
     """
     _runner().sync()
+    try:
+        from . import option_tape as _tape
+        _tape.sync()
+    except Exception as e:  # noqa: BLE001 —— 采集器不得拖垮策略循环
+        print(f"[OPT-LIVE] 盘口采集同步失败（不影响策略循环）："
+              f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
     return live_state()
 
 
