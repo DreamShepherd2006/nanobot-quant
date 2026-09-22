@@ -8,6 +8,7 @@ Tool implementations live in tools/:
   tools_analysis.py    run_td_sequential
   tools_backtest.py    run_backtest
   tools_f1.py          analyze_f1_td, analyze_f1_drawdown
+  tools_iv.py          analyze_iv_leadlag
   tools_structurize.py structurize_signal
   tools_execute.py     execute_signal
 """
@@ -82,6 +83,7 @@ from nanobot_quant.tools.tools_f1 import (
     get_f1_result,
     run_f1_analysis,
 )
+from nanobot_quant.tools.tools_iv import analyze_iv_leadlag
 
 # ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
 # import time through a stdout-bound StreamHandler, BEFORE any handler
@@ -268,6 +270,18 @@ _TOOL_DESCRIPTIONS = {
         "回撤诊断），可直接拷贝给用户看；回撤诊断的三列（段回撤比 / 单根比 /"
         "插针比）必须一起读——**幅度可预测 ≠ 风险可降**。"
     ),
+    "analyze_iv_leadlag": (
+        "IV 领先-滞后诊断（家族 + 天数 + 桶）：H1「已实现波动 → IV」、"
+        "H2「F1 → IV」、H3「已实现波动 vs Deribit DVOL」，输出各 lag 相关系数"
+        "与**循环平移零假设** p 值（不假设 iid——重叠窗口下朴素 t 检验会虚抬显著性）。"
+        "\n**已校准实证（2026-09-22，14 天归档）**：BTC/ETH 在 5m/15m/1H 上 H1 峰值"
+        "corr 仅 0.01–0.12、p=0.11–0.91 —— **不是没方向性，是归档太稀测不出来**"
+        "（BTC 15m 仅 20% 的桶有成交，前向填充把 IV 压成阶梯）；同数据上"
+        "「已实现波动 ↔ F1」显著（0.27–0.29, p≈0.01），说明工具本身有功效。"
+        "真实测 IV 领先-滞后需先攒 ``option_tape`` 盘口样本。"
+        "\n返回 dict 带 **markdown** 报告。首次运行要下载归档（约 30–60s，可能触及"
+        "MCP 30s 超时），缓存落持久卷后每次约 6s。只读：不下单、不改配置。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -283,6 +297,7 @@ _TOOL_DISPATCH = {
     "options_broker_selftest": options_broker_selftest,
     "analyze_f1_td": analyze_f1_td,
     "analyze_f1_drawdown": analyze_f1_drawdown,
+    "analyze_iv_leadlag": analyze_iv_leadlag,
     "run_f1_analysis": run_f1_analysis,
     "get_f1_result": get_f1_result,
     "wallet_login_init": wallet_login_init,

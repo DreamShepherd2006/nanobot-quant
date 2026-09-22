@@ -367,6 +367,26 @@ DVOL_RESOLUTIONS = (1, 60, 3600, 43200, 86400)
 DVOL_MAX_POINTS = 900          # 端点每请求返回上限约 1000 点，留点余量
 
 
+# Deribit 官方波动率指数只覆盖少数币种（官方 DVOL：BTC、ETH）。其余家族
+# （如 SOL）没有官方指数 —— 只能借 BTC 作市场基准，且**必须显式标注**：
+# 否则读者会把 BTC DVOL 当成该标的的外部对照（2026-09-22 复测中发现
+# ETH 家族一直在用 BTC DVOL、而 ETH 自己就有官方指数，等于白丢对照）。
+DVOL_OFFICIAL_CURRENCIES = ("BTC", "ETH")
+
+
+def dvol_currency_for(family: str) -> tuple[str, Optional[str]]:
+    """家族 → ``(DVOL 币种, 借用的原始家族)``。
+
+    ``ETH-USD_UM`` → ``("ETH", None)``（有官方指数，是本标的的对照）；
+    ``SOL-USD_UM`` → ``("BTC", "SOL")``（无官方指数，借 BTC 作市场基准）。
+    第二项非空即表示「这不是本标的自己的指数」，展示层必须标注。
+    """
+    base = (family or "").split("-")[0].strip().upper()
+    if base in DVOL_OFFICIAL_CURRENCIES:
+        return base, None
+    return "BTC", (base or None)
+
+
 def dvol_resolution(window_ms: int, *, max_points: int = DVOL_MAX_POINTS) -> int:
     """按窗口长度选 DVOL 分辨率——**必须粗于「窗口/上限」否则会被端点截断**。
 
@@ -413,7 +433,7 @@ def analyze_iv_leadlag(family: str = "SOL-USD_UM", *, days: int = 14,
                        target_tenor_days: float = 3.0,
                        mode: str = "atm_median", band_pct: float = 10.0,
                        include_dvol: bool = True,
-                       dvol_currency: str = "BTC",
+                       dvol_currency: Optional[str] = None,
                        n_iter: int = 500, cache_dir: Optional[str] = None,
                        progress: Optional[Callable[[str], None]] = None) -> dict:
     """跑一次完整的领先-滞后诊断（H1 / H2 / H3）。
@@ -457,17 +477,30 @@ def analyze_iv_leadlag(family: str = "SOL-USD_UM", *, days: int = 14,
 
     dvol_block: dict = {}
     if include_dvol:
+        # 留空 = 按家族推导（有官方指数就用自己，否则借 BTC 并标注）
+        if dvol_currency:
+            ccy = str(dvol_currency).strip().upper()
+            fam_base = (family or "").split("-")[0].strip().upper()
+            proxy_for = None if ccy == fam_base else (fam_base or None)
+        else:
+            ccy, proxy_for = dvol_currency_for(family)
         try:
-            dv = dvol_series(dvol_currency, begin_ms=begin_ms - 3600_000,
+            dv = dvol_series(ccy, begin_ms=begin_ms - 3600_000,
                              end_ms=end_ms)
-            ref = dvol_currency + "-USDT"
+            ref = ccy + "-USDT"
             btc = spot_frame(ref, begin_ms=begin_ms, end_ms=end_ms, bucket=bucket)
             rv_btc = realized_vol(btc["close"], window=window, bucket=bucket)
             joined = pd.concat([rv_btc.rename("rv"), dv["dvol"].rename("dvol")],
                                axis=1).dropna()
             coarse = joined.resample(f"{max(secs, 3600)}s").last().dropna()
+            if proxy_for:
+                notes.append(
+                    f"⚠️ {proxy_for} 无官方 DVOL，H3 借用 {ccy} DVOL 作市场基准"
+                    "（不是本标的自己的指数）"
+                )
             dvol_block = {
-                "currency": dvol_currency,
+                "currency": ccy,
+                "proxy_for": proxy_for,
                 "points": int(len(coarse)),
                 "test": shift_test(coarse["rv"], coarse["dvol"],
                                    max_lag=max_lag, n_iter=n_iter),
@@ -573,7 +606,11 @@ def markdown(result: dict) -> str:
     if dv.get("error"):
         lines.append(f"- ❌ DVOL 拉取失败：{dv['error']}")
     elif dv:
-        lines.append(f"- {dv['currency']} DVOL · {dv['points']} 点（1h 采样）")
+        label = f"{dv['currency']} DVOL · {dv['points']} 点（1h 采样）"
+        if dv.get("proxy_for"):
+            label += (f"　⚠️ 借用作市场基准（{dv['proxy_for']} 无官方 DVOL，"
+                      f"这不是 {dv['proxy_for']} 自己的指数）")
+        lines.append(f"- {label}")
         lines.append(f"- {_verdict(dv['test'], '已实现波动', 'DVOL')}")
         if dv.get("read"):
             lines.append(f"- 读法：{dv['read']}")
@@ -610,6 +647,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--band", type=float, default=10.0)
     ap.add_argument("--iter", type=int, default=500)
     ap.add_argument("--no-dvol", action="store_true")
+    ap.add_argument("--dvol-ccy", default="",
+                    help="DVOL 币种；留空=按家族推导（有官方指数就用自己，"
+                         "否则借 BTC 并在报告里标注）")
     ap.add_argument("--json", action="store_true", help="只输出 JSON（默认打印 markdown）")
     args = ap.parse_args(argv)
 
@@ -617,7 +657,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.family, days=args.days, bucket=args.bucket, window=args.window,
         max_lag=args.max_lag, target_tenor_days=args.tenor, n_iter=args.iter,
         mode=args.mode, band_pct=args.band,
-        include_dvol=not args.no_dvol, progress=_log)
+        include_dvol=not args.no_dvol, progress=_log,
+        dvol_currency=(args.dvol_ccy or None))
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
     else:

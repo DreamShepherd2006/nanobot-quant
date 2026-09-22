@@ -220,3 +220,83 @@ def test_markdown_reports_limitations_and_verdicts():
 def test_markdown_handles_failure_result():
     md = il.markdown({"ok": False, "family": "SOL-USD_UM", "error": "无成交"})
     assert "无成交" in md
+
+
+# ──────────────────── DVOL 币种推导（2026-09-22 复测缺口）────────────────────
+
+
+def test_dvol_currency_for_uses_official_index_when_available():
+    """有官方指数的家族用自己的指数（不需要标注借用）。"""
+    assert il.dvol_currency_for("BTC-USD_UM") == ("BTC", None)
+    assert il.dvol_currency_for("ETH-USD_UM") == ("ETH", None)
+
+
+def test_dvol_currency_for_falls_back_to_btc_with_marker():
+    """无官方指数的家族只能借 BTC——但必须带回借用标记，否则会被误读成本标的的对照。"""
+    assert il.dvol_currency_for("SOL-USD_UM") == ("BTC", "SOL")
+    assert il.dvol_currency_for("FOO-USD_UM") == ("BTC", "FOO")
+    assert il.dvol_currency_for("") == ("BTC", None)
+
+
+def _fake_analyze_env(monkeypatch, seen: dict, periods: int = 96, step_ms: int = 900_000,
+              start: int = TS0) -> None:
+    """把 analyze 的四条外部依赖全部换成合成数据（零网络）。"""
+    idx = pd.to_datetime([start + i * step_ms for i in range(periods)],
+                         unit="ms", utc=True)
+    close = pd.Series(np.linspace(100.0, 110.0, periods), index=idx)
+    kl = pd.DataFrame({"open": close, "high": close * 1.002,
+                       "low": close * 0.998, "close": close, "volume": 1.0})
+    ivf = pd.DataFrame({"iv_atm": np.linspace(0.50, 0.62, periods),
+                        "n_points": 3}, index=idx)
+
+    def fake_shift(a, b, **kw):
+        return {"table": [{"lag": 0, "corr": 0.0, "n": int(len(a))}],
+                "best_lag": 0, "best_corr": 0.0, "p_value": 1.0,
+                "points": int(len(a))}
+
+    def fake_dvol(ccy, **kw):
+        seen["ccy"] = ccy
+        return pd.DataFrame({"dvol": np.linspace(0.40, 0.45, periods)}, index=idx)
+
+    monkeypatch.setattr(il, "spot_klines", lambda *a, **k: kl.copy())
+    monkeypatch.setattr(il, "spot_frame", lambda *a, **k: kl.copy())
+    monkeypatch.setattr(il, "atm_iv_series",
+                        lambda *a, **k: {"frame": ivf.copy(), "notes": []})
+    monkeypatch.setattr(il, "dvol_series", fake_dvol)
+    monkeypatch.setattr(il, "shift_test", fake_shift)
+
+
+def test_analyze_borrows_btc_dvol_for_family_without_official_index(monkeypatch):
+    """SOL 家族：DVOL 走 BTC（借市场基准），notes + markdown 双处显式标注。"""
+    seen: dict = {}
+    _fake_analyze_env(monkeypatch, seen)
+    res = il.analyze_iv_leadlag("SOL-USD_UM", days=1, bucket="15m", n_iter=50)
+    assert res["ok"] is True
+    assert seen["ccy"] == "BTC"
+    assert res["dvol"]["currency"] == "BTC"
+    assert res["dvol"]["proxy_for"] == "SOL"
+    assert any("无官方 DVOL" in n for n in res["notes"])
+    assert "借用作市场基准" in res["markdown"]
+    assert "这不是 SOL 自己的指数" in res["markdown"]
+
+
+def test_analyze_uses_own_official_dvol_when_present(monkeypatch):
+    """ETH 家族：用 ETH 官方 DVOL，proxy_for 为空且**不得**出现借用标注。"""
+    seen: dict = {}
+    _fake_analyze_env(monkeypatch, seen)
+    res = il.analyze_iv_leadlag("ETH-USD_UM", days=1, bucket="15m", n_iter=50)
+    assert seen["ccy"] == "ETH"
+    assert res["dvol"]["proxy_for"] is None
+    assert not any("无官方 DVOL" in n for n in res["notes"])
+    assert "借用作市场基准" not in res["markdown"]
+
+
+def test_analyze_marks_explicit_foreign_dvol_currency(monkeypatch):
+    """显式指定他人指数（ETH 家族查 BTC DVOL）同样要标注借用。"""
+    seen: dict = {}
+    _fake_analyze_env(monkeypatch, seen)
+    res = il.analyze_iv_leadlag("ETH-USD_UM", days=1, bucket="15m", n_iter=50,
+                                dvol_currency="btc")
+    assert seen["ccy"] == "BTC"
+    assert res["dvol"]["proxy_for"] == "ETH"
+    assert "借用作市场基准" in res["markdown"]
