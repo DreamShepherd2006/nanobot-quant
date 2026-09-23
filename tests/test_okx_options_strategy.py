@@ -143,3 +143,36 @@ class TestContractsByFamily:
     def test_empty(self):
         assert st.contracts_by_family([]) == {}
         assert st.contracts_by_family(None) == {}
+
+
+# ── 方向隔离（§24 C42：卖 put 线与卖 call 线互不越界） ──────────────
+class TestRightIsolation:
+    def test_put_line_does_not_close_short_call(self):
+        rows = [_pos("SOL-USD_UM-260918-94-P", 1.0, 0.40, 0.19),      # 已达 put 止盈线
+                _pos("SOL-USD_UM-260918-110-C", 1.0, 0.40, 0.10)]     # 卖出的 call（side=short）
+        out = st.evaluate_exits(rows, tp_pct=50)
+        assert [x.inst_id for x in out] == ["SOL-USD_UM-260918-94-P"]
+
+    def test_call_line_manages_call_only(self):
+        rows = [_pos("SOL-USD_UM-260918-94-P", 1.0, 0.40, 0.19),
+                _pos("SOL-USD_UM-260918-110-C", 1.0, 0.40, 0.19)]
+        out = st.evaluate_exits(rows, tp_pct=50, opt_type="C")
+        assert [x.inst_id for x in out] == ["SOL-USD_UM-260918-110-C"]
+
+    def test_opt_type_field_wins_over_inst_id(self):
+        row = {**_pos("SOL-USD_UM-260918-110-C", 1.0, 0.40, 0.19), "opt_type": "C"}
+        assert st.evaluate_exits([row], tp_pct=50, opt_type="P") == []
+        assert len(st.evaluate_exits([row], tp_pct=50, opt_type="C")) == 1
+
+    def test_contracts_by_family_separates_right(self):
+        rows = [_pos("SOL-USD_UM-260918-94-P", 1.0, 0.3, 0.3),
+                _pos("SOL-USD_UM-260918-96-P", 2.0, 0.3, 0.3),
+                _pos("SOL-USD_UM-260918-110-C", 5.0, 0.3, 0.3)]      # call 不吃 put 额度
+        assert st.contracts_by_family(rows) == {"SOL": 3}
+        assert st.contracts_by_family(rows, opt_type="C") == {"SOL": 5}
+
+    def test_unparsable_inst_not_counted(self):
+        # 方向判不出的行：不计额度、不参与止盈（fail-closed 不动仓）
+        rows = [_pos("NOPE", 2.0, 0.3, 0.3)]
+        assert st.contracts_by_family(rows) == {}
+        assert st.evaluate_exits([_pos("NOPE", 2.0, 0.40, 0.10)], tp_pct=50) == []

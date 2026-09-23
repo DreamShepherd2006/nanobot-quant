@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from nanobot_quant.okx_options_assets import right_of_inst
 from nanobot_quant.okx_options_select import select_puts
 
 # 权利金回落止盈的默认线（卖 put 实证分水岭：50%）
@@ -185,19 +186,37 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
 
 # ── 出场（止盈买回） ───────────────────────────────
 
-def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT) -> list[ExitDecision]:
+def _row_right(row: dict) -> str:
+    """持仓行的期权方向（``P``/``C``）——行内 ``opt_type`` 优先，缺失时从 instId 尾段解析。
+
+    两者都判不出 → ``""``（消费方按「不匹配」处理：方向不明的行一律不动仓，fail-closed）。
+    """
+    v = str((row or {}).get("opt_type") or "").strip().upper()
+    if v in ("C", "P"):
+        return v
+    return right_of_inst(str((row or {}).get("inst_id") or ""))
+
+
+def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT,
+                   opt_type: str = "P") -> list[ExitDecision]:
     """权利金回落止盈：mark 价跌到开仓价的 (1 − tp_pct%) 以下 → 买回。
 
     Args:
         positions: ``okx_options_trade.open_puts()`` 的输出（含 side/pos/avg_px/mark_px）。
         tp_pct: 回落百分比阈值（50 = 权利金跌掉一半）；≤0 = 关闭止盈。
+        opt_type: 只评估该方向的卖开仓（``"P"`` 卖 put 线 / ``"C"`` 卖 call 线）。
+            方向隔离是硬约束 —— 卖 put 的止盈线不得平掉卖 call 仓（call 另有自己的
+            止盈线），反之亦然（docs/quant-system.md §24 C42）。
     """
     out: list[ExitDecision] = []
+    want = str(opt_type or "P").strip().upper()
     if not tp_pct or tp_pct <= 0:
         return out
     for row in positions or []:
         if str((row or {}).get("side") or "").lower() not in ("short", "net_short"):
             continue  # 只处理卖开仓（买 call / 长仓不归本策略管）
+        if _row_right(row) != want:
+            continue  # 方向隔离：非本方向的仓（含方向不可判定的行）不在本线止盈
         entry = _f(row.get("avg_px"))
         mark = _f(row.get("mark_px"))
         sz = _f(row.get("pos"))
@@ -287,11 +306,17 @@ def cycle_mark_bought(state: dict, family: str) -> None:
     st["cd_triggered"] = True
 
 
-def contracts_by_family(positions) -> dict[str, int]:
-    """按标的统计在仓张数（张数上限判定用）。"""
+def contracts_by_family(positions, *, opt_type: str = "P") -> dict[str, int]:
+    """按标的统计在仓张数（张数上限判定用）—— 只统计 ``opt_type`` 方向的卖开仓。
+
+    卖 put 与卖 call 各占自己的额度：call 仓不再吃掉 put 的张数额度（§24 C42）。
+    """
     out: dict[str, int] = {}
+    want = str(opt_type or "P").strip().upper()
     for row in positions or []:
         if str((row or {}).get("side") or "").lower() not in ("short", "net_short"):
+            continue
+        if _row_right(row) != want:
             continue
         inst = str(row.get("inst_id") or "")
         sz = _f(row.get("pos")) or 0

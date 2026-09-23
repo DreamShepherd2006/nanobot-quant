@@ -87,7 +87,7 @@ def inst_to_asset(inst_id: str):
         strike = float(parts[-2])
     except (ValueError, IndexError):
         return None
-    right = "CALL" if parts[-1].upper() == "C" else "PUT"
+    right = "CALL" if right_of_inst(inst_id) == "C" else "PUT"
     return Asset(symbol=base, asset_type="option", expiration=exp,
                  strike=strike, right=right, multiplier=lot)
 
@@ -96,3 +96,16 @@ def family_of_inst(inst_id: str) -> str:
     """``SOL-USD_UM-260918-94-P`` → ``SOL-USD_UM``。"""
     parts = str(inst_id or "").split("-")
     return "-".join(parts[:2]) if len(parts) >= 2 else ""
+
+
+def right_of_inst(inst_id: str) -> str:
+    """``SOL-USD_UM-260918-94-P`` → ``P``（尾段 C/P；非法/非期权 → ``""``）。
+
+    持仓方向（卖 put / 卖 call 分线管理）的唯一解析入口 —— 与
+    :func:`inst_to_asset` 共用同一段位规则（尾部 3 段 = 到期日/行权价/方向）。
+    """
+    parts = str(inst_id or "").split("-")
+    if len(parts) < 5:
+        return ""
+    tail = parts[-1].strip().upper()
+    return tail if tail in ("C", "P") else ""
