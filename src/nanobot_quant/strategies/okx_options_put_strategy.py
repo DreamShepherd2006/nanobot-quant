@@ -307,7 +307,7 @@ class OkxOptionsPutStrategy(Strategy):
 
     def _positions(self, account: str):
         try:
-            return ot.open_puts(account) or []
+            return ot.open_option_positions(account) or []
         except Exception as e:  # noqa: BLE001
             self._log(f"⚠️ 持仓查询异常：{type(e).__name__}: {e}")
             return None

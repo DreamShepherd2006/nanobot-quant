@@ -43,9 +43,9 @@ def _iso(tmp_path, monkeypatch):
                      "live_mode": True, "families": []}
     _r._strategy = _s
     # 持仓查询也隔离（否则真去读 Gate/OKX 凭证）
-    monkeypatch.setattr(ot, "open_puts", lambda account="": [], raising=False)
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [], raising=False)
     # 策略轮次默认打桩（不触网）：持仓空 + 无 K 线；策略专项测试用 _strat 覆盖
-    monkeypatch.setattr(ot, "open_puts", lambda account="": [])
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
     monkeypatch.setattr(OkxOptionsPutStrategy, "_td_signal",
                         lambda self, family, base, p: None)
     yield tmp_path
@@ -333,7 +333,7 @@ def _strat(monkeypatch, _iso):
     _r_ = ol._runner()
     if _r_._strategy is not None:
         _r_._strategy.parameters["families"] = ["SOL-USD_UM"]
-    monkeypatch.setattr(ol.ot, "open_puts", lambda account="": [dict(SOL_POS)])
+    monkeypatch.setattr(ol.ot, "open_option_positions", lambda account="": [dict(SOL_POS)])
     monkeypatch.setattr(ol.ot, "suggest_px_for_order",
                         lambda inst, side, sz=None: {"px": 0.3})
     monkeypatch.setattr(ol.ot, "open_put",

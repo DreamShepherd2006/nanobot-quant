@@ -130,7 +130,7 @@ class TestBrokerSubmitOrder:
 # ─────────────────────── Broker：持仓 / 余额 / 查单 ───────────────────────
 class TestBrokerState:
     def test_pull_positions_maps_short_to_negative_with_lot(self, monkeypatch):
-        monkeypatch.setattr(oot, "open_puts", lambda account="": [
+        monkeypatch.setattr(oot, "open_option_positions", lambda account="": [
             {"inst_id": "SOL-USD_UM-260918-94-P", "side": "short", "pos": 1.0,
              "avg_px": 0.28, "mark_px": 0.26, "strike": 94.0},
             {"inst_id": "BTC-USD_UM-260918-56000-C", "side": "short", "pos": 2.0,
@@ -142,7 +142,7 @@ class TestBrokerState:
         assert positions[0].current_price == 0.26
 
     def test_pull_position_filters_by_asset(self, monkeypatch):
-        monkeypatch.setattr(oot, "open_puts", lambda account="": [
+        monkeypatch.setattr(oot, "open_option_positions", lambda account="": [
             {"inst_id": "SOL-USD_UM-260918-94-P", "side": "short", "pos": 1.0,
              "avg_px": 0.28, "mark_px": 0.26},
         ])
@@ -159,7 +159,7 @@ class TestBrokerState:
                 {"ccy": "BTC", "avail_bal": 0.01, "cash_bal": 0.01},
             ],
         })
-        monkeypatch.setattr(oot, "open_puts", lambda account="": [
+        monkeypatch.setattr(oot, "open_option_positions", lambda account="": [
             {"inst_id": "SOL-USD_UM-260918-94-P", "side": "short", "pos": 2.0,
              "avg_px": 0.28, "mark_px": 0.5},
         ])

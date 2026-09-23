@@ -202,7 +202,7 @@ def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT,
     """权利金回落止盈：mark 价跌到开仓价的 (1 − tp_pct%) 以下 → 买回。
 
     Args:
-        positions: ``okx_options_trade.open_puts()`` 的输出（含 side/pos/avg_px/mark_px）。
+        positions: ``okx_options_trade.open_option_positions()`` 的输出（含 side/pos/avg_px/mark_px）。
         tp_pct: 回落百分比阈值（50 = 权利金跌掉一半）；≤0 = 关闭止盈。
         opt_type: 只评估该方向的卖开仓（``"P"`` 卖 put 线 / ``"C"`` 卖 call 线）。
             方向隔离是硬约束 —— 卖 put 的止盈线不得平掉卖 call 仓（call 另有自己的

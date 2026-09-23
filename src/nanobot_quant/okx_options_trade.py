@@ -12,7 +12,8 @@
   （BTC 0.01 / ETH 0.01 / SOL 0.1 / XAU 0.01），每张权利金(USD) = px × lot
 - 卖 put 逐仓（isolated）模式，每张独立保证金/强平边界（多笔低9 卖 put 同账号
   并存互不拖累）；等效现金担保（自留口径）= Σ(strike × lot × sz)（账户现金，不设杠杆）
-- 到期结算：欧式、现金结算（settle = 到期日 08:00 UTC 后 30 分钟 TWAP，官方口径）；
+- 到期结算：欧式、现金结算（settle = 到期前 30 分钟标的指数算术平均，官方口径；
+  到期时刻 08:00 UTC）；
   OKX 到期自动结算入账，本模块不重复算钱，到期后经台账标 ``settled`` 并引导核对账单
 """
 
@@ -1436,7 +1437,7 @@ def covered_context(account: str, family: str) -> dict:
     return out
 
 
-def open_puts(account: str = "") -> list[dict]:
+def open_option_positions(account: str = "") -> list[dict]:
     """OKX 当前期权净仓（只读）。无凭证/无仓位 → []；失败抛错由调用方处理。"""
     a = _entry_account(account)
     rows = okx_sdk.check(

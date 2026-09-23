@@ -343,7 +343,7 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             except (OkxSdkError, RuntimeError) as se:
                 settled = []
                 settled_error = str(se)
-            puts = await asyncio.to_thread(ot.open_puts, account)
+            puts = await asyncio.to_thread(ot.open_option_positions, account)
             bal = await asyncio.to_thread(ot.account_balance, account)
             cfg = await asyncio.to_thread(ot.account_config, account)
             open_rows = [e for e in ot.load_ledger()
