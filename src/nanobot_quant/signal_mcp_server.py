@@ -84,6 +84,7 @@ from nanobot_quant.tools.tools_f1 import (
     run_f1_analysis,
 )
 from nanobot_quant.tools.tools_iv import analyze_iv_leadlag
+from nanobot_quant.tools.tools_ashare import probe_ashare_sources
 
 # ``lumibot/__init__._log_startup_version()`` logs "LumiBot vX starting" at
 # import time through a stdout-bound StreamHandler, BEFORE any handler
@@ -282,6 +283,16 @@ _TOOL_DESCRIPTIONS = {
         "\n返回 dict 带 **markdown** 报告。首次运行要下载归档（约 30–60s，可能触及"
         "MCP 30s 超时），缓存落持久卷后每次约 6s。只读：不下单、不改配置。"
     ),
+    "probe_ashare_sources": (
+        "A股 研究线数据源可达性体检（只读）：逐个端点实测上交所云行情（期权链）、"
+        "新浪行情/K 线/股指期货连续、腾讯日线、华创 HCVIX，以及上交所官网披露接口"
+        "与深交所官网（我们网络环境的已知边界）。"
+        "\n**为什么必须实测**：「某源可用」是**环境相关结论**（同一端点在不同网络下"
+        "命运不同：上交所官网 403 vs 云行情 200；东财 reset vs 新浪 200）。换空间/"
+        "机房后重跑，勿沿用旧结论。"
+        "\n返回 dict：``ok/total/sources`` + **markdown**（可直接粘贴）；单源失败不阻断"
+        "其余源（fail-soft），但错误原文一律返回（fail-visible，不允许静默降级）。"
+    ),
 }
 
 _TOOL_DISPATCH = {
@@ -298,6 +309,7 @@ _TOOL_DISPATCH = {
     "analyze_f1_td": analyze_f1_td,
     "analyze_f1_drawdown": analyze_f1_drawdown,
     "analyze_iv_leadlag": analyze_iv_leadlag,
+    "probe_ashare_sources": probe_ashare_sources,
     "run_f1_analysis": run_f1_analysis,
     "get_f1_result": get_f1_result,
     "wallet_login_init": wallet_login_init,
