@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Optional
@@ -116,6 +117,10 @@ def _stats(vals: list) -> dict:
             "min": min(xs), "max": max(xs)}
 
 
+MAX_ROWS_DEFAULT = 40000          # 单次分析的报价行上限（防撞 MCP 60s）
+SAMPLE_SEED = 20260924            # 固定种子 → 抽样可复现
+
+
 def row_metrics(row: dict) -> tuple[Optional[dict], str]:
     """一条盘口报价 → 指标；不可用则返回 ``(None, 原因)``。
 
@@ -172,16 +177,26 @@ def row_metrics(row: dict) -> tuple[Optional[dict], str]:
 
 
 def collect(days: int = DEFAULT_DAYS, families: Optional[list] = None,
+            max_rows: int = MAX_ROWS_DEFAULT,
             progress: Callable[[str], None] = _log) -> tuple[list, dict]:
-    """读最近 ``days`` 天的 tape 采样并算出逐行指标（含覆盖率统计）。"""
+    """读最近 ``days`` 天的 tape 采样并算出逐行指标（含覆盖率统计）。
+
+    ``max_rows``：报价行上限（0/负数 = 不限）。tape 是「每分钟一行/合约」的快照，
+    天数一多就会到几十万行，而每行要做 5 次 BS 反解 —— 不设上限会撞 MCP 的
+    ``tool_timeout``（60s）。超出时**按天等额、固定种子随机抽样**（可复现，
+    中位数/分位数这类分布量对抽样的敏感度远低于样本量带来的耗时）。
+    """
     days = max(1, min(int(days), MAX_DAYS))
     fam_filter = {str(f).strip() for f in (families or []) if str(f).strip()}
     today = datetime.now(timezone.utc).date()
     day_list = [(today - timedelta(days=i)).strftime("%Y%m%d")
                 for i in range(days - 1, -1, -1)]
+    cap = int(max_rows or 0)
+    per_day = max(1, cap // len(day_list)) if cap > 0 else 0
     cov = {"days": day_list, "files": [], "missing_files": [], "rows": 0,
-           "used": 0, "skipped": {}, "families_seen": {},
-           "families_filter": sorted(fam_filter)}
+           "rows_raw": 0, "rows_sampled": 0, "used": 0, "skipped": {},
+           "families_seen": {}, "families_filter": sorted(fam_filter),
+           "max_rows": cap if cap > 0 else None}
     out: list = []
     for day in day_list:
         recs = tape.load_tape(day)
@@ -190,7 +205,11 @@ def collect(days: int = DEFAULT_DAYS, families: Optional[list] = None,
         else:
             cov["missing_files"].append(day)
         flat = tape.flatten(recs)
+        cov["rows_raw"] += len(flat)
+        if per_day and len(flat) > per_day:
+            flat = random.Random(SAMPLE_SEED).sample(flat, per_day)
         cov["rows"] += len(flat)
+        cov["rows_sampled"] += len(flat)
         for r in flat:
             fam = str(r.get("family") or "—")
             if fam_filter and fam not in fam_filter:
@@ -231,6 +250,7 @@ def _group_by(items: list, key_fn) -> list:
 
 def summarize(days: int = DEFAULT_DAYS, families: Optional[list] = None,
               min_samples: int = MIN_SAMPLES_DEFAULT,
+              max_rows: int = MAX_ROWS_DEFAULT,
               progress: Callable[[str], None] = _log) -> dict:
     """跑一次价差画像（只读）。
 
@@ -239,13 +259,16 @@ def summarize(days: int = DEFAULT_DAYS, families: Optional[list] = None,
         families: 家族白名单（空 = 全部）。
         min_samples: 覆盖率门；可用样本低于此值 → ``coverage_ok=False``
             （只摆分布、不下结论）。
+        max_rows: 报价行上限（默认 40000，0 = 不限）；超限按天等额抽样并在
+            覆盖率里如实标注（不做静默截断）。
 
     Returns:
         dict：``ok`` / ``coverage`` / ``coverage_ok`` / ``overall`` /
         ``by_family`` / ``by_delta`` / ``by_dte`` / ``by_family_delta`` /
         ``notes`` / ``markdown``。参数或读取异常 → ``ok=False`` + ``error``。
     """
-    rows, cov = collect(days=days, families=families, progress=progress)
+    rows, cov = collect(days=days, families=families, max_rows=max_rows,
+                        progress=progress)
     res = {
         "ok": True, "days": max(1, min(int(days), MAX_DAYS)),
         "families": sorted({m["family"] for m in rows}),
@@ -273,6 +296,10 @@ def summarize(days: int = DEFAULT_DAYS, families: Optional[list] = None,
         notes.append("**delta 来源**：OKX 的 bulk ticker 只有 bid/ask、不带 greeks，"
                      "故 |Δ| 用「中价 IV 经 BS 反算」（与回测选档同一路径）；"
                      "tape 行自带 delta 时优先用它。")
+    if cov.get("rows_sampled") and cov["rows_sampled"] < cov.get("rows_raw", 0):
+        notes.append(f"**行数上限**：{cov['rows_raw']} 行 → 抽样 {cov['rows_sampled']} 行"
+                     f"（上限 {cov['max_rows']}，按天等额、固定种子，可复现）——"
+                     "抽样只影响极端分位的抖动，不影响中位数量级。")
     notes.append("采集带宽/到期档决定覆盖面：某桶为空多半是采集范围没覆盖，"
                  "不是市场没有 —— 策略卖的是 3–7 天档，采集 `expiries` 需覆盖到"
                  "该档（现值见页面「📼 盘口采集」）。")
@@ -325,7 +352,10 @@ def markdown(res: dict) -> str:
     L.append(f"区间：最近 {res.get('days')} 天 tape 采样（一天一文件） ｜ "
              f"覆盖家族：{', '.join(res.get('families') or []) or '—'} ｜ "
              f"可用样本：**{cov.get('used', 0)}**"
-             f"（报价行 {cov.get('rows', 0)}）"
+             f"（报价行 {cov.get('rows', 0)}"
+             + (f" / 全部 {cov['rows_raw']}，已按行数上限抽样"
+                if cov.get("rows_sampled") and
+                cov["rows_sampled"] < cov.get("rows_raw", 0) else "") + "）"
              + (f" ｜ 筛选：{', '.join(flt)}" if flt else ""))
     if not res.get("coverage_ok"):
         L.append("")

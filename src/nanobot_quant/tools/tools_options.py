@@ -115,7 +115,8 @@ def options_broker_selftest(account: str = "", family: str = "SOL-USD_UM") -> di
 
 
 def analyze_option_spread(family: str = "", days: int = 3,
-                         min_samples: int = 200) -> dict:
+                         min_samples: int = 200,
+                         max_rows: int = 40000) -> dict:
     """期权盘口价差画像（只读）：实测 IV 价差（σ_ask − σ_bid）分布 vs 回测现模型。
 
     回答一个问题：期权回测的买卖价差该用一个常数（方案 A）还是按 delta/到期
@@ -131,6 +132,9 @@ def analyze_option_spread(family: str = "", days: int = 3,
         days: 回看天数（1–14），一天一文件；缺文件会在报告里列明。
         min_samples: 覆盖率门；可用样本低于此值 → 报告只摆分布、明确不给结论
             （覆盖率是第一门：「测不出来」≠「没有关系」）。
+        max_rows: 报价行上限（默认 40000，0 = 不限）。tape 是每分钟一行/合约的
+            快照、每行要做 5 次 BS 反解，不设上限会撞 MCP 的 tool_timeout(60s)；
+            超限按天等额 + 固定种子抽样（可复现），覆盖率里如实标注。
 
     Returns:
         dict: ok / coverage / coverage_ok / overall / by_family / by_delta /
@@ -141,6 +145,7 @@ def analyze_option_spread(family: str = "", days: int = 3,
         from nanobot_quant.analysis import option_spread as osp
 
         fams = [family] if family else []
-        return osp.summarize(days=days, families=fams, min_samples=min_samples)
+        return osp.summarize(days=days, families=fams,
+                             min_samples=min_samples, max_rows=max_rows)
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}

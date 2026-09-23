@@ -166,6 +166,30 @@ def test_summarize_end_to_end(_iso):
     assert "覆盖率" in md and "现模型" in md and "Δσ" in md
 
 
+def test_max_rows_samples_deterministically(_iso):
+    """行数上限：超限按固定种子抽样（同参数两次结果一致），覆盖率如实标注。"""
+    days = _days(2)
+    for d in days:
+        rows = []
+        for k in range(6):
+            ts = _exp_ms() - int(3 * 86_400_000) - k * 60_000
+            t = (_exp_ms() - ts) / 86_400_000 / 365
+            r = _iv_two_sided(f"{FAM}-260926-110-P", "P", t, 0.575, 0.725)
+            rows.append(_row(f"{FAM}-260926-110-P", r["b"], r["a"]))
+            # 不同 instId（用不同 strike）以便区分行
+        _write_day(_iso, d, [_rec(_exp_ms() - int(3 * 86_400_000), rows)])
+    a = os_.summarize(days=2, min_samples=1, max_rows=6, progress=lambda *_: None)
+    b = os_.summarize(days=2, min_samples=1, max_rows=6, progress=lambda *_: None)
+    assert a["coverage"]["rows_raw"] == 12
+    assert a["coverage"]["rows_sampled"] == 6
+    assert a["coverage"]["rows"] == 6
+    assert a["by_delta"] == b["by_delta"]              # 固定种子 → 可复现
+    assert "行数上限" in a["markdown"]
+    assert "全部 12" in a["markdown"]
+    full = os_.summarize(days=2, min_samples=1, max_rows=0, progress=lambda *_: None)
+    assert full["coverage"]["rows_sampled"] == 12       # 0 = 不限
+
+
 def test_coverage_reports_delta_source(_iso):
     days = _days(1)
     ts = _exp_ms() - int(3 * 86_400_000)
