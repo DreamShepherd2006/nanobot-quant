@@ -91,6 +91,12 @@ register(DataSourceSpec(
     bars=("1m", "5m", "15m", "1H", "1D", "1W"),
 ))
 
+# 注意：``sse_options``（上交所云行情 ETF 期权链）**有意不注册** ——
+# registry 的契约是「K 线 / 取价 / 盘口」，期权链是另一种数据类型，强行
+# 注册会让它以「K 线源」身份出现在各类源下拉里、选中必然失败（同 OKX
+# 期权线在 ``okx_options_data.py`` 的先例）。消费方直接 import：
+# ``tools/tools_ashare.py``（可达性体检）与后续 A 股研究线工具。
+
 __all__ = [
     "DataSourceSpec",
     "REGISTRY",
