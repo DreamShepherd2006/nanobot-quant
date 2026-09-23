@@ -175,7 +175,7 @@ class OkxOptionsBroker(Broker):
 
     def _pull_positions(self, strategy):
         """OKX 当前期权净仓 → lumibot Position（含每张面值 multiplier）。"""
-        rows = oot.open_puts(self.account)
+        rows = oot.open_option_positions(self.account)
         out = []
         for r in rows:
             asset = inst_to_asset(r.get("inst_id", ""))

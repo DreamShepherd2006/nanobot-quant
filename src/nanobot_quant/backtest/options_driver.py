@@ -40,7 +40,7 @@ DEFAULT_INITIAL_CASH = 10000.0
 class SimPosition:
     """模拟空头 put 持仓。
 
-    字段刻意与 ``okx_options_trade.open_puts()`` 同形状，使
+    字段刻意与 ``okx_options_trade.open_option_positions()`` 同形状，使
     ``evaluate_exits()`` 能原样复用 —— 回测不另写一套出场判定。
     """
 

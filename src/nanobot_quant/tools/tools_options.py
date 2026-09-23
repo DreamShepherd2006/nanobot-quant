@@ -99,7 +99,7 @@ def options_broker_selftest(account: str = "", family: str = "SOL-USD_UM") -> di
 
     # ④ 当前期权持仓（只读）
     try:
-        positions = oot.open_puts(account)
+        positions = oot.open_option_positions(account)
         checks["positions"] = {"status": "ok", "count": len(positions),
                                "rows": positions}
     except Exception as e:

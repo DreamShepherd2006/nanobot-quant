@@ -258,7 +258,7 @@
 <div class="card" id="posCard" style="display:none">
   <h3>📦 OKX 期权持仓（只读）+ 本地台账 open</h3>
   <div id="posBody"><div class="empty">加载中…</div></div>
-  <div class="note">持仓来自 OKX 实时仓位；本地台账 open 行跨重启保留。到期 ITM 现金结算自动入账（结算参考 = 到期前最后 1 小时指数价 TWAP），官方自动行权、不需本地巡检在线；账面确认后按方向闭回：put 被行权用「<b>补买</b>」持有现货、call 被行权用「<b>出货</b>」市价卖出（≈ 等效按 K 出货），均两步确认。</div>
+  <div class="note">持仓来自 OKX 实时仓位；本地台账 open 行跨重启保留。到期 ITM 现金结算自动入账（结算参考 = 到期前 30 分钟标的指数算术平均价），官方自动行权、不需本地巡检在线；账面确认后按方向闭回：put 被行权用「<b>补买</b>」持有现货、call 被行权用「<b>出货</b>」市价卖出（≈ 等效按 K 出货），均两步确认。</div>
 </div>
 
 <div class="card" id="ledCard" style="display:none">
