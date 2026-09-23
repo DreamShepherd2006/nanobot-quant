@@ -276,7 +276,7 @@ class OptionsBacktestDriver:
                 continue
             alive.append(p)
             rows.append(p.as_position_row(mark))
-        exits = evaluate_exits(rows, tp_pct=self.tp_pct)
+        exits = evaluate_exits(rows, tp_pct=self.tp_pct, opt_type="P")
         if not exits:
             return cash
         by_inst = {p.inst_id: p for p in positions}

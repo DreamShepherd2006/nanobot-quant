@@ -243,11 +243,14 @@ def test_check_exits_skips_when_no_mark():
 def test_check_exits_takes_profit_reuses_live_decision():
     """止盈走实盘 evaluate_exits —— 回落够就买回，记账价含滑点与手续费。"""
     d = _driver(tp_pct=50.0)
+    d.data.seek(_IDX[40])
+    # 合约池筛 -P：驱动只卖 put，且方向隔离后 put 止盈线不管 call（§24 C42）；
+    # 同时要求「开仓价 999 回落过半」成立——否则本用例前提不成立，与用例意图无关
     inst = next(k for k in d.data._contracts
-                if _exp_ms(k) > _to_ms(_IDX[40]))
+                if k.endswith("-P") and _exp_ms(k) > _to_ms(_IDX[40])
+                and (d.data.premium_of(k, _IDX[40]) or 1e9) < 999.0 * 0.5)
     pos = [SimPosition(inst, "SOL-USD_UM", float(inst.split("-")[3]),
                        _exp_ms(inst), 1, 999.0, _IDX[0], "buy9", 0.1)]
-    d.data.seek(_IDX[40])
     mark = d.data.premium_of(inst, _IDX[40])
     assert mark is not None and mark < 999.0 * 0.5   # 回落过半，必触发止盈
     fills: list[dict] = []

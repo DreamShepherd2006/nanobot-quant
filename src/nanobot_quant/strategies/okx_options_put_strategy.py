@@ -95,7 +95,7 @@ class OkxOptionsPutStrategy(Strategy):
             self._finish(settled, None, "持仓查询失败")
             return
 
-        counts = st.contracts_by_family(positions)
+        counts = st.contracts_by_family(positions, opt_type="P")
         total = sum(counts.values())
         self._log(f"当前持仓 | 在仓合约数={total} 分家族={counts or '{}'} "
                   f"明细={[(x.get('inst_id'), x.get('pos')) for x in positions]}")
@@ -230,7 +230,7 @@ class OkxOptionsPutStrategy(Strategy):
         except (TypeError, ValueError):
             tp = 0.0
         try:
-            rows = st.evaluate_exits(positions, tp_pct=tp)
+            rows = st.evaluate_exits(positions, tp_pct=tp, opt_type="P")
         except Exception as e:  # noqa: BLE001
             self._log(f"⚠️ 止盈评估异常：{type(e).__name__}: {e}")
             return []
