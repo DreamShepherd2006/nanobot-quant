@@ -1,6 +1,7 @@
-"""options_broker_selftest: 期权执行层只读自检（E 期 Step 2a 验证入口）。
+"""期权线只读工具（两者都**不下单、不改台账、不动配置**）。
 
-一次调用确认四件事，**全部只读**（不下单、不改台账、不动保证金）：
+``options_broker_selftest`` —— 期权执行层只读自检（E 期 Step 2a 验证入口）。
+一次调用确认四件事，**全部只读**：
 
 1. 期权链（okx_options_data）——家族/现货参考/到期档/可卖合约数
 2. Asset ↔ instId 映射 + 每张面值 multiplier
@@ -11,6 +12,9 @@
 为什么需要它：Broker/DataSource 是薄适配层，单元测试只能证「转发逻辑」；
 「lumibot 期权标的 × OKX 账户」两侧真的接上、multiplier 真的非 100，
 只能在容器里实拉一次才算验证（用户原则：功能生效必须有运行时可见证据）。
+
+``analyze_option_spread`` —— 盘口价差画像（C43① 测量前置）：用 tape 采样量出
+真实 IV 价差（σ_ask − σ_bid）分布，决定回测的买卖价差该用常数还是分层。
 """
 
 from __future__ import annotations
@@ -108,3 +112,35 @@ def options_broker_selftest(account: str = "", family: str = "SOL-USD_UM") -> di
     failed = [k for k, v in checks.items() if v.get("status") != "ok"]
     return {"status": "ok" if not failed else "partial",
             "failed": failed, "checks": checks}
+
+
+def analyze_option_spread(family: str = "", days: int = 3,
+                         min_samples: int = 200) -> dict:
+    """期权盘口价差画像（只读）：实测 IV 价差（σ_ask − σ_bid）分布 vs 回测现模型。
+
+    回答一个问题：期权回测的买卖价差该用一个常数（方案 A）还是按 delta/到期
+    分层（方案 B）—— 先把真实分布量出来再决定。回测现模型是
+    ``bid = mark×(1−0.5%)``、``ask = mark×(1+0.5%)``，它其实只等价于 0.1–0.7 个
+    IV 点；真实市场报的是 IV 双边（本工具就是去量它）。
+
+    数据来源：本空间 📼 盘口采集落的 ``option_tape/tape_YYYYMMDD.jsonl``
+    （一天一文件，需先在期权页开启采集）。只读文件 + 纯计算：不拉网络、不下单。
+
+    Args:
+        family: 家族白名单（如 "SOL-USD_UM"），空 = tape 覆盖的全部家族。
+        days: 回看天数（1–14），一天一文件；缺文件会在报告里列明。
+        min_samples: 覆盖率门；可用样本低于此值 → 报告只摆分布、明确不给结论
+            （覆盖率是第一门：「测不出来」≠「没有关系」）。
+
+    Returns:
+        dict: ok / coverage / coverage_ok / overall / by_family / by_delta /
+              by_dte / by_family_delta / notes / markdown（可直接粘贴的报告）。
+              异常 → status=error + error（不静默失败）。
+    """
+    try:
+        from nanobot_quant.analysis import option_spread as osp
+
+        fams = [family] if family else []
+        return osp.summarize(days=days, families=fams, min_samples=min_samples)
+    except Exception as e:
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
