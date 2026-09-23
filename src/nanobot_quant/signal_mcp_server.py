@@ -9,6 +9,7 @@ Tool implementations live in tools/:
   tools_backtest.py    run_backtest
   tools_f1.py          analyze_f1_td, analyze_f1_drawdown
   tools_iv.py          analyze_iv_leadlag
+  tools_options.py     options_broker_selftest, analyze_option_spread
   tools_structurize.py structurize_signal
   tools_execute.py     execute_signal
 """
@@ -69,7 +70,10 @@ from nanobot_quant.tools.tools_wallet import (
 from nanobot_quant.tools.tools_analysis import run_td_sequential
 from nanobot_quant.tools.tools_backtest import get_backtest_result, run_backtest
 from nanobot_quant.tools.tools_cex import cex_sub_order
-from nanobot_quant.tools.tools_options import options_broker_selftest
+from nanobot_quant.tools.tools_options import (
+    analyze_option_spread,
+    options_broker_selftest,
+)
 from nanobot_quant.tools.tools_structurize import structurize_signal
 from nanobot_quant.tools.tools_execute import (
     _redirect_lumibot_console_to_stderr,
@@ -283,6 +287,21 @@ _TOOL_DESCRIPTIONS = {
         "\n返回 dict 带 **markdown** 报告。首次运行要下载归档（约 30–60s，可能触及"
         "MCP 30s 超时），缓存落持久卷后每次约 6s。只读：不下单、不改配置。"
     ),
+    "analyze_option_spread": (
+        "期权盘口价差画像（只读）：用 📼 盘口采集的 tape 样本量出**真实 IV 价差**"
+        "（σ_ask − σ_bid）分布——按家族 / |delta| 桶 / 剩余期限桶统计中位与分位，"
+        "并与回测现模型（``bid = mark×(1−0.5%)``、``ask = mark×(1+0.5%)``）对照。"
+        "\n**为什么需要它**：回测没有真实 bid/ask（已到期合约的 mark 历史取不到，"
+        "价一律由归档成交反解 IV → 微笑插值 → BS 重定价得出），现模型用「价格 ×±0.5%」"
+        "补两条边——按 SOL 3 天 65% IV 实算，它只等价 **0.1–0.7 个 IV 点**，而真实市场"
+        "是 IV 双边、10–17 点量级；偏差随虚值程度放大（价差/权利金：ATM ≈23%、"
+        "−5.7% OTM ≈67%），而我们卖的正是 5–7% 虚值 put。"
+        "\n**读法**：先看覆盖率（``coverage_ok``）——样本不足时报告只摆分布、"
+        "**不给结论**（覆盖率是第一门：「测不出来」≠「没有关系」）；再看 Δσ 是否随"
+        "|delta|/到期变化，决定回测侧用一个常数（方案 A）还是分层（方案 B）。"
+        "\n返回 dict 带 **markdown**。只读：只读 tape 文件 + 纯计算，不拉网络、不下单、"
+        "不改配置、不碰回测数字。"
+    ),
     "probe_ashare_sources": (
         "A股 研究线数据源可达性体检（只读）：逐个端点实测上交所云行情（期权链）、"
         "新浪行情/K 线/股指期货连续、腾讯日线、华创 HCVIX，以及上交所官网披露接口"
@@ -310,6 +329,7 @@ _TOOL_DISPATCH = {
     "analyze_f1_td": analyze_f1_td,
     "analyze_f1_drawdown": analyze_f1_drawdown,
     "analyze_iv_leadlag": analyze_iv_leadlag,
+    "analyze_option_spread": analyze_option_spread,
     "probe_ashare_sources": probe_ashare_sources,
     "run_f1_analysis": run_f1_analysis,
     "get_f1_result": get_f1_result,

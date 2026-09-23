@@ -50,6 +50,7 @@ EXPECTED_TOOLS = {
     "run_f1_analysis",
     "get_f1_result",
     "analyze_iv_leadlag",
+    "analyze_option_spread",
     "probe_ashare_sources",
 }
 
