@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Optional
 
 from nanobot_quant import option_tape as tape
-from nanobot_quant.bs_pricing import implied_vol
+from nanobot_quant.bs_pricing import bs_delta, implied_vol
 
 DEFAULT_DAYS = 3
 MAX_DAYS = 14
@@ -147,6 +147,12 @@ def row_metrics(row: dict) -> tuple[Optional[dict], str]:
     s_hi = implied_vol(mid * (1 + MODEL_SLIP), spot, strike, t, right=right)
     if s_bid is None or s_ask is None:
         return None, "no_iv"
+    delta, delta_src = _f(row.get("delta")), "tape"
+    if delta is None and s_mid is not None:
+        # OKX 的 bulk ticker（/market/tickers?instType=OPTION）只给 bid/ask、
+        # 不带 greeks —— 缺失时用**中价 IV 经 BS 反算**（与回测选档同一路径）。
+        delta = bs_delta(spot, strike, t, s_mid, right=right)
+        delta_src = "bs"
     return {
         "family": str(row.get("family") or "—"),
         "inst": str(row.get("inst") or ""),
@@ -158,7 +164,8 @@ def row_metrics(row: dict) -> tuple[Optional[dict], str]:
                                 if s_lo is not None and s_hi is not None else None),
         "mid": mid,
         "mid_iv_pts": s_mid * 100.0 if s_mid is not None else None,
-        "delta": _f(row.get("delta")),
+        "delta": delta,
+        "delta_src": delta_src,
         "mark_vol_pts": (_f(row.get("mark_vol")) or 0) * 100.0 or None,
         "dte_days": (exp_ms - ts_ms) / MS_PER_DAY,
     }, ""
@@ -193,6 +200,8 @@ def collect(days: int = DEFAULT_DAYS, families: Optional[list] = None,
             if m is None:
                 cov["skipped"][reason] = cov["skipped"].get(reason, 0) + 1
                 continue
+            cov["delta_src"] = cov.get("delta_src") or {}
+            cov["delta_src"][m["delta_src"]] = cov["delta_src"].get(m["delta_src"], 0) + 1
             out.append(m)
         progress(f"{day}: 采样 {len(recs)} 条 / 报价 {len(flat)} 行")
     cov["used"] = len(out)
@@ -260,8 +269,13 @@ def summarize(days: int = DEFAULT_DAYS, families: Optional[list] = None,
     if not res["coverage_ok"]:
         notes.append(f"样本 {len(rows)} < 门槛 {int(min_samples)}：**只摆分布、不下结论**"
                      "（覆盖率是第一门；「测不出来」≠「没有关系」）。")
+    if (cov.get("delta_src") or {}).get("bs"):
+        notes.append("**delta 来源**：OKX 的 bulk ticker 只有 bid/ask、不带 greeks，"
+                     "故 |Δ| 用「中价 IV 经 BS 反算」（与回测选档同一路径）；"
+                     "tape 行自带 delta 时优先用它。")
     notes.append("采集带宽/到期档决定覆盖面：某桶为空多半是采集范围没覆盖，"
-                 "不是市场没有。")
+                 "不是市场没有 —— 策略卖的是 3–7 天档，采集 `expiries` 需覆盖到"
+                 "该档（现值见页面「📼 盘口采集」）。")
     notes.append("Δσ 单位 = 波动率点（百分点）；现模型等价 Δσ 是把 mid 上下 0.5% "
                  "反解回 IV 的差，仅作对照、不是实测。")
     res["notes"] = notes
@@ -338,6 +352,11 @@ def markdown(res: dict) -> str:
     sk = cov.get("skipped") or {}
     L.append("- 跳过原因：" + (", ".join(f"{k}={v}" for k, v in sorted(sk.items()))
                               if sk else "无"))
+    dsrc = cov.get("delta_src") or {}
+    if dsrc:
+        names = {"tape": "tape 自带", "bs": "中价 IV 经 BS 反算"}
+        L.append("- delta 来源：" + ", ".join(
+            f"{names.get(k, k)}={v}" for k, v in sorted(dsrc.items())))
     seen = cov.get("families_seen") or {}
     if seen:
         L.append("- 家族报价行：" + ", ".join(f"{k} {v}" for k, v in sorted(seen.items())))

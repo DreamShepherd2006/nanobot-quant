@@ -118,6 +118,21 @@ def test_row_metrics_skip_reasons():
     assert os_.row_metrics(dict(base, bid=200.0, ask=210.0))[1] == "no_iv"
 
 
+def test_delta_fallback_uses_bs_when_tape_lacks_greeks():
+    """OKX bulk ticker 不带 greeks → |Δ| 由中价 IV 经 BS 反算（与回测同一路径）。"""
+    m, reason = _flat_metrics()
+    assert reason == "" and m["delta_src"] == "tape"
+    ts = _exp_ms() - int(3 * 86_400_000)
+    t = (_exp_ms() - ts) / 86_400_000 / 365
+    r = _iv_two_sided("SOL-USD_UM-260926-110-P", "P", t, 0.575, 0.725)
+    m2, reason2 = os_.row_metrics(dict(
+        family=FAM, inst="SOL-USD_UM-260926-110-P", right="P", ts_ms=ts,
+        expiry_ms=_exp_ms(), strike=110.0, spot=SPOT, bid=r["b"], ask=r["a"]))
+    assert reason2 == "" and m2["delta_src"] == "bs"
+    assert -0.6 < m2["delta"] < 0.0                  # put delta 恒为负
+    assert os_.delta_bucket(m2["delta"]) != "—"      # 能进桶（此前恒为 —）
+
+
 # ── 汇总 ─────────────────────────────────────────────────
 
 def _synth_days(tmp_path, n_days=2, per_day=3, sig_spread=0.15):
@@ -149,6 +164,22 @@ def test_summarize_end_to_end(_iso):
     assert any("×" in g["label"] for g in res["by_family_delta"])
     md = res["markdown"]
     assert "覆盖率" in md and "现模型" in md and "Δσ" in md
+
+
+def test_coverage_reports_delta_source(_iso):
+    days = _days(1)
+    ts = _exp_ms() - int(3 * 86_400_000)
+    t = (_exp_ms() - ts) / 86_400_000 / 365
+    row = _row(f"{FAM}-260926-110-P", *[ _r for _r in
+               (round(bs_price(SPOT, 110.0, t, 0.65 - 0.075, right="P"), 6),
+                round(bs_price(SPOT, 110.0, t, 0.65 + 0.075, right="P"), 6))],
+               dv=None)
+    _write_day(_iso, days[0], [_rec(ts, [row])])
+    res = os_.summarize(days=1, min_samples=1, progress=lambda *_: None)
+    assert res["coverage"]["delta_src"] == {"bs": 1}
+    assert res["coverage_ok"] is True
+    assert "delta 来源" in res["markdown"]
+    assert "BS 反算" in res["markdown"]
 
 
 def test_summarize_filters_family(_iso):
