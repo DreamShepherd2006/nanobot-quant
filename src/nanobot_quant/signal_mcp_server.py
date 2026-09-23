@@ -290,7 +290,8 @@ _TOOL_DESCRIPTIONS = {
         "\n**为什么必须实测**：「某源可用」是**环境相关结论**（同一端点在不同网络下"
         "命运不同：上交所官网 403 vs 云行情 200；东财 reset vs 新浪 200）。换空间/"
         "机房后重跑，勿沿用旧结论。"
-        "\n返回 dict：``ok/total/sources`` + **markdown**（可直接粘贴）；单源失败不阻断"
+        "\n返回 dict：``ok/total/sources`` + **markdown**（可直接粘贴）；各源**并行**实测，"
+        "整轮 ≈ 最慢源（~20s，适配 nanobot MCP 30s 硬超时）；单源失败不阻断"
         "其余源（fail-soft），但错误原文一律返回（fail-visible，不允许静默降级）。"
     ),
 }

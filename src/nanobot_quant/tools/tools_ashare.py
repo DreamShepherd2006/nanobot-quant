@@ -28,6 +28,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from nanobot_quant.data_sources import sse_options
 
@@ -192,8 +193,10 @@ def _check_tencent_quote(timeout: int, echo_samples: bool) -> dict:
 
 def _check_hcvix(timeout: int, echo_samples: bool) -> dict:
     """华创 HCVIX —— 长历史 IV 参照（iVIX 2018-02 已停发）。"""
-    # 单页 708KB、线路较慢（实测 ~19s），给足超时以免误报不可用。
-    res = _http(_HCVIX, timeout=max(timeout, 30))
+    # 单页 708KB、线路较慢（实测 ~19s）：给足超时，但单源上限取 25s ——
+    # nanobot MCP 工具调用有 **30s 硬超时**（2026-09-23 实测），并行后整轮
+    # ≈ 最慢源，故任何单源都不能帖到 30s。
+    res = _http(_HCVIX, timeout=max(timeout, 25))
     hit = "HCVIX" in res["text"]
     if not hit:
         raise RuntimeError(f"页面未含 HCVIX 字样（{res['bytes']}B）")
@@ -229,24 +232,33 @@ def probe_ashare_sources(echo_samples: bool = True, timeout: int = 15) -> dict:
 
     Args:
         echo_samples: 是否附带样例数据（首行/数值），False 时只报通道状态。
-        timeout: 单个端点的超时秒数（默认 15）。
+        timeout: 单个端点的超时秒数（默认 15；华创 HCVIX 单源例外，最小 25）。
 
     Returns:
-        ``{ok, total, failed, environment, sources: [...], markdown}``；
+        ``{ok, total, failed, unexpected_failures, environment, sources, markdown}``；
         ``sources`` 每项含 source/display/status/ms/detail/sample。
+        各源**并行**实测（整轮 ≈ 最慢源，适配 nanobot MCP 30s 硬超时）；
         单个源异常不影响其余源（fail-soft），但错误信息原样返回（fail-visible）。
     """
     t0 = time.time()
-    rows: list[dict] = []
-    for source, display, fn in _CHECKS:
-        try:
-            row = fn(timeout, echo_samples)
-        except Exception as exc:  # noqa: BLE001 — 单源失败不得阻断体检
-            # 失败行用注册表里的 source/display（而非函数名），报告可读且可定位
-            row = _row(source, display, "fail", 0,
-                       f"{type(exc).__name__}: {str(exc)[:160]}")
-            _log(f"{source} 体检异常：{type(exc).__name__}: {exc}")
-        rows.append(row)
+    results: dict[int, dict] = {}
+    # **并行**跑 8 个源：全是 I/O 等待，串行实测 ~30s → 刚好撞上 nanobot MCP
+    # 工具调用的 30s 硬超时（2026-09-23 quant 实测「MCP tool call timed out
+    # after 30s」；CLI 路径无此限制，所以本地自测时没暴露）；并行后整轮
+    # ≈ 最慢源（~20s）。结果按注册表下标回填，报告顺序稳定。
+    with ThreadPoolExecutor(max_workers=len(_CHECKS)) as pool:
+        futures = [(i, pool.submit(fn, timeout, echo_samples))
+                   for i, (_s, _d, fn) in enumerate(_CHECKS)]
+        for idx, fut in futures:
+            source, display, _fn = _CHECKS[idx]
+            try:
+                results[idx] = fut.result()
+            except Exception as exc:  # noqa: BLE001 — 单源失败不得阻断体检
+                # 失败行用注册表里的 source/display（而非函数名），报告可读且可定位
+                results[idx] = _row(source, display, "fail", 0,
+                                    f"{type(exc).__name__}: {str(exc)[:160]}")
+                _log(f"{source} 体检异常：{type(exc).__name__}: {exc}")
+    rows = [results[i] for i in sorted(results)]
 
     ok = sum(1 for r in rows if r["status"] == "ok")
     unusable = [r["source"] for r in rows if r["status"] == "fail"]

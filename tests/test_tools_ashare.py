@@ -7,6 +7,8 @@ markdown 结构、以及「只读」的结构性约束。
 from __future__ import annotations
 
 import pathlib
+import time
+import time
 
 import pytest
 
@@ -76,6 +78,7 @@ def test_markdown_without_unexpected_failure(monkeypatch):
 
 
 def test_checks_registry_covers_key_sources():
+    """（下接并行性用例，见 test_probe_runs_sources_in_parallel）"""
     names = [c[0] for c in ta._CHECKS]
     assert names[0] == "sse_yunhq"      # 主力源排第一
     for required in ("sina_quote", "sina_kline", "sina_futures",
@@ -105,3 +108,42 @@ def test_source_is_read_only(rel):
     src = pathlib.Path(rel).read_text(encoding="utf-8")
     hits = [s for s in _TRADING_SYMBOLS if s in src]
     assert not hits, f"{rel} 命中交易路径符号：{hits}（本模块必须只读）"
+
+
+# ── 并行性（撑住 MCP 30s 硬超时的根据）──────────────────────────
+
+def test_probe_runs_sources_in_parallel(monkeypatch):
+    """各源并行实测：整轮 ≈ 最慢源，而不是各源相加。
+
+    背景：串行实测 ~30s，刚好撞上 nanobot MCP 工具调用的 30s 硬超时
+    （2026-09-23 quant Space 实测 `MCP tool call timed out after 30s`；
+    CLI 路径无此限制，所以本地自测时没暴露）。
+    """
+    def _make(i):
+        def _slow(timeout, echo_samples):
+            time.sleep(0.3)
+            return ta._row(f"slow{i}", f"慢源{i}", "ok", 300, "sleep 0.3s")
+        return _slow
+
+    monkeypatch.setattr(ta, "_CHECKS",
+                        tuple((f"slow{i}", f"慢源{i}", _make(i)) for i in range(4)))
+    t0 = time.time()
+    res = ta.probe_ashare_sources(echo_samples=False)
+    elapsed = time.time() - t0
+    assert res["ok"] == 4
+    # 报告顺序仍按注册表（并行不扰乱可读性）
+    assert [r["source"] for r in res["sources"]] == ["slow0", "slow1", "slow2", "slow3"]
+    assert elapsed < 0.9, f"4 个 0.3s 源共 {elapsed:.2f}s —— 看起来是串行（应为并行）"
+
+
+def test_single_source_timeout_stays_under_mcp_limit(monkeypatch):
+    """单源超时上限必须 < 30s（MCP 硬超时）：否则整轮被框架掐断、拿不到结果。"""
+    seen = []
+
+    def _spy(url, referer="", timeout=15, encoding="utf-8"):
+        seen.append(timeout)
+        return {"status": 200, "bytes": 1, "ms": 0, "text": "HCVIX"}
+
+    monkeypatch.setattr(ta, "_http", _spy)
+    ta._check_hcvix(15, False)
+    assert seen and max(seen) < 30, f"HCVIX 单源超时 {seen} 不满足 <30s"
