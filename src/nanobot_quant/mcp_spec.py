@@ -28,6 +28,11 @@ class MCPSpec:
     env_from_credential points to a credential name registered via
     credential_registry; launch.sh reads that credential and exports
     the necessary environment variables before starting agents.
+
+    tool_timeout: 单个 MCP 工具调用的超时秒数（nanobot 侧
+    ``MCPServerConfig.tool_timeout``，上游默认 30）。None = 不写该
+    字段、吃上游默认；长任务工具（数据体检/分析/委派等）应显式调高，
+    否则会被 MCP client 在 30s 处直接掐断（工具侧收不到任何通知）。
     """
 
     name: str
@@ -39,6 +44,7 @@ class MCPSpec:
     env: dict[str, str] | None = None
     env_provider_keys: dict[str, str] | None = None
     env_provider_model_keys: dict[str, str] | None = None
+    tool_timeout: int | None = None
 
 
 def register(spec: MCPSpec) -> None:
@@ -47,6 +53,14 @@ def register(spec: MCPSpec) -> None:
 
 def discover() -> dict[str, MCPSpec]:
     return dict(_registry)
+
+
+# ── MCP 工具调用超时（nanobot client 侧 MCPServerConfig.tool_timeout）──
+# 上游默认 30s（nanobot/config/schema.py），官方自己的 MCP preset 也普遍调高到
+# 45/60。我们的 server 全是研究/量化类长任务，30s 太紧：2026-09-23 实测
+# probe_ashare_sources（串行版 ~30s）被掐断、工具侧收不到任何通知。
+# 该值只抬 client 等待上限：不限制工具自身耗时，最坏只是多等 30s。
+MCP_TOOL_TIMEOUT_S = 60
 
 
 # ── Vibe-Trading MCP server ────────────────────────────────────
@@ -67,6 +81,7 @@ vt_mcp = MCPSpec(
     env_provider_model_keys={
         "LANGCHAIN_MODEL_NAME": "deepseek",
     },
+    tool_timeout=MCP_TOOL_TIMEOUT_S,
 )
 register(vt_mcp)
 
@@ -79,6 +94,8 @@ squad_del_mcp = MCPSpec(
     command="python3",
     args=["-m", "nanobot_legion.tools.squad_delegate"],
     target_agents=["neo"],
+    # delegate_to_agent 同步等目标 agent 回复（relay 实测可 30–90s）
+    tool_timeout=MCP_TOOL_TIMEOUT_S,
 )
 register(squad_del_mcp)
 
@@ -103,5 +120,7 @@ signal_mcp = MCPSpec(
     env_provider_model_keys={
         "LANGCHAIN_MODEL_NAME": "deepseek",
     },
+    # 本 server 汇集长任务工具（数据体检、F1/IV 分析、回测等）
+    tool_timeout=MCP_TOOL_TIMEOUT_S,
 )
 register(signal_mcp)
