@@ -8,6 +8,7 @@ mock ot.settle_expired_puts / 凭证存储路径，验证：
 关掉 dry_run 才真下单/买回、持仓查询失败不抛异常。
 """
 
+import threading
 import time
 
 import pytest
@@ -31,8 +32,9 @@ def _iso(tmp_path, monkeypatch):
     _r._stop_event.clear()
     _r._state["totals"] = {}
     # 方案 B：策略/executor 是 runner 实例状态 —— 不复位会把上一个测试的
-    # stop_requested 等标志带过来（表现为下一测试首轮就 SystemExit）。
+    # stop_requested / _stopping 等标志带过来（表现为下一测试首轮就不执行）。
     _r._executor = None
+    _r._stopping = False
     from nanobot_quant import okx_options_live_state as _lst
     _lst.reset()
     # 注入轻量策略：do_round() 走「真实策略逻辑」，但不构造 broker / 不碰网络。
@@ -95,12 +97,27 @@ def _settled_one(**kw):
     return d
 
 
+class _FakeScheduler:
+    """假 scheduler（镜像 lumibot ``executor.scheduler`` 的两个用法）。"""
+
+    def __init__(self):
+        self.removed = 0
+        self.shutdown_calls: list = []
+
+    def remove_all_jobs(self):
+        self.removed += 1
+
+    def shutdown(self, wait=True):
+        self.shutdown_calls.append(wait)
+
+
 class _FakeExecutor:
     """测试用 executor 替身（方案 B 后 runner 把节拍交给 lumibot）。
 
-    ``run()`` 轮询到 ``strategy.parameters["stop_requested"]`` 或自身
-    ``stop()`` 就返回；``rounds>0`` 时先跑 N 轮真实策略逻辑（测周期场景）。
-    不依赖 threading —— 只需 time（本文件已 import）。
+    镜像真实 lumibot 的两条停止语义：``executor.stop_event``（主循环据此 break
+    —— 2026-09-25 修正后 runner 走这条）+ ``strategy.parameters["stop_requested"]``
+    （策略侧本轮不再执行）；``scheduler`` 用于验证停止时的清理调用。
+    不依赖 threading 以外的依赖 —— 只需 time（本文件已 import）。
     """
 
     def __init__(self, strategy=None, rounds: int = 0):
@@ -109,9 +126,11 @@ class _FakeExecutor:
         self.rounds = rounds
         self._count = 0
         self._stopped = False
+        self.stop_event = threading.Event()
+        self.scheduler = _FakeScheduler()
 
     def run(self):
-        while not self._stopped:
+        while not self._stopped and not self.stop_event.is_set():
             if self.strategy is not None and \
                     self.strategy.parameters.get("stop_requested"):
                 return
@@ -255,18 +274,47 @@ def test_load_events_otm_untouched(_iso, monkeypatch):
 
 # ── 线程生命周期 sync ────────────────────────────────────
 
+def _wait_stopped(timeout: float = 5.0) -> bool:
+    """等优雅停止收尾。
+
+    ``stop()`` 立即返回（不阻塞页面），线程在数百毫秒内退出 —— 旧版测试直接
+    断言 ``running is False``，在异步停语义下必然失败（2026-09-25 改异步后修正）。
+    """
+    deadline = time.time() + timeout
+    r = ol._runner()
+    while time.time() < deadline:
+        if ol.live_state()["running"] is False and r._thread is None:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _wait(pred, timeout: float = 5.0) -> bool:
+    """轮询等条件成立（线程刚起/刚退都可能需一拍才可见）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return bool(pred())
+
+
 def test_sync_start_stop(_iso, monkeypatch):
     # 缩短心跳避免测试挂起——直接 patch interval 后启动
+    # 用长驻假 executor：本用例只验启停语义，不碰网络（真 executor 会查 OKX 账户，
+    # 整套跑受负载影响时会因异常而线程早退 —— 也是这个用例历史上 flaky 的根因）
+    _patch_executor(monkeypatch)
     monkeypatch.setattr(ol, "MIN_INTERVAL_S", 1)
     ol.save_live_config(enabled=True, interval_s=1)
-    st = ol.sync()
-    assert st["running"] is True
+    ol.sync()
+    # 线程刚起来可能需一拍（整套跑时负载高）——失败时把 last_error 打出来
+    assert _wait(lambda: ol.live_state()["running"]), \
+        f"循环未起来：last_error={ol.live_state().get('last_error')!r}"
     # 同一配置再 sync = 幂等不重启
     assert ol.sync()["running"] is True
     ol.save_live_config(enabled=False)
-    st = ol.sync()
-    assert st["running"] is False
-    assert ol.live_state()["running"] is False
+    assert ol.sync()["running"] is False
+    assert _wait_stopped()
 
 
 def test_sync_interval_change_restarts(_iso, monkeypatch):
@@ -280,7 +328,7 @@ def test_sync_interval_change_restarts(_iso, monkeypatch):
     assert st["config"]["interval_s"] == 15
     ol.save_live_config(enabled=False)
     ol.sync()
-    assert ol.live_state()["running"] is False
+    assert _wait_stopped()
 
 
 def test_daemon_runs_periodic_settle(_iso, monkeypatch):
@@ -301,7 +349,68 @@ def test_daemon_runs_periodic_settle(_iso, monkeypatch):
     assert ol.live_state()["total_settled"] >= 1
     assert len(ol.load_events(10)) >= 1
     ol.stop()
-    assert ol.live_state()["running"] is False
+    assert _wait_stopped()
+
+
+def test_stop_sets_executor_stop_event_and_cleans_scheduler(_iso, monkeypatch):
+    """停止通道 = executor.stop_event + scheduler 清理（不再是 SystemExit）。"""
+    _patch_executor(monkeypatch)
+    monkeypatch.setattr(ol, "MIN_INTERVAL_S", 1)
+    ol.save_live_config(enabled=True, interval_s=1)
+    assert ol.sync()["running"] is True
+    ex = ol._runner()._executor
+    sched = ex.scheduler
+    assert ol.stop()["ok"] is True
+    assert _wait_stopped()
+    assert ex.stop_event.is_set()             # lumibot 主循环据此 break
+    assert sched.removed == 1                 # remove_all_jobs
+    assert sched.shutdown_calls == [False]     # shutdown(wait=False)
+    assert ex.scheduler is None
+    assert ol._runner()._thread is None
+
+
+def test_stop_marks_strategy_stop_requested(_iso, monkeypatch):
+    """停止位 + 策略看到后只 return（不再抛 SystemExit）。"""
+    _patch_executor(monkeypatch)
+    monkeypatch.setattr(ol, "MIN_INTERVAL_S", 1)
+    ol.save_live_config(enabled=True, interval_s=1)
+    ol.sync()
+    s = ol._runner()._strategy
+    ol.stop()
+    assert _wait_stopped()
+    assert s.parameters["stop_requested"] is True
+    assert s.on_trading_iteration() is None   # 不抛异常（异常会被 APScheduler 吞掉）
+
+
+def test_start_fail_closed_when_old_thread_alive(_iso, monkeypatch):
+    """旧循环未退完时拒绝起新线程（否则基类 is_alive 守卫静默吞掉新配置）。"""
+    monkeypatch.setattr(ol, "STOP_JOIN_WAIT_S", 0.2)
+    r = ol._runner()
+    blocker = threading.Thread(target=lambda: time.sleep(1.5), daemon=True)
+    blocker.start()
+    r._thread = blocker
+    res = r.start()
+    assert res["ok"] is False and res["started"] is False
+    assert "尚未退出" in res["reason"]
+    assert r._executor is None                # 未构造新 executor
+    blocker.join(3)
+
+
+def test_finish_counts_actions_only(_iso):
+    """计数只认动作记录 —— fail-closed 跳过不再被记成「卖call 1」。"""
+    s = ol._runner()._strategy
+    s.parameters["live_mode"] = False         # 不写事件文件
+    s._finish([], {"entries": [{"status": "no_action"},
+                              {"status": "cycle_wait"},
+                              {"status": "dry_run(would_sell)"},
+                              {"status": "failed"}],
+                  "exits": [{"status": "dry_run(would_buy_back)"}],
+                  "call_entries": [{"status": "no_action"}],
+                  "call_exits": []}, "")
+    tot = ol.live_state()
+    assert tot["total_entries"] == 1          # 只有 dry_run(would_sell)
+    assert tot["total_exits"] == 1
+    assert tot["total_call_entries"] == 0     # fail-closed 跳过不计
 
 
 def test_stop_idempotent(_iso):

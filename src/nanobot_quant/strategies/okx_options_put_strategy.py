@@ -17,14 +17,22 @@
 ``dry_run=True``（默认）时**只记录决策、不下单** —— 「AI 不能自行授权实盘」
 在闭环里的结构性落实；需用户在期权页手动取消勾选才会真实下单。
 
-停止：**不调 ``executor.stop()``**（lumibot 内部 ``shutdown(wait=True)`` 会等
-业务轮收尾，遇网络卡死即永久挂住 —— TD live 已踩过）。改为
-``parameters["stop_requested"]`` 标志，每轮开头检查后主动退出，
-使停止永远落在两轮之间，绝不打断正在执行的一轮。
+停止（与 td_live 同构，2026-09-25 修正）：**不调 ``executor.stop()``**
+（lumibot 内部 ``shutdown(wait=True)`` 会等业务轮收尾，遇网络卡死即永久挂住
+—— TD live 已踩过）。真正的退出通道是 runner 侧 ``executor.stop_event``
+（lumibot 主循环据此 break → ``executor.run()`` 返回），策略侧只做两件事：
+``_track_iteration`` 维护 ``self._iteration_active``（runner 据此等当前轮
+自然结束）+ 看到 ``stop_requested`` 时**直接 return**。
+
+**不可用 ``raise SystemExit`` 退出**：异常会被 APScheduler 的 job 层捕获
+并记日志、主循环照跑（2026-09-25 实测：「循环已停止(thread_alive=True)」
++ 每 60s 空转抛一次 traceback，且 ``start()`` 见 alive=True 直接「已在运行」
+⇒ 停一次就再也起不来，只能重启空间）。
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 from datetime import datetime, timezone
@@ -43,6 +51,21 @@ _EVENTS_NAME = "okx_options_live_events.jsonl"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# 「卖出 / 买回」计数只认**动作**记录（2026-09-25 实测修正）：
+#   entries/call_entries 里混着 no_action / cycle_wait / no_signal 这类
+#   「本轮无动作」说明记录，按条数计数会把 fail-closed 跳过记成「卖call 1」
+#   （每轮无动作都 +1）。failed 也不计入（单独用「失败 N」显式提示）。
+_ENTRY_ACTION_STATUSES = frozenset({"sold", "dry_run(would_sell)"})
+_EXIT_ACTION_STATUSES = frozenset({"bought_back", "dry_run(would_buy_back)"})
+_FAILED_STATUSES = frozenset({"failed"})
+
+
+def _count_status(rows: Any, statuses: frozenset) -> int:
+    """按 status 计数（忽略非 dict / 无 status 的记录）。"""
+    return sum(1 for r in (rows or [])
+               if isinstance(r, dict) and r.get("status") in statuses)
 
 
 class OkxOptionsPutStrategy(Strategy):
@@ -69,27 +92,45 @@ class OkxOptionsPutStrategy(Strategy):
         "allow_no_cost_basis": False,     # 无成本锚 C 时是否放行（台账标「无成本锚」）
         "dry_run": True,
         "live_mode": False,        # 事件文件写入开关（回测置 False 不污染实盘监控）
-        "stop_requested": False,   # 见模块 docstring：唯一的停止通道
+        # 停止位（见模块 docstring）：由 runner 置位，策略看到后只 return
+        "stop_requested": False,
     }
 
     # ══════════════════════ 生命周期 ══════════════════════
 
     def initialize(self, **kwargs) -> None:
         """不作账户切换、不预拉数据 —— 全部延迟到轮次内（失败也不阻塞启动）。"""
-        self._log("策略已初始化（卖 put + 权利金回落止盈）")
+        self._iteration_active = False   # 当前业务轮是否在跑（runner 停止路径据此等轮）
+        self._log("策略已初始化（卖 put / 卖 call + 权利金回落止盈）")
 
     def before_market_opens(self) -> None:  # pragma: no cover - 期权 7×24，无需
         pass
 
     # ══════════════════════ 主轮次 ══════════════════════
 
+    def _track_iteration(fn):
+        """包一轮业务（与 ``TdSequentialStrategy._track_iteration`` 同款）。
+
+        ① ``stop_requested`` 置位 → **直接 return**（不是抛异常：异常会被
+           APScheduler 的 job 层捕获记日志、主循环照跑 —— 2026-09-25 实测踩过）；
+        ② 运行期 ``self._iteration_active`` 为 True（finally 复位）——runner 的
+           停止路径据此等当前轮自然结束，**绝不强行中断正在执行的一轮**。
+        """
+        @functools.wraps(fn)
+        def wrapper(self, *a, **kw):
+            if self.parameters.get("stop_requested"):
+                self._log("收到停止请求 —— 本轮不再执行（循环即将退出）")
+                return None
+            self._iteration_active = True
+            try:
+                return fn(self, *a, **kw)
+            finally:
+                self._iteration_active = False
+        return wrapper
+
+    @_track_iteration
     def on_trading_iteration(self) -> None:
         """一轮：到期判定 → 入场 → 止盈 → 状态落盘。异常不外抛给引擎。"""
-        if self.parameters.get("stop_requested"):
-            # 停止永远落在两轮之间（绝不打断正在执行的一轮）
-            self._log("收到停止请求 —— 本轮结束后退出")
-            raise SystemExit("options strategy stop requested")
-
         p = self.parameters
         account = str(p.get("account") or "")
         dry = bool(p.get("dry_run", True))
@@ -403,10 +444,16 @@ class OkxOptionsPutStrategy(Strategy):
 
     def _finish(self, settled, strat, error) -> None:
         """轮次收尾：写 LIVE_STATE + 结束日志（字段名与接线前保持一致）。"""
-        entries = len((strat or {}).get("entries") or [])
-        exits = len((strat or {}).get("exits") or [])
-        c_entries = len((strat or {}).get("call_entries") or [])
-        c_exits = len((strat or {}).get("call_exits") or [])
+        rows = strat or {}
+        # 只计**动作**记录：no_action / cycle_wait / no_signal 是「本轮无动作」的
+        # 说明记录，不是卖出（否则每轮无动作都 +1 —— 2026-09-25 实测：call 线
+        # fail-closed 跳过却记成「卖call 1」）。失败单单独显示「失败 N」，不静默。
+        entries = _count_status(rows.get("entries"), _ENTRY_ACTION_STATUSES)
+        exits = _count_status(rows.get("exits"), _EXIT_ACTION_STATUSES)
+        c_entries = _count_status(rows.get("call_entries"), _ENTRY_ACTION_STATUSES)
+        c_exits = _count_status(rows.get("call_exits"), _EXIT_ACTION_STATUSES)
+        failed = sum(_count_status(rows.get(k), _FAILED_STATUSES)
+                     for k in ("entries", "exits", "call_entries", "call_exits"))
         self._bump("entries", entries)
         self._bump("exits", exits)
         self._bump("call_entries", c_entries)
@@ -418,6 +465,7 @@ class OkxOptionsPutStrategy(Strategy):
         self._log(f"── 巡检轮次结束 ── 到期判定 {len(settled or [])} 笔 · "
                   f"策略 卖put {entries} / 买回put {exits} · "
                   f"卖call {c_entries} / 买回call {c_exits}"
+                  + (f" · 失败 {failed}" if failed else "")
                   + (f" · error={error}" if error else ""))
 
     # ══════════════════════ 小工具 ══════════════════════
