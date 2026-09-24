@@ -882,7 +882,15 @@ def open_call(account: str, *, inst_id: str, sz: int,
               cost_basis: Optional[float] = None) -> dict:
     """卖 call（covered call）开仓——镜像 open_put（side=sell、isolated 逐仓）。
 
-    保本门（§33.23，强制 fail-closed）：cost_basis = 被动持仓成本锚 C
+    两道入场门（均 fail-closed，在真实下单前判定）：
+
+    ① covered 门（§33.40）：现货覆盖 ≥ 卖出张数才算 covered——判据来自
+    covered_context().sellable_sz（现货 ≥ 每张面值×99%）。不足即拒绝，
+    绝不裸空 call：covered 语义是「现货在手对冲上行」，裸卖 call 不是本策略，
+    且上行无界、只靠逐仓 IM 挡（强平路径）——与「不碰杠杆」铁律冲突。
+    该门在后端强制，绕过页面（直调端点）同样拦。
+
+    ② 保本门（§33.23）：cost_basis = 被动持仓成本锚 C
     （接货价 K_put，put 台账 settled_itm max(strike) 自动带出、可改）。
     提供时要求 strike + px ≥ C（px 为 IOC 保底线 = 最差接受成交价，
     门成立则实际成交必成立）；不满足直接拒绝该轮，不硬卖。
@@ -911,6 +919,17 @@ def _open_option(account: str, *, inst_id: str, sz: int,
             f"（opt_type={spec['opt_type']}，请选 {'P' if want == 'P' else 'C'} 侧合约）")
     if int(sz) <= 0:
         raise OkxSdkError("张数 sz 必须为正整数")
+    if kind == "open_call":
+        # covered 门（fail-closed，后端强制）：现货不足 = 裸空 call，一律拒绝
+        cov = covered_context(account or a["label"], spec["inst_family"])
+        covered_sz = int(cov.get("sellable_sz") or 0)
+        if covered_sz < int(sz):
+            raise OkxSdkError(
+                f"covered 门不通过（fail-closed，该轮跳过）：现货 "
+                f"{cov.get('spot_avail')} {cov.get('base')} 覆盖 {covered_sz} 张"
+                f" < 卖出 {sz} 张（现货覆盖 {cov.get('spot_cov_pct')}%，"
+                f"判据 ≥ 每张面值×99%）。现货不足时卖出等于裸空 call"
+                f"（上行无界、只靠逐仓 IM 挡），请先补足现货（补买/划入）后再卖 call。")
     if kind == "open_call" and cost_basis is not None:
         guard = spec["strike"] + (px or 0.0)
         if guard < float(cost_basis) - 1e-9:

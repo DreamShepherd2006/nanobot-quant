@@ -880,7 +880,7 @@ def test_cover_prefill_fallback_settle_then_strike(monkeypatch):
 # ── 批 1 Step 1：卖 call（covered call）执行层（2026-09-08）──────
 
 
-def test_place_sell_call_params(_mock_sdk, _patch_entry):
+def test_place_sell_call_params(_mock_sdk, _patch_entry, _covered_ok):
     """卖 call 下单镜像 put：side=sell isolated；成交回填，kind=open_call。"""
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                          ord_type="limit", px=110.0)
@@ -906,7 +906,7 @@ def test_open_call_rejects_put_inst(_patch_entry):
                      ord_type="limit", px=110.0)
 
 
-def test_open_call_guard_fail_closed(_patch_entry):
+def test_open_call_guard_fail_closed(_patch_entry, _covered_ok):
     """保本门：cost_basis > K+px → fail-closed 拒绝，该轮跳过不硬卖。"""
     with pytest.raises(OkxSdkError) as ei:
         ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
@@ -914,7 +914,7 @@ def test_open_call_guard_fail_closed(_patch_entry):
     assert "保本门不通过" in str(ei.value)
 
 
-def test_open_call_guard_ok(_mock_sdk, _patch_entry):
+def test_open_call_guard_ok(_mock_sdk, _patch_entry, _covered_ok):
     """保本门通过：K+px ≥ C → 正常开仓，台账记录 cost_basis。"""
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                          ord_type="limit", px=110.0, cost_basis=80000.0)
@@ -923,7 +923,84 @@ def test_open_call_guard_ok(_mock_sdk, _patch_entry):
     assert entry["strike"] == 80000.0
 
 
-def test_place_close_call_buy(_mock_sdk, _patch_entry):
+def _cov_stub(sellable_sz, spot_avail=0.01, base="BTC", lot=0.01):
+    def _f(account, family):
+        return {"ok": True, "family": family, "base": base, "lot_coin": lot,
+                "spot_avail": spot_avail, "sellable_sz": sellable_sz,
+                "spot_cov_pct": round(spot_avail / lot * 100, 1) if lot else 0.0,
+                "cost_hint": None, "note": ""}
+    return _f
+
+
+@pytest.fixture
+def _covered_ok(monkeypatch):
+    """现货覆盖充足（call 入场默认放行）——covered 门专项用例自行 monkeypatch 覆盖。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(10))
+
+
+def test_open_call_covered_gate_blocks_uncovered(_mock_sdk, _patch_entry, monkeypatch):
+    """covered 门（§33.40，fail-closed）：现货覆盖不足 → 拒绝，且不下单、不落台账。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(0, spot_avail=0.0001))
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0)
+    assert "covered 门不通过" in str(ei.value)
+    assert _mock_sdk.calls == []        # 未下单
+    assert ot.load_ledger() == []        # 未落台账
+
+
+def test_open_call_covered_gate_partial_sz(_mock_sdk, _patch_entry, monkeypatch):
+    """covered 门按张数判定：覆盖 1 张、卖 2 张 → 拒绝。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=2,
+                     ord_type="limit", px=110.0)
+    assert "covered 门不通过" in str(ei.value)
+    assert _mock_sdk.calls == []
+
+
+def test_open_call_covered_gate_allows_covered(_mock_sdk, _patch_entry, monkeypatch):
+    """covered 门通过：sellable_sz ≥ sz → 正常开仓（与保本门并存）。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0, cost_basis=80000.0)
+    assert entry["status"] == "open"
+    assert entry["cost_basis"] == pytest.approx(80000.0)
+
+
+def test_open_put_unaffected_by_covered_gate(_mock_sdk, _patch_entry, monkeypatch):
+    """回归保护：卖 put 不查现货覆盖（covered_context 不应被调用）。"""
+    def _boom(account, family):
+        raise AssertionError("卖 put 不应调用 covered_context")
+
+    monkeypatch.setattr(ot, "covered_context", _boom)
+    entry = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                        ord_type="limit", px=110.0)
+    assert entry["status"] == "open"
+
+
+def test_open_call_covered_gate_real_context(_mock_sdk, _patch_entry, monkeypatch):
+    """集成口径：真实 covered_context 走通——0.01 BTC（=1 张面值）放行，0.001 BTC 拒绝。"""
+    def _bal(avail):
+        def _f(account=""):
+            return {"total_eq_usd": 100.0, "details": [
+                {"ccy": "BTC", "cash_bal": avail, "avail_bal": avail,
+                 "frozen_bal": 0.0, "eq": avail, "eq_usd": 100.0, "update_ms": 0}]}
+        return _f
+
+    monkeypatch.setattr(ot, "account_balance", _bal(0.01))
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0)
+    assert entry["status"] == "open"
+
+    monkeypatch.setattr(ot, "account_balance", _bal(0.001))
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0)
+    assert "covered 门不通过" in str(ei.value)
+
+
+def test_place_close_call_buy(_mock_sdk, _patch_entry, _covered_ok):
     """买回平仓卖 call（止盈/主动落袋）：kind=close_call，pnl=(开−平)×lot×sz。"""
     ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                  ord_type="limit", px=110.0)
@@ -948,7 +1025,7 @@ def test_close_call_without_open_rejected(_patch_entry):
                       ord_type="limit", px=5)
 
 
-def test_close_call_does_not_touch_put_rows(_mock_sdk, _patch_entry):
+def test_close_call_does_not_touch_put_rows(_mock_sdk, _patch_entry, _covered_ok):
     """call 平仓只匹配 open_call——同名 strike 的 put 行不受影响。"""
     ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
                 ord_type="limit", px=110.0)
