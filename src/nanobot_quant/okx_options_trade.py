@@ -614,7 +614,8 @@ def preview_open_put(inst_id: str, sz: int, ord_type: str = "limit",
 
 def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
                       px: Optional[float] = None,
-                      cost_basis: Optional[float] = None) -> dict:
+                      cost_basis: Optional[float] = None,
+                      no_cost_ack: bool = False) -> dict:
     """卖 call（covered call）订单预览（纯计算，不下单）——镜像 preview_open_put。
 
     输出含：合约规格、参考盘口、订单参数（side=sell tdMode=isolated 逐仓）、
@@ -684,6 +685,8 @@ def preview_open_call(inst_id: str, sz: int, ord_type: str = "limit",
         "net_yield_pct": (round((prem - fee_est) / notional * 100, 3)
                           if notional else None),
         "gate": gate,
+        "no_cost_ack": bool(no_cost_ack),
+        "cost_basis": (round(float(cost_basis), 4) if cost_basis is not None else None),
         "note": ("卖 call（covered call）：持有现货 + 卖虚值/平值 call 收权利金。"
                  "被行权 = 现金结算赔付 (结算价−K)×面值 后现货市价卖出，"
                  "等效按 K 出货（保本门保证 K+权利金 ≥ 被动持仓成本 C）。"
@@ -879,21 +882,26 @@ def open_put(account: str, *, inst_id: str, sz: int,
 
 def open_call(account: str, *, inst_id: str, sz: int,
               ord_type: str = "limit", px: Optional[float] = None,
-              cost_basis: Optional[float] = None) -> dict:
+              cost_basis: Optional[float] = None,
+              no_cost_basis_ack: bool = False) -> dict:
     """卖 call（covered call）开仓——镜像 open_put（side=sell、isolated 逐仓）。
 
-    两道入场门（均 fail-closed，在真实下单前判定）：
+    三道入场门（均 fail-closed，在真实下单前判定）：
 
-    ① covered 门（§33.40）：现货覆盖 ≥ 卖出张数才算 covered——判据来自
+    ① covered 门（§33.39）：现货覆盖 ≥ 卖出张数才算 covered——判据来自
     covered_context().sellable_sz（现货 ≥ 每张面值×99%）。不足即拒绝，
     绝不裸空 call：covered 语义是「现货在手对冲上行」，裸卖 call 不是本策略，
     且上行无界、只靠逐仓 IM 挡（强平路径）——与「不碰杠杆」铁律冲突。
     该门在后端强制，绕过页面（直调端点）同样拦。
 
-    ② 保本门（§33.23）：cost_basis = 被动持仓成本锚 C
-    （接货价 K_put，put 台账 settled_itm max(strike) 自动带出、可改）。
-    提供时要求 strike + px ≥ C（px 为 IOC 保底线 = 最差接受成交价，
-    门成立则实际成交必成立）；不满足直接拒绝该轮，不硬卖。
+    ② 无成本锚确认门（§33.39 / C46）：保本门依赖成本锚 C（= 接货价）才能判定
+    K + px ≥ C。**未提供 C 时后端默认拒绝**（不可静默跳过保本门）；确需放弃保本门
+    （如手动补买现货后卖 call、接货价不便填）必须显式确认——传
+    no_cost_basis_ack=True（页面勾选「确认无成本锚卖出」），台账会记 no_cost_ack
+    标记备查。
+
+    ③ 保本门（§33.23）：提供 C 时要求 strike + px ≥ C（px 为 IOC 保底线 =
+    最差接受成交价，门成立则实际成交必成立）；不满足直接拒绝该轮，不硬卖。
 
     担保差异：call 上行无界，**不做全损现金担保**（_ensure_collateral 仅用于
     卖 put）——covered 语义 = 现货在手，被行权 = 现金结算赔付后现货市价卖出
@@ -902,13 +910,15 @@ def open_call(account: str, *, inst_id: str, sz: int,
     """
     return _open_option(account=account, inst_id=inst_id, sz=sz,
                         ord_type=ord_type, px=px, kind="open_call",
-                        cost_basis=cost_basis)
+                        cost_basis=cost_basis,
+                        no_cost_basis_ack=no_cost_basis_ack)
 
 
 def _open_option(account: str, *, inst_id: str, sz: int,
                  ord_type: str = "limit", px: Optional[float] = None,
                  kind: str = "open_put",
-                 cost_basis: Optional[float] = None) -> dict:
+                 cost_basis: Optional[float] = None,
+                 no_cost_basis_ack: bool = False) -> dict:
     """卖期权开仓公共路径：kind=open_put/open_call 决定合约类型断言与担保行为。"""
     a = _entry_account(account)
     spec = resolve_instrument(inst_id)
@@ -930,13 +940,22 @@ def _open_option(account: str, *, inst_id: str, sz: int,
                 f" < 卖出 {sz} 张（现货覆盖 {cov.get('spot_cov_pct')}%，"
                 f"判据 ≥ 每张面值×99%）。现货不足时卖出等于裸空 call"
                 f"（上行无界、只靠逐仓 IM 挡），请先补足现货（补买/划入）后再卖 call。")
-    if kind == "open_call" and cost_basis is not None:
-        guard = spec["strike"] + (px or 0.0)
-        if guard < float(cost_basis) - 1e-9:
+    if kind == "open_call":
+        # ② 无成本锚确认门（fail-closed）：无 C 则保本门不可判定 → 默认拒绝
+        if cost_basis is None and not no_cost_basis_ack:
             raise OkxSdkError(
-                f"保本门不通过（fail-closed，该轮跳过）：K({spec['strike']})"
-                f" + px({px or 0}) = {guard:.4f} < 成本锚 C({float(cost_basis):.4f})。"
-                "请抬高行权价、等待权利金回升，或上调成本锚后再卖 call。")
+                "保本门缺少成本锚（fail-closed，该轮跳过）：卖 call 必须提供成本锚 C"
+                "（=接货价）才能校验 K + px ≥ C。若确认放弃保本门（例如手动补买现货后"
+                "卖 call、接货价不便填写），请在页面勾选「确认无成本锚卖出」后重试——"
+                "该次卖出会在台账标记「无成本锚」备查。")
+        # ③ 保本门：提供 C 时强制 K + px ≥ C
+        if cost_basis is not None:
+            guard = spec["strike"] + (px or 0.0)
+            if guard < float(cost_basis) - 1e-9:
+                raise OkxSdkError(
+                    f"保本门不通过（fail-closed，该轮跳过）：K({spec['strike']})"
+                    f" + px({px or 0}) = {guard:.4f} < 成本锚 C({float(cost_basis):.4f})。"
+                    "请抬高行权价、等待权利金回升，或上调成本锚后再卖 call。")
     # 开盘前快照盘口供参考（下单后立即轮询会很快，先落台账 pending）
     q = ticker_quote(inst_id)
     entry = add_ledger(
@@ -945,6 +964,8 @@ def _open_option(account: str, *, inst_id: str, sz: int,
         family=spec["inst_family"], side="sell", ord_type=ord_type,
         px=px,
         sz=int(sz), status="pending", ref_bid=q["bid"], ref_ask=q["ask"],
+        **({"no_cost_ack": True} if (kind == "open_call" and cost_basis is None
+                                     and no_cost_basis_ack) else {}),
     )
     if kind == "open_call" and cost_basis is not None:
         update_ledger(lambda x: x["id"] == entry["id"], cost_basis=round(float(cost_basis), 6))
