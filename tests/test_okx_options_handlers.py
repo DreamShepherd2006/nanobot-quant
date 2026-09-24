@@ -104,6 +104,28 @@ def test_dispatch_preview_call_no_cost_ack_passthrough(_dispatch_mocks):
     assert _dispatch_mocks["preview_open_call"]["kw"]["no_cost_ack"] is False
 
 
+def test_sell_stage_to_confirm_carries_no_cost_ack(_dispatch_mocks):
+    """C46 全链路（start stage → confirm consume → dispatch）：
+
+    ack 必须随 stage 一路传到 open_call——否则勾选确认后仍会被后端门误拒。
+    镜像 _sell_confirm 的取参方式（ack 取自 stage payload，不由 confirm 单独传）。
+    """
+    oh._pending_tx.clear()
+    st = oh._stage("sell", {"account": "bot1", "inst_id": "SOL-USD_UM-260910-101-C",
+                            "sz": 1, "ord_type": "limit", "px": 1.1,
+                            "cost_basis": None, "no_cost_ack": True,
+                            "opt_type": "C", "preview": {}})
+    act, err = oh._consume({"tx_id": st["tx_id"]})
+    assert err is None and act["action"] == "sell"
+    p = act["payload"]
+    oh._dispatch_sell(p["account"], p["inst_id"], p["sz"], p["ord_type"],
+                      p.get("px"), p.get("cost_basis"), bool(p.get("no_cost_ack")))
+    assert _dispatch_mocks["open_call"]["kw"]["no_cost_basis_ack"] is True
+    # 令牌一次性：重复 confirm 必须失效
+    _, err2 = oh._consume({"tx_id": st["tx_id"]})
+    assert err2 and "无效" in err2
+
+
 def test_options_page_no_cost_ack_controls():
     """C46 页面契约：卖 call 弹窗必须有「无成本锚确认」勾选框，且台账行标记可见。"""
     from pathlib import Path
