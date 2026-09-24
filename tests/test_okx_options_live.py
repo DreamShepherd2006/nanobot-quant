@@ -384,3 +384,115 @@ class TestStrategyConfig:
         assert ol.live_state()["last_strategy"]["entries"]
         assert any(e.get("type") == "entry" for e in ol.load_events())
         assert ol.live_state()["total_entries"] >= 1
+
+
+# ── C41：卖 call（covered）支线（策略轮次，§33.40）────────────────
+
+CALL_CAND = {"inst_id": "SOL-USD_UM-260920-108-C", "strike": 108.0, "bid": 0.5,
+             "net_yield_pct": 0.48, "days": 5, "notional_usd": 10.8,
+             "collateral_usd": 10.0, "covered": True, "delta": 0.2}
+
+
+def _cov(hint=104.0, sellable=2, spot=0.2):
+    return {"base": "SOL", "spot_avail": spot, "sellable_sz": sellable,
+            "spot_cov_pct": 200.0, "cost_hint": hint}
+
+
+@pytest.fixture
+def _callstrat(_strat, monkeypatch):
+    """在 _strat 之上补 covered 上下文 + call 选档 + 下单打桩（不触网/不下单）。"""
+    from nanobot_quant import okx_options_strategy as st
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as _S)
+
+    orders = {"sell": [], "buy": []}
+    monkeypatch.setattr(ol.ot, "covered_context", lambda account, family: _cov())
+    monkeypatch.setattr(st, "select_calls",
+                        lambda family, base_px=None, selector=None, chain=None, cost_basis=None: {
+                            "family": family, "right": "C", "base_px": 100.0,
+                            "spot": 100.0, "lot_coin": 0.1, "selector": selector,
+                            "candidates": [dict(CALL_CAND)], "scanned": 1,
+                            "filtered": {}, "note": ""})
+
+    def _submit(self, dec, p, closing=False):
+        orders["buy" if closing else "sell"].append(dec)
+        return True, None
+
+    monkeypatch.setattr(_S, "_submit_option", _submit)
+    return orders
+
+
+def _call_cfg(**strat):
+    base = {"dry_run": True, "put_enabled": False, "call_enabled": True}
+    base.update(strat)
+    return base
+
+
+class TestCallLine:
+    def test_default_off(self, _strat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy={"dry_run": True, "put_enabled": False})
+        ol.run_once()
+        assert ol.live_state()["last_strategy"]["call_entries"] == []
+
+    def test_dry_run_records_intent_without_order(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg())
+        ol.run_once()
+        rows = ol.live_state()["last_strategy"]["call_entries"]
+        assert rows and rows[0]["opt_type"] == "C"
+        assert str(rows[0]["status"]).startswith("dry_run")
+        assert _callstrat["sell"] == []                        # dry-run 不下单
+        assert ol.live_state()["total_call_entries"] >= 1
+        assert any(e.get("type") == "entry" and e.get("opt_type") == "C"
+                   for e in ol.load_events())
+
+    def test_real_order_after_dry_run_off(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        assert len(_callstrat["sell"]) == 1
+        assert ol.live_state()["last_strategy"]["call_entries"][0]["status"] == "sold"
+
+    def test_put_line_off_skips_put_scan(self, _callstrat, monkeypatch, _iso):
+        """put_enabled=false ⇒ put 线不扫描（便于只验证 call 线）。"""
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        assert ol.live_state()["last_strategy"]["entries"] == []
+
+    def test_no_cost_anchor_skips(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "covered_context", lambda account, family: _cov(hint=None))
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        rows = ol.live_state()["last_strategy"]["call_entries"]
+        assert rows and rows[0]["status"] == "no_action" and "无成本锚" in rows[0]["note"]
+        assert _callstrat["sell"] == []
+
+    def test_allow_no_cost_basis_sells(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "covered_context", lambda account, family: _cov(hint=None))
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True,
+                            strategy=_call_cfg(dry_run=False, allow_no_cost_basis=True))
+        ol.run_once()
+        assert len(_callstrat["sell"]) == 1
+
+    def test_call_exit_uses_own_tp_line(self, _callstrat, monkeypatch, _iso):
+        """call 止盈线独立（30%）：回落 32.5% 即买回（put 线 50% 不适用于 call）。"""
+        monkeypatch.setattr(ol.ot, "open_option_positions",
+                            lambda account="": [{"inst_id": "SOL-USD_UM-260918-108-C",
+                                                  "side": "short", "pos": 1.0,
+                                                  "avg_px": 0.40, "mark_px": 0.27}])
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        assert len(_callstrat["buy"]) == 1
+        assert _callstrat["buy"][0].inst_id == "SOL-USD_UM-260918-108-C"
+
+    def test_defaults_include_call_params(self, _iso):
+        s = ol.live_config()["strategy"]
+        assert s["call_enabled"] is False and s["put_enabled"] is True
+        assert s["take_profit_pct_call"] == 30
+        assert s["max_calls_per_family"] == 1 and s["max_calls_total"] == 2
+        assert s["allow_no_cost_basis"] is False

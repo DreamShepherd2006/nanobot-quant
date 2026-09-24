@@ -48,9 +48,16 @@ DEFAULT_STRATEGY: dict = {
     "entry_setup": 9,                    # 买 9 阈值
     "entry_countdown": 13,               # countdown 13 阈值
     "iv_min_percentile": 0,              # IV 环境闸门（0 = 关）
-    "take_profit_pct": 50,               # 权利金回落止盈线（%）
+    "take_profit_pct": 50,               # put 线权利金回落止盈线（%）
     "max_contracts_per_family": 1,
     "max_contracts_total": 3,
+    # ── 卖 call（covered call）支线（§33.40）—— 与 put 参数互不影响 ──
+    "put_enabled": True,                 # put 线总开关（便于只跑 call 线验证）
+    "call_enabled": False,               # call 线总开关（默认关，用户在页面手动开）
+    "take_profit_pct_call": 30,          # call 线止盈线（上行无界、快落袋）
+    "max_calls_per_family": 1,           # 单家族在仓 call 张数上限
+    "max_calls_total": 2,                # 全局在仓 call 张数上限
+    "allow_no_cost_basis": False,        # 无成本锚 C 时是否放行（台账标「无成本锚」）
     "dry_run": True,
 }
 
@@ -386,6 +393,8 @@ def live_state() -> dict:
         "total_settled": int(totals.get("settled") or 0),
         "total_entries": int(totals.get("entries") or 0),
         "total_exits": int(totals.get("exits") or 0),
+        "total_call_entries": int(totals.get("call_entries") or 0),
+        "total_call_exits": int(totals.get("call_exits") or 0),
     }
 
 

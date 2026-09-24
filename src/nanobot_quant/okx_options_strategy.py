@@ -1,10 +1,12 @@
 """卖 put 自动循环的决策核心（纯函数：不碰 SDK、不下单、不写台账）。
 
-一轮决策两件事：
+一轮决策三件事：
 
 1. ``evaluate_entry()`` —— 该不该卖 put、卖哪个合约
    （TD 衰竭信号 → IV 环境闸门 → 张数上限 → 复用 C28 1a 的 ``select_puts`` 选档）
-2. ``evaluate_exits()`` —— 已持有的 short 仓该不该买回（权利金回落止盈）
+2. ``evaluate_call_entry()`` —— 该不该卖 call（covered call）、卖哪个合约
+   （**不做信号择时**：张数上限 → covered 容量 → 成本锚 C → ``select_calls`` 选档）
+3. ``evaluate_exits()`` —— 已持有的 short 仓该不该买回（权利金回落止盈，按方向分线）
 
 刻意与执行分离：本模块只产出决策对象，``okx_options_live`` 的循环体负责执行。
 好处是同一份决策逻辑同时服务 dry_run 观察、单元测试与将来的期权回测
@@ -25,10 +27,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from nanobot_quant.okx_options_assets import right_of_inst
-from nanobot_quant.okx_options_select import select_puts
+from nanobot_quant.okx_options_select import select_calls, select_puts
 
-# 权利金回落止盈的默认线（卖 put 实证分水岭：50%）
+# 权利金回落止盈的默认线：卖 put 50%（实证分水岭）/ 卖 call 30%（上行无界、快落袋）
 DEFAULT_TP_PCT = 50.0
+DEFAULT_TP_PCT_CALL = 30.0
 
 
 def _f(v) -> Optional[float]:
@@ -58,6 +61,9 @@ class EntryDecision:
     delta: Optional[float] = None
     notional_usd: Optional[float] = None
     note: str = ""
+    opt_type: str = "P"                        # P = 卖 put 线 / C = 卖 call（covered）线
+    collateral_usd: Optional[float] = None     # 收益率分母（put=名义 / call=现货市值）
+    cost_basis: Optional[float] = None         # 卖 call 的成本锚 C（保本价）
 
     def to_event(self) -> dict:
         return {
@@ -66,7 +72,8 @@ class EntryDecision:
             "spot": self.spot, "net_yield_pct": self.net_yield_pct,
             "apr_pct": self.apr_pct, "days": self.days, "iv": self.iv,
             "delta": self.delta, "notional_usd": self.notional_usd,
-            "note": self.note,
+            "note": self.note, "opt_type": self.opt_type,
+            "collateral_usd": self.collateral_usd, "cost_basis": self.cost_basis,
         }
 
 
@@ -185,6 +192,102 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
 
 
 # ── 出场（止盈买回） ───────────────────────────────
+
+def evaluate_call_entry(family: str, *, params: dict,
+                        covered: Optional[dict] = None,
+                        open_calls: int = 0, total_calls: int = 0,
+                        cost_basis: Optional[float] = None,
+                        selector: Optional[dict] = None,
+                        chain: Optional[dict] = None,
+                        base_px: Optional[float] = None,
+                        ) -> tuple[Optional[EntryDecision], str]:
+    """卖 call（covered call）决策。返回 ``(决策, note)``；决策为 None 时 note 说明原因。
+
+    **不做信号择时**（用户 2026-09-08 定稿 + 2026-09-24 确认）：入场条件 =
+    「有 covered 余量 + 保本门可判定 + 有合格候选」；自节流 = call 张数上限 ×
+    covered 容量 × 止盈/到期后才有新余量。
+
+    门序（每一道 fail-closed；执行层 ``_open_option`` 会再校验一遍）：
+
+    ① **call 张数上限**（家族 / 全局，与 put 额度相互独立）
+    ② **covered 容量**：现货覆盖张数 − 在仓 call 张数 ≥ 1
+    ③ **成本锚 C**：显式传入 > ``covered['cost_hint']``（同家族已 settled_itm
+       put 的 max(K)）；两处都无 → 除非 ``allow_no_cost_basis``，否则跳过
+       （与手工路径的「无成本锚确认」同语义：不给 C 就不卖）
+    ④ 选档 ``select_calls``（含保本门硬过滤 ``strike + bid ≥ C``）
+
+    Args:
+        covered: ``okx_options_trade.covered_context()`` 的输出；None = 未取数
+            （无法判定 covered 容量 → fail-closed 跳过）。
+        open_calls / total_calls: 该家族 / 全局在仓 call 张数。
+        cost_basis: 显式成本锚（页面/调用方指定）；None 时用 ``covered['cost_hint']``。
+    """
+    p = params or {}
+
+    # ① 张数上限（call 自己的额度，硬约束）
+    max_fam = int(p.get("max_calls_per_family") or 0)
+    max_all = int(p.get("max_calls_total") or 0)
+    if max_fam > 0 and open_calls >= max_fam:
+        return None, f"张数上限：{family} 在仓 call {open_calls} ≥ {max_fam}"
+    if max_all > 0 and total_calls >= max_all:
+        return None, f"张数上限：全局在仓 call {total_calls} ≥ {max_all}"
+
+    # ② covered 容量（现货覆盖张数 − 在仓 call）
+    cov = covered if isinstance(covered, dict) else None
+    if cov is None:
+        return None, "covered 上下文不可用（现货查询失败）→ 跳过（fail-closed）"
+    sellable = int(_f(cov.get("sellable_sz")) or 0)
+    usable = sellable - int(open_calls)
+    base = str(cov.get("base") or str(family).split("-")[0])
+    if usable < 1:
+        return None, (f"covered 容量不足（现货 {cov.get('spot_avail')} {base} → 覆盖 "
+                      f"{sellable} 张 − 在仓 call {open_calls} = {usable} 张）")
+
+    # ③ 成本锚 C
+    c = _f(cost_basis)
+    if c is None:
+        c = _f(cov.get("cost_hint"))
+    notes = [f"covered（现货 {cov.get('spot_avail')} {base} → 可卖 {sellable} 张）"]
+    if c is None:
+        if not p.get("allow_no_cost_basis"):
+            return None, ("无成本锚 C（同家族无 settled_itm put 接货记录）→ "
+                          "fail-closed 跳过；确需放行请勾选「允许无成本锚」")
+        notes.append("⚠️ 无成本锚（已允许）—— 本次卖出不校验保本门，台账标「无成本锚」")
+    else:
+        notes.append(f"成本锚 C={c:g}（保本门 K+px ≥ C）")
+
+    # ④ 选档
+    sel = p.get("selector") if isinstance(p.get("selector"), dict) else selector
+    res = select_calls(family, base_px=base_px, selector=sel, chain=chain,
+                       cost_basis=c)
+    cands = res.get("candidates") or []
+    if not cands:
+        return None, (f"无合格候选（{family} base_px={res.get('base_px')} "
+                      f"过滤={res.get('filtered')}）")
+    cand = cands[0]
+    if res.get("note"):
+        notes.append(f"选择器：{res['note']}")
+    decision = EntryDecision(
+        family=family,
+        inst_id=str(cand.get("inst_id") or ""),
+        strike=float(cand.get("strike") or 0),
+        sz=1,
+        bid=float(cand.get("bid") or 0),
+        entry_reason=(f"covered(现货 {cov.get('spot_avail')} {base} / 可卖 {sellable} 张)"),
+        spot=_f(res.get("spot")),
+        net_yield_pct=_f(cand.get("net_yield_pct")),
+        apr_pct=_f(cand.get("apr_pct")),
+        days=_f(cand.get("days")),
+        iv=_f(cand.get("iv")),
+        delta=_f(cand.get("delta")),
+        notional_usd=_f(cand.get("notional_usd")),
+        note=" | ".join(notes),
+        opt_type="C",
+        collateral_usd=_f(cand.get("collateral_usd")),
+        cost_basis=c,
+    )
+    return decision, decision.note
+
 
 def _row_right(row: dict) -> str:
     """持仓行的期权方向（``P``/``C``）——行内 ``opt_type`` 优先，缺失时从 instId 尾段解析。
@@ -328,4 +431,5 @@ def contracts_by_family(positions, *, opt_type: str = "P") -> dict[str, int]:
 
 
 __all__ = ["EntryDecision", "ExitDecision", "td_entry_reason", "evaluate_entry",
-           "evaluate_exits", "contracts_by_family", "DEFAULT_TP_PCT"]
+           "evaluate_call_entry", "evaluate_exits", "contracts_by_family",
+           "DEFAULT_TP_PCT", "DEFAULT_TP_PCT_CALL"]

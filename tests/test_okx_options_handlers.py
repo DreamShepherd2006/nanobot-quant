@@ -139,6 +139,19 @@ def test_options_page_no_cost_ack_controls():
     assert "no_cost_ack" in html and "e.no_cost_ack" in html
 
 
+def test_options_page_call_line_controls():
+    """C41 页面契约：两线参数组（🟤 卖 put / 🟠 卖 call）与各自字段、事件分组标记。"""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1]
+            / "src" / "nanobot_quant" / "okx_options_page.html").read_text(encoding="utf-8")
+    for tok in ('id="liveCallEnabled"', 'id="livePutEnabled"', 'id="liveTpCall"',
+                'id="liveMaxCallFam"', 'id="liveMaxCallAll"', 'id="liveAllowNoC"',
+                "call_enabled:", "put_enabled:", "take_profit_pct_call:",
+                "max_calls_per_family:", "max_calls_total:", "allow_no_cost_basis:",
+                "call_entries", "call_exits", "🟠 卖 call（covered）"):
+        assert tok in html, tok
+
+
 def test_ledger_page_pnl_falls_back_to_settle_pnl():
     """台账「盈亏」列须回退读 settle_pnl：到期判定行只写 settle_pnl（无 pnl_usd），
     此前页面盈亏恒显示「—」（2026-09-15 重建实测 104-C 行）。"""

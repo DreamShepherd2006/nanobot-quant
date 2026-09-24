@@ -930,13 +930,17 @@ def _open_option(account: str, *, inst_id: str, sz: int,
     if int(sz) <= 0:
         raise OkxSdkError("张数 sz 必须为正整数")
     if kind == "open_call":
-        # covered 门（fail-closed，后端强制）：现货不足 = 裸空 call，一律拒绝
+        # covered 门（fail-closed，后端强制）：现货不足 = 裸空 call，一律拒绝。
+        # 累计口径（2026-09-24 修）：必须减去**已在仓的 short call 张数** —— 否则
+        # 现货只够 1 张时分两笔各卖 1 张，两笔都能过（覆盖被重复使用 = 裸空）。
         cov = covered_context(account or a["label"], spec["inst_family"])
         covered_sz = int(cov.get("sellable_sz") or 0)
-        if covered_sz < int(sz):
+        inflight = _inflight_call_sz(account or a["label"], spec["inst_family"])
+        if covered_sz < inflight + int(sz):
             raise OkxSdkError(
                 f"covered 门不通过（fail-closed，该轮跳过）：现货 "
                 f"{cov.get('spot_avail')} {cov.get('base')} 覆盖 {covered_sz} 张"
+                f" − 在仓 call {inflight} 张 = 可用 {max(covered_sz - inflight, 0)} 张"
                 f" < 卖出 {sz} 张（现货覆盖 {cov.get('spot_cov_pct')}%，"
                 f"判据 ≥ 每张面值×99%）。现货不足时卖出等于裸空 call"
                 f"（上行无界、只靠逐仓 IM 挡），请先补足现货（补买/划入）后再卖 call。")
@@ -1475,6 +1479,30 @@ def covered_context(account: str, family: str) -> dict:
     if costs:
         out["cost_hint"] = max(costs)
     return out
+
+
+def _inflight_call_sz(account: str, family: str) -> int:
+    """该家族已在仓的 short call 张数（covered 门累计判据用，见 §33.40.3）。
+
+    持仓查询失败 → 抛错（fail-closed）：宁可拒绝卖出，也不能在无法核对在仓量
+    时放行（覆盖可能已被重复使用）。
+    """
+    from .okx_options_assets import right_of_inst   # 延迟导入：assets → trade（FAMILY_LOT）避免循环
+
+    try:
+        rows = open_option_positions(account)
+    except Exception as e:  # noqa: BLE001 —— 任何查询失败一律 fail-closed
+        raise OkxSdkError(
+            f"covered 门无法核对在仓 call（持仓查询失败，fail-closed）：{e}") from e
+    n = 0
+    for r in rows or []:
+        inst = str(r.get("inst_id") or "")
+        if str(r.get("side") or "").lower() != "short" or right_of_inst(inst) != "C":
+            continue
+        if inst_family_of(inst) != family:
+            continue
+        n += int(float(r.get("pos") or 0))
+    return n
 
 
 def open_option_positions(account: str = "") -> list[dict]:

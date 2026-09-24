@@ -27,6 +27,53 @@ def _group(days, exp_ms, rows):
             "contracts": len(rows)}
 
 
+def _call(inst, bid, delta, ask=None, iv=70.0):
+    return {"inst_id": inst, "bid": bid, "ask": ask if ask is not None else (bid or 0) * 1.2,
+            "iv": iv, "delta": delta}
+
+
+# ── 卖 call（covered）选档（§33.40）──────────────────────────
+
+def test_select_calls_distance_is_mirrored_above_spot():
+    """call 卖在现价**上方**：strike < 基准价×(1+5%) 一律过滤。"""
+    chain = _chain(groups=[_group(5, 2, [
+        {"strike": 103.0, "C": _call("260920-103-C", 1.2, 0.30)},   # 距现价 3% → 过滤
+        {"strike": 106.0, "C": _call("260920-106-C", 0.7, 0.20)},   # 6% ✓
+        {"strike": 112.0, "C": _call("260920-112-C", 0.3, 0.10)},   # 12% ✓
+    ])])
+    res = osel.select_calls("SOL-USD_UM", base_px=100.0, chain=chain)
+    assert [c["inst_id"] for c in res["candidates"]] == ["260920-106-C", "260920-112-C"]
+    assert res["filtered"]["distance"] == 1
+    assert res["right"] == "C"
+
+
+def test_select_calls_collateral_is_spot_value():
+    """收益率分母 = 现货市值（covered 占用现货，不是现金担保）。"""
+    chain = _chain(spot=100.0, lot=0.1, groups=[_group(5, 2, [
+        {"strike": 110.0, "C": _call("260920-110-C", 1.0, 0.20)},
+    ])])
+    res = osel.select_calls("SOL-USD_UM", base_px=100.0, chain=chain)
+    c = res["candidates"][0]
+    assert c["collateral_usd"] == pytest.approx(10.0)        # spot × lot，非 110×0.1
+    assert c["notional_usd"] == pytest.approx(11.0)          # 名义仍 = strike × lot（手续费基数）
+    prem, fee = 1.0 * 0.1, min(11.0 * FEE, 0.07 * 1.0 * 0.1)
+    assert c["net_yield_pct"] == pytest.approx((prem - fee) / 10.0 * 100, rel=1e-3)
+    assert c["covered"] is True
+
+
+def test_select_calls_cost_basis_filter_only_when_given():
+    """保本门硬过滤只在传入 C 时生效（K+bid ≥ C），未传时不加该条件。"""
+    chain = _chain(groups=[_group(5, 2, [
+        {"strike": 106.0, "C": _call("260920-106-C", 0.5, 0.20)},   # 106.5 < 108 → 滤掉
+        {"strike": 110.0, "C": _call("260920-110-C", 0.6, 0.18)},   # 110.6 ≥ 108 ✓
+    ])])
+    no_c = osel.select_calls("SOL-USD_UM", base_px=100.0, chain=chain)
+    assert len(no_c["candidates"]) == 2 and no_c["filtered"]["cost_basis"] == 0
+    with_c = osel.select_calls("SOL-USD_UM", base_px=100.0, chain=chain, cost_basis=108.0)
+    assert [c["inst_id"] for c in with_c["candidates"]] == ["260920-110-C"]
+    assert with_c["filtered"]["cost_basis"] == 1
+
+
 def test_hard_filters_expiry_bid_distance_delta():
     chain = _chain(groups=[
         _group(2, 1, [{"strike": 95.0, "P": _put("260917-95-P", 0.5, -0.2)}]),       # 到期窗口外
