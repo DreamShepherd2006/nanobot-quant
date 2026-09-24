@@ -881,9 +881,12 @@ def test_cover_prefill_fallback_settle_then_strike(monkeypatch):
 
 
 def test_place_sell_call_params(_mock_sdk, _patch_entry, _covered_ok):
-    """卖 call 下单镜像 put：side=sell isolated；成交回填，kind=open_call。"""
+    """卖 call 下单镜像 put：side=sell isolated；成交回填，kind=open_call。
+
+    不传 cost_basis ⇒ 需 no_cost_basis_ack=True（C46 无成本锚确认门）。
+    """
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
-                         ord_type="limit", px=110.0)
+                         ord_type="limit", px=110.0, no_cost_basis_ack=True)
     call = _mock_sdk.calls[-1]
     assert call["instId"] == "BTC-USD_UM-260904-80000-C"
     assert call["side"] == "sell"
@@ -939,7 +942,7 @@ def _covered_ok(monkeypatch):
 
 
 def test_open_call_covered_gate_blocks_uncovered(_mock_sdk, _patch_entry, monkeypatch):
-    """covered 门（§33.40，fail-closed）：现货覆盖不足 → 拒绝，且不下单、不落台账。"""
+    """covered 门（§33.39，fail-closed）：现货覆盖不足 → 拒绝，且不下单、不落台账。"""
     monkeypatch.setattr(ot, "covered_context", _cov_stub(0, spot_avail=0.0001))
     with pytest.raises(OkxSdkError) as ei:
         ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
@@ -990,20 +993,78 @@ def test_open_call_covered_gate_real_context(_mock_sdk, _patch_entry, monkeypatc
 
     monkeypatch.setattr(ot, "account_balance", _bal(0.01))
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
-                         ord_type="limit", px=110.0)
+                         ord_type="limit", px=110.0, no_cost_basis_ack=True)
     assert entry["status"] == "open"
 
     monkeypatch.setattr(ot, "account_balance", _bal(0.001))
     with pytest.raises(OkxSdkError) as ei:
         ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
-                     ord_type="limit", px=110.0)
+                     ord_type="limit", px=110.0, no_cost_basis_ack=True)
     assert "covered 门不通过" in str(ei.value)
+
+
+# ── C46：无成本锚确认门（保本门不可静默跳过，2026-09-24）───────────
+
+
+def test_open_call_no_cost_basis_rejected_by_default(_mock_sdk, _patch_entry, _covered_ok):
+    """C46：无成本锚且未确认 → fail-closed 拒绝（不静默跳过保本门）。"""
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0)
+    msg = str(ei.value)
+    assert "缺少成本锚" in msg and "勾选" in msg
+    assert _mock_sdk.calls == []      # 未下单
+    assert ot.load_ledger() == []     # 未落台账
+
+
+def test_open_call_no_cost_basis_ack_allows_and_marks_ledger(_mock_sdk, _patch_entry, _covered_ok):
+    """C46：显式确认（no_cost_basis_ack=True）→ 放行，且台账记 no_cost_ack 标记备查。"""
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0, no_cost_basis_ack=True)
+    assert entry["status"] == "open"
+    assert entry.get("no_cost_ack") is True
+    assert entry.get("cost_basis") is None
+    assert _mock_sdk.calls[-1]["side"] == "sell"
+
+
+def test_open_call_ack_does_not_bypass_cost_basis_guard(_patch_entry, _covered_ok):
+    """C46：确认只能跳过「无 C」，不能跳过保本门——给了 C 照样校验 K+px ≥ C。"""
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0, cost_basis=80200.0,
+                     no_cost_basis_ack=True)
+    assert "保本门不通过" in str(ei.value)
+
+
+def test_open_call_with_cost_basis_needs_no_ack(_mock_sdk, _patch_entry, _covered_ok):
+    """C46：提供 C 时无需确认（默认路径不变），台账不记 no_cost_ack。"""
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0, cost_basis=80000.0)
+    assert entry["status"] == "open"
+    assert not entry.get("no_cost_ack")
+
+
+def test_open_put_unaffected_by_cost_basis_gate(_mock_sdk, _patch_entry, _covered_ok):
+    """C46 回归：卖 put 无成本锚概念，不受该门影响（无需 ack）。"""
+    entry = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                        ord_type="limit", px=110.0)
+    assert entry["status"] == "open"
+    assert not entry.get("no_cost_ack")
+
+
+def test_preview_open_call_reports_no_cost_ack(_mock_sdk):
+    """C46：预览回传 no_cost_ack 状态供页面区分「已确认/未确认无 C」。"""
+    p1 = ot.preview_open_call("BTC-USD_UM-260904-80000-C", 1, "limit", px=110.0)
+    assert p1["no_cost_ack"] is False and p1["gate"] is None
+    p2 = ot.preview_open_call("BTC-USD_UM-260904-80000-C", 1, "limit", px=110.0,
+                              no_cost_ack=True)
+    assert p2["no_cost_ack"] is True
 
 
 def test_place_close_call_buy(_mock_sdk, _patch_entry, _covered_ok):
     """买回平仓卖 call（止盈/主动落袋）：kind=close_call，pnl=(开−平)×lot×sz。"""
     ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
-                 ord_type="limit", px=110.0)
+                 ord_type="limit", px=110.0, no_cost_basis_ack=True)
     e = ot.close_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                       ord_type="limit", px=108.0)
     call = _mock_sdk.calls[-1]
@@ -1030,7 +1091,7 @@ def test_close_call_does_not_touch_put_rows(_mock_sdk, _patch_entry, _covered_ok
     ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
                 ord_type="limit", px=110.0)
     ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
-                 ord_type="limit", px=110.0)
+                 ord_type="limit", px=110.0, no_cost_basis_ack=True)
     e = ot.close_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                       ord_type="limit", px=108.0)
     assert e["status"] == "closed"

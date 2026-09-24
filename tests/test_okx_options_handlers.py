@@ -37,11 +37,21 @@ def _make_fake(calls, name):
 
 
 def test_dispatch_sell_call(_dispatch_mocks):
-    """C 合约 → open_call，cost_basis 透传（保本门强制在后端执行）。"""
+    """C 合约 → open_call，cost_basis / no_cost_basis_ack 透传（门在后端执行）。"""
     oh._dispatch_sell("bot1", "SOL-USD_UM-260910-101-C", 1, "limit", 1.1, cost_basis=106.0)
     assert _dispatch_mocks["open_call"]["kw"]["cost_basis"] == 106.0
     assert _dispatch_mocks["open_call"]["kw"]["inst_id"].endswith("-C")
     assert "open_put" not in _dispatch_mocks
+
+
+def test_dispatch_sell_call_no_cost_ack_passthrough(_dispatch_mocks):
+    """C46：无成本锚确认标志必须透传到 open_call（否则后端门直接拒）。"""
+    oh._dispatch_sell("bot1", "SOL-USD_UM-260910-101-C", 1, "limit", 1.1,
+                      cost_basis=None, no_cost_ack=True)
+    assert _dispatch_mocks["open_call"]["kw"]["no_cost_basis_ack"] is True
+    # 默认未确认
+    oh._dispatch_sell("bot1", "SOL-USD_UM-260910-101-C", 1, "limit", 1.1, cost_basis=106.0)
+    assert _dispatch_mocks["open_call"]["kw"]["no_cost_basis_ack"] is False
 
 
 def test_dispatch_sell_put(_dispatch_mocks):
@@ -84,6 +94,49 @@ def test_dispatch_preview_put(_dispatch_mocks):
     oh._dispatch_preview("SOL-USD_UM-260910-101-P", 1, "limit", 0.3)
     assert "preview_open_put" in _dispatch_mocks
     assert "preview_open_call" not in _dispatch_mocks
+
+
+def test_dispatch_preview_call_no_cost_ack_passthrough(_dispatch_mocks):
+    """C46：预览也透传 no_cost_ack（页面据此区分「已确认 / 未确认无 C」）。"""
+    oh._dispatch_preview("SOL-USD_UM-260910-101-C", 1, "limit", 1.1, no_cost_ack=True)
+    assert _dispatch_mocks["preview_open_call"]["kw"]["no_cost_ack"] is True
+    oh._dispatch_preview("SOL-USD_UM-260910-101-C", 1, "limit", 1.1)
+    assert _dispatch_mocks["preview_open_call"]["kw"]["no_cost_ack"] is False
+
+
+def test_sell_stage_to_confirm_carries_no_cost_ack(_dispatch_mocks):
+    """C46 全链路（start stage → confirm consume → dispatch）：
+
+    ack 必须随 stage 一路传到 open_call——否则勾选确认后仍会被后端门误拒。
+    镜像 _sell_confirm 的取参方式（ack 取自 stage payload，不由 confirm 单独传）。
+    """
+    oh._pending_tx.clear()
+    st = oh._stage("sell", {"account": "bot1", "inst_id": "SOL-USD_UM-260910-101-C",
+                            "sz": 1, "ord_type": "limit", "px": 1.1,
+                            "cost_basis": None, "no_cost_ack": True,
+                            "opt_type": "C", "preview": {}})
+    act, err = oh._consume({"tx_id": st["tx_id"]})
+    assert err is None and act["action"] == "sell"
+    p = act["payload"]
+    oh._dispatch_sell(p["account"], p["inst_id"], p["sz"], p["ord_type"],
+                      p.get("px"), p.get("cost_basis"), bool(p.get("no_cost_ack")))
+    assert _dispatch_mocks["open_call"]["kw"]["no_cost_basis_ack"] is True
+    # 令牌一次性：重复 confirm 必须失效
+    _, err2 = oh._consume({"tx_id": st["tx_id"]})
+    assert err2 and "无效" in err2
+
+
+def test_options_page_no_cost_ack_controls():
+    """C46 页面契约：卖 call 弹窗必须有「无成本锚确认」勾选框，且台账行标记可见。"""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1]
+            / "src" / "nanobot_quant" / "okx_options_page.html").read_text(encoding="utf-8")
+    assert 'id="mNoCostAck"' in html                  # 勾选框存在
+    assert 'id="mRowCostAck"' in html                 # 所在行（随 call 模式显隐）
+    assert "后端默认拒绝" in html                      # 未勾选时的后果文案
+    assert "no_cost_ack" in html                       # 表单透传字段
+    assert "⚠️无成本锚" in html                          # 台账行标记（e.no_cost_ack）
+    assert "no_cost_ack" in html and "e.no_cost_ack" in html
 
 
 def test_ledger_page_pnl_falls_back_to_settle_pnl():

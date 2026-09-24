@@ -73,20 +73,22 @@ def _deny(err: str) -> JSONResponse:
 
 
 def _dispatch_preview(inst_id: str, sz: int, ord_type: str, px,
-                      cost_basis=None) -> dict:
-    """按合约类型分派订单预览：Call → preview_open_call（含保本门），Put → preview_open_put。"""
+                      cost_basis=None, no_cost_ack: bool = False) -> dict:
+    """按合约类型分派订单预览：Call → preview_open_call（含保本门/无成本锚确认），Put → preview_open_put。"""
     if ot.resolve_instrument(inst_id)["opt_type"] == "C":
         return ot.preview_open_call(inst_id, sz, ord_type, px,
-                                    cost_basis=cost_basis)
+                                    cost_basis=cost_basis,
+                                    no_cost_ack=no_cost_ack)
     return ot.preview_open_put(inst_id, sz, ord_type, px)
 
 
 def _dispatch_sell(account: str, inst_id: str, sz: int, ord_type: str,
-                   px, cost_basis=None) -> dict:
-    """卖期权分派：Call → open_call（cost_basis 保本门强制），Put → open_put。"""
+                   px, cost_basis=None, no_cost_ack: bool = False) -> dict:
+    """卖期权分派：Call → open_call（保本门 / 无成本锚确认门强制），Put → open_put。"""
     if ot.resolve_instrument(inst_id)["opt_type"] == "C":
         return ot.open_call(account, inst_id=inst_id, sz=sz, ord_type=ord_type,
-                            px=px, cost_basis=cost_basis)
+                            px=px, cost_basis=cost_basis,
+                            no_cost_basis_ack=no_cost_ack)
     return ot.open_put(account, inst_id=inst_id, sz=sz, ord_type=ord_type, px=px)
 
 
@@ -698,9 +700,10 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         ord_type = (body.get("ord_type") or "limit").lower()
         px = _num(body, "px")
         cost_basis = _num(body, "cost_basis")
+        no_cost_ack = bool(body.get("no_cost_ack"))
         try:
             out = await asyncio.to_thread(
-                _dispatch_preview, inst_id, sz, ord_type, px, cost_basis)
+                _dispatch_preview, inst_id, sz, ord_type, px, cost_basis, no_cost_ack)
             return JSONResponse(out)
         except (OkxSdkError, RuntimeError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
@@ -718,17 +721,19 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         ord_type = (body.get("ord_type") or "limit").lower()
         px = _num(body, "px")
         cost_basis = _num(body, "cost_basis")
+        no_cost_ack = bool(body.get("no_cost_ack"))
         if sz <= 0:
             return JSONResponse({"ok": False, "error": "张数必须为正整数"})
         try:
             prev = await asyncio.to_thread(
-                _dispatch_preview, inst_id, sz, ord_type, px, cost_basis)
+                _dispatch_preview, inst_id, sz, ord_type, px, cost_basis, no_cost_ack)
         except (OkxSdkError, RuntimeError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "stage": _stage("sell", {
             "account": account, "inst_id": inst_id, "sz": sz,
             "ord_type": ord_type, "px": px if ord_type != "market" else None,
             "cost_basis": cost_basis,
+            "no_cost_ack": no_cost_ack,
             "opt_type": prev.get("opt_type", "P"),
             "preview": prev})})
 
@@ -748,7 +753,8 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         try:
             res = await asyncio.to_thread(
                 _dispatch_sell, p["account"], p["inst_id"], p["sz"],
-                p["ord_type"], p.get("px"), p.get("cost_basis"))
+                p["ord_type"], p.get("px"), p.get("cost_basis"),
+                bool(p.get("no_cost_ack")))
             return JSONResponse({"ok": True, "entry": res})
         except (OkxSdkError, RuntimeError) as e:
             return JSONResponse({"ok": False, "error": str(e)})

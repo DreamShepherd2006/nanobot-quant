@@ -364,6 +364,14 @@
       <label>成本锚 C（接货价，保本门）</label><input type="number" id="mCost" step="any" placeholder="默认=已 settled_itm put 行权价">
       <span class="hint" id="mCostHint">保本门：K_call + px ≥ C 才可卖 call（页面预校验 + 后端强制）</span>
     </div>
+    <div class="row" id="mRowCostAck" style="display:none">
+      <label>无成本锚确认</label>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
+        <input type="checkbox" id="mNoCostAck" style="width:auto;margin:0">
+        我确认放弃保本门卖出（无 C）
+      </label>
+      <span class="hint">未填 C 时<b>后端默认拒绝</b>（保本门不可判定，fail-closed）；仅用于「手动补买现货后卖 call、接货价不便填」等场景——勾选后本次卖出放行，并在台账标记「⚠️ 无成本锚」备查。</span>
+    </div>
     <div class="row" id="mRowAmt" style="display:none">
       <label>补买金额(USD)</label><input type="number" id="mAmt" step="any" min="0" placeholder="quote_amt（或下方数量二选一）">
     </div>
@@ -904,6 +912,7 @@ async function loadLedger() {
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
         '</td><td>' + usd(e.premium_usd) + '</td><td class="mono">' + feeUsd(e) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
         '</td><td>' + pnlUsd(e) + '</td><td>' + esc(e.status) +
+        (e.no_cost_ack ? ' <span class="warn" title="无成本锚卖出：用户显式确认（页面勾选），保本门未校验——K + px ≥ C 不可判定">⚠️无成本锚</span>' : '') +
         '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
     }
     html += '</tbody></table>';
@@ -1053,6 +1062,7 @@ async function openSellFor(instId) {
   if (opt === "C") {
     // covered 上下文：现货可用/可卖张数 + 成本锚 C 建议
     $("mRowCost").style.display = ""; $("mCost").value = "";
+    $("mRowCostAck").style.display = ""; $("mNoCostAck").checked = false;
     $("mCostHint").textContent = "保本门：K_call + px ≥ C 才可卖 call（页面预校验 + 后端强制）。默认带出该标的被行权 put（settled_itm）行权价 = 被动持仓成本；混批多批时取最大（最保守）。";
     $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 call（covered call，收权利金）<br>每张面值 ' + fmt(lot, 4) +
       ' ' + esc(base) + ' · 逐仓(isolated) · <b>不做全损现金担保</b>（call 上行无界）——covered 由现货在手实现；被行权=现金结算赔付后现货市价卖出（等效按 K 出货）。';
@@ -1060,6 +1070,7 @@ async function openSellFor(instId) {
     loadCoveredCtx(instId);   // async 填充现货/成本锚（见下）
   } else {
     $("mRowCost").style.display = "none";
+    $("mRowCostAck").style.display = "none"; $("mNoCostAck").checked = false;
     $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 put（收权利金）<br>每张面值 ' + fmt(lot, 4) +
       ' ' + esc(base) + ' · 逐仓(isolated) · 成交后自动追加至担保目标（比例见「⚙️ 担保设置」）';
     $("mTypeHint").textContent = "OKX 期权无纯市价单（50016）；卖 put 立即成交：限价 px=盘口 bid，或 IOC 保底价 ≤bid（如 0.01）扫单";
@@ -1088,7 +1099,8 @@ async function loadCoveredCtx(instId) {
         "（<b>后端强制</b>：绕过页面直调下单入口同样会被拒）</span>";
     hint.innerHTML = sellableTxt +
       "<br>U 本位期权<b>现金结算</b>：被行权只赔 (结算价−K)×面值 的现金差价、<b>不交出币</b>——现货是对冲工具（浮盈对冲赔付），组合（现货+短 call）无爆仓路径。保本门：K_call + px ≥ C，K&lt;C 时永远不通过（浮亏现货需等 K&gt;C 档或价格回升）。" +
-      "成本锚默认=" + (r.cost_hint ? "被行权 put 行权价 $" + fmt(r.cost_hint, 4) : "无（手动填被动持仓接货价）") + "，可改。";
+      "成本锚默认=" + (r.cost_hint ? "被行权 put 行权价 $" + fmt(r.cost_hint, 4) : "无（手动填被动持仓接货价）") + "，可改。" +
+      "<br><b>未填 C 时后端默认拒绝</b>（保本门不可判定）——确需放弃保本门请勾选「无成本锚确认」后重试。";
     $("mCost").value = r.cost_hint != null ? r.cost_hint : "";
     if (r.note) hint.innerHTML += "<br><span style='color:#b26a00'>" + esc(r.note) + "</span>";
     gateDisabled = r.sellable_sz <= 0;
@@ -1289,6 +1301,10 @@ function formVal() {
   if (modalMode === "sell" && modalOpt === "C" && $("mCost") && $("mCost").value) {
     f.cost_basis = parseFloat($("mCost").value);
   }
+  if (modalMode === "sell" && modalOpt === "C" && $("mNoCostAck") && $("mNoCostAck").checked) {
+    // 显式放弃保本门（后端默认拒绝无 C 卖 call）；台账会记 no_cost_ack 标记
+    f.no_cost_ack = true;
+  }
   return f;
 }
 
@@ -1339,8 +1355,10 @@ async function doPreview(mode) {
           : "<b>保本门：</b><span style='color:#c62828'>🔴 不通过（该轮跳过，fail-closed）</span>（K=" + fmt(p.strike, 4) +
             " + px=" + fmt(p.px, 4) + " = " + fmt(g && g.guard, 4) + " &lt; C=" + fmt(cb, 4) +
             "）——请抬高行权价 / 等待权利金回升 / 上调 C 后再卖";
+      } else if (f.no_cost_ack) {
+        extraTxt = "<b>保本门：</b><span class='warn'>🟠 已确认放弃（无成本锚）</span>——后端将放行本次卖出，台账会标记「⚠️ 无成本锚」；K+px ≥ C 无法校验，请自行确认 K 足够高";
       } else {
-        extraTxt = "<b>保本门：</b><span class='warn'>未填成本锚 C——后端不校验保本门（K+px ≥ C 需 C 才有意义）；covered 卖出请务必填 C（默认带出被行权价）</span>";
+        extraTxt = "<b>保本门：</b><span style='color:#c62828'>🔴 未填成本锚 C——后端默认拒绝（fail-closed，该轮跳过）</span>。若确认放弃保本门（如手动补买现货后卖 call），请勾选上方「我确认放弃保本门卖出（无 C）」后重试。";
       }
       extraTxt += "<br><b>担保：</b>不做全损现金担保（上行无界）——covered 由现货在手实现，isolated 仅平台 IM 冻结，暴涨接近强平价需主动买回平仓或补保证金";
     } else {
@@ -1380,10 +1398,15 @@ async function doStageSell() {
   const f = formVal();
   try {
     if (modalOpt === "C" && gateDisabled) { throw new Error("无现货可卖 call（covered 禁止裸卖上行）——请先补足现货后重开本弹窗"); }
+    if (modalOpt === "C" && !f.cost_basis && !f.no_cost_ack) {
+      throw new Error("未填成本锚 C 且未勾选「无成本锚确认」——后端默认拒绝（fail-closed）。请填 C，或勾选确认后重试");
+    }
     const j = await jpost("/config/okx-options/sell/start", f);
     stageInfo = j.stage;
     const warnTxt = modalOpt === "C"
-      ? "逐仓卖 call（covered，现货在手覆盖上行，不追加全损担保）；被行权=现金结算赔付后现货市价卖出（等效按 K 出货）"
+      ? (f.cost_basis
+         ? "逐仓卖 call（covered，现货在手覆盖上行，不追加全损担保）；被行权=现金结算赔付后现货市价卖出（等效按 K 出货）"
+         : "逐仓卖 call（covered，现货在手覆盖上行，不追加全损担保）；<b>无成本锚（已确认）</b>——本次<b>不校验保本门</b>，台账将标记「⚠️ 无成本锚」")
       : "逐仓卖 put，成交后自动追加至担保目标；请确保账户自留足额现金";
     $("mPreview").innerHTML += "<br>⚠️ 确认令牌已生成（30 秒内有效）。点击「② 最终确认卖出」真实下单（不可撤回，" + warnTxt + "）。";
     $("mGo").textContent = "② 最终确认卖出";
