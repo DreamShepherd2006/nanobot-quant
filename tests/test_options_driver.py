@@ -335,6 +335,28 @@ def test_run_records_open_positions_with_mark(monkeypatch):
             row["strike"] * 0.1 * row["sz"])
 
 
+def test_run_open_premium_separate_from_settled(monkeypatch):
+    """未平仓那张的权利金单列（与净值闭合），不混进「已了结」栏。
+
+    2026-09-25 实测：权利金栏 0.358 = 3 张已了结之和（0.124+0.152+0.082），
+    而净值含第 4 张（未平仓、权利金 0.066）—— 只给一栏会看着像算错。
+    """
+    d = _driver(tp_pct=999.0)                     # 止盈线不可达 → 必然留下未平仓
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
+    res = d.run()
+    opens = res["final_positions"]
+    assert opens, "止盈不可达时必然留下未平仓"
+    lot = 0.1                                     # SOL 家族每张面值
+    expect = sum(r["entry_px"] * lot * r["sz"] for r in opens)
+    assert res["kpi"]["open_premium_usd"] == pytest.approx(round(expect, 4), abs=1e-4)
+    # 已了结栏只能来自带 premium_usd 的记录（到期/买回），不含未平仓那张
+    settled = sum(f.get("premium_usd") or 0 for f in res["fills"])
+    assert res["kpi"]["premium_income_usd"] == pytest.approx(round(settled, 4), abs=1e-4)
+
+
 def test_run_result_is_json_serializable(monkeypatch):
     """端点返回前必须能 JSON 序列化 —— 曾因 pandas Timestamp 直接 500。
 

@@ -540,12 +540,16 @@ class OptionsBacktestDriver:
         last_ts = bt[-1]
         self.data.seek(last_ts)
         open_value, open_rows = 0.0, []
+        # 未平仓那张的权利金早已进 cash，但不在 ``premium_usd``（只有了结记录带
+        # 这个字段）里 —— 单列出来才与净值闭合。
+        open_premium = 0.0
         for p in positions:
             mark = self.data.premium_of(p.inst_id, last_ts)
             if mark is None:
                 mark = p.entry_px
             val = mark * p.lot_coin * p.sz
             open_value += val
+            open_premium += p.entry_px * p.lot_coin * p.sz
             open_rows.append({
                 "inst_id": p.inst_id, "strike": p.strike, "sz": p.sz,
                 "entry_px": round(p.entry_px, 6), "mark_px": round(mark, 6),
@@ -571,7 +575,10 @@ class OptionsBacktestDriver:
         out["kpi"] = {
             "final_net_usd": round(net, 4),
             "roi_pct": round((net - self.initial_cash) / self.initial_cash * 100, 4),
+            # 权利金口径：``premium_usd`` 只出现在到期/买回了结的记录里 ⇒ 本项是
+            # **已了结**部分；期末未平仓那张的权利金在 cash 里、却不在此列（净值含它）。
             "premium_income_usd": round(sum(f.get("premium_usd") or 0 for f in fills), 4),
+            "open_premium_usd": round(open_premium, 4),
             "payout_usd": round(sum(f.get("payout_usd") or 0 for f in fills), 4),
             "open_mark_value_usd": round(open_value, 4),
             "fills": len(fills),

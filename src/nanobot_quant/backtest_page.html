@@ -925,7 +925,8 @@ function renderOptResult(res, runId) {
   const kpi = [
     ["期末净值", `$${fmtN(k.final_net_usd, 4)}`],
     ["ROI", `<b class="${roi < 0 ? "sl-neg" : ""}">${roi >= 0 ? "+" : ""}${fmtN(roi, 4)}%</b>`],
-    ["权利金收入", `$${fmtN(k.premium_income_usd, 4)}`],
+    ["权利金收入（已了结）", `$${fmtN(k.premium_income_usd, 4)}`],
+    ["未平仓权利金", k.open_premium_usd == null ? "—" : `$${fmtN(k.open_premium_usd, 4)}`],
     ["赔付支出", `$${fmtN(k.payout_usd, 4)}`],
     ["期末持仓市值", `$${fmtN(k.open_mark_value_usd, 4)}（负债，已从净值扣减）`],
     ["成交笔数", `${k.fills}（盈利 ${k.wins} / 亏损 ${k.losses}）`],
