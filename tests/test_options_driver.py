@@ -173,6 +173,37 @@ def test_opt_params_cached_no_duplicate_notes():
     assert len([n for n in d.notes if "张数上限" in n]) == 1
 
 
+# ── 止盈线接线（2026-09-25 复验发现：此前恒 None = 全程不止盈）─────
+
+def test_tp_pct_follows_live_params_when_not_passed():
+    """未显式传 tp_pct → 跟随实盘策略参数。
+
+    回归背景：driver 默认 ``tp_pct=None`` 被直接透传给 ``evaluate_exits``，
+    而它对 falsy 立即返回空 ⇒ 回测全程零止盈买回、离场全靠到期；启动行却
+    照打「止盈=50%」（读的是策略参数），日志与实际行为不一致。
+    """
+    d = _driver_with_opt_params({"entry_setup": 9, "take_profit_pct": 50})
+    d.tp_pct = d._resolve_tp_pct(d._opt_params())        # run() 里的同一步
+    assert d.tp_pct == 50.0
+    assert d._tp_txt() == "50%"
+
+
+def test_tp_pct_explicit_wins_over_live_params():
+    """CLI --tp / 页面覆盖优先于实盘配置。"""
+    d = _driver(tp_pct=30.0)
+    d.opt_params = {"take_profit_pct": 50}
+    d._opt_cache = None
+    assert d._resolve_tp_pct(d._opt_params()) == 30.0
+
+
+def test_tp_pct_zero_or_missing_means_disabled():
+    """0 / 空 = 关闭止盈，日志要写「关闭」而不是 ``None%``。"""
+    for raw in (0, None, ""):
+        d = _driver_with_opt_params({"take_profit_pct": raw})
+        assert d._resolve_tp_pct(d._opt_params()) is None
+    assert _driver_with_opt_params({"take_profit_pct": 0})._tp_txt() == "关闭"
+
+
 @pytest.mark.parametrize("inst,expect", [
     ("SOL-USD_UM-260918-100-P", "2026-09-18 08:00 UTC"),
     ("SOL-USD_UM-260918-100.5-P", "2026-09-18 08:00 UTC"),
@@ -333,6 +364,17 @@ def test_run_records_open_positions_with_mark(monkeypatch):
                             "collateral_usd", "mark_value_usd", "pnl_pct"}
         assert row["collateral_usd"] == pytest.approx(
             row["strike"] * 0.1 * row["sz"])
+
+
+def test_run_resolves_tp_pct_from_live_params(monkeypatch):
+    """整轮跑通时，生效止盈线 = 实盘配置值（不再静默变 None）。"""
+    d = _driver_with_opt_params({"entry_setup": 9, "take_profit_pct": 999})
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
+    res = d.run()
+    assert res["tp_pct"] == 999.0
 
 
 def test_run_open_premium_separate_from_settled(monkeypatch):

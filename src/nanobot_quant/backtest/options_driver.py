@@ -406,6 +406,31 @@ class OptionsBacktestDriver:
         })
         return cash
 
+    # ── 止盈线 ──────────────────────────────────────────────
+
+    def _resolve_tp_pct(self, op: dict) -> Optional[float]:
+        """生效止盈线：显式传入优先，未传则跟随实盘策略参数（0/空 = 关闭）。
+
+        ``evaluate_exits`` 对 falsy 的 ``tp_pct`` 直接返回空 —— 即「不止盈」。
+        """
+        if self.tp_pct is not None:
+            try:
+                return float(self.tp_pct)
+            except (TypeError, ValueError):
+                return None
+        raw = op.get("take_profit_pct")
+        if raw in (None, ""):
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return val if val > 0 else None
+
+    def _tp_txt(self) -> str:
+        """日志用：把「不止盈」显示成中文，别让 None 打成 ``None%``。"""
+        return f"{self.tp_pct:g}%" if self.tp_pct else "关闭"
+
     # ── 主流程 ──────────────────────────────────────────────
 
     def run(self) -> dict:
@@ -419,6 +444,11 @@ class OptionsBacktestDriver:
             f"区间={self.start_ts or '默认'}→{self.end_ts}"
         )
         op = self._opt_params()
+        # 止盈线：显式传入（CLI --tp / 页面覆盖）优先，未传则跟随实盘策略参数。
+        # 此前 driver 的 ``tp_pct`` 默认 None 被直接透传，``evaluate_exits`` 对 falsy
+        # 立即返回空 —— 全程零止盈买回、离场全靠到期，而启动行照打「止盈=50%」：
+        # 日志与实际行为不一致（2026-09-25 复验：期末浮盈 99.91% 的持仓不被平仓）。
+        self.tp_pct = self._resolve_tp_pct(op)
         # selector 不在策略参数里（它是 option_params.json 的兄弟字段）——
         # 统一走 selector_params() 这个唯一入口，没传就用实盘磁盘配置。
         from nanobot_quant.okx_options_select import selector_params
@@ -430,7 +460,8 @@ class OptionsBacktestDriver:
             f"td_period={op.get('td_period')} "
             f"单家族上限={op.get('max_contracts_per_family')} "
             f"全局上限={op.get('max_contracts_total')} "
-            f"IV闸门={op.get('iv_min_percentile')} 止盈={op.get('take_profit_pct')}%"
+            f"IV闸门={op.get('iv_min_percentile')} "
+            f"止盈={op.get('take_profit_pct')}%（生效={self._tp_txt()}）"
         )
         self._log(
             f"选档 最小距离={sel['min_distance_pct']}% "
