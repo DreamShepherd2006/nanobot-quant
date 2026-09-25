@@ -1,7 +1,10 @@
-"""卖 put 自动循环决策核心单测（纯函数，不触网）。"""
+"""卖 put / 卖 call 自动循环决策核心单测（纯函数，不触网）。"""
 
 from __future__ import annotations
 
+import pytest
+
+from nanobot_quant import okx_options_select as osl
 from nanobot_quant import okx_options_strategy as st
 
 FAMILY = "SOL-USD_UM"
@@ -22,6 +25,32 @@ CHAIN = {
 
 PARAMS = {"entry_setup": 9, "entry_countdown": 13,
           "max_contracts_per_family": 1, "max_contracts_total": 3}
+
+# 卖 call（covered）注入链：C 侧候选；strike 104 距现价 4% < 5% 应被距离过滤
+CALL_CHAIN = {
+    "family": FAMILY, "spot": 100.0, "lot_coin": 0.1,
+    "groups": [{
+        "days": 5, "date": "2026-09-20", "exp_ms": 1789948800000,
+        "rows": [
+            {"strike": 104.0, "C": {"inst_id": "SOL-USD_UM-260920-104-C",
+                                      "bid": 1.20, "ask": 1.35, "iv": 80.0, "delta": 0.30}},
+            {"strike": 108.0, "C": {"inst_id": "SOL-USD_UM-260920-108-C",
+                                      "bid": 0.50, "ask": 0.60, "iv": 80.0, "delta": 0.20}},
+            {"strike": 112.0, "C": {"inst_id": "SOL-USD_UM-260920-112-C",
+                                      "bid": 0.20, "ask": 0.28, "iv": 80.0, "delta": 0.10}},
+        ],
+    }],
+}
+COVERED = {"base": "SOL", "spot_avail": 0.2, "sellable_sz": 2,
+           "spot_cov_pct": 200.0, "cost_hint": 104.0}
+CALL_PARAMS = {"max_calls_per_family": 1, "max_calls_total": 2}
+
+
+def _call(**kw):
+    args = {"params": CALL_PARAMS, "covered": dict(COVERED),
+            "chain": CALL_CHAIN, "base_px": 100.0}
+    args.update(kw)
+    return st.evaluate_call_entry(FAMILY, **args)
 
 
 def _entry(**kw):
@@ -176,3 +205,72 @@ class TestRightIsolation:
         rows = [_pos("NOPE", 2.0, 0.3, 0.3)]
         assert st.contracts_by_family(rows) == {}
         assert st.evaluate_exits([_pos("NOPE", 2.0, 0.40, 0.10)], tp_pct=50) == []
+
+
+# ── 卖 call（covered）入场决策（§33.40）──────────────────────
+class TestEvaluateCallEntry:
+    def test_happy_path(self):
+        d, note = _call()
+        assert d is not None
+        assert d.inst_id == "SOL-USD_UM-260920-108-C"       # 104-C 被距离过滤（距现价 4%）
+        assert d.opt_type == "C" and d.sz == 1
+        assert d.cost_basis == 104.0                        # 默认取同家族接货价
+        assert d.collateral_usd == pytest.approx(10.0)       # 现货市值 100 × 0.1
+        assert "covered" in d.entry_reason and "成本锚 C=104" in note
+        assert d.to_event()["opt_type"] == "C"
+
+    def test_put_decision_defaults_to_p(self):
+        d, _ = _entry()
+        assert d.opt_type == "P" and d.to_event()["opt_type"] == "P"
+
+    def test_family_cap_blocks(self):
+        d, note = _call(open_calls=1)
+        assert d is None and "张数上限" in note
+
+    def test_total_cap_blocks(self):
+        d, note = _call(open_calls=0, total_calls=2)
+        assert d is None and "张数上限：全局" in note
+
+    def test_covered_capacity_subtracts_inflight(self):
+        """现货覆盖 2 张、已在仓 2 张 call ⇒ 无余量（不重复使用覆盖）。"""
+        d, note = _call(open_calls=2, total_calls=2, params={})
+        assert d is None and "covered 容量不足" in note
+
+    def test_covered_missing_fails_closed(self):
+        d, note = _call(covered=None)
+        assert d is None and "covered 上下文不可用" in note
+
+    def test_cost_anchor_missing_is_fail_closed(self):
+        cv = {**COVERED, "cost_hint": None}
+        d, note = _call(covered=cv)
+        assert d is None and "无成本锚" in note and "fail-closed" in note
+
+    def test_allow_no_cost_basis_passes_with_warning(self):
+        cv = {**COVERED, "cost_hint": None}
+        d, note = _call(covered=cv, params={**CALL_PARAMS, "allow_no_cost_basis": True})
+        assert d is not None and d.cost_basis is None
+        assert "⚠️ 无成本锚" in note
+
+    def test_explicit_cost_basis_overrides_hint(self):
+        d, note = _call(cost_basis=120.0)
+        assert d is None and "无合格候选" in note            # K+bid ≥ 120 的档不存在
+        d2, _ = _call(cost_basis=108.5)                       # 108-C: 108+0.5 = 108.5 ≥ 108.5 ✓
+        assert d2 is not None and d2.cost_basis == 108.5
+
+    def test_cost_basis_filter_excludes_cheap_calls(self):
+        """保本门硬过滤：K+bid < C 的档不进候选（选档与执行门同判据）。"""
+        res = osl.select_calls(FAMILY, base_px=100.0, chain=CALL_CHAIN, cost_basis=112.2)
+        ids = [c["inst_id"] for c in res["candidates"]]
+        assert ids == ["SOL-USD_UM-260920-112-C"]            # 112+0.2 = 112.2 ≥ C
+        # 104-C 先被距离过滤（距现价 4%）→ 保本门只过滤掉 108-C 一档
+        assert res["filtered"]["cost_basis"] == 1
+        assert res["filtered"]["distance"] == 1
+
+    def test_no_candidates_when_all_too_close(self):
+        chain = {"family": FAMILY, "spot": 100.0, "lot_coin": 0.1,
+                 "groups": [{"days": 5, "date": "d", "exp_ms": 1,
+                             "rows": [{"strike": 101.0,
+                                       "C": {"inst_id": "SOL-USD_UM-260920-101-C",
+                                             "bid": 0.9, "ask": 1.0, "iv": 80.0, "delta": 0.4}}]}]}
+        d, note = _call(chain=chain)
+        assert d is None and "无合格候选" in note

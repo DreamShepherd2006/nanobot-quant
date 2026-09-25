@@ -8,6 +8,7 @@ mock ot.settle_expired_puts / 凭证存储路径，验证：
 关掉 dry_run 才真下单/买回、持仓查询失败不抛异常。
 """
 
+import threading
 import time
 
 import pytest
@@ -31,8 +32,9 @@ def _iso(tmp_path, monkeypatch):
     _r._stop_event.clear()
     _r._state["totals"] = {}
     # 方案 B：策略/executor 是 runner 实例状态 —— 不复位会把上一个测试的
-    # stop_requested 等标志带过来（表现为下一测试首轮就 SystemExit）。
+    # stop_requested / _stopping 等标志带过来（表现为下一测试首轮就不执行）。
     _r._executor = None
+    _r._stopping = False
     from nanobot_quant import okx_options_live_state as _lst
     _lst.reset()
     # 注入轻量策略：do_round() 走「真实策略逻辑」，但不构造 broker / 不碰网络。
@@ -95,12 +97,27 @@ def _settled_one(**kw):
     return d
 
 
+class _FakeScheduler:
+    """假 scheduler（镜像 lumibot ``executor.scheduler`` 的两个用法）。"""
+
+    def __init__(self):
+        self.removed = 0
+        self.shutdown_calls: list = []
+
+    def remove_all_jobs(self):
+        self.removed += 1
+
+    def shutdown(self, wait=True):
+        self.shutdown_calls.append(wait)
+
+
 class _FakeExecutor:
     """测试用 executor 替身（方案 B 后 runner 把节拍交给 lumibot）。
 
-    ``run()`` 轮询到 ``strategy.parameters["stop_requested"]`` 或自身
-    ``stop()`` 就返回；``rounds>0`` 时先跑 N 轮真实策略逻辑（测周期场景）。
-    不依赖 threading —— 只需 time（本文件已 import）。
+    镜像真实 lumibot 的两条停止语义：``executor.stop_event``（主循环据此 break
+    —— 2026-09-25 修正后 runner 走这条）+ ``strategy.parameters["stop_requested"]``
+    （策略侧本轮不再执行）；``scheduler`` 用于验证停止时的清理调用。
+    不依赖 threading 以外的依赖 —— 只需 time（本文件已 import）。
     """
 
     def __init__(self, strategy=None, rounds: int = 0):
@@ -109,9 +126,11 @@ class _FakeExecutor:
         self.rounds = rounds
         self._count = 0
         self._stopped = False
+        self.stop_event = threading.Event()
+        self.scheduler = _FakeScheduler()
 
     def run(self):
-        while not self._stopped:
+        while not self._stopped and not self.stop_event.is_set():
             if self.strategy is not None and \
                     self.strategy.parameters.get("stop_requested"):
                 return
@@ -255,18 +274,47 @@ def test_load_events_otm_untouched(_iso, monkeypatch):
 
 # ── 线程生命周期 sync ────────────────────────────────────
 
+def _wait_stopped(timeout: float = 5.0) -> bool:
+    """等优雅停止收尾。
+
+    ``stop()`` 立即返回（不阻塞页面），线程在数百毫秒内退出 —— 旧版测试直接
+    断言 ``running is False``，在异步停语义下必然失败（2026-09-25 改异步后修正）。
+    """
+    deadline = time.time() + timeout
+    r = ol._runner()
+    while time.time() < deadline:
+        if ol.live_state()["running"] is False and r._thread is None:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _wait(pred, timeout: float = 5.0) -> bool:
+    """轮询等条件成立（线程刚起/刚退都可能需一拍才可见）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return bool(pred())
+
+
 def test_sync_start_stop(_iso, monkeypatch):
     # 缩短心跳避免测试挂起——直接 patch interval 后启动
+    # 用长驻假 executor：本用例只验启停语义，不碰网络（真 executor 会查 OKX 账户，
+    # 整套跑受负载影响时会因异常而线程早退 —— 也是这个用例历史上 flaky 的根因）
+    _patch_executor(monkeypatch)
     monkeypatch.setattr(ol, "MIN_INTERVAL_S", 1)
     ol.save_live_config(enabled=True, interval_s=1)
-    st = ol.sync()
-    assert st["running"] is True
+    ol.sync()
+    # 线程刚起来可能需一拍（整套跑时负载高）——失败时把 last_error 打出来
+    assert _wait(lambda: ol.live_state()["running"]), \
+        f"循环未起来：last_error={ol.live_state().get('last_error')!r}"
     # 同一配置再 sync = 幂等不重启
     assert ol.sync()["running"] is True
     ol.save_live_config(enabled=False)
-    st = ol.sync()
-    assert st["running"] is False
-    assert ol.live_state()["running"] is False
+    assert ol.sync()["running"] is False
+    assert _wait_stopped()
 
 
 def test_sync_interval_change_restarts(_iso, monkeypatch):
@@ -280,7 +328,7 @@ def test_sync_interval_change_restarts(_iso, monkeypatch):
     assert st["config"]["interval_s"] == 15
     ol.save_live_config(enabled=False)
     ol.sync()
-    assert ol.live_state()["running"] is False
+    assert _wait_stopped()
 
 
 def test_daemon_runs_periodic_settle(_iso, monkeypatch):
@@ -301,7 +349,68 @@ def test_daemon_runs_periodic_settle(_iso, monkeypatch):
     assert ol.live_state()["total_settled"] >= 1
     assert len(ol.load_events(10)) >= 1
     ol.stop()
-    assert ol.live_state()["running"] is False
+    assert _wait_stopped()
+
+
+def test_stop_sets_executor_stop_event_and_cleans_scheduler(_iso, monkeypatch):
+    """停止通道 = executor.stop_event + scheduler 清理（不再是 SystemExit）。"""
+    _patch_executor(monkeypatch)
+    monkeypatch.setattr(ol, "MIN_INTERVAL_S", 1)
+    ol.save_live_config(enabled=True, interval_s=1)
+    assert ol.sync()["running"] is True
+    ex = ol._runner()._executor
+    sched = ex.scheduler
+    assert ol.stop()["ok"] is True
+    assert _wait_stopped()
+    assert ex.stop_event.is_set()             # lumibot 主循环据此 break
+    assert sched.removed == 1                 # remove_all_jobs
+    assert sched.shutdown_calls == [False]     # shutdown(wait=False)
+    assert ex.scheduler is None
+    assert ol._runner()._thread is None
+
+
+def test_stop_marks_strategy_stop_requested(_iso, monkeypatch):
+    """停止位 + 策略看到后只 return（不再抛 SystemExit）。"""
+    _patch_executor(monkeypatch)
+    monkeypatch.setattr(ol, "MIN_INTERVAL_S", 1)
+    ol.save_live_config(enabled=True, interval_s=1)
+    ol.sync()
+    s = ol._runner()._strategy
+    ol.stop()
+    assert _wait_stopped()
+    assert s.parameters["stop_requested"] is True
+    assert s.on_trading_iteration() is None   # 不抛异常（异常会被 APScheduler 吞掉）
+
+
+def test_start_fail_closed_when_old_thread_alive(_iso, monkeypatch):
+    """旧循环未退完时拒绝起新线程（否则基类 is_alive 守卫静默吞掉新配置）。"""
+    monkeypatch.setattr(ol, "STOP_JOIN_WAIT_S", 0.2)
+    r = ol._runner()
+    blocker = threading.Thread(target=lambda: time.sleep(1.5), daemon=True)
+    blocker.start()
+    r._thread = blocker
+    res = r.start()
+    assert res["ok"] is False and res["started"] is False
+    assert "尚未退出" in res["reason"]
+    assert r._executor is None                # 未构造新 executor
+    blocker.join(3)
+
+
+def test_finish_counts_actions_only(_iso):
+    """计数只认动作记录 —— fail-closed 跳过不再被记成「卖call 1」。"""
+    s = ol._runner()._strategy
+    s.parameters["live_mode"] = False         # 不写事件文件
+    s._finish([], {"entries": [{"status": "no_action"},
+                              {"status": "cycle_wait"},
+                              {"status": "dry_run(would_sell)"},
+                              {"status": "failed"}],
+                  "exits": [{"status": "dry_run(would_buy_back)"}],
+                  "call_entries": [{"status": "no_action"}],
+                  "call_exits": []}, "")
+    tot = ol.live_state()
+    assert tot["total_entries"] == 1          # 只有 dry_run(would_sell)
+    assert tot["total_exits"] == 1
+    assert tot["total_call_entries"] == 0     # fail-closed 跳过不计
 
 
 def test_stop_idempotent(_iso):
@@ -384,3 +493,115 @@ class TestStrategyConfig:
         assert ol.live_state()["last_strategy"]["entries"]
         assert any(e.get("type") == "entry" for e in ol.load_events())
         assert ol.live_state()["total_entries"] >= 1
+
+
+# ── C41：卖 call（covered）支线（策略轮次，§33.40）────────────────
+
+CALL_CAND = {"inst_id": "SOL-USD_UM-260920-108-C", "strike": 108.0, "bid": 0.5,
+             "net_yield_pct": 0.48, "days": 5, "notional_usd": 10.8,
+             "collateral_usd": 10.0, "covered": True, "delta": 0.2}
+
+
+def _cov(hint=104.0, sellable=2, spot=0.2):
+    return {"base": "SOL", "spot_avail": spot, "sellable_sz": sellable,
+            "spot_cov_pct": 200.0, "cost_hint": hint}
+
+
+@pytest.fixture
+def _callstrat(_strat, monkeypatch):
+    """在 _strat 之上补 covered 上下文 + call 选档 + 下单打桩（不触网/不下单）。"""
+    from nanobot_quant import okx_options_strategy as st
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as _S)
+
+    orders = {"sell": [], "buy": []}
+    monkeypatch.setattr(ol.ot, "covered_context", lambda account, family: _cov())
+    monkeypatch.setattr(st, "select_calls",
+                        lambda family, base_px=None, selector=None, chain=None, cost_basis=None: {
+                            "family": family, "right": "C", "base_px": 100.0,
+                            "spot": 100.0, "lot_coin": 0.1, "selector": selector,
+                            "candidates": [dict(CALL_CAND)], "scanned": 1,
+                            "filtered": {}, "note": ""})
+
+    def _submit(self, dec, p, closing=False):
+        orders["buy" if closing else "sell"].append(dec)
+        return True, None
+
+    monkeypatch.setattr(_S, "_submit_option", _submit)
+    return orders
+
+
+def _call_cfg(**strat):
+    base = {"dry_run": True, "put_enabled": False, "call_enabled": True}
+    base.update(strat)
+    return base
+
+
+class TestCallLine:
+    def test_default_off(self, _strat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy={"dry_run": True, "put_enabled": False})
+        ol.run_once()
+        assert ol.live_state()["last_strategy"]["call_entries"] == []
+
+    def test_dry_run_records_intent_without_order(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg())
+        ol.run_once()
+        rows = ol.live_state()["last_strategy"]["call_entries"]
+        assert rows and rows[0]["opt_type"] == "C"
+        assert str(rows[0]["status"]).startswith("dry_run")
+        assert _callstrat["sell"] == []                        # dry-run 不下单
+        assert ol.live_state()["total_call_entries"] >= 1
+        assert any(e.get("type") == "entry" and e.get("opt_type") == "C"
+                   for e in ol.load_events())
+
+    def test_real_order_after_dry_run_off(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        assert len(_callstrat["sell"]) == 1
+        assert ol.live_state()["last_strategy"]["call_entries"][0]["status"] == "sold"
+
+    def test_put_line_off_skips_put_scan(self, _callstrat, monkeypatch, _iso):
+        """put_enabled=false ⇒ put 线不扫描（便于只验证 call 线）。"""
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        assert ol.live_state()["last_strategy"]["entries"] == []
+
+    def test_no_cost_anchor_skips(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "covered_context", lambda account, family: _cov(hint=None))
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        rows = ol.live_state()["last_strategy"]["call_entries"]
+        assert rows and rows[0]["status"] == "no_action" and "无成本锚" in rows[0]["note"]
+        assert _callstrat["sell"] == []
+
+    def test_allow_no_cost_basis_sells(self, _callstrat, monkeypatch, _iso):
+        monkeypatch.setattr(ol.ot, "covered_context", lambda account, family: _cov(hint=None))
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True,
+                            strategy=_call_cfg(dry_run=False, allow_no_cost_basis=True))
+        ol.run_once()
+        assert len(_callstrat["sell"]) == 1
+
+    def test_call_exit_uses_own_tp_line(self, _callstrat, monkeypatch, _iso):
+        """call 止盈线独立（30%）：回落 32.5% 即买回（put 线 50% 不适用于 call）。"""
+        monkeypatch.setattr(ol.ot, "open_option_positions",
+                            lambda account="": [{"inst_id": "SOL-USD_UM-260918-108-C",
+                                                  "side": "short", "pos": 1.0,
+                                                  "avg_px": 0.40, "mark_px": 0.27}])
+        monkeypatch.setattr(ol.ot, "settle_expired_puts", lambda: [])
+        ol.save_live_config(enabled=True, strategy=_call_cfg(dry_run=False))
+        ol.run_once()
+        assert len(_callstrat["buy"]) == 1
+        assert _callstrat["buy"][0].inst_id == "SOL-USD_UM-260918-108-C"
+
+    def test_defaults_include_call_params(self, _iso):
+        s = ol.live_config()["strategy"]
+        assert s["call_enabled"] is False and s["put_enabled"] is True
+        assert s["take_profit_pct_call"] == 30
+        assert s["max_calls_per_family"] == 1 and s["max_calls_total"] == 2
+        assert s["allow_no_cost_basis"] is False

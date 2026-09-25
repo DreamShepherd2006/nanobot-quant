@@ -939,11 +939,23 @@ def _cov_stub(sellable_sz, spot_avail=0.01, base="BTC", lot=0.01):
 def _covered_ok(monkeypatch):
     """现货覆盖充足（call 入场默认放行）——covered 门专项用例自行 monkeypatch 覆盖。"""
     monkeypatch.setattr(ot, "covered_context", _cov_stub(10))
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
+
+
+def _pos_stub(rows):
+    def _f(account=""):
+        return list(rows)
+    return _f
+
+
+def _call_pos(inst_id="BTC-USD_UM-260904-82000-C", pos=1.0, side="short"):
+    return {"inst_id": inst_id, "side": side, "pos": pos}
 
 
 def test_open_call_covered_gate_blocks_uncovered(_mock_sdk, _patch_entry, monkeypatch):
     """covered 门（§33.39，fail-closed）：现货覆盖不足 → 拒绝，且不下单、不落台账。"""
     monkeypatch.setattr(ot, "covered_context", _cov_stub(0, spot_avail=0.0001))
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
     with pytest.raises(OkxSdkError) as ei:
         ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                      ord_type="limit", px=110.0)
@@ -955,6 +967,7 @@ def test_open_call_covered_gate_blocks_uncovered(_mock_sdk, _patch_entry, monkey
 def test_open_call_covered_gate_partial_sz(_mock_sdk, _patch_entry, monkeypatch):
     """covered 门按张数判定：覆盖 1 张、卖 2 张 → 拒绝。"""
     monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
     with pytest.raises(OkxSdkError) as ei:
         ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=2,
                      ord_type="limit", px=110.0)
@@ -962,9 +975,51 @@ def test_open_call_covered_gate_partial_sz(_mock_sdk, _patch_entry, monkeypatch)
     assert _mock_sdk.calls == []
 
 
-def test_open_call_covered_gate_allows_covered(_mock_sdk, _patch_entry, monkeypatch):
-    """covered 门通过：sellable_sz ≥ sz → 正常开仓（与保本门并存）。"""
+def test_open_call_covered_gate_counts_inflight_calls(_mock_sdk, _patch_entry, monkeypatch):
+    """covered 门**累计口径**（§33.40.3）：在仓 short call 占用现货覆盖额度。
+
+    现货只够 1 张、已卖 1 张 call ⇒ 再卖 1 张必须被拦（否则覆盖被重复使用 = 裸空）。
+    """
     monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+    monkeypatch.setattr(ot, "open_option_positions",
+                        _pos_stub([_call_pos(pos=1.0)]))
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0, no_cost_basis_ack=True)
+    msg = str(ei.value)
+    assert "covered 门不通过" in msg and "在仓 call 1 张" in msg
+    assert _mock_sdk.calls == []
+
+
+def test_open_call_covered_gate_inflight_other_family_ignored(_mock_sdk, _patch_entry, monkeypatch):
+    """在仓 call 属**其他家族** ⇒ 不占用本家族覆盖额度（仍放行）。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+    monkeypatch.setattr(ot, "open_option_positions",
+                        _pos_stub([_call_pos(inst_id="ETH-USD_UM-260904-3000-C")]))
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0, no_cost_basis_ack=True)
+    assert entry["status"] == "open"
+
+
+def test_open_call_covered_gate_positions_failure_fails_closed(_mock_sdk, _patch_entry, monkeypatch):
+    """持仓查询失败 ⇒ covered 门无法累计 ⇒ fail-closed 拒绝（不猜、不放行）。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+
+    def _boom(account=""):
+        raise RuntimeError("503 持仓接口不可用")
+
+    monkeypatch.setattr(ot, "open_option_positions", _boom)
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=110.0, no_cost_basis_ack=True)
+    assert "无法核对在仓 call" in str(ei.value)
+    assert _mock_sdk.calls == []
+
+
+def test_open_call_covered_gate_allows_covered(_mock_sdk, _patch_entry, monkeypatch):
+    """covered 门通过：sellable_sz ≥ 在仓 call + sz → 正常开仓（与保本门并存）。"""
+    monkeypatch.setattr(ot, "covered_context", _cov_stub(1))
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                          ord_type="limit", px=110.0, cost_basis=80000.0)
     assert entry["status"] == "open"
@@ -992,6 +1047,7 @@ def test_open_call_covered_gate_real_context(_mock_sdk, _patch_entry, monkeypatc
         return _f
 
     monkeypatch.setattr(ot, "account_balance", _bal(0.01))
+    monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
                          ord_type="limit", px=110.0, no_cost_basis_ack=True)
     assert entry["status"] == "open"

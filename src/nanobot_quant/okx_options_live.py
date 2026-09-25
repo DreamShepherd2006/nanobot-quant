@@ -24,13 +24,21 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from . import okx_options_trade as ot
-from .live_runner_base import LiveRunnerBase
+from .live_runner_base import STOP_WAIT_TIMEOUT, LiveRunnerBase
 
 _LIVE_EVENTS_NAME = "okx_options_live_events.jsonl"
+
+# 停止收尾（与 td_live 同构，2026-09-25 实测定稿）：
+#   STOP_WAIT_TIMEOUT（基类常量 90s）= 等当前业务轮自然结束的上限；
+#   STOP_JOIN_WAIT_S = start() 前等旧线程退出的上限（等不到即 fail-closed）。
+STOP_JOIN_WAIT_S = 15.0
 
 DEFAULT_INTERVAL_S = 60
 MIN_INTERVAL_S = 10
@@ -48,9 +56,16 @@ DEFAULT_STRATEGY: dict = {
     "entry_setup": 9,                    # 买 9 阈值
     "entry_countdown": 13,               # countdown 13 阈值
     "iv_min_percentile": 0,              # IV 环境闸门（0 = 关）
-    "take_profit_pct": 50,               # 权利金回落止盈线（%）
+    "take_profit_pct": 50,               # put 线权利金回落止盈线（%）
     "max_contracts_per_family": 1,
     "max_contracts_total": 3,
+    # ── 卖 call（covered call）支线（§33.40）—— 与 put 参数互不影响 ──
+    "put_enabled": True,                 # put 线总开关（便于只跑 call 线验证）
+    "call_enabled": False,               # call 线总开关（默认关，用户在页面手动开）
+    "take_profit_pct_call": 30,          # call 线止盈线（上行无界、快落袋）
+    "max_calls_per_family": 1,           # 单家族在仓 call 张数上限
+    "max_calls_total": 2,                # 全局在仓 call 张数上限
+    "allow_no_cost_basis": False,        # 无成本锚 C 时是否放行（台账标「无成本锚」）
     "dry_run": True,
 }
 
@@ -213,6 +228,7 @@ class _OkxOptionsRunner(LiveRunnerBase):
         super().__init__()
         self._executor = None
         self._strategy = None
+        self._stopping = False   # 优雅停止线程是否在跑（防重复 stop 起多个）
 
     # ── 基类钩子 ──
     def load_config(self) -> dict:
@@ -232,30 +248,134 @@ class _OkxOptionsRunner(LiveRunnerBase):
     def run_forever(self) -> None:
         """长驻：构造 executor 并阻塞在 ``executor.run()``。
 
-        ``_round_active`` 全程为 True —— :meth:`LiveRunnerBase.stop` 因此会等
-        executor 自然返回（策略在下一轮开头看到 ``stop_requested`` 后退出），
-        不会强行中断正在执行的一轮。
+        **不在整段生命周期置 ``_round_active=True``**（2026-09-25 实测修正）：
+        基类 ``stop()`` 会据此等满超时再 join，实际永远等不到 → 「循环已停止
+        (thread_alive=True)」、且 ``start()`` 见 alive=True 直接「已在运行」
+        ⇒ 停一次就再也起不来，只能重启空间。
+        改为逐轮由策略侧 ``_iteration_active`` 表达「当前轮是否在跑」，
+        :meth:`stop` 据此等当前轮自然结束（绝不强行中断业务轮）。
         """
-        self._round_active = True
-        try:
-            self._build_executor()
-            self._executor.run()
-        finally:
-            self._round_active = False
+        self._build_executor()
+        self._executor.run()
 
     def stop(self) -> dict:
-        """优雅停止：先请策略在下一轮退出，再等线程结束。
+        """优雅停止（幂等、立即返回，页面不受影响）。
+
+        ① 后台等当前业务轮自然结束（策略 ``_iteration_active``，90s 兜底，
+           **绝不强行中断正在执行的一轮**）
+        ② 置 ``parameters["stop_requested"]`` + **``executor.stop_event``** ——
+           lumibot 主循环 ``_should_continue_trading_loop`` 感知 stop_event 后
+           break → ``executor.run()`` 返回 → 线程退出
+        ③ 清 scheduler（remove_all_jobs + ``shutdown(wait=False)`` + None），
+           防主循环收尾前重建的 scheduler 继续调度孤儿 job
 
         **不调** ``executor.stop()`` —— lumibot 内部 ``shutdown(wait=True)`` 会等
         业务轮收尾，遇网络卡死即永久挂住（TD live 已踩过）。
+
+        历史教训：上一版靠策略 ``raise SystemExit`` 退出 —— 异常被 APScheduler
+        的 job 层捕获记日志、主循环照跑（2026-09-25 实测复现「循环已停止
+        (thread_alive=True)」+ 每 60s 空转抛一次 traceback）。
         """
-        if self._strategy is not None:
-            try:
-                self._strategy.parameters["stop_requested"] = True
-                self._log("已请求策略停止（下一轮开头退出）")
-            except Exception:  # noqa: BLE001
-                pass
-        return super().stop()
+        with self._lock:
+            self._stop_event.set()
+            self._state["running"] = False
+            executor, strategy = self._executor, self._strategy
+            alive = bool(self._thread is not None and self._thread.is_alive())
+            if not alive:
+                self._stopping = False
+            elif self._stopping:
+                return {"ok": True, "stopping": True, "thread_alive": True}
+            else:
+                self._stopping = True
+        if not alive:
+            self._teardown_executor(executor, strategy)
+            self._log("循环未在运行（无需停止）")
+            return {"ok": True, "stopping": False, "thread_alive": False}
+        threading.Thread(
+            target=self._graceful_stop, args=(executor, strategy),
+            daemon=True, name="opt-live-stop",
+        ).start()
+        self._log("已请求停止（等当前轮自然结束后退出；页面不受影响）")
+        return {"ok": True, "stopping": True, "thread_alive": True}
+
+    def _teardown_executor(self, executor, strategy) -> None:
+        """停止信号 + scheduler 清理（幂等、可重入）。"""
+        try:
+            if strategy is not None:
+                strategy.parameters["stop_requested"] = True
+        except Exception as e:  # noqa: BLE001
+            self._log(f"⚠️ 停止位设置失败：{type(e).__name__}: {e}")
+        try:
+            ev = getattr(executor, "stop_event", None)
+            if ev is not None:
+                ev.set()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"⚠️ stop_event 设置失败：{type(e).__name__}: {e}")
+        try:
+            sched = getattr(executor, "scheduler", None)
+            if sched is not None:
+                sched.remove_all_jobs()
+                sched.shutdown(wait=False)
+            if executor is not None:
+                executor.scheduler = None
+        except Exception as e:  # noqa: BLE001
+            self._log(f"⚠️ scheduler 清理失败：{type(e).__name__}: {e}")
+
+    def _graceful_stop(self, executor, strategy) -> None:
+        """后台停止：等当前轮自然结束 → 发停止信号 → 收尾（不阻塞页面）。"""
+        deadline = time.monotonic() + STOP_WAIT_TIMEOUT
+        waited = False
+        while time.monotonic() < deadline:
+            if strategy is None or not getattr(strategy, "_iteration_active", False):
+                break
+            waited = True
+            time.sleep(0.2)
+        if waited and time.monotonic() >= deadline:
+            self._log(f"⚠️ 等当前轮结束超时（{STOP_WAIT_TIMEOUT:.0f}s）"
+                      "——仍发停止信号（本轮跑完才退出）")
+        self._teardown_executor(executor, strategy)
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=5.0)
+        alive = bool(t is not None and t.is_alive())
+        with self._lock:
+            if not alive:
+                self._thread = None
+            self._state["running"] = False
+            self._stopping = False
+        self._log(f"循环已停止（thread_alive={alive}）")
+
+    def start(self, cfg: Optional[dict] = None) -> dict:
+        """起线程前先等旧循环退出（stop 后 lumibot 收尾需数百毫秒~数秒）。
+
+        基类 ``start`` 的 ``is_alive`` 守卫会把新配置静默吞掉（页面只显示
+        「已在运行」、参数不生效）——这里等不到就 fail-closed 明确报错。
+        """
+        if not self._wait_thread_exit(STOP_JOIN_WAIT_S):
+            msg = f"上一轮循环尚未退出（等 {STOP_JOIN_WAIT_S:.0f}s 超时），请稍后重试"
+            self._log(f"⚠️ {msg}")
+            with self._lock:
+                self._state["last_error"] = msg
+            return {"ok": False, "started": False, "reason": msg}
+        return super().start(cfg)
+
+    def sync(self, cfg: Optional[dict] = None) -> dict:
+        """比基类多一层：正在退出中的循环视为「未运行」，等它退完再起。"""
+        cfg = dict(cfg if cfg is not None else (self.load_config() or {}))
+        if self._enabled(cfg) and self._stop_event.is_set():
+            self._wait_thread_exit(STOP_JOIN_WAIT_S)
+        return super().sync(cfg)
+
+    def _wait_thread_exit(self, timeout: float) -> bool:
+        """轮询等旧线程退出；返回是否已退出。"""
+        deadline = time.monotonic() + float(timeout)
+        while time.monotonic() < deadline:
+            t = self._thread
+            if t is None or not t.is_alive():
+                return True
+            time.sleep(0.2)
+        t = self._thread
+        return t is None or not t.is_alive()
 
     def do_round(self) -> dict:
         """单轮（测试/调试）：直接调策略的一轮，与引擎路径共用决策实现。
@@ -296,18 +416,21 @@ class _OkxOptionsRunner(LiveRunnerBase):
         strategy = OkxOptionsPutStrategy(
             broker=broker, data_source=data_source, sleeptime=sleeptime,
         )
-        strategy.parameters = {
+        params = {
             **dict(OkxOptionsPutStrategy.parameters),
             **strat_cfg,
             "live_mode": True,
             "stop_requested": False,
         }
+        strategy.parameters = params
         print(
             f"[DIAG] 期权 runner: account={account or '(default)'} "
-            f"sleeptime={sleeptime} families={strat_cfg.get('families')} "
-            f"dry_run={strat_cfg.get('dry_run')} "
-            f"entry=setup{strat_cfg.get('entry_setup')}/cd{strat_cfg.get('entry_countdown')} "
-            f"tp={strat_cfg.get('take_profit_pct')}%",
+            f"sleeptime={sleeptime} families={params.get('families')} "
+            f"dry_run={params.get('dry_run')} "
+            f"put={'on' if params.get('put_enabled', True) else 'off'} "
+            f"call={'on' if params.get('call_enabled') else 'off'} "
+            f"entry=setup{params.get('entry_setup')}/cd{params.get('entry_countdown')} "
+            f"tp={params.get('take_profit_pct')}%/tp_call={params.get('take_profit_pct_call')}%",
             file=sys.stderr, flush=True,
         )
         executor = StrategyExecutor(strategy)
@@ -378,7 +501,10 @@ def live_state() -> dict:
     totals = snap.get("totals") or st.get("totals") or {}
     return {
         "config": cfg,
-        "running": bool(r._thread is not None and r._thread.is_alive()),
+        # 「循环在运行」= 状态位未清 且 线程活着：stop() 会立即清状态位 → 页面
+        # 随即显示「已停止」，而线程仍在后台把当前轮跑完再退出（不打断业务轮）。
+        "running": bool(st.get("running") and r._thread is not None
+                        and r._thread.is_alive()),
         "last_run": st.get("last_run") or snap.get("round_ts"),
         "last_settled": snap.get("settled") or st.get("last_settled") or [],
         "last_strategy": snap.get("strategy") or st.get("last_strategy"),
@@ -386,6 +512,8 @@ def live_state() -> dict:
         "total_settled": int(totals.get("settled") or 0),
         "total_entries": int(totals.get("entries") or 0),
         "total_exits": int(totals.get("exits") or 0),
+        "total_call_entries": int(totals.get("call_entries") or 0),
+        "total_call_exits": int(totals.get("call_exits") or 0),
     }
 
 

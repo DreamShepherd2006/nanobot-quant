@@ -1,13 +1,16 @@
-"""卖 put 候选选择（C24 合约选择机制，设计见 docs/quant-system.md 33.26）。
+"""卖 put / 卖 call 候选选择（C24 合约选择机制，设计见 docs/quant-system.md 33.26 / 33.40）。
 
-从 OKX 期权链按「选择参数」挑出可卖的 put 合约：
+从 OKX 期权链按「选择参数」挑出可卖的 put（或 covered call）合约：
 
 1. 硬过滤：到期天数窗口 → 有买盘（bid > 0，卖得出去）→ ``min_distance_pct``
-   （strike ≤ 基准价 ×(1−距离%)，安全边际优先）→ delta 带（控制被行权概率）；
-2. 排序：净收益率（默认，= 净权利金 ÷ 担保额）→ |delta − 0.25| 距离；
+   （put：strike ≤ 基准价×(1−距离%)；call：strike ≥ 基准价×(1+距离%)，方向相反）
+   → 卖 call 额外可选保本门（``strike + bid ≥ C``）→ delta 带（控制被行权概率）；
+2. 排序：净收益率（默认）→ |delta − 0.25| 距离；
 
-口径（2026-09-15 定稿，见 33.25）：**净权利金 = bid × 每张面值 − 名义 × 0.03% 手续费**
-（``OPTION_FEE_RATE_TAKER``），担保额 = strike × 每张面值；卖出吃买盘用 bid（非 ask）。
+口径（2026-09-15 定稿，见 33.25；2026-09-24 扩到 call，见 33.40）：
+**净权利金 = bid × 每张面值 − 名义 × 0.03% 手续费**（``OPTION_FEE_RATE_TAKER``）；
+收益率分母：卖 put = 名义（strike × 面值，现金担保），卖 call = **现货市值**
+（spot × 面值，covered 占用的是现货）；卖出吃买盘用 bid（非 ask）。
 
 参数存 ``option_params.json`` 的 ``selector`` 字段（与担保比例 / 到期巡检同文件）。
 """
@@ -109,17 +112,54 @@ def validate_selector(raw: dict) -> tuple[dict | None, str | None]:
 def select_puts(family: str, base_px: float | None = None,
                 selector: dict | None = None, chain: dict | None = None,
                 exp_ms=None) -> dict:
-    """按选择参数挑卖 put 候选。
+    """按选择参数挑卖 put 候选（见 :func:`_select_options`）。"""
+    return _select_options(family, "P", base_px=base_px, selector=selector,
+                           chain=chain, exp_ms=exp_ms)
+
+
+def select_calls(family: str, base_px: float | None = None,
+                 selector: dict | None = None, chain: dict | None = None,
+                 exp_ms=None, cost_basis: float | None = None) -> dict:
+    """按选择参数挑卖 call（covered call）候选 —— 与卖 put 同一套选择参数。
+
+    与 :func:`select_puts` 的方向差异（镜像）：
+
+    - 距离判据反向：call 卖在现价**上方** ⇒ ``strike ≥ 基准价×(1+距离%)``；
+    - **保本门硬过滤**（仅当传入 ``cost_basis``）：``strike + bid ≥ C``——
+      与执行门（``_open_option`` 的保本门）同判据，候选阶段就不给
+      「K+px < C」的档（等价于「保本价以上的档才出现在候选里」），
+      但执行门不依赖本过滤（双保险，调用方不传 C 时执行门仍拦）；
+    - 收益率分母 = **现货市值** ``spot × 面值``（covered call 占用的是现货，
+      不是现金担保）⇒ 额外输出 ``collateral_usd`` / ``covered=True``。
+    """
+    return _select_options(family, "C", base_px=base_px, selector=selector,
+                           chain=chain, exp_ms=exp_ms, cost_basis=cost_basis)
+
+
+def _select_options(family: str, right: str, base_px: float | None = None,
+                    selector: dict | None = None, chain: dict | None = None,
+                    exp_ms=None, cost_basis: float | None = None) -> dict:
+    """卖 put / 卖 call 共用选档核心（``right`` 区分方向，差异见各包装函数）。
 
     - ``base_px``：基准价（默认标的实时现价）；
     - ``chain``：注入期权链数据（测试用），None 时按到期窗口拉 OKX 链；
     - ``exp_ms``：锁定到期档（毫秒时间戳）——候选跟随期权链页当前 tab，指定时
       只在该到期里挑、跳过「到期天数窗口」（窗口退化为组合档/全部档的默认值）；
-    - 返回 {family, base_px, spot, lot_coin, selector, candidates, scanned, filtered, note,
-      expiry_mode, expiry_locked_ms}。
+    - ``cost_basis``：卖 call 的保本价 C（仅 ``right="C"`` 用）；None = 不启用该过滤；
+    - 返回 {family, right, base_px, spot, lot_coin, selector, candidates, scanned,
+      filtered, note, expiry_mode, expiry_locked_ms}。
     """
     from . import okx_options_data as od
     from .okx_options_trade import OPTION_FEE_CAP_RATIO, OPTION_FEE_RATE_TAKER
+
+    want = str(right or "P").strip().upper()
+    is_call = want == "C"
+    c_basis = None
+    if is_call and cost_basis not in (None, ""):
+        try:
+            c_basis = float(cost_basis)
+        except (TypeError, ValueError):
+            c_basis = None
 
     sel = selector_params(selector)
     lo, hi = sel["expiry_min_days"], sel["expiry_max_days"]
@@ -148,8 +188,8 @@ def select_puts(family: str, base_px: float | None = None,
     f_rate = OPTION_FEE_RATE_TAKER
 
     cands: list[dict] = []
-    filtered = {"expiry": 0, "no_bid": 0, "distance": 0, "delta": 0, "net": 0, "yield": 0,
-                "no_lot": 0}
+    filtered = {"expiry": 0, "no_bid": 0, "distance": 0, "cost_basis": 0,
+                "delta": 0, "net": 0, "yield": 0, "no_lot": 0}
     for g in chain.get("groups", []):
         days = g.get("days")
         if lock_ms is not None:
@@ -160,7 +200,7 @@ def select_puts(family: str, base_px: float | None = None,
             filtered["expiry"] += 1
             continue
         for row in g.get("rows", []):
-            cell = (row or {}).get("P") or {}
+            cell = (row or {}).get(want) or {}
             inst = cell.get("inst_id")
             if not inst:
                 continue
@@ -172,9 +212,15 @@ def select_puts(family: str, base_px: float | None = None,
                 filtered["no_bid"] += 1
                 continue
             strike = float(row["strike"])
-            if base and sel["min_distance_pct"] > 0 and \
-                    strike > base * (1 - sel["min_distance_pct"] / 100.0):
-                filtered["distance"] += 1
+            if base and sel["min_distance_pct"] > 0:
+                d = sel["min_distance_pct"] / 100.0
+                # put 卖在下方（要求 strike ≤ base×(1−d)）；call 卖在上方（strike ≥ base×(1+d)）
+                too_close = (strike < base * (1 + d)) if is_call else (strike > base * (1 - d))
+                if too_close:
+                    filtered["distance"] += 1
+                    continue
+            if is_call and c_basis is not None and (strike + bid) < c_basis:
+                filtered["cost_basis"] += 1          # 保本门：K + px ≥ C
                 continue
             delta = cell.get("delta")
             ad = abs(delta) if delta is not None else None
@@ -191,7 +237,12 @@ def select_puts(family: str, base_px: float | None = None,
             if net <= 0:                          # 扣手续费后无利可图（薄权利金）
                 filtered["net"] += 1
                 continue
-            net_yield = net / notional * 100 if notional else 0.0
+            # 收益率分母：put = 名义（现金担保）；call = 现货市值（covered 占用现货）
+            coll = (spot * lot) if (is_call and spot) else notional
+            if coll <= 0:
+                filtered["net"] += 1
+                continue
+            net_yield = net / coll * 100
             if sel["min_net_yield_pct"] > 0 and net_yield < sel["min_net_yield_pct"]:
                 filtered["yield"] += 1
                 continue
@@ -207,12 +258,14 @@ def select_puts(family: str, base_px: float | None = None,
                 "delta": delta,
                 "lot_coin": lot,
                 "notional_usd": round(notional, 6),
+                "collateral_usd": round(coll, 6),
+                "covered": bool(is_call),
                 "premium_usd": round(prem, 8),
                 "fee_usd": round(fee, 8),
                 "net_premium_usd": round(net, 8),
                 "net_yield_pct": round(net_yield, 4),
-                "apr_pct": round(net / notional * 100 * 365 / max(float(days), 0.5), 2)
-                if notional else None,
+                "apr_pct": round(net / coll * 100 * 365 / max(float(days), 0.5), 2)
+                if coll else None,
                 "delta_gap": round(abs(ad - _DELTA_TARGET), 4) if ad is not None else 9.9,
             })
 
@@ -224,6 +277,7 @@ def select_puts(family: str, base_px: float | None = None,
     cands.sort(key=keys[sel["sort_by"]])
     return {
         "family": family,
+        "right": want,
         "base_px": base,
         "spot": spot,
         "lot_coin": lot,

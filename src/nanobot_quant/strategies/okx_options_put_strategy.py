@@ -8,22 +8,31 @@
 
   ① **到期判定**：``ot.settle_expired_puts()``（OTM 自动关账 / ITM 记赔付 /
      矛盾挂 settled_review fail-closed / 账单未出保持 open 下轮重试）。
-  ② **入场**（逐家族）：标的 TD 信号（OKX 现货 K 线 + 原版 TD 引擎）→
-     IV 环境闸门 → 张数上限 → ``select_puts`` 选档 → 卖 put。
-  ③ **止盈**：持仓权利金回落 ≥ 止盈线 → 买回平仓。
+  ② **入场**：卖 put 线（逐家族）标的 TD 信号（OKX 现货 K 线 + 原版 TD 引擎）→
+     IV 环境闸门 → 张数上限 → ``select_puts`` 选档；卖 call 线（``call_enabled``）
+     covered 容量 → 成本锚 C → 张数上限 → ``select_calls`` 选档（**无信号择时**）。
+  ③ **止盈**：持仓权利金回落 ≥ 止盈线 → 买回平仓（put 线 50% / call 线 30%，各自参数）。
   ④ 状态写入 ``okx_options_live_state`` + 事件文件落盘。
 
 ``dry_run=True``（默认）时**只记录决策、不下单** —— 「AI 不能自行授权实盘」
 在闭环里的结构性落实；需用户在期权页手动取消勾选才会真实下单。
 
-停止：**不调 ``executor.stop()``**（lumibot 内部 ``shutdown(wait=True)`` 会等
-业务轮收尾，遇网络卡死即永久挂住 —— TD live 已踩过）。改为
-``parameters["stop_requested"]`` 标志，每轮开头检查后主动退出，
-使停止永远落在两轮之间，绝不打断正在执行的一轮。
+停止（与 td_live 同构，2026-09-25 修正）：**不调 ``executor.stop()``**
+（lumibot 内部 ``shutdown(wait=True)`` 会等业务轮收尾，遇网络卡死即永久挂住
+—— TD live 已踩过）。真正的退出通道是 runner 侧 ``executor.stop_event``
+（lumibot 主循环据此 break → ``executor.run()`` 返回），策略侧只做两件事：
+``_track_iteration`` 维护 ``self._iteration_active``（runner 据此等当前轮
+自然结束）+ 看到 ``stop_requested`` 时**直接 return**。
+
+**不可用 ``raise SystemExit`` 退出**：异常会被 APScheduler 的 job 层捕获
+并记日志、主循环照跑（2026-09-25 实测：「循环已停止(thread_alive=True)」
++ 每 60s 空转抛一次 traceback，且 ``start()`` 见 alive=True 直接「已在运行」
+⇒ 停一次就再也起不来，只能重启空间）。
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 from datetime import datetime, timezone
@@ -44,6 +53,21 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# 「卖出 / 买回」计数只认**动作**记录（2026-09-25 实测修正）：
+#   entries/call_entries 里混着 no_action / cycle_wait / no_signal 这类
+#   「本轮无动作」说明记录，按条数计数会把 fail-closed 跳过记成「卖call 1」
+#   （每轮无动作都 +1）。failed 也不计入（单独用「失败 N」显式提示）。
+_ENTRY_ACTION_STATUSES = frozenset({"sold", "dry_run(would_sell)"})
+_EXIT_ACTION_STATUSES = frozenset({"bought_back", "dry_run(would_buy_back)"})
+_FAILED_STATUSES = frozenset({"failed"})
+
+
+def _count_status(rows: Any, statuses: frozenset) -> int:
+    """按 status 计数（忽略非 dict / 无 status 的记录）。"""
+    return sum(1 for r in (rows or [])
+               if isinstance(r, dict) and r.get("status") in statuses)
+
+
 class OkxOptionsPutStrategy(Strategy):
     """卖 put + 权利金回落止盈（U 本位线性期权，USDSⓈ-M 家族）。"""
 
@@ -59,29 +83,54 @@ class OkxOptionsPutStrategy(Strategy):
         "take_profit_pct": 50,
         "max_contracts_per_family": 1,
         "max_contracts_total": 3,
+        # ── 卖 call（covered call）支线 —— 与 put 参数互不影响（§33.40）──
+        "put_enabled": True,             # put 线总开关（默认开；便于只跑 call 线验证）
+        "call_enabled": False,           # call 线总开关（默认关，用户在页面手动开）
+        "take_profit_pct_call": 30,      # call 止盈线（上行无界、快落袋）
+        "max_calls_per_family": 1,        # 单家族在仓 call 张数上限
+        "max_calls_total": 2,             # 全局在仓 call 张数上限
+        "allow_no_cost_basis": False,     # 无成本锚 C 时是否放行（台账标「无成本锚」）
         "dry_run": True,
         "live_mode": False,        # 事件文件写入开关（回测置 False 不污染实盘监控）
-        "stop_requested": False,   # 见模块 docstring：唯一的停止通道
+        # 停止位（见模块 docstring）：由 runner 置位，策略看到后只 return
+        "stop_requested": False,
     }
 
     # ══════════════════════ 生命周期 ══════════════════════
 
     def initialize(self, **kwargs) -> None:
         """不作账户切换、不预拉数据 —— 全部延迟到轮次内（失败也不阻塞启动）。"""
-        self._log("策略已初始化（卖 put + 权利金回落止盈）")
+        self._iteration_active = False   # 当前业务轮是否在跑（runner 停止路径据此等轮）
+        self._log("策略已初始化（卖 put / 卖 call + 权利金回落止盈）")
 
     def before_market_opens(self) -> None:  # pragma: no cover - 期权 7×24，无需
         pass
 
     # ══════════════════════ 主轮次 ══════════════════════
 
+    def _track_iteration(fn):
+        """包一轮业务（与 ``TdSequentialStrategy._track_iteration`` 同款）。
+
+        ① ``stop_requested`` 置位 → **直接 return**（不是抛异常：异常会被
+           APScheduler 的 job 层捕获记日志、主循环照跑 —— 2026-09-25 实测踩过）；
+        ② 运行期 ``self._iteration_active`` 为 True（finally 复位）——runner 的
+           停止路径据此等当前轮自然结束，**绝不强行中断正在执行的一轮**。
+        """
+        @functools.wraps(fn)
+        def wrapper(self, *a, **kw):
+            if self.parameters.get("stop_requested"):
+                self._log("收到停止请求 —— 本轮不再执行（循环即将退出）")
+                return None
+            self._iteration_active = True
+            try:
+                return fn(self, *a, **kw)
+            finally:
+                self._iteration_active = False
+        return wrapper
+
+    @_track_iteration
     def on_trading_iteration(self) -> None:
         """一轮：到期判定 → 入场 → 止盈 → 状态落盘。异常不外抛给引擎。"""
-        if self.parameters.get("stop_requested"):
-            # 停止永远落在两轮之间（绝不打断正在执行的一轮）
-            self._log("收到停止请求 —— 本轮结束后退出")
-            raise SystemExit("options strategy stop requested")
-
         p = self.parameters
         account = str(p.get("account") or "")
         dry = bool(p.get("dry_run", True))
@@ -97,13 +146,22 @@ class OkxOptionsPutStrategy(Strategy):
 
         counts = st.contracts_by_family(positions, opt_type="P")
         total = sum(counts.values())
-        self._log(f"当前持仓 | 在仓合约数={total} 分家族={counts or '{}'} "
+        call_counts = st.contracts_by_family(positions, opt_type="C")
+        call_total = sum(call_counts.values())
+        self._log(f"当前持仓 | 在仓 put {total} 张 分家族={counts or '{}'} · "
+                  f"在仓 call {call_total} 张 分家族={call_counts or '{}'} "
                   f"明细={[(x.get('inst_id'), x.get('pos')) for x in positions]}")
 
         entries = self._entries(account, p, dry, counts, total, positions)
-        exits = self._exits(account, p, dry, positions)
+        call_entries = self._call_entries(account, p, dry, positions,
+                                          call_counts, call_total)
+        exits = self._exits(account, p, dry, positions, opt_type="P")
+        call_exits = self._exits(account, p, dry, positions, opt_type="C")
 
-        self._finish(settled, {"entries": entries, "exits": exits, "counts": counts},
+        self._finish(settled, {"entries": entries, "exits": exits,
+                               "call_entries": call_entries,
+                               "call_exits": call_exits,
+                               "counts": counts, "call_counts": call_counts},
                      None)
 
     # ══════════════════════ ① 到期判定 ══════════════════════
@@ -170,6 +228,10 @@ class OkxOptionsPutStrategy(Strategy):
 
     def _entries(self, account: str, p: dict, dry: bool,
                  counts: dict, total: int, positions: list) -> list[dict]:
+        """卖 put 支线（TD 衰竭信号驱动）。"""
+        if not p.get("put_enabled", True):
+            self._log("PUT 线已关闭（put_enabled=false）—— 跳过卖 put 支线")
+            return []
         out: list[dict] = []
         for family in (p.get("families") or []):
             base = str(family).split("-")[0]
@@ -178,14 +240,14 @@ class OkxOptionsPutStrategy(Strategy):
                 out.append({"family": base, "status": "no_signal",
                             "note": "无 K 线数据"})
                 continue
-            self._log(f"{base} TD | setup_buy={sig.get('setup_buy')}/{p.get('entry_setup')} "
+            self._log(f"PUT {base} TD | setup_buy={sig.get('setup_buy')}/{p.get('entry_setup')} "
                       f"cd_buy={sig.get('cd_buy')}/{p.get('entry_countdown')} "
                       f"setup_sell={sig.get('setup_sell')} cd_sell={sig.get('cd_sell')} "
                       f"price={sig.get('price')} rec={sig.get('recommendation')}")
 
             gate = self._cycle_gate(family, sig, p, positions)
             if gate:
-                self._log(f"{base} → 周期门控拦截：{gate}")
+                self._log(f"PUT {base} → 周期门控拦截：{gate}")
                 out.append({"family": base, "status": "cycle_wait", "note": gate})
                 continue
 
@@ -193,14 +255,14 @@ class OkxOptionsPutStrategy(Strategy):
                 family, td_signal=sig, params=p,
                 open_contracts=counts.get(base, 0), total_contracts=total)
             if dec is None:
-                self._log(f"{base} → 无动作：{note}")
+                self._log(f"PUT {base} → 无动作：{note}")
                 out.append({"family": base, "status": "no_action", "note": note})
                 continue
 
             rec = {**dec.to_event(), "dry_run": dry}
             if dry:
                 rec["status"] = "dry_run(would_sell)"
-                self._log(f"{base} → 【dry-run】卖出 {dec.inst_id} ×{dec.sz} "
+                self._log(f"PUT {base} → 【dry-run】卖出 {dec.inst_id} ×{dec.sz} "
                           f"| 盘口 bid={rec.get('bid')} "
                           f"净收益率={rec.get('net_yield_pct')}% "
                           f"年化={rec.get('apr_pct')}% 担保=${rec.get('notional_usd')} "
@@ -211,35 +273,93 @@ class OkxOptionsPutStrategy(Strategy):
                 rec["status"] = "sold" if ok else "failed"
                 if err:
                     rec["error"] = err
-                    self._log(f"⚠️ {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
+                    self._log(f"⚠️ PUT {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
                 else:
                     counts[base] = counts.get(base, 0) + dec.sz
                     total += dec.sz
-                    self._log(f"{base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
+                    self._log(f"PUT {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
             out.append(rec)
             # 建仓（含 dry-run 意图）即置位 —— 之后同周期不再开仓
             self._cycle_mark_bought(family, sig)
             self._record({"type": "entry", **rec})
         return out
 
+    def _call_entries(self, account: str, p: dict, dry: bool, positions: list,
+                      call_counts: dict, call_total: int) -> list[dict]:
+        """卖 call（covered call）支线 —— 无信号择时：有 covered 余量就卖。
+
+        决策全在 ``okx_options_strategy.evaluate_call_entry()``（纯函数，回测可复用）；
+        本方法只负责取 ``covered_context``、下单与日志/事件。
+        """
+        if not p.get("call_enabled"):
+            return []
+        out: list[dict] = []
+        for family in (p.get("families") or []):
+            base = str(family).split("-")[0]
+            try:
+                cov = ot.covered_context(account, family)
+            except Exception as e:  # noqa: BLE001 —— 现货查不到就不卖（fail-closed）
+                note = f"现货查询失败：{type(e).__name__}: {e}"
+                self._log(f"CALL {base} → 无动作：{note}（fail-closed）")
+                out.append({"family": base, "opt_type": "C",
+                            "status": "no_action", "note": note})
+                continue
+            dec, note = st.evaluate_call_entry(
+                family, params=p, covered=cov,
+                open_calls=call_counts.get(base, 0), total_calls=call_total)
+            if dec is None:
+                self._log(f"CALL {base} → 无动作：{note}")
+                out.append({"family": base, "opt_type": "C",
+                            "status": "no_action", "note": note})
+                continue
+
+            rec = {**dec.to_event(), "dry_run": dry}
+            if dry:
+                rec["status"] = "dry_run(would_sell)"
+                self._log(f"CALL {base} → 【dry-run】卖出 {dec.inst_id} ×{dec.sz} "
+                          f"| 盘口 bid={rec.get('bid')} "
+                          f"净收益率={rec.get('net_yield_pct')}%（分母=现货市值） "
+                          f"delta={rec.get('delta')} 天数={rec.get('days')} "
+                          f"成本锚 C={rec.get('cost_basis')} | 理由={dec.entry_reason}")
+            else:
+                ok, err = self._submit_option(dec, p)
+                rec["status"] = "sold" if ok else "failed"
+                if err:
+                    rec["error"] = err
+                    self._log(f"⚠️ CALL {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
+                else:
+                    call_counts[base] = call_counts.get(base, 0) + dec.sz
+                    call_total += dec.sz
+                    self._log(f"CALL {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
+            out.append(rec)
+            self._record({"type": "entry", **rec})
+        return out
+
     # ══════════════════════ ③ 止盈 ══════════════════════
 
-    def _exits(self, account: str, p: dict, dry: bool, positions) -> list[dict]:
+    def _exits(self, account: str, p: dict, dry: bool, positions,
+               opt_type: str = "P") -> list[dict]:
+        """止盈买回巡检（按方向分线：put 用 ``take_profit_pct``、call 用 ``take_profit_pct_call``）。"""
+        is_call = opt_type == "C"
+        key = "take_profit_pct_call" if is_call else "take_profit_pct"
+        tag = "CALL" if is_call else "PUT"
+        default_tp = st.DEFAULT_TP_PCT_CALL if is_call else st.DEFAULT_TP_PCT
         try:
-            tp = float(p.get("take_profit_pct") or 0)
+            raw = p.get(key)
+            tp = float(default_tp if raw is None else raw)
         except (TypeError, ValueError):
-            tp = 0.0
+            tp = float(default_tp)
         try:
-            rows = st.evaluate_exits(positions, tp_pct=tp, opt_type="P")
+            rows = st.evaluate_exits(positions, tp_pct=tp, opt_type=opt_type)
         except Exception as e:  # noqa: BLE001
-            self._log(f"⚠️ 止盈评估异常：{type(e).__name__}: {e}")
+            self._log(f"⚠️ {tag} 止盈评估异常：{type(e).__name__}: {e}")
             return []
         out: list[dict] = []
         for x in rows:
-            rec = {**x.to_event(), "dry_run": dry}
+            rec = {**x.to_event(), "dry_run": dry, "opt_type": opt_type}
             if dry:
                 rec["status"] = "dry_run(would_buy_back)"
-                self._log(f"→ 【dry-run】买回 {x.inst_id} ×{x.sz} | "
+                self._log(f"{tag} → 【dry-run】买回 {x.inst_id} ×{x.sz} | "
                           f"开仓 {rec.get('entry_px')} → 现价 {rec.get('mark_px')} "
                           f"（回落 {rec.get('drop_pct')} ≥ 止盈线 {tp}%）")
             else:
@@ -247,13 +367,16 @@ class OkxOptionsPutStrategy(Strategy):
                 rec["status"] = "bought_back" if ok else "failed"
                 if err:
                     rec["error"] = err
-                    self._log(f"⚠️ 买回失败 {x.inst_id} ×{x.sz}：{err}")
+                    self._log(f"⚠️ {tag} 买回失败 {x.inst_id} ×{x.sz}：{err}")
                 else:
-                    self._log(f"→ 已提交买回 {x.inst_id} ×{x.sz}")
+                    self._log(f"{tag} → 已提交买回 {x.inst_id} ×{x.sz}")
             out.append(rec)
             self._record({"type": "exit", **rec})
         if not rows and positions:
-            self._log(f"止盈巡检 | {len(positions)} 张在仓，均未达回落 {tp}% 门槛，继续持有")
+            n = sum(1 for x in (positions or [])
+                    if str(x.get("inst_id") or "").endswith("-" + opt_type))
+            if n:
+                self._log(f"{tag} 止盈巡检 | {n} 张在仓，均未达回落 {tp}% 门槛，继续持有")
         return out
 
     # ══════════════════════ 下单（经 lumibot broker 抽象）══════════════════════
@@ -321,16 +444,28 @@ class OkxOptionsPutStrategy(Strategy):
 
     def _finish(self, settled, strat, error) -> None:
         """轮次收尾：写 LIVE_STATE + 结束日志（字段名与接线前保持一致）。"""
-        entries = len((strat or {}).get("entries") or [])
-        exits = len((strat or {}).get("exits") or [])
+        rows = strat or {}
+        # 只计**动作**记录：no_action / cycle_wait / no_signal 是「本轮无动作」的
+        # 说明记录，不是卖出（否则每轮无动作都 +1 —— 2026-09-25 实测：call 线
+        # fail-closed 跳过却记成「卖call 1」）。失败单单独显示「失败 N」，不静默。
+        entries = _count_status(rows.get("entries"), _ENTRY_ACTION_STATUSES)
+        exits = _count_status(rows.get("exits"), _EXIT_ACTION_STATUSES)
+        c_entries = _count_status(rows.get("call_entries"), _ENTRY_ACTION_STATUSES)
+        c_exits = _count_status(rows.get("call_exits"), _EXIT_ACTION_STATUSES)
+        failed = sum(_count_status(rows.get(k), _FAILED_STATUSES)
+                     for k in ("entries", "exits", "call_entries", "call_exits"))
         self._bump("entries", entries)
         self._bump("exits", exits)
+        self._bump("call_entries", c_entries)
+        self._bump("call_exits", c_exits)
         try:
             lst.set_round(settled=settled, strategy=strat, error=error or "")
         except Exception:  # noqa: BLE001 —— 状态展示失败不阻塞策略
             pass
         self._log(f"── 巡检轮次结束 ── 到期判定 {len(settled or [])} 笔 · "
-                  f"策略 卖 {entries} / 买回 {exits}"
+                  f"策略 卖put {entries} / 买回put {exits} · "
+                  f"卖call {c_entries} / 买回call {c_exits}"
+                  + (f" · 失败 {failed}" if failed else "")
                   + (f" · error={error}" if error else ""))
 
     # ══════════════════════ 小工具 ══════════════════════
