@@ -4,7 +4,7 @@
 
 ============  ==========================================================
 ①回放数据源    ``OptionsReplayDataSource``（#349 已交付）
-②撮合          本文件内联记账 —— mark ± 滑点 + 名义手续费（期权 taker 按名义计费）
+②撮合          本文件内联记账 —— 家族 Δσ 价差（卖收 bid / 买付 ask）+ 名义手续费
 ③驱动          本文件
 ④接入层        WebUI / MCP / CLI（后续 PR）
 ============  ==========================================================
@@ -29,7 +29,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-DEFAULT_SLIPPAGE_PCT = 0.5    # mark 中价 ± 滑点（%）；与现货回测「滑点是百分比」同口径
+DEFAULT_SLIPPAGE_PCT = 0.0    # 价差之上**额外**的对称价格滑点（%）；默认 0
+# —— 盘口价差由「家族 Δσ + tick 地板」模型给出（okx_options_trade.
+# FAMILY_DSIGMA_PTS / FAMILY_TICK，生产 tape 实测，C43-① 方案 A）；
+# 填入 >0 表示在此之上再加一层价格滑点（压力测试/保守估计用）。
 DEFAULT_FEE_RATE = 0.0003     # 期权 taker 名义费率（OKX 按名义价值收，非权利金比例）
 DEFAULT_INITIAL_CASH = 10000.0
 # 合约枚举尾部延伸由 OptionsReplayDataSource 内置（_ENUM_TAIL_DAYS = 7）——
@@ -82,6 +85,8 @@ class OptionsBacktestDriver:
         fee_rate: float = DEFAULT_FEE_RATE,
         tp_pct: Optional[float] = None,
         initial_cash: float = DEFAULT_INITIAL_CASH,
+        dsigma_pts: Optional[float] = None,
+        tick: Optional[float] = None,
         progress_cb: Any = None,
     ) -> None:
         self.family = str(family).upper()
@@ -96,12 +101,17 @@ class OptionsBacktestDriver:
         self.fee_rate = max(0.0, float(fee_rate))
         self.tp_pct = tp_pct
         self.initial_cash = float(initial_cash)
+        # 价差模型覆盖（仅 CLI/实验用；None = 家族实测常数 + 家族 tick）：
+        # dsigma_pts=0 且 tick=0 时退化为「mark 中价」，配 --slippage 0.5 即旧代理模型。
+        self.dsigma_pts = None if dsigma_pts is None else max(0.0, float(dsigma_pts))
+        self.tick = None if tick is None else max(0.0, float(tick))
         # 进度回调（接入层用来把 progress 写进 run 文件）；日志走 stderr
         self._progress_cb = progress_cb
 
         self.data = None
         self.notes: list[str] = []
         self.skips: list[str] = []
+        self._ask_fallback_logged: set[str] = set()   # 出场回退留痕去重
         self._opt_cache: Optional[dict] = None
         self._effective_cap: Optional[int] = None
 
@@ -285,7 +295,16 @@ class OptionsBacktestDriver:
             p = by_inst.get(e.inst_id)
             if p is None:
                 continue
-            buy_px = e.mark_px * (1 + self.slippage)
+            # 买回吃 ask（与入场 bid 同一套家族 Δσ + tick 地板口径）。
+            # 取不到 ask 时回退 mark×(1+滑点) 并留痕 —— 静默降价不可接受。
+            buy_px = self.data.ask_at(p.inst_id, ts, extra_slip=self.slippage,
+                                      dsigma_pts=self.dsigma_pts, tick=self.tick)
+            if buy_px is None or buy_px <= 0:
+                buy_px = e.mark_px * (1 + self.slippage)
+                if p.inst_id not in self._ask_fallback_logged:
+                    self._ask_fallback_logged.add(p.inst_id)
+                    self.notes.append(
+                        f"[出场] {p.inst_id} 无 ask（Δσ 模型）→ 回退 mark×(1+滑点)")
             fee = self._option_fee(p.strike, p.lot_coin, e.sz, premium_px=buy_px)
             cash -= buy_px * p.lot_coin * e.sz + fee
             fills.append({
@@ -349,7 +368,8 @@ class OptionsBacktestDriver:
             self.skips.append(f"周期门控：{gate}")
             return cash
 
-        chain = self.data.chain_dict_at(ts, slippage=self.slippage)
+        chain = self.data.chain_dict_at(ts, opt_type="P", dsigma_pts=self.dsigma_pts,
+                                        tick=self.tick, slippage=self.slippage)
         d, note = evaluate_entry(
             self.family, td_signal=sig, params=self._opt_params(),
             open_contracts=len(positions), total_contracts=len(positions),
@@ -365,7 +385,7 @@ class OptionsBacktestDriver:
             self.skips.append(
                 f"担保不足：需 {collateral:.2f} + 已占 {occupied:.2f} > 可用 {cash:.2f}")
             return cash
-        sell_px = d.bid                     # 已是 mark × (1 − 滑点)，选档成交同口径
+        sell_px = d.bid                     # 家族 Δσ 模型的买一价（选档成交同口径）
         fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px)
         premium = sell_px * lot * d.sz - fee
         cash += premium
@@ -394,7 +414,8 @@ class OptionsBacktestDriver:
         self._log(
             f"启动 family={self.family} timestep={self.timestep} "
             f"td_bars={self.td_bars} 初始={self.initial_cash:.2f} "
-            f"滑点={self.slippage * 100:.2f}% 手续费率={self.fee_rate} "
+            f"额外滑点={self.slippage * 100:.2f}% 手续费率={self.fee_rate} "
+            f"价差模型=家族Δσ+tick地板 "
             f"区间={self.start_ts or '默认'}→{self.end_ts}"
         )
         op = self._opt_params()
@@ -433,12 +454,24 @@ class OptionsBacktestDriver:
         self.data.prefetch()
 
         bt = self.data.bar_times
+        from nanobot_quant.okx_options_trade import (
+            family_dsigma_pts,
+            family_tick,
+        )
         out: dict[str, Any] = {
             "family": self.family, "timestep": self.timestep,
             "bar": self.data.bar, "ref_inst": self.data.ref_inst,
             "start_ts": None, "end_ts": None,
             "initial_cash": self.initial_cash,
             "slippage_pct": self.slippage * 100, "fee_rate": self.fee_rate,
+            "spread_model": "family_dsigma+tick",
+            "spread_model_note": (
+                ("Δσ 覆盖=%.2f IV 点、tick 覆盖=%.4g（实验）" % (self.dsigma_pts, self.tick))
+                if (self.dsigma_pts is not None or self.tick is not None) else
+                (f"家族 Δσ + tick 地板（{self.family}："
+                 f"Δσ={family_dsigma_pts(self.family):g} IV 点，"
+                 f"tick={family_tick(self.family):g}）")
+                + f"；额外滑点 {self.slippage * 100:.2f}%"),
             "td_bars": self.td_bars, "tp_pct": self.tp_pct,
             "bars": {"fetched": len(bt), "evaluated": 0},
             "contracts": {"in_archive": len(self.data._contracts),
@@ -608,6 +641,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--td-bars", type=int, default=120)
     ap.add_argument("--slippage", type=float, default=DEFAULT_SLIPPAGE_PCT)
+    ap.add_argument("--dsigma", type=float, default=None,
+                    help="Δσ 覆盖（IV 点）；0 配 --tick 0 即旧「mark 中价」模型（实验）")
+    ap.add_argument("--tick", type=float, default=None, help="px tick 覆盖（实验）")
     ap.add_argument("--tp", type=float, default=None, help="止盈回落%%（缺省跟随实盘）")
     ap.add_argument("--cash", type=float, default=DEFAULT_INITIAL_CASH)
     ap.add_argument("--out", default="")
@@ -617,7 +653,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         a.family, timestep=a.timestep, end_ts=int(time.time()),
         start_ts=int(time.time()) - a.days * 86400,
         td_bars=a.td_bars, slippage_pct=a.slippage, tp_pct=a.tp,
-        initial_cash=a.cash)
+        initial_cash=a.cash, dsigma_pts=a.dsigma, tick=a.tick)
     res = drv.run()
     if a.out:
         from pathlib import Path

@@ -205,7 +205,7 @@
   <div class="field"><span class="f-label">结束时间</span><input type="datetime-local" id="opt-end"><span class="f-hint">留空 = 现在</span></div>
   <div class="field"><span class="f-label">初始资金（USDC）</span><input type="number" id="opt-cash" value="10000" min="100" step="100"><span class="f-hint">纯模拟记账，与实盘子账号完全隔离</span></div>
   <div class="field"><span class="f-label">TD 窗口（bars）</span><input type="number" id="opt-tdbars" value="120" min="20" max="300"><span class="f-hint">预热 + 重算窗口，改它同时变更回测与实盘语义</span></div>
-  <div class="field"><span class="f-label">滑点（%）</span><input type="number" id="opt-slip" value="0.5" min="0" max="50" step="0.1"><span class="f-hint">在 IV 曲面价上双边加价</span></div>
+  <div class="field"><span class="f-label">额外滑点（%）</span><input type="number" id="opt-slip" value="0" min="0" max="50" step="0.1"><span class="f-hint">默认 0：价差由「家族 Δσ + tick 地板」模型给出（实测）；填 &gt;0 = 在其之上再加对称价格滑点</span></div>
 
   <details style="margin-top:6px;">
     <summary style="cursor:pointer;font-size:.9em;font-weight:600;color:#555;padding:6px 0;">策略参数覆盖（留空 = 跟随实盘 option_params）</summary>
@@ -912,7 +912,8 @@ function renderOptResult(res, runId) {
     ["初始资金", `$${fmtN(res.initial_cash, 2)}`],
     ["TD 窗口", `${res.td_bars} bars`],
     ["张数上限", maxContractsTxt(res)],
-    ["滑点", `${fmtN(res.slippage_pct, 2)}%`], ["手续费率", `${(res.fee_rate || 0) * 100}%（名义）`],
+    ["额外滑点", `${fmtN(res.slippage_pct, 2)}%`], ["价差模型", res.spread_model_note || res.spread_model || "—"],
+    ["手续费率", `${(res.fee_rate || 0) * 100}%（名义）`],
     ["合约总数", `${(res.contracts || {}).in_archive} 档 · 有 IV ${(res.contracts || {}).with_iv}`],
   ];
   for (const [a, b] of p) html += `<tr><td style="width:150px;color:#666;">${a}</td><td>${b ?? "—"}</td></tr>`;

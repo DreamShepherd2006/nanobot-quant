@@ -523,7 +523,9 @@ def fetch_chain(family: str, expiries: list[int] | None = None,
                 inst_id = pair.get(side)
                 cell = {"inst_id": inst_id or "", "bid": None, "ask": None,
                         "iv": None, "delta": None, "prem_usd": None,
-                        "prem_pct": None, "apr_pct": None}
+                        "prem_pct": None, "apr_pct": None,
+                        # 卖方口径（吃买一价 bid）：毛实收，未扣手续费
+                        "bid_usd": None, "bid_pct": None, "bid_apr_pct": None}
                 if inst_id:
                     tk = tickers.get(inst_id, {})
                     cell["bid"] = _f(tk.get("bidPx"))
@@ -532,13 +534,19 @@ def fetch_chain(family: str, expiries: list[int] | None = None,
                     iv = _f(os_.get("markVol"))
                     cell["iv"] = iv * 100 if iv is not None else None
                     cell["delta"] = _f(os_.get("delta"))
-                    if side == "P" and cell["ask"] is not None and lot and spot:
-                        ask = cell["ask"]
-                        # U 本位线性：bidPx/askPx = USD/1 名义币 → 每张 = ask × lot（直接 USD）
-                        cell["prem_usd"] = ask * lot
-                        cell["prem_pct"] = ask / spot * 100.0
+                    if side == "P" and lot and spot:
                         exp_days = max((exp - now) / 86400000.0, 1 / 365.0)
-                        cell["apr_pct"] = cell["prem_pct"] * 365.0 / exp_days
+                        if cell["ask"] is not None:
+                            ask = cell["ask"]
+                            # U 本位线性：bidPx/askPx = USD/1 名义币 → 每张 = px × lot（直接 USD）
+                            cell["prem_usd"] = ask * lot
+                            cell["prem_pct"] = ask / spot * 100.0
+                            cell["apr_pct"] = cell["prem_pct"] * 365.0 / exp_days
+                        if cell["bid"] is not None:
+                            # 卖方实收：卖 put 吃买一价（与 ask 口径并存、不可混用）
+                            cell["bid_usd"] = cell["bid"] * lot
+                            cell["bid_pct"] = cell["bid"] / spot * 100.0
+                            cell["bid_apr_pct"] = cell["bid_pct"] * 365.0 / exp_days
                 row[side] = cell
             rows.append(row)
         if rows:

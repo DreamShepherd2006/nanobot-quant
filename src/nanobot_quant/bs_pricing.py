@@ -24,7 +24,7 @@ from typing import Optional
 
 __all__ = [
     "norm_cdf", "intrinsic", "bs_price", "bs_delta", "implied_vol",
-    "years_to_expiry", "SECONDS_PER_YEAR",
+    "years_to_expiry", "quote_pair_from_iv", "SECONDS_PER_YEAR",
 ]
 
 SECONDS_PER_YEAR = 365.0 * 86400.0
@@ -95,6 +95,47 @@ def bs_delta(spot: float, strike: float, t: float, sigma: float,
         return None
     disc = math.exp(-r * t)
     return (norm_cdf(d1) - 1.0) * disc if right == "P" else norm_cdf(d1) * disc
+
+
+def quote_pair_from_iv(spot: float, strike: float, t: float, iv: float,
+                       right: str = "P", dsigma: float = 0.0,
+                       tick: float = 0.0, extra_slip: float = 0.0,
+                       r: float = 0.0):
+    """中价 IV → 可成交 ``(bid, ask)``（每 1 名义币，USD）。
+
+    ``σ_bid = iv − Δσ/2``、``σ_ask = iv + Δσ/2``（``dsigma`` 为 IV 小数，
+    0.122 = 12.2 点）—— 做市商报的是 IV 双边，价差在**波动率维度**上稳定，
+    在价格维度上看普会随虚值程度被 vega 几何放大（假象）。
+
+    ``tick`` > 0 时复现真实报价量化：价差不足 1 tick 按 1 tick 展开，并按 tick
+    网格取整（bid 向下、ask 向上）—— 最薄档（权利金 ≲ 1 tick）的 bid 会被
+    取整到 0，调用方按 ``bid > 0`` 自然剔除（与 OKX 返回 null bidPx 同效）。
+
+    ``extra_slip`` 是在价差之上的对称价格滑点（默认 0，仅用于压力测试）。
+    无效输入（spot/strike/t/iv 非法）→ ``(None, None)``（fail-closed）。
+    """
+    if not (spot > 0 and strike > 0) or t is None or t <= 0 \
+            or iv is None or iv <= 0:
+        return None, None
+    half = max(0.0, float(dsigma or 0.0)) / 2.0
+    bid = bs_price(spot, strike, t, max(1e-6, float(iv) - half), r, right)
+    ask = bs_price(spot, strike, t, float(iv) + half, r, right)
+    if bid is None or ask is None:
+        return None, None
+    sl = max(0.0, float(extra_slip or 0.0))
+    if sl:
+        bid *= 1.0 - sl
+        ask *= 1.0 + sl
+    tk = max(0.0, float(tick or 0.0))
+    if tk > 0:
+        if ask - bid < tk:                       # 地板：至少一个 tick
+            mid = (ask + bid) / 2.0
+            bid, ask = mid - tk / 2.0, mid + tk / 2.0
+        bid = math.floor(bid / tk + 1e-9) * tk
+        ask = math.ceil(ask / tk - 1e-9) * tk
+    if bid < 0:
+        bid = 0.0
+    return bid, ask
 
 
 def years_to_expiry(ts_ms: int, exp_ms: int) -> Optional[float]:

@@ -37,7 +37,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from nanobot_quant.bs_pricing import bs_delta, years_to_expiry
+from nanobot_quant.bs_pricing import bs_delta, quote_pair_from_iv, years_to_expiry
 from nanobot_quant.iv_surface import (
     DEFAULT_IV_STALENESS_MS,
     IVSurface,
@@ -499,32 +499,37 @@ class OptionsReplayDataSource:
         expiry_min_days: Optional[float] = None,
         expiry_max_days: Optional[float] = None,
         slippage: float = 0.0,
+        dsigma_pts: Optional[float] = None,
+        tick: Optional[float] = None,
     ) -> dict:
         """把该时刻的链快照转成 ``okx_options_select.select_puts`` 认的 chain dict。
 
         这是**回测与实盘共用同一份选档代码的唯一桥接层** —— 过滤/排序逻辑一行
-        都不重写，回测侧只负责把历史 mark 还原成「链」。
+        都不重写，回测侧只负责把历史中价 IV 还原成「链」。
 
-        字段映射（回测没有盘口，一律以 mark 代理）：
+        字段映射（盘口价差由**家族 Δσ + tick 地板**模型给出，C43-① 方案 A）：
 
         ==========  ==================================================
-        ``bid``     ``mark × (1 − slippage)`` —— 模拟「买一价」。
+        ``bid``     ``BS(iv − Δσ/2)`` —— 模拟「买一价」（卖方实收）。
                     选档与成交共用它，避免「选档看 mark、成交吃 bid」的口径分裂。
-        ``ask``     ``mark × (1 + slippage)``
-        ``iv``      从 mark 反解（与 OKX ``markVol`` 同口径：欧式/无股息/r≈0）
-        ``delta``   BS 算（代入反解出的 IV）；反解失败 → None
+        ``ask``     ``BS(iv + Δσ/2)`` —— 买回价（与 bid 同一份代码）
+        ``iv``      直接取 IV 曲面值（含插值），不反向从 mark 反解
+        ``delta``   BS 算（代入曲面 IV）；反解失败 → None
         ``days``    ``(exp_ms − ts) / 86400000``
         ==========  ==================================================
 
-        ``slippage`` 为小数（0.005 = 0.5%），默认 0 = 直接用 mark。
-        缺 spot / 已到期 / 反解失败的合约一律剔除并计入 ``stats``
+        Δσ 取自 ``okx_options_trade.FAMILY_DSIGMA_PTS``（生产 tape 实测，单位
+        IV 点），tick 取自 ``FAMILY_TICK``；两者均可用 ``dsigma_pts``/``tick``
+        参数临时覆盖（测试/敏感性分析用）。``slippage`` 是**在价差之上**的
+        额外对称价格滑点（小数，0.005 = 0.5%），默认 0。
+        缺 spot / 已到期 / 无 IV / 算不出价的合约一律剔除并计入 ``stats``
         —— 静默降级不可接受，调用方必须看得到剔了多少、为什么。
         """
         t = ts or self._current_ts
         lot = self._lot_coin()
         empty = {"spot": 0.0, "lot_coin": lot, "groups": [],
                  "stats": {"total": 0, "kept": 0, "expired": 0,
-                           "no_spot": 1, "no_iv": 0}}
+                           "no_spot": 1, "no_iv": 0, "no_px": 0}}
         if t is None:
             return dict(empty)
         t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
@@ -532,13 +537,17 @@ class OptionsReplayDataSource:
         # ``_current_ts``，传入 ts 但未 seek 时会出现「链是 ts 的、spot 却是上次
         # seek 的」错配（测试里就撞到了：groups 直接空）。
         spot = float(self._spot_at_ms(t_ms) or 0.0)
-        stats = {"total": 0, "kept": 0, "expired": 0, "no_spot": 0, "no_iv": 0}
+        stats = {"total": 0, "kept": 0, "expired": 0, "no_spot": 0, "no_iv": 0,
+                 "no_px": 0}
         if spot <= 0:
             stats["no_spot"] = 1
             return {"spot": 0.0, "lot_coin": lot, "groups": [], "stats": stats}
 
-        sl = max(0.0, float(slippage or 0.0))
+        sl = max(0.0, float(slippage or 0.0))   # 价差之上的额外对称价格滑点
         right = (opt_type or "P").upper()[:1]
+        dsigma_override = None if dsigma_pts is None else max(0.0, float(dsigma_pts))
+        tick_override = None if tick is None else max(0.0, float(tick))
+        from nanobot_quant.okx_options_trade import family_dsigma_pts, family_tick
         groups: dict[int, dict] = {}
         for c in self.chain_at(t, opt_type):
             stats["total"] += 1
@@ -558,6 +567,18 @@ class OptionsReplayDataSource:
                 stats["no_iv"] += 1
                 continue
             delta = bs_delta(spot, strike, tv, iv, 0.0, right)
+            # 盘口价差：家族 Δσ + tick 地板（C43-① 方案 A，单一实现）
+            inst_id = c.get("inst_id")
+            dsigma = (dsigma_override if dsigma_override is not None
+                      else family_dsigma_pts(inst_id)) / 100.0
+            tick_sz = (tick_override if tick_override is not None
+                       else family_tick(inst_id))
+            bid, ask = quote_pair_from_iv(spot, strike, tv, iv, right=right,
+                                          dsigma=dsigma, tick=tick_sz,
+                                          extra_slip=sl)
+            if bid is None:
+                stats["no_px"] += 1
+                continue
             g = groups.get(exp_ms)
             if g is None:
                 g = groups[exp_ms] = {
@@ -570,9 +591,9 @@ class OptionsReplayDataSource:
             g["rows"].append({
                 "strike": _fmt_strike(strike),
                 right: {
-                    "inst_id": c.get("inst_id"),
-                    "bid": mark * (1.0 - sl),
-                    "ask": mark * (1.0 + sl),
+                    "inst_id": inst_id,
+                    "bid": bid,
+                    "ask": ask,
                     "iv": iv,
                     "delta": delta,
                     "mark_px": mark,
@@ -591,6 +612,49 @@ class OptionsReplayDataSource:
             out_groups.append(g)
         return {"spot": spot, "lot_coin": lot, "groups": out_groups,
                 "stats": stats}
+
+    def ask_at(self, inst_id: str, ts=None, right: Optional[str] = None,
+               extra_slip: float = 0.0, dsigma_pts: Optional[float] = None,
+               tick: Optional[float] = None) -> Optional[float]:
+        """该合约在 ``ts`` 的**买回价（ask）**——与链快照同一套 Δσ + tick 口径。
+
+        出场买回（止盈）用它与入场（``chain_dict_at`` 的 ``bid``）对称：
+        卖收 bid、买付 ask，不能用同一个中价。（无 IV / 已到期 / 无 spot
+        → ``None``，调用方自行回退并留痕，不得静默降价。）
+        """
+        t = ts or self._current_ts
+        if t is None or not inst_id or self._surface is None:
+            return None
+        t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
+        meta = self._contracts.get(str(inst_id))
+        if not meta:
+            return None
+        exp_ms = int(meta.get("exp_ms") or 0)
+        strike = float(meta.get("strike") or 0)
+        rt = (right or meta.get("opt_type") or "")[:1].upper()
+        if not rt:
+            try:
+                from nanobot_quant.okx_options_assets import right_of_inst
+                rt = right_of_inst(inst_id)
+            except Exception:  # noqa: BLE001
+                return None
+        if exp_ms <= t_ms or strike <= 0:
+            return None
+        spot = float(self._spot_at_ms(t_ms) or 0.0)
+        if spot <= 0:
+            return None
+        tv = years_to_expiry(t_ms, exp_ms)
+        iv = self._surface.iv_for(str(inst_id), t_ms)
+        if iv is None:
+            return None
+        from nanobot_quant.okx_options_trade import family_dsigma_pts, family_tick
+        _bid, ask = quote_pair_from_iv(
+            spot, strike, tv, iv, right=rt,
+            dsigma=((dsigma_pts if dsigma_pts is not None
+                     else family_dsigma_pts(inst_id)) / 100.0),
+            tick=(tick if tick is not None else family_tick(inst_id)),
+            extra_slip=max(0.0, float(extra_slip or 0.0)))
+        return ask
 
     def contracts(self) -> list[dict]:
         """全部有 IV 覆盖的合约（附 IV 观测点数）。"""

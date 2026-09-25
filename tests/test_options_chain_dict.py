@@ -170,10 +170,32 @@ def test_iv_and_delta_recovered_from_price():
     assert checked > 0, "应有非病态档参与校验"
 
 
-def test_slippage_applied_symmetrically():
+def test_family_dsigma_spread_replaces_price_proxy():
+    """C43-①：bid/ask 由家族 Δσ + tick 地板给出（不再 mark×（1∓滑点））。
+
+    量级用中位价差率做 sanity check：SOL Δσ=12.2 点远比旧代理（共 1%）宽。
+    """
     ds = _ds()
     ds.seek(_IDX[5])   # 距 09-04 到期约 3.1 天，落在默认 3–7 天窗口
-    chain = ds.chain_dict_at(slippage=0.01)
+    chain = ds.chain_dict_at()
+    ratios = []
+    for g in chain["groups"]:
+        for row in g["rows"]:
+            cell = row["P"]
+            mark = cell["mark_px"]
+            assert cell["bid"] < cell["ask"]
+            if mark > 0:
+                ratios.append((cell["ask"] - cell["bid"]) / mark)
+    assert ratios
+    ratios.sort()
+    assert ratios[len(ratios) // 2] > 0.02            # 中位价差率 > 2%
+
+
+def test_extra_slippage_stacks_on_top_of_spread_model():
+    """额外滑点是叠加项：dsigma=0/tick=0 时退化为旧模型 mark×(1∓滑点)。"""
+    ds = _ds()
+    ds.seek(_IDX[5])
+    chain = ds.chain_dict_at(slippage=0.01, dsigma_pts=0.0, tick=0.0)
     for g in chain["groups"]:
         for row in g["rows"]:
             cell = row["P"]
@@ -182,13 +204,31 @@ def test_slippage_applied_symmetrically():
             assert cell["ask"] == pytest.approx(mark * 1.01)
 
 
+def test_tick_floor_keeps_spread_at_least_one_tick():
+    """价差地板：Δσ=0 时仍按 1 tick 展开（最薄档报价量化）。"""
+    ds = _ds()
+    ds.seek(_IDX[5])
+    chain = ds.chain_dict_at(dsigma_pts=0.0, tick=0.5)
+    seen = 0
+    for g in chain["groups"]:
+        for row in g["rows"]:
+            cell = row["P"]
+            assert cell["ask"] - cell["bid"] >= 0.5 - 1e-9
+            seen += 1
+    assert seen
+
+
 def test_no_slippage_by_default():
+    """默认（无额外滑点）下仍按家族 Δσ 给出价差，不用中价成交。"""
     ds = _ds()
     ds.seek(_IDX[5])   # 距 09-04 到期约 3.1 天，落在默认 3–7 天窗口
     chain = ds.chain_dict_at()
+    seen = 0
     for g in chain["groups"]:
         for row in g["rows"]:
-            assert row["P"]["bid"] == pytest.approx(row["P"]["mark_px"])
+            assert row["P"]["bid"] < row["P"]["ask"]
+            seen += 1
+    assert seen
 
 
 # ── stats（静默降级不可接受）─────────────────────────────────────────

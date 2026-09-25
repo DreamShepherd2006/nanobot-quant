@@ -257,7 +257,10 @@ def test_check_exits_takes_profit_reuses_live_decision():
     cash = d._check_exits(_IDX[40], pos, fills, 1000.0)
     assert pos == []
     assert fills[0]["side"] == "close"
-    buy_px = mark * (1 + d.slippage)
+    # 买回吃 ask（与入场 bid 同一套家族 Δσ + tick 地板口径，C43-①）
+    buy_px = d.data.ask_at(inst, _IDX[40], extra_slip=d.slippage)
+    assert buy_px is not None and buy_px > 0
+    assert buy_px > mark            # ask 严格高于中价 mark，不是用中价成交
     rec_px = fills[0]["avg_px"]
     # 记录层把成交价 round 到 6 位（既有设计，不是本次改动引入）
     assert rec_px == pytest.approx(buy_px, abs=1e-6)
@@ -298,7 +301,8 @@ def test_run_end_to_end_shape(monkeypatch):
     d = _driver(tp_pct=50.0)
     monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
     monkeypatch.setattr(type(d.data), "chain_dict_at",
-                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
     res = d.run()
     assert "error" not in res, res.get("error")
     for key in ("kpi", "fills", "final_positions", "skips", "bars",
@@ -319,7 +323,8 @@ def test_run_records_open_positions_with_mark(monkeypatch):
     d = _driver(tp_pct=999.0)                     # 止盈线不可达 → 必然留下未平仓
     monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
     monkeypatch.setattr(type(d.data), "chain_dict_at",
-                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
     res = d.run()
     opens = res["final_positions"]
     assert opens, "止盈不可达时必然留下未平仓"
@@ -340,6 +345,7 @@ def test_run_result_is_json_serializable(monkeypatch):
     d = _driver(tp_pct=999.0)
     monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
     monkeypatch.setattr(type(d.data), "chain_dict_at",
-                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
     res = d.run()
     json.dumps(res)          # 不带 default=，必须原生可序列化

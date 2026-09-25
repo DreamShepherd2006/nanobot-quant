@@ -610,11 +610,14 @@ function renderChain(data) {
       '<th class="stk">Strike</th>' +
       '<th colspan="3" class="sec call">Call</th>' +
       '<th colspan="3" class="sec put">Put（卖 put 视角）</th>' +
-      '<th class="sec put">权利金/张</th><th class="sec put">年化</th><th></th>' +
+      '<th class="sec put">权利金/张(ask)</th><th class="sec put">年化(ask)</th>' +
+      '<th class="sec put" title="卖方吃买一价（bid）实收：毛权利金，未扣手续费">卖方实收/张(bid)</th>' +
+      '<th class="sec put" title="卖方口径年化（bid ÷ 现货价 × 365/天数，毛）">卖方年化(bid)</th>' +
+      '<th></th>' +
       '</tr><tr>' +
       '<th></th><th>bid/ask</th><th>IV</th><th>Δ</th>' +
       '<th>bid/ask</th><th>IV</th><th>Δ</th>' +
-      '<th>USD</th><th>率</th><th></th>' +
+      '<th>USD</th><th>率</th><th>USD</th><th>率</th><th></th>' +
       '</tr></thead><tbody>';
     for (const r of g.rows) {
       const c = r.C, p = r.P;
@@ -640,6 +643,8 @@ function renderChain(data) {
         cellHtml(p, clsP) +
         '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
         '<td>' + (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
+        '<td>' + (p.bid_usd ? "$" + fmt(p.bid_usd, 2) : '<span class="na">—</span>') + '</td>' +
+        '<td>' + (p.bid_apr_pct ? '<span class="apr' + (p.bid_apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.bid_apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
         '<td>' + lcBtnC + ' ' + sellCallBtn + '<br>' + lcBtn + ' ' + sellBtn + '</td></tr>';
     }
     html += '</tbody></table></div>';
