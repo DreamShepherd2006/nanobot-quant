@@ -290,6 +290,9 @@ class OptionsBacktestDriver:
         if not exits:
             return cash
         by_inst = {p.inst_id: p for p in positions}
+        # 建仓手续费——从已落盘的开仓记录取，用于算这张的净盈亏（不重复推导）
+        open_fee = {f["inst_id"]: (f.get("fee_usd") or 0.0)
+                    for f in fills if f.get("side") == "sell_open"}
         done: list[str] = []
         for e in exits:
             p = by_inst.get(e.inst_id)
@@ -307,10 +310,18 @@ class OptionsBacktestDriver:
                         f"[出场] {p.inst_id} 无 ask（Δσ 模型）→ 回退 mark×(1+滑点)")
             fee = self._option_fee(p.strike, p.lot_coin, e.sz, premium_px=buy_px)
             cash -= buy_px * p.lot_coin * e.sz + fee
+            e_fee = open_fee.get(p.inst_id, 0.0)
+            # 这张的净盈亏 =（卖出价 − 买回价）× 面值 × 张数 − 两笔手续费。
+            # 原先买回记录不带 pnl、明细「盈亏」列显示「—」，止盈收益既进不了
+            # 「权利金」也进不了 wins/losses ⇒ 报告与净值不闭合（2026-09-26 复验：
+            # 7 笔止盈收益 ~0.286 在 KPI 里完全看不到）。
+            pnl = (p.entry_px - buy_px) * p.lot_coin * e.sz - e_fee - fee
             fills.append({
                 "ts": str(ts), "inst_id": p.inst_id, "side": "close",
                 "sz": e.sz, "strike": p.strike, "strategy_px": p.entry_px,
                 "avg_px": round(buy_px, 6), "fee_usd": round(fee, 6),
+                "close_cost_usd": round(buy_px * p.lot_coin * e.sz, 6),
+                "pnl_usd": round(pnl, 6),
                 "spot": round(self.data.price_of() or 0.0, 4),
                 "reason": f"止盈（回落 {e.drop_pct:.1f}% ≥ {self.tp_pct:g}%）",
             })
@@ -402,6 +413,9 @@ class OptionsBacktestDriver:
             "spot": round(spot, 4),
             "iv": d.iv, "delta": d.delta, "days": d.days,
             "net_yield_pct": d.net_yield_pct,
+            # 毛权利金收入（每笔开仓都记）—— KPI「权利金收入（毛）」= 本字段求和。
+            # 只落在开仓记录上：到期记录也带同名字段（那张的权利金），不能混求。
+            "premium_usd": round(sell_px * lot * d.sz, 6),
             "reason": d.entry_reason,
         })
         return cash
@@ -603,14 +617,25 @@ class OptionsBacktestDriver:
             "per_family": op.get("max_contracts_per_family"),
             "total": op.get("max_contracts_total"),
         }
+        # ── 账目四件套（与净值闭合）────────────────────────────
+        # 毛权利金 = 全部开仓收到的；买回支出 = 止盈买回的付出；赔付 = 到期被
+        # 行权赔付；手续费 = 全部成交的手续费。净交易损益 = 四者轧差 ⇒
+        # 期末净值 = 初始 + 净交易损益 − 期末未平仓市值。
+        premium_gross = sum(f.get("premium_usd") or 0 for f in fills
+                            if f.get("side") == "sell_open")
+        buyback = sum(f.get("close_cost_usd") or 0 for f in fills
+                      if f.get("side") == "close")
+        payout_total = sum(f.get("payout_usd") or 0 for f in fills)
+        fees_total = sum(f.get("fee_usd") or 0 for f in fills)
         out["kpi"] = {
             "final_net_usd": round(net, 4),
             "roi_pct": round((net - self.initial_cash) / self.initial_cash * 100, 4),
-            # 权利金口径：``premium_usd`` 只出现在到期/买回了结的记录里 ⇒ 本项是
-            # **已了结**部分；期末未平仓那张的权利金在 cash 里、却不在此列（净值含它）。
-            "premium_income_usd": round(sum(f.get("premium_usd") or 0 for f in fills), 4),
+            "premium_income_usd": round(premium_gross, 4),
+            "buyback_cost_usd": round(buyback, 4),
+            "payout_usd": round(payout_total, 4),
+            "fees_usd": round(fees_total, 4),
+            "net_trading_usd": round(premium_gross - buyback - payout_total - fees_total, 4),
             "open_premium_usd": round(open_premium, 4),
-            "payout_usd": round(sum(f.get("payout_usd") or 0 for f in fills), 4),
             "open_mark_value_usd": round(open_value, 4),
             "fills": len(fills),
             "wins": sum(1 for f in fills if (f.get("pnl_usd") or 0) > 0),
@@ -623,7 +648,9 @@ class OptionsBacktestDriver:
             f"完成 用时={out['elapsed_s']}s 评估={out['bars']['evaluated']} 根 "
             f"成交={k['fills']}（盈 {k['wins']} / 亏 {k['losses']}） "
             f"期末持仓={len(open_rows)} 净值={k['final_net_usd']} "
-            f"ROI={k['roi_pct']}% 权利金={k['premium_income_usd']} 赔付={k['payout_usd']}"
+            f"ROI={k['roi_pct']}% 毛权利金={k['premium_income_usd']} "
+            f"买回={k['buyback_cost_usd']} 赔付={k['payout_usd']} "
+            f"手续费={k['fees_usd']} 净交易={k['net_trading_usd']}"
         )
         if out["skips"]:
             self._log(f"SKIP 汇总：{out['skips']}")

@@ -394,9 +394,51 @@ def test_run_open_premium_separate_from_settled(monkeypatch):
     lot = 0.1                                     # SOL 家族每张面值
     expect = sum(r["entry_px"] * lot * r["sz"] for r in opens)
     assert res["kpi"]["open_premium_usd"] == pytest.approx(round(expect, 4), abs=1e-4)
-    # 已了结栏只能来自带 premium_usd 的记录（到期/买回），不含未平仓那张
-    settled = sum(f.get("premium_usd") or 0 for f in res["fills"])
-    assert res["kpi"]["premium_income_usd"] == pytest.approx(round(settled, 4), abs=1e-4)
+    # 毛权利金栏只累计开仓记录（到期记录同名字段是那张自己的权利金，不能混求）
+    gross = sum(f.get("premium_usd") or 0 for f in res["fills"] if f["side"] == "sell_open")
+    assert res["kpi"]["premium_income_usd"] == pytest.approx(round(gross, 4), abs=1e-4)
+
+
+def test_check_exits_records_cost_and_pnl_for_buyback():
+    """买回记录必须带 close_cost_usd 与 pnl_usd（含建仓 + 平仓两笔手续费）。
+
+    否则止盈收益在报告里彻底消失：既进不了「权利金」也进不了 wins/losses，
+    明细里那一行「盈亏」还是个「—」（2026-09-26 复验：7 笔止盈收益 ~0.286
+    完全看不到，净值却实打实 +0.28）。
+    """
+    d = _driver(tp_pct=50.0)
+    d.data.seek(_IDX[40])
+    inst = next(k for k in d.data._contracts
+                if k.endswith("-P") and _exp_ms(k) > _to_ms(_IDX[40])
+                and (d.data.premium_of(k, _IDX[40]) or 1e9) < 999.0 * 0.5)
+    pos = [SimPosition(inst, "SOL-USD_UM", float(inst.split("-")[3]),
+                       _exp_ms(inst), 1, 999.0, _IDX[0], "buy9", 0.1)]
+    # 建仓那条记录得先在 fills 里 —— 净盈亏要把两笔手续费都扣掉
+    fills: list[dict] = [{"inst_id": inst, "side": "sell_open", "fee_usd": 0.0026}]
+    d._check_exits(_IDX[40], pos, fills, 1000.0)
+    rec = fills[-1]
+    assert rec["side"] == "close"
+    buy_px = d.data.ask_at(inst, _IDX[40], extra_slip=d.slippage)
+    assert rec["close_cost_usd"] == pytest.approx(round(buy_px * 0.1, 6), abs=1e-6)
+    assert rec["pnl_usd"] == pytest.approx(
+        round((999.0 - buy_px) * 0.1 - 0.0026 - rec["fee_usd"], 6), abs=1e-6)
+
+
+def test_kpi_closes_with_final_net(monkeypatch):
+    """账目四件套轧差 = 净值变动 + 期末未平仓市值（报表必须是一本能对上的账）。"""
+    d = _driver(tp_pct=999.0)           # 不止盈 → 期末留仓，顺带覆盖未平仓项
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
+    res = d.run()
+    k = res["kpi"]
+    lhs = (k["premium_income_usd"] - k["buyback_cost_usd"]
+           - k["payout_usd"] - k["fees_usd"])
+    assert k["net_trading_usd"] == pytest.approx(lhs, abs=1e-4)
+    assert k["final_net_usd"] == pytest.approx(
+        d.initial_cash + k["net_trading_usd"] - k["open_mark_value_usd"], abs=2e-3)
+    assert k["open_premium_usd"] > 0
 
 
 def test_run_result_is_json_serializable(monkeypatch):

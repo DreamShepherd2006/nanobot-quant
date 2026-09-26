@@ -25,7 +25,8 @@ def _opt_result() -> dict:
         "contracts": {"in_archive": 3824, "with_iv": 206},
         "kpi": {
             "final_net_usd": 101.3633, "roi_pct": 1.3633,
-            "premium_income_usd": 1.2911, "payout_usd": 0.039,
+            "premium_income_usd": 1.2911, "buyback_cost_usd": 0.4102,
+            "payout_usd": 0.039, "fees_usd": 0.0481, "net_trading_usd": 0.7938,
             "open_mark_value_usd": 0.0507, "fills": 21, "wins": 9, "losses": 0,
         },
         "fills": [
@@ -215,22 +216,26 @@ def test_spread_model_row_present_only_for_options():
     assert "| 价差模型 |" not in render_markdown(_spot_result())
 
 
-def test_premium_income_split_settled_and_open():
-    """权利金拆两栏：已了结（premium_usd 累计）+ 未平仓（在 cash 里但不在 fills 里）。
+def test_premium_accounting_rows_present():
+    """账目四件套（毛权利金 / 买回 / 赔付 / 手续费）+ 轧差行必须齐全，并单列未平仓权利金。
 
-    原先只给一栏「权利金收入」= 已了结，而净值含未平仓那张 ⇒ 两栏不闭合，
-    看上去像算错（2026-09-25 实测：0.358 vs 净值 100.4126）。
+    止盈生效后「买回支出」才是大头：只给一栏毛权利金会让报告看着像算错
+    （2026-09-26 复验：7 笔止盈收益 ~0.286 在 KPI 里完全看不到）。
     """
-    res = _opt_result()
-    res["kpi"]["open_premium_usd"] = 0.089
-    md = render_markdown(res)
-    assert "| 权利金收入（已了结） | $1.2911 |" in md
-    assert "| 未平仓权利金 | $0.0890 |" in md
+    md = render_markdown(_opt_result())
+    assert "| 权利金收入（毛） | $1.2911 |" in md
+    assert "| 买回支出 | $0.4102 |" in md
+    assert "| 赔付支出 | $0.0390 |" in md
+    assert "| 手续费合计 | $0.0481 |" in md
+    assert "| 净交易损益（毛权利金−买回−赔付−手续费） | $0.7938 |" in md
 
-    # 旧记录没有该字段 → 必须是「—」而不是 None/NaN 拼接残留
-    res["kpi"].pop("open_premium_usd")
+    # 旧记录没有这些字段 → 「—」，且不得留 None/NaN 拼接残留
+    res = _opt_result()
+    for key in ("buyback_cost_usd", "fees_usd", "net_trading_usd", "open_premium_usd"):
+        res["kpi"].pop(key, None)
     md_old = render_markdown(res)
-    assert "| 未平仓权利金 | $— |" in md_old
+    assert "| 买回支出 | $— |" in md_old
+    assert "| 净交易损益（毛权利金−买回−赔付−手续费） | $— |" in md_old
     assert "None" not in md_old
 
 
