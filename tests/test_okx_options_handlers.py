@@ -354,3 +354,32 @@ def test_live_sync_also_syncs_tape_without_breaking_strategy(monkeypatch):
     assert "from . import option_tape as _tape" in src
     assert "_tape.sync()" in src
     assert "不影响策略循环" in src        # 异常吞噪，但打 stderr 可查
+
+
+def test_options_page_polish_markers():
+    """期权页展示层四项（纯文案/标记，零行为变更）。
+
+    ① 候选区：「切 tab 不自动重算」提示 + 与当前 tab 不一致时前端比对提示；
+    ② 链页：实值（ITM）put 不显示年化，改打「实值」标记；
+    ③ 策略事件：已过到期时刻（08:00 UTC）的合约打「已到期」标；
+    ④ 自动循环区：重建后不会自动恢复、需点一次保存。
+    """
+    from pathlib import Path
+    h = (Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+         / "okx_options_page.html").read_text(encoding="utf-8")
+    # ① 候选区提示
+    assert 'id="candStale"' in h
+    assert "function markCandsStale()" in h
+    assert "candsLockMs = d.expiry_locked_ms" in h        # 记下生成时锁定的档
+    assert "不会自动重算" in h and "需手动点一次" in h
+    assert "markCandsStale();" in h                        # setSelExp 里调用（不打接口）
+    # ② 实值档
+    assert "function instExpired(" in h and "function msDate(" in h
+    assert ".itm-tag" in h and "实值" in h
+    assert "const pItm = !isNaN(spotNum) && k > spotNum;" in h            # 年化两列由 pItm 控制
+    assert "实值（ITM）档不显示年化" in h
+    # ③ 事件过期打标
+    assert "已到期" in h
+    assert "该合约已过到期时刻（08:00 UTC）" in h
+    # ④ 循环启动提示
+    assert "不会自动恢复" in h and "确认无误后再取消勾选" in h

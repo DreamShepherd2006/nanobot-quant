@@ -37,6 +37,7 @@
   .grp { margin-top:14px; }
   .grp-title { font-weight:700; font-size:.95em; margin:6px 0; display:flex; align-items:center; gap:10px; }
   .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:.76em; background:#eef2f7; color:#555; }
+  .itm-tag { display:inline-block; padding:0 5px; border-radius:8px; font-size:.76em; background:#fdecea; color:#b71c1c; border:1px solid #ef9a9a; }
   .tag.red { background:#fdecea; color:#c62828; }
   table { width:100%; border-collapse:collapse; font-size:.82em; }
   th, td { padding:4px 6px; border-bottom:1px solid #f0f0f0; text-align:right; white-space:nowrap; }
@@ -249,6 +250,8 @@
       <span class="hint" id="candStamp"></span>
       <span class="hint" id="candMeta"></span>
     </div>
+    <div class="hint" style="margin-bottom:4px">ℹ️ 本区只在「页面加载 / 保存合约选择参数 / 换标的 / 点 🔄 生成候选」时重算 —— <b>切换上方期权链的到期 tab 后不会自动重算，需手动点一次「🔄 生成候选」</b>。</div>
+    <div class="outside-note" id="candStale" style="display:none"></div>
     <div class="outside-note" id="candOutside" style="display:none"></div>
     <div id="candBody"><div class="empty">点「🔄 生成候选」：按当前选择参数（距离 / 到期 / delta 过滤 + 净收益率排序）挑出可卖合约</div></div>
   </div>
@@ -280,6 +283,7 @@
     <button class="btn-ghost" id="saveLiveBtn">保存</button>
     <span class="hint" id="liveStatus"></span>
   </div>
+  <div class="hint" style="margin-top:2px">ℹ️ 空间重建 / 重启后循环<b>不会自动恢复</b> —— 需要在这里点一次「保存」把它拉起来（dry-run 默认勾选 = 只记意图不下单，确认无误后再取消勾选）。</div>
   <div class="ctl" style="margin-top:6px">
     <span class="hint">标的家族</span>
     <span id="liveFamilies" class="famchk" title="自动循环在这些标的上跑（可多选）；与顶部「标的」互不影响"></span>
@@ -524,11 +528,21 @@ function syncExpSel(v) {
   expSel.value = v ? String(v) : "";
 }
 // 到期切换唯一入口：tab / 下拉 / 候选回跳都走这里，保证下拉与 selExp 不脱节
+let candsLockMs = null;                   // 最近一次候选生成时锁定的到期档（ms），用于与当前 tab 比对
+function markCandsStale() {
+  const el = $("candStale"); if (!el) return;
+  const cur = String(selExp || ""), gen = candsLockMs ? String(candsLockMs) : "";
+  if (!gen || !cur || gen === cur) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  el.innerHTML = "⚠️ 当前到期 tab 是 <b>" + esc(msDate(cur)) + "</b>，而上方候选是按 <b>" + esc(msDate(gen)) +
+    "</b> 生成的 —— 本区不会自动重算，请点一次「🔄 生成候选」。";
+}
 function setSelExp(v) {
   selExp = String(v || "");
   syncExpSel(selExp);
   buildExpTabs();
   loadChain();
+  markCandsStale();
 }
 function buildExpTabs() {
   const bar = $("expTabs");
@@ -575,6 +589,18 @@ function jumpToExpiry(expMs) {
 function cellHtml(side, cls) {
   const k = cls ? " class=\"" + cls + "\"" : "";
   return '<td' + k + '>' + bidAsk(side.bid, side.ask) + '</td><td' + k + '>' + pct(side.iv) + '</td><td' + k + '>' + fmt(side.delta, 3) + '</td>';
+}
+function msDate(ms) {                    // exp_ms（毫秒）→ 日期串（与 OKX 到期档标签同口径）
+  const d = new Date(Number(ms));
+  return isNaN(d.getTime()) ? "—" : d.toISOString().slice(0, 10);
+}
+function instExpired(instId) {            // 期权合约是否已过到期时刻（08:00 UTC）
+  const parts = String(instId || "").split("-");
+  const seg = parts.length >= 3 ? parts[parts.length - 3] : "";
+  if (!/^\d{6}$/.test(seg)) return false;
+  const exp = Date.UTC(2000 + Number(seg.slice(0, 2)), Number(seg.slice(2, 4)) - 1,
+                       Number(seg.slice(4, 6)), 8, 0, 0);
+  return Date.now() >= exp;
 }
 function renderChain(data) {
   chainData = data;
@@ -624,6 +650,7 @@ function renderChain(data) {
       const k = Number(r.strike);
       const clsC = !isNaN(spotNum) && k < spotNum ? "bgi-c" : "";
       const clsP = !isNaN(spotNum) && k > spotNum ? "bgi-p" : "";
+      const pItm = !isNaN(spotNum) && k > spotNum;   // put 实值（strike > 现货）→ 年化不显示
       const isAtm = atmStrike === r.strike;
       const sellBtn = (p.inst_id && p.bid !== null)
         ? '<a class="act put-sell" onclick="openSell(' + g.exp_ms + ',' + r.strike + ')">卖 put</a>'
@@ -642,13 +669,18 @@ function renderChain(data) {
         cellHtml(c, clsC) +
         cellHtml(p, clsP) +
         '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
-        '<td>' + (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
+        '<td>' + (pItm
+          ? '<span class="itm-tag" title="实值（ITM）档不显示年化：实值权利金以内在价值为主，按现货价折算的年化会失真">实值</span>'
+          : (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>')) + '</td>' +
         '<td>' + (p.bid_usd ? "$" + fmt(p.bid_usd, 2) : '<span class="na">—</span>') + '</td>' +
-        '<td>' + (p.bid_apr_pct ? '<span class="apr' + (p.bid_apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.bid_apr_pct, 1) + '%</span>' : '<span class="na">—</span>') + '</td>' +
+        '<td>' + (pItm
+          ? '<span class="na" title="实值档不显示年化">—</span>'
+          : (p.bid_apr_pct ? '<span class="apr' + (p.bid_apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.bid_apr_pct, 1) + '%</span>' : '<span class="na">—</span>')) + '</td>' +
         '<td>' + lcBtnC + ' ' + sellCallBtn + '<br>' + lcBtn + ' ' + sellBtn + '</td></tr>';
     }
     html += '</tbody></table></div>';
   }
+  html += '<div class="note" style="margin-top:2px">🔻 <b>「实值」标记</b> = 该 put 已实值（strike &gt; 现货），其「年化」两列不显示 —— 实值权利金以内在价值为主，按现货价折算的年化没有意义（会爆表）。卖 put 选档请以「🎯 卖 put 候选」表的净权利金 / 净收益率为准。</div>';
   wrap.innerHTML = html;
   $("priceNote").textContent = data.price_note || "";
 }
@@ -1568,6 +1600,8 @@ async function loadCandidates() {
 }
 function renderCandidates(d) {
   const s = d.selector || {}, f = d.filtered || {};
+  candsLockMs = d.expiry_locked_ms || null;      // 记下本次锁定档：切 tab 后据此提示「需手动重算」
+  markCandsStale();
   // 家族外提示：这里看的是「手动操作上下文」，与自动循环的标的家族互不影响
   const noteEl = $("candOutside");
   if (noteEl) {
@@ -1583,7 +1617,7 @@ function renderCandidates(d) {
   }
   $("candMeta").textContent = (d.family || "") + " · 基准 " + fmt(d.base_px, 2) + " · 距离 ≥" + fmt(s.min_distance_pct, 1) + "% · 到期 " +
     (d.expiry_mode === "locked"
-      ? "锁定 " + ((((d.candidates || [])[0] || {}).date) || "当前 tab") + "（跟随链 tab）"
+      ? "锁定 " + (d.expiry_locked_ms ? msDate(d.expiry_locked_ms) : ((((d.candidates || [])[0] || {}).date) || "当前 tab")) + "（跟随链 tab）"
       : "窗口 " + fmt(s.expiry_min_days, 0) + "–" + fmt(s.expiry_max_days, 0) + " 天") +
     " · delta " + fmt(s.delta_min, 2) + "–" + fmt(s.delta_max, 2) +
     " · 过滤[到期 " + (f.expiry || 0) + " · 无买盘 " + (f.no_bid || 0) + " · 距离 " + (f.distance || 0) + " · delta " + (f.delta || 0) +
@@ -1641,8 +1675,10 @@ function renderLiveEvents(evs) {
       const label = st.indexOf("dry_run") === 0
         ? (isEntry ? "🖐 打算卖" : "🖐 打算买回")
         : (st === "sold" || st === "bought_back" ? "✅ " + (isEntry ? "已卖" : "已买回") : "❌ 失败");
-      return "<div style='padding:3px 0'>" + icon + " " + label + " · " + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " +
+      const expired = instExpired(e.inst_id);     // 已过到期时刻的历史意图：淡化 + 打标
+      return "<div style='padding:3px 0" + (expired ? ";opacity:.55" : "") + "'>" + icon + " " + label + " · " + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " +
         locTs(Date.parse(e.ts)) +
+        (expired ? " · <span class='itm-tag' title='该合约已过到期时刻（08:00 UTC），此条仅为历史记录'>已到期</span>" : "") +
         (e.error ? " · <span style='color:#c62828'>" + esc(e.error) + "</span>" : "") + "</div>";
     }).join("");
   }
