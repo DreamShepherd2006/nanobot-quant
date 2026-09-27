@@ -325,6 +325,40 @@ def resolve_instrument(inst_id: str) -> dict:
 # 供到期补买预填等场景：合约到期后 OKX instruments 不再返回规格，面值须本地解析。
 FAMILY_LOT = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XAU": 0.01}
 
+# ── 期权盘口价差模型（C43-① 方案 A：家族常数 Δσ + px tick 地板）────────
+# Δσ = 盘口买卖 IV 价差（单位：IV 点，1 点 = 1%）。用途：把「中价 IV」还原成
+# 可成交的 bid/ask —— 回测原先用「mark × (1 ∓ 滑点%)」代理价差，实测其等价
+# 量仅 0.34~0.54 IV 点，比真实盘口窄一到两个数量级（SOL 差～21 倍）。
+# 取值 = 生产 tape（2026-09-24/25，可用样本 31032）**卖出带 |Δ| 0.15–0.50
+# 两桶中位的均值**：SOL 11.79/12.62→12.2、XAU 4.58/4.82→4.7、
+# BTC 1.57/0.91→1.24、ETH 1.59/1.01→1.30。家族间差 ~10×（SOL vs BTC），
+# 故必须按家族取值、不能全局一个常数。
+# 详见 docs/quant-system.md §33.41 与 skill okx-options-historical-data §3。
+FAMILY_DSIGMA_PTS = {"SOL": 12.2, "XAU": 4.7, "BTC": 1.24, "ETH": 1.30}
+DEFAULT_DSIGMA_PTS = 2.0     # 未实测家族的兜底（FAMILIES 四个均已实测）
+
+# 报价最小变动（px tick）—— 价差地板：模型价差 < 1 tick 时按 1 tick 展开。
+# SOL/BTC/XAU 来自实盘下单实测（SOL 0.01、BTC 1、XAU 0.1）；ETH 未实测，
+# 暂取 0.05（偏保守：tick 越大地板越宽），对 ETH 影响可忽略（其 Δσ 1.3 点
+# 已对应远超 1 tick 的价差）。
+FAMILY_TICK = {"SOL": 0.01, "BTC": 1.0, "XAU": 0.1, "ETH": 0.05}
+DEFAULT_TICK = 0.01
+
+
+def family_of(inst_id: str) -> str:
+    """instId / 家族名 → 基础币（``SOL-USD_UM-260927-124-C`` → ``SOL``）。"""
+    return (inst_id or "").split("-")[0].upper()
+
+
+def family_dsigma_pts(inst_id: str) -> float:
+    """该家族的 Δσ（IV 点）。"""
+    return float(FAMILY_DSIGMA_PTS.get(family_of(inst_id), DEFAULT_DSIGMA_PTS))
+
+
+def family_tick(inst_id: str) -> float:
+    """该家族的报价最小变动（px tick）。"""
+    return float(FAMILY_TICK.get(family_of(inst_id), DEFAULT_TICK))
+
 #: OKX 期权吃单手续费率（按「名义价值 = strike × 面值 × 张数」计）——
 #: 2026-09-14 实盘账单反推：call 104-C 1 张 fee 0.00309 USDC，
 #: 名义 104×0.1 = 10.4 → 0.0297% ≈ 0.03%（低于 OKX 最低手续费时按最低收，

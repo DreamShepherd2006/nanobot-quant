@@ -203,6 +203,37 @@ def test_missing_numbers_render_dash_not_dash_percent():
     assert "—%" not in md
 
 
+def test_spread_model_row_present_only_for_options():
+    """「价差模型」是期权回测专有行（现货链没有这个模型）——页面有、markdown 也必须有，
+    否则「复制 Markdown = 页面所见」这条一致性要求会被静默破坏。"""
+    res = _opt_result()
+    res["spread_model"] = "family_dsigma+tick"
+    res["spread_model_note"] = "家族 Δσ + tick 地板（SOL-USD_UM：Δσ=12.2 IV 点，tick=0.01）；额外滑点 0.00%"
+    md = render_markdown(res)
+    assert "| 价差模型 |" in md
+    assert "Δσ=12.2 IV 点" in md
+    assert "| 价差模型 |" not in render_markdown(_spot_result())
+
+
+def test_premium_income_split_settled_and_open():
+    """权利金拆两栏：已了结（premium_usd 累计）+ 未平仓（在 cash 里但不在 fills 里）。
+
+    原先只给一栏「权利金收入」= 已了结，而净值含未平仓那张 ⇒ 两栏不闭合，
+    看上去像算错（2026-09-25 实测：0.358 vs 净值 100.4126）。
+    """
+    res = _opt_result()
+    res["kpi"]["open_premium_usd"] = 0.089
+    md = render_markdown(res)
+    assert "| 权利金收入（已了结） | $1.2911 |" in md
+    assert "| 未平仓权利金 | $0.0890 |" in md
+
+    # 旧记录没有该字段 → 必须是「—」而不是 None/NaN 拼接残留
+    res["kpi"].pop("open_premium_usd")
+    md_old = render_markdown(res)
+    assert "| 未平仓权利金 | $— |" in md_old
+    assert "None" not in md_old
+
+
 def test_archive_summary_line_is_not_duplicated():
     """原始 notes 自带的「归档共 N 天」应与我们生成的摘要合并成一条。"""
     md = render_markdown(_opt_result())

@@ -218,20 +218,40 @@ def test_chain_dict_at_shape():
         assert g["rows"] and g["days"] > 0
         for r in g["rows"]:
             p = r["P"]
-            assert p["bid"] > 0 and p["ask"] > 0
+            assert p["bid"] >= 0 and p["ask"] > 0
+            if p["bid"] > 0:
+                assert p["ask"] > p["bid"]
             assert p["delta"] is not None and -1.0 < p["delta"] < 0.0
 
 
-def test_chain_dict_at_slippage_widens_spread():
+def test_chain_dict_at_extra_slippage_widens_spread():
+    """额外滑点（dsigma/tick 置 0 隔离）在价差模型之上再扩一层。"""
     ds = _ds()
     ds.prefetch()
     ts = ds.bar_times[ds.start_idx]
-    tight = ds.chain_dict_at(ts, opt_type="P")
-    wide = ds.chain_dict_at(ts, opt_type="P", slippage=0.01)
+    tight = ds.chain_dict_at(ts, opt_type="P", dsigma_pts=0.0, tick=0.0)
+    wide = ds.chain_dict_at(ts, opt_type="P", dsigma_pts=0.0, tick=0.0,
+                            slippage=0.01)
     a = tight["groups"][0]["rows"][0]["P"]
     b = wide["groups"][0]["rows"][0]["P"]
     assert b["bid"] < a["bid"]
     assert b["ask"] > a["ask"]
+
+
+def test_ask_at_matches_chain_ask_and_honors_overrides():
+    """出场买回价与入场链快照同源：同一套 Δσ + tick 口径（单一实现）。"""
+    ds = _ds()
+    ds.prefetch()
+    ts = ds.bar_times[ds.start_idx]
+    row = ds.chain_dict_at(ts, opt_type="P")["groups"][0]["rows"][0]["P"]
+    inst = row["inst_id"]
+    assert ds.ask_at(inst, ts) == pytest.approx(row["ask"], rel=1e-9)
+    # 覆盖参数生效：Δσ=0/tick=0 → 退回中价 mark
+    assert ds.ask_at(inst, ts, dsigma_pts=0.0, tick=0.0) == pytest.approx(
+        row["mark_px"], rel=1e-9)
+    # 额外滑点叠加在 ask 之上（置零 Δσ/tick 以免被 tick 网格吞掉）
+    assert ds.ask_at(inst, ts, extra_slip=0.01, dsigma_pts=0.0, tick=0.0) == pytest.approx(
+        row["mark_px"] * 1.01, rel=1e-9)
 
 
 def test_chain_dict_at_expiry_window_filters_groups():

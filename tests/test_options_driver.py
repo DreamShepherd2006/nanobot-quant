@@ -257,7 +257,10 @@ def test_check_exits_takes_profit_reuses_live_decision():
     cash = d._check_exits(_IDX[40], pos, fills, 1000.0)
     assert pos == []
     assert fills[0]["side"] == "close"
-    buy_px = mark * (1 + d.slippage)
+    # 买回吃 ask（与入场 bid 同一套家族 Δσ + tick 地板口径，C43-①）
+    buy_px = d.data.ask_at(inst, _IDX[40], extra_slip=d.slippage)
+    assert buy_px is not None and buy_px > 0
+    assert buy_px > mark            # ask 严格高于中价 mark，不是用中价成交
     rec_px = fills[0]["avg_px"]
     # 记录层把成交价 round 到 6 位（既有设计，不是本次改动引入）
     assert rec_px == pytest.approx(buy_px, abs=1e-6)
@@ -298,7 +301,8 @@ def test_run_end_to_end_shape(monkeypatch):
     d = _driver(tp_pct=50.0)
     monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
     monkeypatch.setattr(type(d.data), "chain_dict_at",
-                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
     res = d.run()
     assert "error" not in res, res.get("error")
     for key in ("kpi", "fills", "final_positions", "skips", "bars",
@@ -319,7 +323,8 @@ def test_run_records_open_positions_with_mark(monkeypatch):
     d = _driver(tp_pct=999.0)                     # 止盈线不可达 → 必然留下未平仓
     monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
     monkeypatch.setattr(type(d.data), "chain_dict_at",
-                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
     res = d.run()
     opens = res["final_positions"]
     assert opens, "止盈不可达时必然留下未平仓"
@@ -328,6 +333,28 @@ def test_run_records_open_positions_with_mark(monkeypatch):
                             "collateral_usd", "mark_value_usd", "pnl_pct"}
         assert row["collateral_usd"] == pytest.approx(
             row["strike"] * 0.1 * row["sz"])
+
+
+def test_run_open_premium_separate_from_settled(monkeypatch):
+    """未平仓那张的权利金单列（与净值闭合），不混进「已了结」栏。
+
+    2026-09-25 实测：权利金栏 0.358 = 3 张已了结之和（0.124+0.152+0.082），
+    而净值含第 4 张（未平仓、权利金 0.066）—— 只给一栏会看着像算错。
+    """
+    d = _driver(tp_pct=999.0)                     # 止盈线不可达 → 必然留下未平仓
+    monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
+    monkeypatch.setattr(type(d.data), "chain_dict_at",
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
+    res = d.run()
+    opens = res["final_positions"]
+    assert opens, "止盈不可达时必然留下未平仓"
+    lot = 0.1                                     # SOL 家族每张面值
+    expect = sum(r["entry_px"] * lot * r["sz"] for r in opens)
+    assert res["kpi"]["open_premium_usd"] == pytest.approx(round(expect, 4), abs=1e-4)
+    # 已了结栏只能来自带 premium_usd 的记录（到期/买回），不含未平仓那张
+    settled = sum(f.get("premium_usd") or 0 for f in res["fills"])
+    assert res["kpi"]["premium_income_usd"] == pytest.approx(round(settled, 4), abs=1e-4)
 
 
 def test_run_result_is_json_serializable(monkeypatch):
@@ -340,6 +367,7 @@ def test_run_result_is_json_serializable(monkeypatch):
     d = _driver(tp_pct=999.0)
     monkeypatch.setattr(type(d), "_td_signal_at", lambda self, ts: _SIG)
     monkeypatch.setattr(type(d.data), "chain_dict_at",
-                        lambda self, ts=None, slippage=0.0: _fake_chain(ts, slippage))
+                        lambda self, ts=None, slippage=0.0, dsigma_pts=None,
+                        tick=None, **_kw: _fake_chain(ts, slippage))
     res = d.run()
     json.dumps(res)          # 不带 default=，必须原生可序列化

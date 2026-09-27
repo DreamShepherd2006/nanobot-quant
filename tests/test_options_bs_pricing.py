@@ -15,7 +15,7 @@ import pytest
 
 from nanobot_quant.bs_pricing import (
     SECONDS_PER_YEAR, bs_delta, bs_price, implied_vol, intrinsic,
-    norm_cdf, years_to_expiry,
+    norm_cdf, quote_pair_from_iv, years_to_expiry,
 )
 
 
@@ -185,3 +185,60 @@ def test_years_to_expiry():
 ])
 def test_price_and_delta_fail_closed(fn, args):
     assert fn(*args, right="P") is None
+
+
+# ── quote_pair_from_iv：家族 Δσ + tick 地板（C43-①）───────────────
+
+_SPOT, _STRIKE, _T, _IV = 117.0, 110.0, 3 / 365, 0.59
+
+
+def test_quote_pair_symmetric_in_vol_bid_lt_mid_lt_ask():
+    """σ 双边对称 → bid < 中价 < ask，且 mid 就是 BS(iv)。"""
+    bid, ask = quote_pair_from_iv(_SPOT, _STRIKE, _T, _IV, right="P",
+                                  dsigma=0.122, tick=0.01)
+    mid = bs_price(_SPOT, _STRIKE, _T, _IV, 0.0, "P")
+    assert bid < mid < ask
+    assert bid > 0
+
+
+def test_quote_pair_dsigma_zero_means_no_spread():
+    """Δσ=0 + tick=0 → bid == ask == BS(iv)（旧行为基线，便于回归对照）。"""
+    bid, ask = quote_pair_from_iv(_SPOT, _STRIKE, _T, _IV, right="P",
+                                  dsigma=0.0, tick=0.0)
+    mid = bs_price(_SPOT, _STRIKE, _T, _IV, 0.0, "P")
+    assert bid == pytest.approx(mid, rel=1e-12)
+    assert ask == pytest.approx(mid, rel=1e-12)   # Δσ=0 即「无模型」基线，允许 ask==bid
+
+
+def test_quote_pair_tick_floor_and_grid_alignment():
+    """价差不足 1 tick → 按 1 tick 展开，且 bid/ask 落在 tick 网格上。"""
+    bid, ask = quote_pair_from_iv(_SPOT, _STRIKE, _T, _IV, right="P",
+                                  dsigma=0.0, tick=0.5)
+    assert ask - bid >= 0.5 - 1e-9
+    assert abs(bid / 0.5 - round(bid / 0.5)) < 1e-6
+    assert abs(ask / 0.5 - round(ask / 0.5)) < 1e-6
+
+
+def test_quote_pair_extra_slippage_stacks_on_spread():
+    """额外价格滑点在价差之上再扩：dsigma=0 时退化为 mid×(1∓slip)。"""
+    bid, ask = quote_pair_from_iv(_SPOT, _STRIKE, _T, _IV, right="P",
+                                  dsigma=0.0, tick=0.0, extra_slip=0.01)
+    mid = bs_price(_SPOT, _STRIKE, _T, _IV, 0.0, "P")
+    assert bid == pytest.approx(mid * 0.99, rel=1e-12)
+    assert ask == pytest.approx(mid * 1.01, rel=1e-12)
+
+
+def test_quote_pair_deep_otm_bid_rounds_to_zero():
+    """极虚 + 小 tick：bid 取整到 0（调用方按 bid>0 剔除，同 OKX null bidPx）。"""
+    bid, ask = quote_pair_from_iv(117.0, 5.0, 1 / 365, 0.60, right="P",
+                                  dsigma=0.122, tick=0.01)
+    assert bid == 0.0 and ask >= 0.0
+
+
+@pytest.mark.parametrize("args", [
+    (0.0, 100.0, 1.0, 0.2), (100.0, 0.0, 1.0, 0.2),
+    (100.0, 100.0, 0.0, 0.2), (100.0, 100.0, 1.0, None),
+    (100.0, 100.0, 1.0, 0.0), (100.0, 100.0, -1.0, 0.2),
+])
+def test_quote_pair_fail_closed(args):
+    assert quote_pair_from_iv(*args, right="P", dsigma=0.1, tick=0.01) == (None, None)
