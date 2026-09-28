@@ -284,6 +284,15 @@ class OkxOptionsPutStrategy(Strategy):
             self._log("PUT 线已关闭（put_enabled=false）—— 跳过卖 put 支线")
             return []
         out: list[dict] = []
+        # 现金担保前置门（§33.43 Step 3）：先取子账号 USDC 可用额；查询失败用 -1.0
+        # 哨兵强制拦截 —— 宁可本轮跳过建仓，也不在无法核对现金时按「够」假设放行。
+        try:
+            cash = ot.usdc_avail(account)
+            self._log(f"PUT 现金担保：可用 USDC ${cash:.2f}（每张需 strike×面值 全损担保）")
+        except Exception as e:  # noqa: BLE001
+            cash = -1.0
+            self._log(f"PUT 现金担保查询失败：{type(e).__name__}: {e} "
+                      f"→ 本轮跳过卖 put（fail-closed）")
         for family in (p.get("families") or []):
             base = str(family).split("-")[0]
             sig = self._td_signal(family, base, p)
@@ -304,7 +313,8 @@ class OkxOptionsPutStrategy(Strategy):
 
             dec, note = st.evaluate_entry(
                 family, td_signal=sig, params=p,
-                open_contracts=counts.get(base, 0), total_contracts=total)
+                open_contracts=counts.get(base, 0), total_contracts=total,
+                cash_avail=cash)
             if dec is None:
                 self._log(f"PUT {base} → 无动作：{note}")
                 out.append({"family": base, "status": "no_action", "note": note})
@@ -359,6 +369,15 @@ class OkxOptionsPutStrategy(Strategy):
                 family, params=p, covered=cov,
                 open_calls=call_counts.get(base, 0), total_calls=call_total)
             if dec is None:
+                self._log(f"CALL {base} → 无动作：{note}")
+                out.append({"family": base, "opt_type": "C",
+                            "status": "no_action", "note": note})
+                continue
+
+            # 去重门（§33.43 Step 4b）：同合约已有在途委托 → 不重复提交
+            # （重复卖出 = 超额 short；covered 门扣的「在仓 call」只管已成交部分）
+            if ot.has_pending_inst(account, family, dec.inst_id):
+                note = f"已有在途委托（{dec.inst_id}）→ 跳过（去重，fail-closed）"
                 self._log(f"CALL {base} → 无动作：{note}")
                 out.append({"family": base, "opt_type": "C",
                             "status": "no_action", "note": note})

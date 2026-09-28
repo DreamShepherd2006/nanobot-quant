@@ -51,18 +51,18 @@ def env(tmp_path, monkeypatch):
 
 
 def _fake_cover(rec):
-    def _fn(account, *, spot_inst, base_qty=None, quote_amt=None):
+    def _fn(account, *, spot_inst, base_qty=None, quote_amt=None, ref_id=""):
         rec["cover_calls"].append({"account": account, "spot_inst": spot_inst,
-                                   "qty": base_qty})
+                                   "qty": base_qty, "ref_id": ref_id})
         return {"kind": "spot_cover", "inst_id": spot_inst, "sz": base_qty,
                 "status": "filled", "filled_px": rec["ask"], "ord_id": "SP1"}
     return _fn
 
 
 def _fake_cover_limit(rec):
-    def _fn(account, *, spot_inst, px, base_qty):
+    def _fn(account, *, spot_inst, px, base_qty, ref_id=""):
         rec["limit_calls"].append({"account": account, "spot_inst": spot_inst,
-                                   "px": px, "qty": base_qty})
+                                   "px": px, "qty": base_qty, "ref_id": ref_id})
         return {"kind": "spot_cover", "inst_id": spot_inst, "sz": base_qty,
                 "status": "pending", "px": px, "ord_id": "LIM1"}
     return _fn
@@ -268,6 +268,8 @@ def test_auto_cover_immediate_market_path(env):
     assert res[0]["action"] == "filled"
     assert env["cover_calls"][0]["spot_inst"] == "SOL-USD"
     assert env["cover_calls"][0]["qty"] == pytest.approx(0.1)
+    assert env["cover_calls"][0]["ref_id"] == "r1", \
+        "补买下单须带台账行 ref_id（§33.43 Step 2 成本锚 C 归因）"
 
 
 def test_auto_cover_cash_guard_fails_closed(env):

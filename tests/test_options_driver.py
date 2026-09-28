@@ -97,7 +97,7 @@ def _fake_chain(ts=None, slippage=0.0) -> dict:
     return {
         "ts": ts, "spot": 88.0, "lot_coin": 0.1,
         "groups": [{
-            "days": 4.5,
+            "days": 2.0,
             "rows": [{"strike": strike, "P": {
                 "inst_id": f"SOL-USD_UM-260918-{int(strike)}-P",
                 "bid": bid, "mark_px": bid, "iv": 0.55, "delta": -0.25,

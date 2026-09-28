@@ -50,6 +50,9 @@ def _iso(tmp_path, monkeypatch):
     monkeypatch.setattr(ot, "open_option_positions", lambda account="": [])
     monkeypatch.setattr(OkxOptionsPutStrategy, "_td_signal",
                         lambda self, family, base, p: None)
+    # §33.43 Step 3/4b 新增的外部查询：测试环境无凭证 —— 打桩（否则 fail-closed 全跳过）
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="", ccy="USDC": 1e6)
+    monkeypatch.setattr(ot, "pending_orders", lambda account, family: [])
     yield tmp_path
     ol.stop()  # 保证测试结束无 daemon 线程泄漏
     ol._state.update(running=False, last_run=None, last_settled=[],

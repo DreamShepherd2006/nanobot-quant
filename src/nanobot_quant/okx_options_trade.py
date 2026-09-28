@@ -218,9 +218,40 @@ def load_option_params() -> dict:
         return {"collateral_ratio_pct": DEFAULT_COLLATERAL_RATIO_PCT}
     try:
         d = json.loads(p.read_text("utf-8"))
-        return d if isinstance(d, dict) else {}
+        return _migrate_selector_window(d if isinstance(d, dict) else {})
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+_LEGACY_EXPIRY_WINDOW = (3.0, 7.0)   # 旧默认到期窗口（§33.43 Step 4a 起改为 0–3 天）
+
+
+def _migrate_selector_window(d: dict) -> dict:
+    """一次性迁移旧默认到期窗口 3–7 天 → 0–3 天（§33.43 Step 4a，2026-09-28）。
+
+    SOL/XAU 在售档结构上只有 ≤D+2.2 的日到期与 ≥D+7.2 的周线，3–7 天窗口恒为空，
+    旧实现靠「窗口空 → 取最近 3 档」的静默放宽拿到合约（已移除）⇒ 不迁移会让自动
+    循环直接选不到合约。仅当两面**都恰好等于旧默认值**时迁移（用户自定义值不动），
+    并写 ``selector_window_migrated`` 标记保证幂等；页面「天窗口」随之为 0–3。
+    """
+    sel = d.get("selector")
+    if not isinstance(sel, dict) or d.get("selector_window_migrated"):
+        return d
+    try:
+        pair = (float(sel.get("expiry_min_days")), float(sel.get("expiry_max_days")))
+    except (TypeError, ValueError):
+        return d
+    if pair != _LEGACY_EXPIRY_WINDOW:
+        return d
+    d = {**d,
+         "selector": {**sel, "expiry_min_days": 0.0, "expiry_max_days": 3.0},
+         "selector_window_migrated": f"3-7 -> 0-3 ({_utc_now()})"}
+    try:
+        p = params_path()
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), "utf-8")
+    except OSError:
+        pass
+    return d
 
 
 def save_option_params(**fields) -> dict:
@@ -907,6 +938,23 @@ def pending_orders(account: str = "", inst_family: str = "") -> list[dict]:
     return out
 
 
+def has_pending_inst(account: str, family: str, inst_id: str) -> bool:
+    """该合约是否已有在途委托（卖 call 入场去重，§33.43 Step 4b）。
+
+    重复卖出同一合约 = 超额 short 仓（covered 门的「扣在仓 call」只覆盖已成交，
+    拦不住两笔同时在飞的挂单），故入场前必须查一次。
+
+    查询失败 **fail-closed 返回 True**（视为已有在途单）——宁可这轮不卖。
+    """
+    if not inst_id:
+        return False
+    try:
+        rows = pending_orders(account, family)
+    except Exception:  # noqa: BLE001 —— 查不清就当作有
+        return True
+    return any(str(r.get("inst_id") or "") == str(inst_id) for r in rows or [])
+
+
 def open_put(account: str, *, inst_id: str, sz: int,
              ord_type: str = "limit", px: Optional[float] = None) -> dict:
     """卖 put 开仓（真实下单）。成功后写入台账（pending → 轮询 filled）。"""
@@ -1198,12 +1246,14 @@ def _settle_close_entry(creds: dict, entry: dict, open_entry: dict) -> dict:
 
 def spot_cover(account: str, *, spot_inst: str,
                base_qty: Optional[float] = None,
-               quote_amt: Optional[float] = None) -> dict:
+               quote_amt: Optional[float] = None,
+               ref_id: str = "") -> dict:
     """到期 ITM 现金结算后的现货补买（手动闭环持有现货）。
 
     spot_inst = OKX 现货交易对（如 BTC-USDC）；二选一指定数量：
     base_qty 按基础币数量（tgtCcy=base_ccy）／quote_amt 按计价币金额（默认）。
     市价单、cash、无杠杆；金额 ≤0 拒绝（fail-closed）。
+    ref_id = 对应的 settled_itm 台账行 id（成本锚 C 归因用，§33.43 Step 2，可空）。
     """
     a = _entry_account(account)
     if base_qty is not None:
@@ -1220,6 +1270,7 @@ def spot_cover(account: str, *, spot_inst: str,
         kind="spot_cover", account=account or a["label"], inst_id=spot_inst,
         spot_inst=spot_inst, side="buy", ord_type="market",
         sz=sz, tgt_ccy=tgt, status="pending",
+        **({"ref_id": ref_id} if ref_id else {}),
     )
     params = {
         "instId": spot_inst, "tdMode": "cash", "side": "buy",
@@ -1474,6 +1525,91 @@ def account_balance(account: str = "") -> dict:
             "account": a["name"] or a["label"], "account_uid": a["uid"]}
 
 
+def usdc_avail(account: str = "") -> float:
+    """子账号计价币可用额（USDC）—— 现金担保前置门用（§33.43 Step 3）。
+
+    查询失败**向上抛**（调用方 fail-closed：宁可跳过建仓，也不在无法核对现金时按
+    「够」假设放行）；币种不存在 → 0.0（真的没有现金）。
+    """
+    for r in (account_balance(account).get("details") or []):
+        if r.get("ccy") == "USDC":
+            return float(r.get("avail_bal") or 0.0)
+    return 0.0
+
+
+def _spot_base_of(value: str) -> str:
+    """现货对 instId 的基础币（大写，如 SOL-USD → SOL）。"""
+    return str(value or "").split("-")[0].upper()
+
+
+def refresh_cost_bases(family: str = "") -> int:
+    """成本锚 C 口径回写（§33.43 Step 2）：C =（现金赔付 + 实际补买支出）÷（面值×张数）。
+
+    补买价 P = 结算价 S 时 C 恰好 = 行权价 K（「被行权 + 补买 ≡ 按 K 接货」）；
+    人工延迟补买会让 P 漂移、K 不再等于真实成本，故必须按**实际支出**核算。
+    赔付用毛赔付（``settle_payout``；缺失时按 (K − 结算价)×面值×张数 反推）。
+
+    归因（幂等）：优先 ``ref_id`` 关联（自动补买路径写入）；无 ref_id 时，仅当该
+    基础币只有**一行**未核算 settled_itm 行才按基础币归因（多行对不上账 → 不猜）。
+    到货量不足额（<99%）或尚无成交补买 → 不回写（保持「待补买」，仍以 K 暂计）。
+
+    返回本次回写的行数。
+    """
+    rows = load_ledger()
+    settled = [e for e in rows if e.get("kind") == "open_put"
+               and e.get("status") == STATUS_SETTLED_ITM
+               and (not family or e.get("family") == family)]
+    todo = [e for e in settled if not e.get("cost_basis")]
+    if not todo:
+        return 0
+    n = 0
+    for row in todo:
+        base = _spot_base_of(row.get("inst_id"))
+        lot = float(FAMILY_LOT.get(base) or 0.0)
+        try:
+            sz = int(float(row.get("sz") or 0))
+        except (TypeError, ValueError):
+            continue
+        if lot <= 0 or sz <= 0:
+            continue
+        need_qty = lot * sz
+        spot_base = _SPOT_CCY.get(base, base)          # XAU → XAUT
+        uniq = sum(1 for e in todo if _spot_base_of(e.get("inst_id")) == base) <= 1
+        fills = []
+        for e in rows:
+            if e.get("kind") != "spot_cover" or e.get("status") != "filled":
+                continue
+            if _spot_base_of(e.get("spot_inst") or e.get("inst_id")) != spot_base:
+                continue
+            rid = str(e.get("ref_id") or "")
+            if (rid and rid == str(row.get("id") or "")) or (not rid and uniq):
+                fills.append(e)
+        if not fills:
+            continue
+        qty = sum(_f(e.get("filled_sz")) or _f(e.get("sz")) for e in fills)
+        if qty < need_qty * 0.99:
+            continue
+        spend = sum((_f(e.get("filled_sz")) or _f(e.get("sz")))
+                    * _f(e.get("filled_px")) for e in fills)
+        fees = sum(_f(e.get("fee_usd")) for e in fills)
+        if spend <= 0:
+            continue
+        payout = _f(row.get("settle_payout"))
+        if payout <= 0:
+            k, s = _f(row.get("strike")), _f(row.get("settle_px"))
+            if k > 0 and s > 0:
+                payout = max(k - s, 0.0) * need_qty
+        cost = (payout + spend + fees) / need_qty
+        note = (f"赔付 ${payout:.4f} + 补买 ${spend:.4f}"
+                + (f" + 费 ${fees:.4f}" if fees else "")
+                + f" ÷ {need_qty:g} 币")
+        update_ledger(lambda x, _i=row.get("id"): x.get("id") == _i,
+                      cost_basis=round(cost, 8), cost_basis_ts=_utc_now(),
+                      cost_basis_note=note)
+        n += 1
+    return n
+
+
 def covered_context(account: str, family: str) -> dict:
     """卖 call（covered call）上下文：现货对冲覆盖 + 成本锚 C 建议（只读）。
 
@@ -1481,14 +1617,16 @@ def covered_context(account: str, family: str) -> dict:
     现货补买会扣 0.1% 手续费（0.1 SOL → 0.0999），按面值整数判据会把自己
     刚补的货判成「裸卖」；且 U 本位期权为现金结算（被行权只赔现金差价、
     不交币），现货是对冲工具（浮盈对冲赔付）而非交割物。成本锚建议 = 同
-    family 已 settled_itm（被行权接货）put 台账行的 max(strike)。
+    family 已 settled_itm（被行权接货）put 台账行的**核算成本 C** —— §33.43 Step 2：
+    ``(现金赔付 + 实际补买支出) ÷ (面值×张数)``；尚未补买的行暂以行权价 K 计，
+    并由 ``cost_pending=True`` 供页面标注「待补买·成本暂以 K 计」。
     """
     base = (family or "").split("-")[0]
     lot = FAMILY_LOT.get(base, 0.0)
     out = {"ok": True, "family": family, "base": base,
            "spot_avail": 0.0, "lot_coin": lot,
            "sellable_sz": 0, "spot_cov_pct": 0.0,
-           "cost_hint": None, "note": ""}
+           "cost_hint": None, "cost_pending": False, "cost_rows": [], "note": ""}
     if base == "XAU":
         out["note"] = ("XAU-USD_UM 的现货标的是 XAUT（Tether Gold）——"
                        "对冲/出货按 XAUT-USDT 现货对处理")
@@ -1505,13 +1643,23 @@ def covered_context(account: str, family: str) -> dict:
             out["sellable_sz"] = int(out["spot_avail"] / need_per + 1e-6)
         if out["spot_avail"] > 0:
             out["spot_cov_pct"] = round(out["spot_avail"] / lot * 100, 1)
-    costs = [float(e.get("strike") or 0)
-             for e in load_ledger()
-             if e.get("kind") == "open_put"
-             and e.get("status") == STATUS_SETTLED_ITM
-             and e.get("family") == family]
+    # 成本锚 C（§33.43 Step 2）：先按实际支出幂等回写，再取各已接货行的核算成本
+    # （未补买的行暂以 K 计）。回写失败不阻断只读上下文。
+    try:
+        refresh_cost_bases(family)
+    except Exception:  # noqa: BLE001 —— 回写失败不影响只读上下文
+        pass
+    rows = [e for e in load_ledger()
+            if e.get("kind") == "open_put"
+            and e.get("status") == STATUS_SETTLED_ITM
+            and e.get("family") == family]
+    costs = [float(e.get("cost_basis") or e.get("strike") or 0) for e in rows]
     if costs:
         out["cost_hint"] = max(costs)
+    out["cost_pending"] = any(not e.get("cost_basis") for e in rows)
+    out["cost_rows"] = [{"id": e.get("id"), "inst_id": e.get("inst_id"),
+                         "cost": float(e.get("cost_basis") or e.get("strike") or 0),
+                         "settled": bool(e.get("cost_basis"))} for e in rows]
     return out
 
 
@@ -2019,11 +2167,12 @@ def pending_covers() -> list[dict]:
 
 
 def spot_cover_limit(account: str, *, spot_inst: str, px: float,
-                     base_qty: float) -> dict:
+                     base_qty: float, ref_id: str = "") -> dict:
     """限价补买（§33.43 ``limit`` 模式）：挂 GTC 限价买单，返回台账行（含 ord_id）。
 
     与 :func:`spot_cover` 同一台账/参数口径，但**不等待成交**（状态机由
     :func:`auto_cover_pending` 逆轮推进）；限价单数量恒为基础币。
+    ref_id = 对应的 settled_itm 台账行 id（成本锚 C 归因用，§33.43 Step 2，可空）。
     """
     if base_qty <= 0 or px <= 0:
         raise OkxSdkError("限价补买需数量>0 且目标价>0")
@@ -2033,7 +2182,8 @@ def spot_cover_limit(account: str, *, spot_inst: str, px: float,
     entry = add_ledger(kind="spot_cover", account=account or a["label"],
                        inst_id=spot_inst, spot_inst=spot_inst, side="buy",
                        ord_type="limit", sz=sz, px=pxs, status="pending",
-                       note=f"自动补买（limit 挂单）目标价 {px:g}")
+                       note=f"自动补买（limit 挂单）目标价 {px:g}",
+                       **({"ref_id": ref_id} if ref_id else {}))
     params = {"instId": spot_inst, "side": "buy", "ordType": "limit",
               "sz": sz, "px": pxs, "tdMode": "cross"}
     if spot_inst.endswith("-USD"):
@@ -2288,7 +2438,8 @@ def _cover_row(account: str, row: dict, *, cp: dict, dry_run: bool, now: float,
                            reason=f"撤单失败：{e} → 退回人工（防双倍持仓）")
                 return res
         try:
-            entry = spot_cover(a["label"], spot_inst=spot_inst, base_qty=qty)
+            entry = spot_cover(a["label"], spot_inst=spot_inst, base_qty=qty,
+                               ref_id=str(row.get("id") or ""))
         except Exception as e:  # noqa: BLE001
             _cover_mark(row, cover_status=COVER_ST_FAILED, note=f"市价补买失败：{e}")
             res.update(action="skip", status=COVER_ST_FAILED, reason=f"市价补买失败：{e}")
@@ -2317,7 +2468,8 @@ def _cover_row(account: str, row: dict, *, cp: dict, dry_run: bool, now: float,
         res.update(action="skip", reason="目标价非法 → fail-closed")
         return res
     try:
-        entry = spot_cover_limit(a["label"], spot_inst=spot_inst, px=target, base_qty=qty)
+        entry = spot_cover_limit(a["label"], spot_inst=spot_inst, px=target,
+                                 base_qty=qty, ref_id=str(row.get("id") or ""))
     except Exception as e:  # noqa: BLE001
         _cover_mark(row, cover_status=COVER_ST_FAILED, note=f"限价挂单失败：{e}")
         res.update(action="skip", status=COVER_ST_FAILED, reason=f"限价挂单失败：{e}")
