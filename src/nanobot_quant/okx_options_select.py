@@ -19,8 +19,11 @@ from __future__ import annotations
 
 DEFAULT_SELECTOR: dict = {
     "min_distance_pct": 5.0,     # strike 必须 ≤ 基准价×(1−该百分比)；0 = 关闭硬过滤
-    "expiry_min_days": 3.0,      # 到期天数窗口下限
-    "expiry_max_days": 7.0,      # 到期天数窗口上限
+    # 到期窗口（§33.43 Step 4a，2026-09-28 定稿）：显式 0–3 天。OKX 在售档结构上只有
+    # ≤D+2.2 的日到期与 ≥D+7.2 的周线，旧默认 3–7 天在 SOL/XAU 上恒为空、只能靠
+    # 静默放宽拿到合约（已移除）；想卖周线请显式把窗口改成 7 天以上。
+    "expiry_min_days": 0.0,      # 到期天数窗口下限
+    "expiry_max_days": 3.0,      # 到期天数窗口上限
     "delta_min": 0.05,           # delta 带下限（绝对值）；默认宽松（低 delta 更安全；
                                  # 上限才是风险控制，「保费太薄」交给 min_net_yield_pct）
     "delta_max": 0.35,           # delta 带上限
@@ -177,9 +180,21 @@ def _select_options(family: str, right: str, base_px: float | None = None,
             exps = od.list_expiries(family)
             pick = [e for e in exps if lo <= e.get("days", -1) <= hi]
             if not pick:
-                pick = exps[:3]
-                if pick:
-                    note = f"窗口内（{lo:g}–{hi:g} 天）无在售到期，已放宽为最近 {len(pick)} 个到期"
+                # §33.43 Step 4a（2026-09-28）：**去掉静默放宽** —— 旧行为「窗口空 →
+                # 取最近 3 个到期」会让选择参数形同虚设，并掩盖「窗口与市场结构不符」
+                # （SOL/XAU 在售档只有 ≤D+2.2 日到期与 ≥D+7.2 周线，3–7 天窗口恒空）。
+                # 窗口空 = fail-closed：不下单，并在 note 里给出在售档与出路。
+                avail = ", ".join(
+                    (f"{e.get('days'):g}天" if e.get("days") is not None else "?")
+                    for e in exps[:6]) or "无"
+                return {
+                    "family": family, "right": want, "base_px": None, "spot": None,
+                    "lot_coin": 0.0, "selector": sel, "candidates": [],
+                    "scanned": 0, "filtered": {"expiry": len(exps)},
+                    "note": (f"窗口内（{lo:g}–{hi:g} 天）无在售到期 → fail-closed 不下单"
+                             f"（在售：{avail}；可调窗口或让候选跟随期权链 tab）"),
+                    "expiry_mode": "window", "expiry_locked_ms": None,
+                }
             chain = od.fetch_chain(family, expiries=[e["exp_ms"] for e in pick])
 
     spot = chain.get("spot")

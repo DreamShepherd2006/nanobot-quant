@@ -13,7 +13,7 @@ FAMILY = "SOL-USD_UM"
 CHAIN = {
     "family": FAMILY, "spot": 100.0, "lot_coin": 0.1,
     "groups": [{
-        "days": 5, "date": "2026-09-20", "exp_ms": 1789948800000,
+        "days": 2, "date": "2026-09-20", "exp_ms": 1789948800000,
         "rows": [
             {"strike": 88.0, "P": {"inst_id": "SOL-USD_UM-260920-88-P",
                                     "bid": 0.30, "ask": 0.36, "iv": 80.0, "delta": -0.12}},
@@ -30,7 +30,7 @@ PARAMS = {"entry_setup": 9, "entry_countdown": 13,
 CALL_CHAIN = {
     "family": FAMILY, "spot": 100.0, "lot_coin": 0.1,
     "groups": [{
-        "days": 5, "date": "2026-09-20", "exp_ms": 1789948800000,
+        "days": 2, "date": "2026-09-20", "exp_ms": 1789948800000,
         "rows": [
             {"strike": 104.0, "C": {"inst_id": "SOL-USD_UM-260920-104-C",
                                       "bid": 1.20, "ask": 1.35, "iv": 80.0, "delta": 0.30}},
@@ -268,7 +268,7 @@ class TestEvaluateCallEntry:
 
     def test_no_candidates_when_all_too_close(self):
         chain = {"family": FAMILY, "spot": 100.0, "lot_coin": 0.1,
-                 "groups": [{"days": 5, "date": "d", "exp_ms": 1,
+                 "groups": [{"days": 2, "date": "d", "exp_ms": 1,
                              "rows": [{"strike": 101.0,
                                        "C": {"inst_id": "SOL-USD_UM-260920-101-C",
                                              "bid": 0.9, "ask": 1.0, "iv": 80.0, "delta": 0.4}}]}]}

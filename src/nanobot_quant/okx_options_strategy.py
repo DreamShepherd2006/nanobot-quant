@@ -121,6 +121,7 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
                    selector: Optional[dict] = None,
                    chain: Optional[dict] = None,
                    base_px: Optional[float] = None,
+                   cash_avail: Optional[float] = None,
                    ) -> tuple[Optional[EntryDecision], str]:
     """卖 put 决策。返回 ``(决策, note)``；决策为 None 时 note 说明为何不动作。
 
@@ -130,6 +131,10 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
             iv_min_percentile / selector）。
         open_contracts: 该家族当前在仓张数；total_contracts: 全局在仓张数。
         iv_percentile: 当前 IV 分位（0–100）；None = 样本不足（fail-open）。
+        cash_avail: 子账号可用现金（USDC）；**None = 不做现金担保校验**（回测/纯
+            信号路径）。传入时启用⑤现金担保前置门（§33.43 Step 3）：可用现金 <
+            全损担保（strike × 每张面值 × 张数）→ fail-closed 拒绝建仓（负数
+            哨兵表示查询失败，同样拒绝）。
         chain: 注入期权链（测试用；None 时自拉）。
     """
     p = params or {}
@@ -173,6 +178,24 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
     c = cands[0]
     if res.get("note"):
         notes.append(f"选择器：{res['note']}")
+
+    # ⑤ 现金担保前置门（§33.43 Step 3）：可用现金 < 全损担保 → fail-closed。
+    #    全损担保 = strike × 每张面值 × 张数（U 本位现金结算下最坏情形 = 标的归零
+    #    时全额赔付）。担保在成交后由执行层自动追加，但追加前现金必须真在账上——
+    #    「担保未到位」与「补买没钱」是同一笔钱的两种表现。
+    if cash_avail is not None:
+        avail = float(cash_avail)
+        if avail < 0:
+            return None, "现金担保不可得（余额查询失败）→ fail-closed"
+        from .okx_options_trade import FAMILY_LOT  # 延迟导入：避开模块级循环
+        lot = float(FAMILY_LOT.get(family.split("-")[0].upper()) or 0.0)
+        strike = float(c.get("strike") or 0)
+        req = strike * lot * 1.0
+        if lot > 0 and req > 0 and avail < req - 1e-9:   # 容差：边界相等应放行（浮点噪声）
+            return None, (f"现金担保不足：可用 ${avail:.2f} < 全损担保 ${req:.2f}"
+                          f"（{strike:g}×{lot:g}×1）→ fail-closed")
+        notes.append(f"现金担保：可用 ${avail:.2f} ≥ ${req:.2f}")
+
     decision = EntryDecision(
         family=family,
         inst_id=str(c.get("inst_id") or ""),
@@ -213,7 +236,9 @@ def evaluate_call_entry(family: str, *, params: dict,
     ① **call 张数上限**（家族 / 全局，与 put 额度相互独立）
     ② **covered 容量**：现货覆盖张数 − 在仓 call 张数 ≥ 1
     ③ **成本锚 C**：显式传入 > ``covered['cost_hint']``（同家族已 settled_itm
-       put 的 max(K)）；两处都无 → 除非 ``allow_no_cost_basis``，否则跳过
+       put 的**核算成本** —— ``(现金赔付 + 实际补买支出) ÷ (面值×张数)``，未补买
+       的行暂以行权价 K 计，见 §33.43 Step 2）；两处都无 → 除非
+       ``allow_no_cost_basis``，否则跳过
        （与手工路径的「无成本锚确认」同语义：不给 C 就不卖）
     ④ 选档 ``select_calls``（含保本门硬过滤 ``strike + bid ≥ C``）
 

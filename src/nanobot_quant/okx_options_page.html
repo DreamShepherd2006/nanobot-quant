@@ -337,7 +337,7 @@
       <input type="checkbox" id="liveAllowNoC">
     </label>
   </div>
-  <div class="note" id="liveNote">常驻循环每周期三件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 支线</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → 候选选档）；<b>③ 卖 call 支线（covered）</b>（开关键 <code>🟠 卖 call</code>；无信号择时——covered 容量（现货 ≥ 面值×99%，<b>并扣除在仓 call</b>）→ 成本锚 C（默认取同家族已接货 put 的行权价）→ 保本门 <code>K+px ≥ C</code> → call 张数上限 → 候选选档；被行权=现金结算赔付、现货对冲，不交出币）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法/无成本锚一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。</div>
+  <div class="note" id="liveNote">常驻循环每周期三件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 支线</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → <b>现金担保门</b>（可用 USDC ≥ 全损担保 = strike×面值×张数）→ 候选选档）；<b>③ 卖 call 支线（covered）</b>（开关键 <code>🟠 卖 call</code>；无信号择时——covered 容量（现货 ≥ 面值×99%，<b>并扣除在仓 call</b>）→ 成本锚 C（= (现金赔付+实际补买支出)÷(面值×张数)；尚未补买的行暂以行权价 K 计）→ 保本门 <code>K+px ≥ C</code> → <b>去重门</b>（同合约已有在途委托则跳过，防重复卖出）→ call 张数上限 → 候选选档；被行权=现金结算赔付、现货对冲，不交出币）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法/无成本锚/现金不足/在途未清一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。</div>
   <div id="liveStrategy"><div class="empty">最近一轮策略：暂无（开启循环后显示决策与原因）</div></div>
   <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
   </div>
@@ -399,7 +399,7 @@
       <span class="hint" id="mPxHint"></span>
     </div>
     <div class="row" id="mRowCost" style="display:none">
-      <label>成本锚 C（接货价，保本门）</label><input type="number" id="mCost" step="any" placeholder="默认=已 settled_itm put 行权价">
+      <label>成本锚 C（接货价，保本门）</label><input type="number" id="mCost" step="any" placeholder="默认=已接货成本 C（赔付+补买支出）÷面值">
       <span class="hint" id="mCostHint">保本门：K_call + px ≥ C 才可卖 call（页面预校验 + 后端强制）</span>
     </div>
     <div class="row" id="mRowCostAck" style="display:none">
@@ -1173,7 +1173,8 @@ async function loadCoveredCtx(instId) {
         "（<b>后端强制</b>：绕过页面直调下单入口同样会被拒）</span>";
     hint.innerHTML = sellableTxt +
       "<br>U 本位期权<b>现金结算</b>：被行权只赔 (结算价−K)×面值 的现金差价、<b>不交出币</b>——现货是对冲工具（浮盈对冲赔付），组合（现货+短 call）无爆仓路径。保本门：K_call + px ≥ C，K&lt;C 时永远不通过（浮亏现货需等 K&gt;C 档或价格回升）。" +
-      "成本锚默认=" + (r.cost_hint ? "被行权 put 行权价 $" + fmt(r.cost_hint, 4) : "无（手动填被动持仓接货价）") + "，可改。" +
+      "成本锚默认=" + (r.cost_hint ? "已接货核算成本 C $" + fmt(r.cost_hint, 4) +
+        (r.cost_pending ? "（⚠️ 有行待补买，暂以行权价 K 计）" : "") : "无（手动填被动持仓接货价）") + "，可改。" +
       "<br><b>未填 C 时后端默认拒绝</b>（保本门不可判定）——确需放弃保本门请勾选「无成本锚确认」后重试。";
     $("mCost").value = r.cost_hint != null ? r.cost_hint : "";
     if (r.note) hint.innerHTML += "<br><span style='color:#b26a00'>" + esc(r.note) + "</span>";
