@@ -1933,4 +1933,368 @@ def reopen_entry(entry_id: str) -> Optional[dict]:
                          status="open", note=note)
 
 
+# ══════════════ 补买（自动接货）执行层 —— §33.43 Step 1 ══════════════
+#
+# 背景：卖 put 被判 ITM 后 U 本位现金结算（只赔差价、不交币），现货必须靠
+# 「补买」才到手 ⇒ 补买是「被行权 + 补买 = 按行权价折扣接货」的最后一环。
+# 本段是**执行层**：数量机械（台账行 sz × 每张面值）、幂等状态机、哨兵
+# （接货名义×1.5 / 现金 / 精度，fail-closed）、限价挂单 + 超时兜底市价；
+# 价格/时机由纯函数 `okx_options_strategy.evaluate_cover` 决定。
+#
+# 幂等键 = 台账行 id（**重复补买 = 双倍持仓，第一风险点**）：
+#   （无）→ waiting（等信号/等价格）| pending（已有挂单）→ done
+#   failed 不自动重试（显式告警 + 退回页面手动补买按钮）
+# 受 `cover.auto` 开关控制（**默认关**，用户页面手动开）；dry_run 只返回意图，
+# 不改台账状态、不下单。
+
+DEFAULT_COVER: dict = {"auto": False, "mode": "limit", "discount_pct": 1.0,
+                       "timeout_hours": 24.0}
+COVER_MODES = ("immediate", "limit", "signal")
+COVER_MAX_NOTIONAL_MULT = 1.5      # 哨兵：单笔上限 = 接货名义 × 1.5（异常护栏）
+COVER_ST_WAITING = "waiting"       # 等信号 / 等价格（超时计时已启动）
+COVER_ST_PENDING = "pending"       # 已挂限价单，等成交
+COVER_ST_DONE = "done"
+COVER_ST_FAILED = "failed"
+
+
+def cover_params() -> dict:
+    """补买参数（option_params.json 的 ``cover`` 段）；缺省/非法一律回默认值。"""
+    out = dict(DEFAULT_COVER)
+    raw = load_option_params().get("cover")
+    if not isinstance(raw, dict):
+        return out
+    out["auto"] = bool(raw.get("auto", False))
+    mode = str(raw.get("mode") or "").strip().lower()
+    out["mode"] = mode if mode in COVER_MODES else DEFAULT_COVER["mode"]
+    try:
+        x = float(raw.get("discount_pct", DEFAULT_COVER["discount_pct"]))
+    except (TypeError, ValueError):
+        x = float(DEFAULT_COVER["discount_pct"])
+    out["discount_pct"] = min(max(x, 0.0), 50.0)
+    try:
+        t = float(raw.get("timeout_hours", DEFAULT_COVER["timeout_hours"]))
+    except (TypeError, ValueError):
+        t = float(DEFAULT_COVER["timeout_hours"])
+    out["timeout_hours"] = min(max(t, 0.1), 168.0)
+    return out
+
+
+def save_cover_params(**fields) -> dict:
+    """保存补买参数（页面用）——合并进 ``cover`` 段后经 :func:`cover_params` 归一化。"""
+    cur = dict(load_option_params().get("cover") or {})
+    cur.update({k: v for k, v in fields.items() if v is not None})
+    save_option_params(cover=cur)
+    return cover_params()
+
+
+def pending_covers() -> list[dict]:
+    """台账中**未完成**的「被行权接货」行（settled_itm 且 cover 未 done）。
+
+    已 failed 的行不返回（不自动重试，靠页面手动补买按钮）；等待/挂单行返回，
+    由 :func:`auto_cover_pending` 推进状态机。
+    """
+    out = []
+    for e in load_ledger():
+        if e.get("kind") != "open_put" or e.get("status") != STATUS_SETTLED_ITM:
+            continue
+        st = str(e.get("cover_status") or "").strip().lower()
+        if st in (COVER_ST_DONE, COVER_ST_FAILED):
+            continue
+        out.append(e)
+    return out
+
+
+def spot_cover_limit(account: str, *, spot_inst: str, px: float,
+                     base_qty: float) -> dict:
+    """限价补买（§33.43 ``limit`` 模式）：挂 GTC 限价买单，返回台账行（含 ord_id）。
+
+    与 :func:`spot_cover` 同一台账/参数口径，但**不等待成交**（状态机由
+    :func:`auto_cover_pending` 逆轮推进）；限价单数量恒为基础币。
+    """
+    if base_qty <= 0 or px <= 0:
+        raise OkxSdkError("限价补买需数量>0 且目标价>0")
+    a = _entry_account(account)
+    sz = f"{base_qty:.8f}".rstrip("0").rstrip(".")
+    pxs = f"{px:.8f}".rstrip("0").rstrip(".")
+    entry = add_ledger(kind="spot_cover", account=account or a["label"],
+                       inst_id=spot_inst, spot_inst=spot_inst, side="buy",
+                       ord_type="limit", sz=sz, px=pxs, status="pending",
+                       note=f"自动补买（limit 挂单）目标价 {px:g}")
+    params = {"instId": spot_inst, "side": "buy", "ordType": "limit",
+              "sz": sz, "px": pxs, "tdMode": "cross"}
+    if spot_inst.endswith("-USD"):
+        params["tradeQuoteCcy"] = "USDC"
+    api = okx_sdk.trade_for(a["creds"])
+    try:
+        if spot_inst.endswith("-USD"):
+            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
+        else:
+            data = okx_sdk.check(api.set_order(**params))
+    except Exception as e:  # noqa: BLE001
+        update_ledger(lambda x: x.get("id") == entry["id"], status="failed",
+                      note=f"限价补买下单失败: {e}")
+        raise
+    row = data[0] if isinstance(data, list) and data else {}
+    if str(row.get("sCode") or "0") not in ("0", ""):
+        msg = f"OKX {row.get('sCode')} {row.get('sMsg', '')}".strip()
+        update_ledger(lambda x: x.get("id") == entry["id"], status="failed", note=msg)
+        raise OkxSdkError(msg)
+    ord_id = str(row.get("ordId") or "")
+    update_ledger(lambda x: x.get("id") == entry["id"], ord_id=ord_id)
+    entry["ord_id"] = ord_id
+    return entry
+
+
+def _cover_mark(row: dict, **fields) -> Optional[dict]:
+    """写台账该行的补买字段（幂等键 = 行 id）。"""
+    rid = (row or {}).get("id")
+    if not rid:
+        return None
+    return update_ledger(lambda x: x.get("id") == rid, **fields)
+
+
+def _cover_ord_state(creds: dict, spot_inst: str, ord_id: str) -> Optional[dict]:
+    """查挂单状态 → {status, px, acc}；查询失败返回 None（保守：保留状态下轮重试）。"""
+    try:
+        r = poll_order(creds, spot_inst, ord_id)
+    except Exception:  # noqa: BLE001
+        return None
+    return {"status": r.get("status") or "unknown",
+            "px": r.get("avg_px") or 0.0,
+            "acc": r.get("acc_fill_sz") or 0.0}
+
+
+def _spot_ask(creds: dict, spot_inst: str) -> Optional[float]:
+    """现货卖一价（哨兵估值用；取不到返回 None → 不阻断，靠其他护栏）。"""
+    try:
+        q = ticker_quote(spot_inst)
+    except Exception:  # noqa: BLE001
+        return None
+    px = q.get("ask") or q.get("last") or 0.0
+    return float(px) if px else None
+
+
+def auto_cover_pending(account: str, *, dry_run: bool = True,
+                       now: Optional[float] = None, signal_fn=None,
+                       entry_setup: int = 9, entry_countdown: int = 13) -> list[dict]:
+    """自动补买一轮（§33.43 Step 1）：扫台账未完接货行，推进状态机。
+
+    - **幂等**：幂等键 = 台账行 id；waiting/pending 不再新建订单
+      （重复补买 = 双倍持仓）；failed 不自动重试（退回人工按钮）。
+    - **dry_run=True**：只返回「打算补买」意图，**不写台账状态、不下单**。
+    - 哨兵（fail-closed）：数量不合法 / 预计金额 > 接货名义×1.5 / 现金不足
+      → 返回 skip + 原因，不动台账。
+    - 单行异常不外抛（记 action=error），不影响其它行与策略轮。
+    """
+    cp = cover_params()
+    if not cp.get("auto"):
+        return []
+    ts = float(now if now is not None else time.time())
+    out: list[dict] = []
+    for row in pending_covers():
+        try:
+            res = _cover_row(account, row, cp=cp, dry_run=dry_run, now=ts,
+                             signal_fn=signal_fn, entry_setup=entry_setup,
+                             entry_countdown=entry_countdown)
+        except Exception as e:  # noqa: BLE001
+            res = {"id": row.get("id"), "inst_id": row.get("inst_id"),
+                   "action": "error", "mode": cp.get("mode"), "qty": 0.0,
+                   "target_px": None, "reason": f"{type(e).__name__}: {e}"}
+        if res:
+            out.append(res)
+    return out
+
+
+def _cover_row(account: str, row: dict, *, cp: dict, dry_run: bool, now: float,
+               signal_fn=None, entry_setup: int = 9, entry_countdown: int = 13) -> dict:
+    """单行补买状态机推进（见 :func:`auto_cover_pending` 说明）。"""
+    from . import okx_options_strategy as _stg  # 延迟导入：避免模块级循环
+
+    inst = str(row.get("inst_id") or "")
+    base = inst.split("-")[0].upper() if inst else ""
+    lot = float(FAMILY_LOT.get(base) or 0.0)
+    try:
+        sz_total = int(float(row.get("sz") or 0))
+    except (TypeError, ValueError):
+        sz_total = 0
+    st = str(row.get("cover_status") or "").strip().lower()
+    res: dict = {"id": row.get("id"), "inst_id": inst, "base": base,
+                 "mode": cp.get("mode"), "status": st, "action": "",
+                 "qty": 0.0, "target_px": None, "px": None,
+                 "ord_id": str(row.get("cover_ord_id") or ""), "reason": ""}
+    if lot <= 0 or sz_total <= 0:
+        res.update(action="skip", reason=f"台账行缺面值/张数（lot={lot}, sz={sz_total}）")
+        return res
+    spot_inst = spot_pair_of(inst)
+    if not spot_inst:
+        res.update(action="skip", reason="无法解析现货对 → 退回人工补买")
+        return res
+    filled_qty = float(row.get("cover_qty") or 0.0) or 0.0
+    qty_total = lot * sz_total
+    qty_left = max(qty_total - filled_qty, 0.0)
+    if qty_left <= 0:
+        _cover_mark(row, cover_status=COVER_ST_DONE, cover_qty=round(filled_qty, 10),
+                    note="补买数量已满足（幂等收尾）")
+        res.update(action="skip", status=COVER_ST_DONE, reason="补买数量已满足 → 收尾")
+        return res
+    a = _entry_account(account)
+    creds = a["creds"]
+    ord_id = str(row.get("cover_ord_id") or "")
+    # ── ① 已有挂单：先查状态（幂等：不重复下单；超时 → 决策层转市价）──
+    if st == COVER_ST_PENDING and ord_id:
+        state = _cover_ord_state(creds, spot_inst, ord_id)
+        if state is None:
+            res.update(action="skip", reason=f"挂单 {ord_id} 查询失败 → 保留状态下轮重试")
+            return res
+        acc = float(state.get("acc") or 0.0)
+        if acc > 0:
+            filled_qty += acc
+            qty_left = max(qty_total - filled_qty, 0.0)
+            row = dict(row)
+            row["cover_qty"] = round(filled_qty, 10)
+        if state.get("status") == "filled" or qty_left <= 0:
+            px = float(state.get("px") or 0.0) or None
+            _cover_mark(row, cover_status=COVER_ST_DONE, cover_qty=round(filled_qty, 10),
+                        cover_px=px, cover_ord_id=ord_id, cover_ts=_utc_now(),
+                        note=f"限价挂单成交（mode={cp.get('mode')}）")
+            res.update(action="filled", status=COVER_ST_DONE,
+                       qty=round(filled_qty, 10), px=px,
+                       reason=f"限价挂单已成交 @{px}")
+            return res
+        if state.get("status") in ("cancelled", "failed"):
+            _cover_mark(row, cover_status="", cover_ord_id="",
+                        note=f"挂单已{state.get('status')}（剩余 {qty_left:g}）→ 重新决策")
+            row = dict(row)
+            row["cover_status"] = ""
+            row["cover_ord_id"] = ""
+            st = ""
+        else:
+            started = _stg.cover_started_ts(row)
+            tmo = float(cp.get("timeout_hours") or 0)
+            overdue = (started is not None and tmo > 0
+                       and (now - started) >= tmo * 3600)
+            if not overdue:
+                res.update(action="skip", qty=round(qty_left, 10),
+                           reason=f"挂单 {ord_id} 未成交（{state.get('status')}）→ 等待")
+                return res
+            # 超时：不在此返回，落到决策层（返回 market + cancel_ord=True）
+    # ── ② 决策（纯函数：模式 / 超时兜底）──
+    sig = None
+    if cp.get("mode") == "signal" and signal_fn is not None:
+        try:
+            sig = signal_fn(base)
+        except Exception as e:  # noqa: BLE001
+            sig = None
+            res["reason"] = f"信号取数失败：{type(e).__name__}: {e}"
+    d = _stg.evaluate_cover(row, mode=cp.get("mode"),
+                            discount_pct=cp.get("discount_pct"),
+                            timeout_hours=cp.get("timeout_hours"),
+                            signal=sig, now=now,
+                            entry_setup=entry_setup, entry_countdown=entry_countdown)
+    action = str(d.get("action") or "skip")
+    res.update(action=action, target_px=d.get("target_px"),
+               reason=(res.get("reason") or d.get("reason") or ""))
+    if action == "skip":
+        return res
+    if action == "wait_signal":
+        if dry_run:
+            res["reason"] = f"[dry-run] {d.get('reason')}"
+            return res
+        _cover_mark(row, cover_status=COVER_ST_WAITING, cover_mode=cp.get("mode"),
+                    cover_started_at=row.get("cover_started_at") or _utc_now(),
+                    cover_note=d.get("reason") or "")
+        res.update(status=COVER_ST_WAITING)
+        return res
+    # ── ③ 数量 + 哨兵（fail-closed；仅真下单路径需要）──
+    try:
+        lim = spot_limits(a["label"], spot_inst)
+    except Exception as e:  # noqa: BLE001
+        res.update(action="skip", reason=f"精度/余额查询失败：{type(e).__name__}: {e}")
+        return res
+    step = float(lim.get("lot_sz") or 0.0) or 0.0
+    qty = qty_left
+    if step > 0:
+        qty = math.floor(qty / step + 1e-9) * step
+    qty = round(qty, 10)
+    res["qty"] = qty
+    if qty <= 0 or (lim.get("min_sz") and qty < float(lim["min_sz"])):
+        res.update(action="skip",
+                   reason=f"数量不合法（{qty:g}，minSz={lim.get('min_sz')}）→ fail-closed")
+        return res
+    notional = float(row.get("strike") or 0.0) * lot * sz_total
+    ask = _spot_ask(creds, spot_inst)
+    est = (ask or float(d.get("target_px") or 0.0)) * qty
+    if est > 0 and notional > 0 and est > notional * COVER_MAX_NOTIONAL_MULT:
+        res.update(action="skip",
+                   reason=(f"预计金额 ${est:.2f} > 接货名义 ${notional:.2f}×"
+                           f"{COVER_MAX_NOTIONAL_MULT:g} → 哨兵拦截，退回人工"))
+        return res
+    qavail = lim.get("quote_avail")
+    if est > 0 and qavail is not None and float(qavail) < est:
+        res.update(action="skip",
+                   reason=f"现金不足：可用 {qavail} < 预计 ${est:.2f} → fail-closed")
+        return res
+    if dry_run:
+        kind = "市价" if action == "market" else "限价"
+        res["reason"] = (f"[dry-run] 打算{kind}补买 {qty:g} 币 · {d.get('reason')}"
+                         + (f" · 目标价 {float(d.get('target_px')):g}"
+                            if d.get("target_px") else ""))
+        return res
+    # ── ④ 真下单 ──
+    if action == "market":
+        if d.get("cancel_ord") and ord_id:
+            try:
+                cancel_order(a["label"], inst_id=spot_inst, ord_id=ord_id)
+            except Exception as e:  # noqa: BLE001
+                _cover_mark(row, cover_status=COVER_ST_FAILED,
+                            note=f"超时兜底撤单失败：{e}（未补买，退回人工）")
+                res.update(action="skip", status=COVER_ST_FAILED,
+                           reason=f"撤单失败：{e} → 退回人工（防双倍持仓）")
+                return res
+        try:
+            entry = spot_cover(a["label"], spot_inst=spot_inst, base_qty=qty)
+        except Exception as e:  # noqa: BLE001
+            _cover_mark(row, cover_status=COVER_ST_FAILED, note=f"市价补买失败：{e}")
+            res.update(action="skip", status=COVER_ST_FAILED, reason=f"市价补买失败：{e}")
+            return res
+        stat = str((entry or {}).get("status") or "")
+        if stat == "filled":
+            px = float((entry or {}).get("filled_px") or 0.0) or None
+            total = round(filled_qty + qty, 10)
+            _cover_mark(row, cover_status=COVER_ST_DONE, cover_mode=cp.get("mode"),
+                        cover_qty=total, cover_px=px,
+                        cover_ord_id=str((entry or {}).get("ord_id") or ""),
+                        cover_ts=_utc_now(),
+                        cover_note=f"自动补买成交（mode={cp.get('mode')}）")
+            res.update(action="filled", status=COVER_ST_DONE, qty=total, px=px,
+                       ord_id=str((entry or {}).get("ord_id") or ""),
+                       reason=f"市价补买成交 @{px}")
+            return res
+        _cover_mark(row, cover_status=COVER_ST_FAILED,
+                    note=f"市价补买未成交（status={stat or '未知'}）→ 退回人工")
+        res.update(action="skip", status=COVER_ST_FAILED,
+                   reason=f"市价补买未成交（{stat or '未知'}）→ 退回人工")
+        return res
+    # limit（挂单）
+    target = float(d.get("target_px") or 0.0)
+    if target <= 0:
+        res.update(action="skip", reason="目标价非法 → fail-closed")
+        return res
+    try:
+        entry = spot_cover_limit(a["label"], spot_inst=spot_inst, px=target, base_qty=qty)
+    except Exception as e:  # noqa: BLE001
+        _cover_mark(row, cover_status=COVER_ST_FAILED, note=f"限价挂单失败：{e}")
+        res.update(action="skip", status=COVER_ST_FAILED, reason=f"限价挂单失败：{e}")
+        return res
+    oid = str((entry or {}).get("ord_id") or "")
+    _cover_mark(row, cover_status=COVER_ST_PENDING, cover_mode=cp.get("mode"),
+                cover_ord_id=oid, cover_target_px=target,
+                cover_started_at=row.get("cover_started_at") or _utc_now(),
+                cover_qty=round(filled_qty, 10),
+                cover_note=(f"限价挂单 @{target:g}（mode={cp.get('mode')}，超时 "
+                            f"{float(cp.get('timeout_hours') or 0):g}h 兜底市价）"))
+    res.update(status=COVER_ST_PENDING, ord_id=oid, target_px=target)
+    return res
+
+
 # ── instrument / 盘口辅助 ──────────────────────────────────────

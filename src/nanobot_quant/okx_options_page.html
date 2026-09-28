@@ -172,6 +172,24 @@
   <div class="note">下单弹窗的 px 保护线 = <b>N 张盘口模拟成交均价 × (1 ∓ 容忍滑点%)</b>（卖 put/卖 call 开仓降 tol、买回平仓升 tol）。IOC 语义下 px 是「最差接受线」而非目标价：正常盘口仍成交在最优档（卖吃 bid、买吃 ask），仅当盘口在提交瞬间崩到该线之外时自动拒单不成交。0% = 盘口稍差即拒单（最严）；旧规则固定 bid×0.5（≈50% 宽闸门）保留为盘口深度不可用时的兜底。</div>
 </div>
 
+<div class="card" id="coverCard" style="margin-bottom:10px;border:none;padding:10px 0 0;border-radius:0">
+  <div class="ctl">
+    <label>📦 自动补买（被行权接货）</label>
+    <select id="mCoverMode" title="immediate=判定即市价；limit=挂限价单等回落（默认）；signal=等 TD 衰竭信号">
+      <option value="immediate">立即市价</option>
+      <option value="limit">限价（默认）</option>
+      <option value="signal">等 TD 衰竭信号</option>
+    </select>
+    <input type="number" id="mCoverDiscount" min="0" max="50" step="0.5" value="1" title="limit 模式：目标价 = 结算价 × (1 − 折让%)">
+    <span class="hint">% 折让</span>
+    <input type="number" id="mCoverTimeout" min="0.1" max="168" step="1" value="24" title="超时兜底：到点未成交 → 撤单后按市价补买">
+    <span class="hint">h 超时兜底</span>
+    <label style="font-weight:400;margin-left:4px"><input type="checkbox" id="mCoverAuto"> 启用自动补买</label>
+    <span class="hint" id="coverHint"></span>
+  </div>
+  <div class="note">卖 put 被判 ITM（到期被行权）后 U 本位是<b>现金结算</b>（只赔现金差价、不交币），现货要靠补买才到手 —— 补买 = 「按行权价折扣接货」的最后一环。数量机械 = 台账行张数×每张面值；价格/时机按所选模式：<b>限价</b> = 挂单 @ 结算价×(1−折让%)、<b>signal</b> = 等 TD 衰竭（买9 / CD13，与卖 put 同源）、<b>立即市价</b> = 不等。所有模式都有<b>超时兜底</b>（到点未成交 → 撤单 + 市价），防「货不到手 ⇒ 无 covered 容量 ⇒ 卖 call 支线起不来」。<b>默认关</b>：勾选「启用自动补买」并保存后才生效；dry-run 勾选时只记意图不下单（人工「补买」按钮始终可用）。</div>
+</div>
+
 </details>
 
 
@@ -956,8 +974,11 @@ async function loadLedger() {
           act = done ? '<span style="color:#0a8f4f">已出货</span>'
                      : '<a class="act" onclick="openExit(\'' + esc(e.inst_id || "") + '\',\'' + szA + '\')">出货</a>';
         } else {
+          const cs = String(e.cover_status || "").toLowerCase();
+          const csTxt = {waiting: "等信号/等价", pending: "限价挂单中", failed: "补买失败(人工)"}[cs] || "";
           act = done ? '<span style="color:#0a8f4f">已补买</span>'
-                     : '<a class="act" onclick="openCover(\'' + esc(e.inst_id || "") + '\',\'' + szA + '\')">补买</a>';
+                     : (csTxt ? '<span style="color:#b26a00" title="自动补买状态（§33.43）">' + csTxt + '</span> ' : "")
+                       + '<a class="act" onclick="openCover(\'' + esc(e.inst_id || "") + '\',\'' + szA + '\')">补买</a>';
         }
       }
       html += '<tr><td class="mono">' + esc(e.ts || "") + '</td><td>' + esc(kind) + '</td><td class="mono">' +
@@ -1525,6 +1546,13 @@ async function loadParams() {
       const tol = j.params.px_tolerance_pct ?? 5;
       if ($("mTolPct")) $("mTolPct").value = tol;
       if ($("tolHint")) $("tolHint").textContent = "保护线 = N 张模拟均价 × (1 ∓ " + tol + "%)";
+      const cov = j.params.cover || {};
+      if ($("mCoverMode")) $("mCoverMode").value = cov.mode || "limit";
+      if ($("mCoverDiscount")) $("mCoverDiscount").value = cov.discount_pct ?? 1;
+      if ($("mCoverTimeout")) $("mCoverTimeout").value = cov.timeout_hours ?? 24;
+      if ($("mCoverAuto")) $("mCoverAuto").checked = !!cov.auto;
+      if ($("coverHint")) $("coverHint").textContent = (cov.auto ? "已启用" : "未启用（默认关）") +
+        " · 模式 " + (cov.mode || "limit");
     }
   } catch (e) { $("paramHint").textContent = "读取失败"; }
 }
@@ -1533,9 +1561,16 @@ async function saveParams() {
   if (isNaN(ratio) || ratio < 0 || ratio > 200) { showErr("担保比例须为整数（0–200）"); return; }
   const tol = parseFloat($("mTolPct") ? $("mTolPct").value : "5");
   if (isNaN(tol) || tol < 0 || tol > 50) { showErr("容忍滑点须在 0–50 之间"); return; }
+  const cMode = $("mCoverMode") ? $("mCoverMode").value : "limit";
+  const cDisc = parseFloat($("mCoverDiscount") ? $("mCoverDiscount").value : "1");
+  if (isNaN(cDisc) || cDisc < 0 || cDisc > 50) { showErr("补买折让须在 0–50 之间"); return; }
+  const cTmo = parseFloat($("mCoverTimeout") ? $("mCoverTimeout").value : "24");
+  if (isNaN(cTmo) || cTmo < 0.1 || cTmo > 168) { showErr("补买超时须在 0.1–168 小时之间"); return; }
+  const cAuto = $("mCoverAuto") ? !!$("mCoverAuto").checked : false;
   try {
     const j = await jpost("/config/okx-options/params",
-      {collateral_ratio_pct: ratio, px_tolerance_pct: tol});
+      {collateral_ratio_pct: ratio, px_tolerance_pct: tol,
+       cover: {auto: cAuto, mode: cMode, discount_pct: cDisc, timeout_hours: cTmo}});
     if (!j.ok) { showErr(j.error || "保存失败"); return; }
     $("paramHint").textContent = "已保存：自动追加目标 = 全损 × " + (j.params.collateral_ratio_pct ?? ratio) +
       "% · 容忍滑点 " + (j.params.px_tolerance_pct ?? tol) + "%";
@@ -1543,6 +1578,10 @@ async function saveParams() {
     if ($("mTolPct")) $("mTolPct").value = j.params.px_tolerance_pct ?? tol;
     if ($("tolHint")) $("tolHint").textContent = "保护线 = N 张模拟均价 × (1 ∓ " +
       (j.params.px_tolerance_pct ?? tol) + "%)";
+    const cv = j.params.cover || {};
+    if ($("coverHint")) $("coverHint").textContent = (cv.auto ? "已启用" : "未启用（默认关）") +
+      " · 模式 " + (cv.mode || cMode) + " · 折让 " + (cv.discount_pct ?? cDisc) +
+      "% · 超时 " + (cv.timeout_hours ?? cTmo) + "h";
   } catch (e) {
     const b = $("mErr"); b.textContent = "❌ " + e.message; b.style.display = "block";
   }
@@ -1663,7 +1702,8 @@ function renderLiveEvents(evs) {
   const box = $("liveEvents");
   if (!evs || !evs.length) { box.innerHTML = '<div class="empty">暂无事件（开启循环后：到期的 put/call 自动判定、策略轮次逐笔落盘）</div>'; return; }
   const strat = evs.filter(e => e.type === "entry" || e.type === "exit");
-  const settle = evs.filter(e => e.type !== "entry" && e.type !== "exit");
+  const covs = evs.filter(e => e.type === "cover");
+  const settle = evs.filter(e => e.type !== "entry" && e.type !== "exit" && e.type !== "cover");
   let html = "";
   if (strat.length) {
     html += "<div class='note' style='margin:6px 0'>🤖 策略事件（🟤 卖 put / 🟠 卖 call · 止盈买回）：</div>" + strat.slice(0, 12).map(e => {
@@ -1680,6 +1720,18 @@ function renderLiveEvents(evs) {
         locTs(Date.parse(e.ts)) +
         (expired ? " · <span class='itm-tag' title='该合约已过到期时刻（08:00 UTC），此条仅为历史记录'>已到期</span>" : "") +
         (e.error ? " · <span style='color:#c62828'>" + esc(e.error) + "</span>" : "") + "</div>";
+    }).join("");
+  }
+  if (covs.length) {
+    const CA = {market: "市价补买", limit: "挂限价补买", filled: "补买成交", wait_signal: "等衰竭信号", skip: "跳过", error: "异常"};
+    html += "<div class='note' style='margin:6px 0'>📦 补买事件（被行权接货 · §33.43）：</div>" + covs.slice(0, 8).map(e => {
+      const act = String(e.action || "");
+      const icon = act === "filled" ? "✅" : (act === "skip" || act === "error" ? "⚠️" : "🖐");
+      return "<div style='padding:3px 0'>" + icon + " " + esc(CA[act] || act) + " · " + esc(e.inst_id) +
+        " · " + (e.qty ?? "—") + " 币" + (e.target_px ? " · 目标价 " + e.target_px : "") +
+        (e.ord_id ? " · 挂单 " + esc(String(e.ord_id)) : "") + " · " + locTs(Date.parse(e.ts)) +
+        (e.dry_run ? " · <span class='na'>dry-run</span>" : "") +
+        (e.reason ? " · <span class='na'>" + esc(e.reason) + "</span>" : "") + "</div>";
     }).join("");
   }
   if (settle.length) {
