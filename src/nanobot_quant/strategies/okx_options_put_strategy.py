@@ -152,6 +152,7 @@ class OkxOptionsPutStrategy(Strategy):
                   f"在仓 call {call_total} 张 分家族={call_counts or '{}'} "
                   f"明细={[(x.get('inst_id'), x.get('pos')) for x in positions]}")
 
+        covers = self._auto_cover(account, p, dry)
         entries = self._entries(account, p, dry, counts, total, positions)
         call_entries = self._call_entries(account, p, dry, positions,
                                           call_counts, call_total)
@@ -161,8 +162,58 @@ class OkxOptionsPutStrategy(Strategy):
         self._finish(settled, {"entries": entries, "exits": exits,
                                "call_entries": call_entries,
                                "call_exits": call_exits,
+                               "covers": covers,
                                "counts": counts, "call_counts": call_counts},
                      None)
+
+    # ══════════════════════ ①' 自动补买（接货闭环）══════════════════════
+
+    def _auto_cover(self, account: str, p: dict, dry: bool) -> list[dict]:
+        """自动补买（§33.43 Step 1）：卖 put 被判 ITM 后，按 ``cover.mode`` 推进接货。
+
+        受 option_params.json 的 ``cover.auto`` 控制（**默认关**，用户页面手动开）；
+        dry-run 只记意图（不写台账状态、不下单）。数量机械 = 台账行 sz×面值；
+        价格/时机由纯函数 ``evaluate_cover`` 决定（limit 默认 / signal 等衰竭 /
+        immediate 判定即市价），所有模式共有超时兜底 T。异常不得杀策略轮。
+        """
+        try:
+            cp = ot.cover_params()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"⚠️ 补买参数读取失败：{type(e).__name__}: {e}")
+            return []
+        if not cp.get("auto"):
+            return []
+        sig_fn = None
+        if cp.get("mode") == "signal":
+            def _cover_sig(base):
+                """与 put 入场同源：同周期、同源 K 线的 TD 衰竭信号。"""
+                return self._td_signal(f"{base}-USD_UM", base, p)
+
+            sig_fn = _cover_sig
+        try:
+            res = ot.auto_cover_pending(
+                account, dry_run=dry, signal_fn=sig_fn,
+                entry_setup=int(p.get("entry_setup") or 9),
+                entry_countdown=int(p.get("entry_countdown") or 13)) or []
+        except Exception as e:  # noqa: BLE001
+            self._log(f"⚠️ 自动补买异常：{type(e).__name__}: {e}")
+            return []
+        for r in res:
+            act = str(r.get("action") or "")
+            head = {"market": "市价补买", "limit": "挂限价补买", "filled": "补买成交",
+                    "wait_signal": "等衰竭信号", "skip": "跳过",
+                    "error": "异常"}.get(act, act)
+            tgt = r.get("target_px")
+            self._log(f"COVER {head} | {r.get('inst_id')} · {r.get('qty') or 0:g} 币"
+                      + (f" · 目标价 {float(tgt):g}" if tgt else "")
+                      + f" · mode={r.get('mode')} · {r.get('reason') or ''}")
+            self._record({"type": "cover", "id": r.get("id"),
+                          "inst_id": r.get("inst_id"), "account": account,
+                          "action": act, "mode": r.get("mode"), "qty": r.get("qty"),
+                          "target_px": r.get("target_px"), "px": r.get("px"),
+                          "ord_id": r.get("ord_id"), "status": r.get("status"),
+                          "reason": r.get("reason") or "", "dry_run": bool(dry)})
+        return res
 
     # ══════════════════════ ① 到期判定 ══════════════════════
 
@@ -452,12 +503,15 @@ class OkxOptionsPutStrategy(Strategy):
         exits = _count_status(rows.get("exits"), _EXIT_ACTION_STATUSES)
         c_entries = _count_status(rows.get("call_entries"), _ENTRY_ACTION_STATUSES)
         c_exits = _count_status(rows.get("call_exits"), _EXIT_ACTION_STATUSES)
+        covers = sum(1 for r in (rows.get("covers") or [])
+                     if str(r.get("action")) in ("market", "limit", "filled"))
         failed = sum(_count_status(rows.get(k), _FAILED_STATUSES)
                      for k in ("entries", "exits", "call_entries", "call_exits"))
         self._bump("entries", entries)
         self._bump("exits", exits)
         self._bump("call_entries", c_entries)
         self._bump("call_exits", c_exits)
+        self._bump("covers", covers)
         try:
             lst.set_round(settled=settled, strategy=strat, error=error or "")
         except Exception:  # noqa: BLE001 —— 状态展示失败不阻塞策略
@@ -465,6 +519,7 @@ class OkxOptionsPutStrategy(Strategy):
         self._log(f"── 巡检轮次结束 ── 到期判定 {len(settled or [])} 笔 · "
                   f"策略 卖put {entries} / 买回put {exits} · "
                   f"卖call {c_entries} / 买回call {c_exits}"
+                  + (f" · 补买 {covers}" if covers else "")
                   + (f" · 失败 {failed}" if failed else "")
                   + (f" · error={error}" if error else ""))
 

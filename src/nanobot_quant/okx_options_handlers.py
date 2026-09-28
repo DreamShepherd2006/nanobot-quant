@@ -669,6 +669,37 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             if not 0 <= tol <= 50:
                 return JSONResponse({"ok": False, "error": "容忍滑点须在 0–50 之间"})
             fields["px_tolerance_pct"] = tol
+        cover = body.get("cover")
+        if isinstance(cover, dict) and cover:
+            c: dict = {}
+            if cover.get("auto") is not None:
+                c["auto"] = bool(cover.get("auto"))
+            if cover.get("mode") is not None:
+                cmode = str(cover.get("mode") or "").strip().lower()
+                if cmode not in ot.COVER_MODES:
+                    return JSONResponse({"ok": False,
+                                         "error": "补买模式须为 immediate / limit / signal"})
+                c["mode"] = cmode
+            if cover.get("discount_pct") is not None:
+                try:
+                    cdisc = float(cover.get("discount_pct"))
+                except (TypeError, ValueError):
+                    return JSONResponse({"ok": False, "error": "补买折让必须为数字（0–50）"})
+                if not 0 <= cdisc <= 50:
+                    return JSONResponse({"ok": False, "error": "补买折让须在 0–50 之间"})
+                c["discount_pct"] = cdisc
+            if cover.get("timeout_hours") is not None:
+                try:
+                    ctmo = float(cover.get("timeout_hours"))
+                except (TypeError, ValueError):
+                    return JSONResponse({"ok": False, "error": "补买超时必须为数字（0.1–168）"})
+                if not 0.1 <= ctmo <= 168:
+                    return JSONResponse({"ok": False, "error": "补买超时须在 0.1–168 小时之间"})
+                c["timeout_hours"] = ctmo
+            if c:
+                cur_cover = dict(ot.load_option_params().get("cover") or {})
+                cur_cover.update(c)
+                fields["cover"] = cur_cover
         if not fields:
             return JSONResponse({"ok": False, "error": "无可保存字段"})
         return JSONResponse({"ok": True, "params": ot.save_option_params(**fields)})

@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from nanobot_quant.okx_options_assets import right_of_inst
@@ -430,6 +431,120 @@ def contracts_by_family(positions, *, opt_type: str = "P") -> dict[str, int]:
     return out
 
 
+# ══════════════ 补买（自动接货）决策 —— §33.43 Step 1 ══════════════
+#
+# 背景（2026-09-28 讨论定稿）：卖 put 被判 ITM 后，U 本位是**现金结算**
+# （只赔现金差价、不交币）⇒ 现货必须靠「补买」才到手。补买是
+# 「被行权 + 补买 = 按行权价折扣接货」（P = S ⇒ 成本 = K）的最后一环。
+# 数量机械（= 台账行 sz × 每张面值，执行层算），**价格/时机由本函数决定**。
+#
+# 三模式三选一（option_params.json 的 `cover.mode`，默认 limit）：
+#   immediate → 判定即市价
+#   limit     → 挂限价单 @ 结算价 × (1 − x%)
+#   signal    → 等 TD 衰竭信号（setup_buy ≥ 买9 或 cd_buy ≥ CD，与 put 入场同源）
+# 所有模式共有**超时兜底 T**：从 `cover_started_at` 起算 ≥ T 一律转市价
+# （若已有挂单则要求先撤单，见 ``cancel_ord``）——防「悬空」：货不到手 ⇒
+# covered 容量为 0 ⇒ 卖 call 支线永远起不来。
+#
+# 幂等：已进状态机的行（waiting/pending/done/failed）一律 skip（幂等键 =
+# 台账行 id）；重复补买 = 双倍持仓，是第一风险点。
+
+COVER_ACTIONS = ("skip", "market", "limit", "wait_signal")
+COVER_ACTIVE_STATES = ("waiting", "pending")
+COVER_TERMINAL_STATES = ("done", "failed")
+
+
+def cover_started_ts(row: dict) -> Optional[float]:
+    """台账 ``cover_started_at``（ISO 字符串或 epoch 秒）→ epoch 秒；不可解析返回 None。"""
+    v = (row or {}).get("cover_started_at")
+    if v in (None, ""):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        dt = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def cover_signal_hit(signal: Any, *, entry_setup: int = 9,
+                     entry_countdown: int = 13) -> tuple[bool, str]:
+    """补买择时判据（signal 模式）——与 put 入场同源：setup_buy ≥ 买9 或 cd_buy ≥ CD。"""
+    if not isinstance(signal, dict):
+        return False, "无信号（取数失败/未计算）"
+    sb = int(_f(signal.get("setup_buy")) or 0)
+    cd = int(_f(signal.get("cd_buy")) or 0)
+    if sb >= int(entry_setup):
+        return True, f"setup_buy={sb}≥{entry_setup}"
+    if cd >= int(entry_countdown):
+        return True, f"cd_buy={cd}≥{entry_countdown}"
+    return False, f"setup_buy={sb}/{entry_setup}、cd_buy={cd}/{entry_countdown} 未达阈值"
+
+
+def evaluate_cover(row: dict, *, mode: str = "limit", discount_pct: float = 1.0,
+                   timeout_hours: float = 24.0, signal: Any = None,
+                   now: Optional[float] = None, entry_setup: int = 9,
+                   entry_countdown: int = 13) -> dict:
+    """补买决策（纯函数，不碰 SDK/台账）→ ``{action, target_px, cancel_ord, reason}``。
+
+    ``action`` ∈ :data:`COVER_ACTIONS`。判定顺序：**幂等**（已进状态机 → skip）
+    → **超时兜底**（优先于模式判定）→ 模式判定。实盘/回测共用同一函数，
+    因此 limit / signal / immediate 三模式可在回测里对照（Step 6）。
+    """
+    out: dict = {"mode": mode, "action": "skip", "target_px": None,
+                 "cancel_ord": False, "reason": ""}
+    st = str((row or {}).get("cover_status") or "").strip().lower()
+    if st in COVER_TERMINAL_STATES:
+        out["reason"] = f"终态（cover_status={st}）→ 幂等跳过"
+        return out
+    strike = _f((row or {}).get("strike")) or 0.0
+    if strike <= 0:
+        out["reason"] = "台账行缺 strike，无法核算接货名义 → skip（fail-closed）"
+        return out
+    try:
+        tmo = float(timeout_hours)
+    except (TypeError, ValueError):
+        tmo = 24.0
+    # 超时兜底**优先于进行中的幂等拦截**：挂单/等信号超过 T 未完成 → 撤单 + 市价
+    # （执行层已在前面排除「挂单已成交」的情形，故进到这里意味着真没买到）
+    started = cover_started_ts(row)
+    if started is not None and now is not None and tmo > 0 \
+            and (float(now) - started) >= tmo * 3600:
+        out.update(action="market", cancel_ord=bool((row or {}).get("cover_ord_id")),
+                   reason=f"超时兜底（> {tmo:g}h 未成交）→ 市价补买")
+        return out
+    if st in COVER_ACTIVE_STATES:
+        out["reason"] = f"已在补买状态机中（cover_status={st}）→ 幂等跳过（不重复下单）"
+        return out
+    if mode == "immediate":
+        out.update(action="market", reason="模式 immediate：判定即市价补买")
+        return out
+    if mode == "signal":
+        hit, why = cover_signal_hit(signal, entry_setup=entry_setup,
+                                    entry_countdown=entry_countdown)
+        if hit:
+            out.update(action="market", reason=f"模式 signal：{why} → 市价补买")
+        else:
+            out.update(action="wait_signal", reason=f"模式 signal：等衰竭信号（{why}）")
+        return out
+    # limit（默认）
+    settle_px = _f((row or {}).get("settle_px")) or 0.0
+    if settle_px <= 0:
+        out.update(action="market", reason="台账行缺结算价 → 退化为市价补买（不猜目标价）")
+        return out
+    x = _f(discount_pct)
+    x = 0.0 if x is None else x
+    target = settle_px * (1 - x / 100.0)
+    out.update(action="limit", target_px=target,
+               reason=f"模式 limit：挂限价 @ 结算价×(1−{x:g}%) = {target:g}")
+    return out
+
+
 __all__ = ["EntryDecision", "ExitDecision", "td_entry_reason", "evaluate_entry",
-           "evaluate_call_entry", "evaluate_exits", "contracts_by_family",
+           "evaluate_call_entry", "evaluate_cover", "evaluate_exits", "contracts_by_family",
+           "COVER_ACTIONS", "COVER_ACTIVE_STATES", "COVER_TERMINAL_STATES",
+           "cover_signal_hit", "cover_started_ts",
            "DEFAULT_TP_PCT", "DEFAULT_TP_PCT_CALL"]
