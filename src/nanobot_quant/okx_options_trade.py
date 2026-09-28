@@ -1992,13 +1992,27 @@ def pending_covers() -> list[dict]:
 
     已 failed 的行不返回（不自动重试，靠页面手动补买按钮）；等待/挂单行返回，
     由 :func:`auto_cover_pending` 推进状态机。
+
+    **旧口径兼容（重要）**：本功能上线前人工补买的行没有 ``cover_status``，
+    但台账里已有 ``filled`` 的 spot_cover 行（与台账 tab 的「已补买」判定同口径）
+    ——这类行一律跳过，防止重建后对已接货的行重复补买（双倍持仓）。
     """
+    rows = load_ledger()
+    closed: set[str] = set()
+    for x in rows:
+        if x.get("status") == "filled" and x.get("kind") == "spot_cover":
+            b = str(x.get("inst_id") or "").split("-")[0]
+            if b:
+                closed.add(b)
     out = []
-    for e in load_ledger():
+    for e in rows:
         if e.get("kind") != "open_put" or e.get("status") != STATUS_SETTLED_ITM:
             continue
         st = str(e.get("cover_status") or "").strip().lower()
         if st in (COVER_ST_DONE, COVER_ST_FAILED):
+            continue
+        base = str(e.get("inst_id") or "").split("-")[0]
+        if base and base in closed:
             continue
         out.append(e)
     return out
@@ -2051,6 +2065,24 @@ def _cover_mark(row: dict, **fields) -> Optional[dict]:
     if not rid:
         return None
     return update_ledger(lambda x: x.get("id") == rid, **fields)
+
+
+def _cover_sync_spot_row(ord_id: str, *, status: str, filled_px,
+                         filled_sz: float) -> None:
+    """把限价补买对应的 spot_cover 台账行同步为终态（与手动补买口径一致）。
+
+    台账 tab 的「已补买」判定扫的是 ``filled`` 的 spot_cover 行，故自动补买也
+    必须回写，否则页面仍显示「补买」入口、且旧口径无法识别已接货。
+    """
+    if not ord_id:
+        return
+    fields: dict = {"status": status}
+    if filled_px:
+        fields["filled_px"] = filled_px
+    if filled_sz:
+        fields["sz"] = f"{filled_sz:.8f}".rstrip("0").rstrip(".")
+    update_ledger(lambda x: x.get("ord_id") == ord_id and x.get("kind") == "spot_cover",
+                  **fields)
 
 
 def _cover_ord_state(creds: dict, spot_inst: str, ord_id: str) -> Optional[dict]:
@@ -2157,6 +2189,8 @@ def _cover_row(account: str, row: dict, *, cp: dict, dry_run: bool, now: float,
             _cover_mark(row, cover_status=COVER_ST_DONE, cover_qty=round(filled_qty, 10),
                         cover_px=px, cover_ord_id=ord_id, cover_ts=_utc_now(),
                         note=f"限价挂单成交（mode={cp.get('mode')}）")
+            _cover_sync_spot_row(ord_id, status="filled", filled_px=px,
+                                 filled_sz=filled_qty)
             res.update(action="filled", status=COVER_ST_DONE,
                        qty=round(filled_qty, 10), px=px,
                        reason=f"限价挂单已成交 @{px}")
@@ -2164,6 +2198,8 @@ def _cover_row(account: str, row: dict, *, cp: dict, dry_run: bool, now: float,
         if state.get("status") in ("cancelled", "failed"):
             _cover_mark(row, cover_status="", cover_ord_id="",
                         note=f"挂单已{state.get('status')}（剩余 {qty_left:g}）→ 重新决策")
+            _cover_sync_spot_row(ord_id, status="cancelled", filled_px=None,
+                                 filled_sz=filled_qty)
             row = dict(row)
             row["cover_status"] = ""
             row["cover_ord_id"] = ""

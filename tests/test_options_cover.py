@@ -332,6 +332,33 @@ def test_auto_cover_signal_mode_buys_when_hit(env):
     assert env["cover_calls"], "信号达标 → 市价补买"
 
 
+def test_auto_cover_skips_legacy_manually_covered(env):
+    """本功能上线前人工补买的行（无 cover_status，但有 filled spot_cover）→ 不重复补买。"""
+    _set_params(env, auto=True, mode="immediate")
+    env["write_ledger"]([
+        _row(),
+        {"id": "s1", "kind": "spot_cover", "status": "filled",
+         "inst_id": "SOL-USD", "sz": "0.1", "filled_px": 98.0},
+    ])
+    assert ot.pending_covers() == [], "旧口径已补买的行必须排除（防双倍持仓）"
+    assert ot.auto_cover_pending("A", dry_run=False, now=time.time()) == []
+    assert env["cover_calls"] == []
+
+
+def test_auto_cover_limit_fill_syncs_spot_row(env):
+    """限价单成交后要把 spot_cover 台账行同步为 filled（台账 tab「已补买」口径）。"""
+    _set_params(env, auto=True, mode="limit")
+    env["write_ledger"]([
+        _row(cover_status="pending", cover_ord_id="LIM1", cover_started_at=time.time()),
+        {"id": "s1", "kind": "spot_cover", "status": "pending", "ord_id": "LIM1",
+         "inst_id": "SOL-USD", "sz": "0.1"},
+    ])
+    env["ord_state"] = {"status": "filled", "avg_px": 98.5, "acc_fill_sz": 0.1}
+    ot.auto_cover_pending("A", dry_run=False, now=time.time())
+    spot = [r for r in env["read_ledger"]() if r.get("id") == "s1"][0]
+    assert spot["status"] == "filled" and spot["filled_px"] == pytest.approx(98.5)
+
+
 def test_auto_cover_signal_error_does_not_kill_round(env):
     _set_params(env, auto=True, mode="signal")
     env["write_ledger"]([_row()])
