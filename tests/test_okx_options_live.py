@@ -636,10 +636,16 @@ def test_submit_option_passes_quantity_not_side(monkeypatch):
         return _Order()
 
     monkeypatch.setattr(s, "create_order", fake_create_order)
+    submitted = {}
+    monkeypatch.setattr(s, "submit_order",
+                        lambda order, **kw: submitted.update(order=order))
     dec = types.SimpleNamespace(inst_id="SOL-USD_UM-260929-118-P", sz=1)
 
     ok, err = s._submit_option(dec, {})
     assert ok and err is None, err
+    assert submitted.get("order") is not None, (
+        "必须调 submit_order —— lumibot create_order 只建对象不提交（2026-09-29 根因）"
+    )
     assert seen["quantity"] == 1 and isinstance(seen["quantity"], int)
     assert seen["side"] == "sell"
     assert getattr(seen["asset"], "symbol", None) == "SOL"

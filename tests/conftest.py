@@ -69,6 +69,17 @@ except ImportError:
                 strategy=self, asset=asset, quantity=quantity, side=side, **kwargs
             )
 
+        def submit_order(self, order, **kwargs):
+            # 镜像 lumibot v4.5.78：``create_order`` **只建对象、不提交**
+            # （docstring: "Once created, an order must still be submitted."），
+            # 必须再调 ``submit_order`` → broker.submit_order → _submit_order。
+            # stub 缺此法，会让「漏调 submit_order」的 bug 在单测里静默通过
+            # （2026-09-29 实测：期权线日志报成功、交易所在所无单）。
+            broker = getattr(self, "broker", None)
+            if broker is None:
+                raise RuntimeError("Strategy.submit_order: no broker")
+            return broker.submit_order(order)
+
         def get_position(self, symbol):
             # 镜像 lumibot v4.5.78：从 broker 当前持仓查询（回测驱动
             # BacktestBroker._positions 为内存账本；str stub 归一化）。

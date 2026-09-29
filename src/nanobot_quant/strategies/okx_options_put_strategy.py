@@ -377,8 +377,12 @@ class OkxOptionsPutStrategy(Strategy):
                         total += dec.sz
                         self._log(f"PUT {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
             out.append(rec)
-            # 建仓（含 dry-run 意图）即置位 —— 之后同周期不再开仓
-            self._cycle_mark_bought(family, sig)
+            # 建仓（含 dry-run 意图 / 在途未定案）即置位 —— 之后同周期不再开仓。
+            # 例外：**提交失败不置位**（交易所在所无单），否则一次薄盘口 IOC
+            # 未成交就会白白吃掉整轮信号周期（2026-09-29 实测：假成功后周期
+            # 门控立刻拦住后续所有尝试）。
+            if rec.get("status") != "failed":
+                self._cycle_mark_bought(family, sig)
             self._record({"type": "entry", **rec})
         return out
 
@@ -519,6 +523,13 @@ class OkxOptionsPutStrategy(Strategy):
             order = self.create_order(asset, int(dec.sz), side)
             if order is None:
                 return False, "create_order 返回 None"
+            # ★ lumibot v4.5.78 的 ``Strategy.create_order`` **只创建 Order 对象、
+            # 不提交**（docstring: "Once created, an order must still be submitted."）
+            # —— 漏掉 submit_order 会让整条期权线变「假成功」：日志报「已提交卖出」
+            # 但交易所在所无单、无持仓、台账无行（2026-09-29 13:31 实测：
+            # 卖 SOL-USD_UM-261002-114-P ×1 报成功，OKX 无委托/无仓位、
+            # frozen=0、台账无新行）。现货线一直显式 `submit_order`，故只有期权线中招。
+            self.submit_order(order)
             err = getattr(order, "error", None) or getattr(order, "_error", None)
             if err:
                 return False, str(err)
