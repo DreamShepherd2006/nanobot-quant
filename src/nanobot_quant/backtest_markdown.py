@@ -210,12 +210,38 @@ _SIDE_LABEL = {
     "buy_close": "🔵 买回平仓",
     "settle_otm": "✅ 到期作废",
     "settle_itm": "⚠️ 被行权",
+    "cover": "🛒 补买接货",
 }
 
 
 def _opt_side(f: dict) -> str:
     raw = str(f.get("side") or "")
-    return _SIDE_LABEL.get(raw, raw or "—")
+    label = _SIDE_LABEL.get(raw, raw or "—")
+    if f.get("opt_type") == "C":
+        label += "（call）"
+    return label
+
+
+def _chain_txt(chain: Optional[dict]) -> str:
+    """资金链段开关快照（补买三模式 + 卖 call 止盈）——报告要能自证口径。"""
+    if not chain:
+        return "—（旧记录无该字段）"
+    if chain.get("cover_enabled"):
+        cover = (f"开·{chain.get('cover_mode')} "
+                 f"@结算价×(1−{_num(chain.get('cover_discount_pct'), 2)}%) · "
+                 f"超时 {_num(chain.get('cover_timeout_hours'), 1)}h→市价")
+    else:
+        cover = "关（不计现货接货）"
+    call = (f"开·止盈 {_num(chain.get('tp_call_pct'), 0)}%"
+            if chain.get("call_enabled") else "关")
+    return f"补买 {cover} · 卖 call {call}"
+
+
+def _settle_txt(res: dict) -> str:
+    win = (res.get("chain") or {}).get("settle_window_min")
+    if win is None:
+        return "到期前 30 分钟标的均价（官方口径）"
+    return f"到期前 {win} 分钟标的均价（回放按 {res.get('timestep')} 粒度取均值）"
 
 
 def _options_md(res: dict) -> str:
@@ -243,17 +269,30 @@ def _options_md(res: dict) -> str:
         # 与回测页同序、同口径（页面上「价差模型」行印的是 spread_model_note）
         ("价差模型", res.get('spread_model_note') or res.get('spread_model') or "—"),
         ("手续费率", _pct((res.get('fee_rate') or 0) * 100)),
-        ("止盈线", _pct(res.get('tp_pct'), 0)),
+        ("止盈线", f"put {_pct(res.get('tp_pct'), 0)} / call {_pct(res.get('tp_pct_call'), 0)}"),
+        ("资金链", _chain_txt(res.get("chain"))),
+        ("结算价口径", _settle_txt(res)),
         ("合约总数", f"{contracts.get('in_archive', 0)} 档 · 有 IV {contracts.get('with_iv', 0)}"),
     ]))
 
     md.append("\n**📊 结果**\n")
     md.append(_kv_table([
-        ("期末净值", f"${_num(kpi.get('final_net_usd'), 4)}"),
+        ("期末净值", f"${_num(kpi.get('final_net_usd'), 4)}（现金 ${_num(res.get('cash'), 4)}"
+                  f" − 持仓负债 ${_num(kpi.get('open_mark_value_usd'), 4)}"
+                  f" + 现货 ${_num(kpi.get('spot_value_usd'), 4)}）"),
         ("ROI", _pct(kpi.get('roi_pct'), 4)),
-        ("权利金收入（毛）", f"${_num(kpi.get('premium_income_usd'), 4)}"),
+        ("权利金收入（毛）", f"${_num(kpi.get('premium_income_usd'), 4)}"
+                      f"（put ${_num(kpi.get('premium_put_usd'), 4)}"
+                      f" / call ${_num(kpi.get('premium_call_usd'), 4)}）"),
         ("买回支出", f"${_num(kpi.get('buyback_cost_usd'), 4)}"),
-        ("赔付支出", f"${_num(kpi.get('payout_usd'), 4)}"),
+        ("赔付支出", f"${_num(kpi.get('payout_usd'), 4)}"
+                  f"（其中 call ${_num(kpi.get('payout_call_usd'), 4)}）"),
+        ("补买接货支出", f"${_num(kpi.get('cover_spend_usd'), 4)}"
+                   f"（{_num(kpi.get('cover_qty'), 6)} 币）"),
+        ("接货现货", f"{_num(kpi.get('spot_qty'), 6)} 币 · "
+                 f"市值 ${_num(kpi.get('spot_value_usd'), 4)}（资产，已计入净值）"),
+        ("成本锚 C", f"均值 {_num(kpi.get('cost_basis_avg'), 4)}"
+                  f" / 上限 {_num(kpi.get('cost_basis_max'), 4)}"),
         ("手续费合计", f"${_num(kpi.get('fees_usd'), 4)}"),
         ("净交易损益（毛权利金−买回−赔付−手续费）", f"${_num(kpi.get('net_trading_usd'), 4)}"),
         ("未平仓权利金", f"${_num(kpi.get('open_premium_usd'), 4)}"),

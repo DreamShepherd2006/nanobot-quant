@@ -1610,6 +1610,29 @@ def refresh_cost_bases(family: str = "") -> int:
     return n
 
 
+COVERAGE_TOL = 0.99          # covered 覆盖容差（现货 ≥ 面值×99% 即视为覆盖 1 张）
+
+
+def covered_sellable_sz(spot_avail: float, lot_coin: float) -> int:
+    """现货能覆盖的 call 张数 —— **单一来源**（实盘 covered 门 / 回测模拟共用）。
+
+    容差 1%：补买扣 0.1% 手续费后到货 0.0999 SOL，按面值整数判据会把自己刚
+    补的货判成「裸卖」；且 U 本位期权为现金结算（被行权只赔现金差价、不交币），
+    现货是对冲工具而非交割物。
+    """
+    try:
+        lot = float(lot_coin)
+        qty = float(spot_avail)
+    except (TypeError, ValueError):
+        return 0
+    if not (math.isfinite(lot) and math.isfinite(qty)):
+        return 0
+    need = lot * COVERAGE_TOL
+    if need <= 0 or qty <= 0:
+        return 0
+    return int(qty / need + 1e-6)
+
+
 def covered_context(account: str, family: str) -> dict:
     """卖 call（covered call）上下文：现货对冲覆盖 + 成本锚 C 建议（只读）。
 
@@ -1638,9 +1661,7 @@ def covered_context(account: str, family: str) -> dict:
             break
     if lot and lot > 0:
         # 每张对冲需求 = 面值；容差 1%（补买扣 fee 后 ~99.9% 覆盖即视为可卖）
-        need_per = lot * 0.99
-        if need_per > 0:
-            out["sellable_sz"] = int(out["spot_avail"] / need_per + 1e-6)
+        out["sellable_sz"] = covered_sellable_sz(out["spot_avail"], lot)
         if out["spot_avail"] > 0:
             out["spot_cov_pct"] = round(out["spot_avail"] / lot * 100, 1)
     # 成本锚 C（§33.43 Step 2）：先按实际支出幂等回写，再取各已接货行的核算成本

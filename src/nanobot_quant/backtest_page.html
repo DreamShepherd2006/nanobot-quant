@@ -874,18 +874,30 @@ function maxContractsTxt(res) {
 }
 
 function optFillRow(f) {
-  const sideTxt = { sell_open: "🟠 卖出开仓", sell_close: "🔵 买回平仓",
-                    settle_otm: "✅ 到期作废", settle_itm: "⚠️ 被行权" }[f.side] || f.side;
+  let sideTxt = { sell_open: "🟠 卖出开仓", sell_close: "🔵 买回平仓", close: "🔵 买回平仓",
+                   settle_otm: "✅ 到期作废", settle_itm: "⚠️ 被行权",
+                   cover: "🛒 补买接货" }[f.side] || f.side;
+  if (f.opt_type === "C") sideTxt += "（call）";
   const px = f.avg_px !== undefined ? fmtN(f.avg_px, 6)
     : (f.settle_px !== undefined ? fmtN(f.settle_px, 4) : "—");
   const pnl = f.pnl_usd === undefined || f.pnl_usd === null ? "—" : fmtN(f.pnl_usd, 4);
+  const sz = f.side === "cover" ? (f.qty !== undefined ? f.qty : "—") : f.sz;
   return `<tr><td>${fmtTs(f.ts)}</td><td>${f.inst_id || "—"}</td>` +
-    `<td>${sideTxt}</td><td>${f.sz}</td><td>${f.strike || "—"}</td>` +
+    `<td>${sideTxt}</td><td>${sz}</td><td>${f.strike || "—"}</td>` +
     `<td>${f.spot !== undefined && f.spot !== null ? fmtN(f.spot, 2) : "—"}</td>` +
     `<td>${px}</td><td>${pnl}</td>` +
     `<td>${f.iv ? (f.iv * 100).toFixed(1) + "%" : "—"}</td>` +
     `<td>${f.delta !== undefined && f.delta !== null ? f.delta.toFixed(4) : "—"}</td>` +
     `<td>${f.reason || "—"}</td></tr>`;
+}
+
+function chainTxt(chain) {
+  if (!chain) return "—（旧记录无该字段）";
+  const cv = chain.cover_enabled
+    ? `开·${chain.cover_mode} @结算价×(1−${fmtN(chain.cover_discount_pct, 2)}%) · 超时 ${fmtN(chain.cover_timeout_hours, 1)}h→市价`
+    : "关（不计现货接货）";
+  const cl = chain.call_enabled ? `开·止盈 ${fmtN(chain.tp_call_pct, 0)}%` : "关";
+  return `补买 ${cv} · 卖 call ${cl}`;
 }
 
 function renderOptResult(res, runId) {
@@ -914,6 +926,11 @@ function renderOptResult(res, runId) {
     ["张数上限", maxContractsTxt(res)],
     ["额外滑点", `${fmtN(res.slippage_pct, 2)}%`], ["价差模型", res.spread_model_note || res.spread_model || "—"],
     ["手续费率", `${(res.fee_rate || 0) * 100}%（名义）`],
+    ["止盈线", `put ${fmtN(res.tp_pct, 0)}% / call ${fmtN(res.tp_pct_call, 0)}%`],
+    ["资金链", chainTxt(res.chain)],
+    ["结算价口径", (res.chain && res.chain.settle_window_min != null)
+      ? `到期前 ${res.chain.settle_window_min} 分钟标的均价（回放按 ${res.timestep} 粒度取均值）`
+      : "到期前 30 分钟标的均价（官方口径）"],
     ["合约总数", `${(res.contracts || {}).in_archive} 档 · 有 IV ${(res.contracts || {}).with_iv}`],
   ];
   for (const [a, b] of p) html += `<tr><td style="width:150px;color:#666;">${a}</td><td>${b ?? "—"}</td></tr>`;
@@ -923,11 +940,14 @@ function renderOptResult(res, runId) {
   html += `<h3 style="font-size:.95em;margin:14px 0 4px;">📊 结果</h3><table><tbody>`;
   const roi = k.roi_pct || 0;
   const kpi = [
-    ["期末净值", `$${fmtN(k.final_net_usd, 4)}`],
+    ["期末净值", `$${fmtN(k.final_net_usd, 4)}（现金 $${fmtN(res.cash, 4)} − 持仓负债 $${fmtN(k.open_mark_value_usd, 4)} + 现货 $${fmtN(k.spot_value_usd, 4)}）`],
     ["ROI", `<b class="${roi < 0 ? "sl-neg" : ""}">${roi >= 0 ? "+" : ""}${fmtN(roi, 4)}%</b>`],
-    ["权利金收入（毛）", `$${fmtN(k.premium_income_usd, 4)}`],
+    ["权利金收入（毛）", `$${fmtN(k.premium_income_usd, 4)}（put $${fmtN(k.premium_put_usd, 4)} / call $${fmtN(k.premium_call_usd, 4)}）`],
     ["买回支出", k.buyback_cost_usd == null ? "—" : `$${fmtN(k.buyback_cost_usd, 4)}`],
-    ["赔付支出", `$${fmtN(k.payout_usd, 4)}`],
+    ["赔付支出", `$${fmtN(k.payout_usd, 4)}（其中 call $${fmtN(k.payout_call_usd, 4)}）`],
+    ["补买接货支出", k.cover_spend_usd == null ? "—" : `$${fmtN(k.cover_spend_usd, 4)}（${fmtN(k.cover_qty, 6)} 币）`],
+    ["接货现货", k.spot_qty == null ? "—" : `${fmtN(k.spot_qty, 6)} 币 · 市值 $${fmtN(k.spot_value_usd, 4)}（资产，已计入净值）`],
+    ["成本锚 C", k.cost_basis_max == null ? "—" : `均值 ${fmtN(k.cost_basis_avg, 4)} / 上限 ${fmtN(k.cost_basis_max, 4)}`],
     ["手续费合计", k.fees_usd == null ? "—" : `$${fmtN(k.fees_usd, 4)}`],
     ["净交易损益（毛权利金−买回−赔付−手续费）", k.net_trading_usd == null ? "—" : `$${fmtN(k.net_trading_usd, 4)}`],
     ["未平仓权利金", k.open_premium_usd == null ? "—" : `$${fmtN(k.open_premium_usd, 4)}`],

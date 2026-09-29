@@ -229,7 +229,9 @@ def test_auto_cover_limit_places_order_and_marks_pending(env):
 def test_auto_cover_is_idempotent_while_order_open(env):
     _set_params(env, auto=True, mode="limit")
     env["write_ledger"]([_row(cover_status="pending", cover_ord_id="LIM1",
-                              cover_started_at="2026-09-28 00:00:00")])
+                              cover_started_at=time.strftime(
+                                  "%Y-%m-%d %H:%M:%S",
+                                  time.gmtime(time.time() - 3600)))])
     env["ord_state"] = {"status": "open", "avg_px": 0.0, "acc_fill_sz": 0.0}
     res = ot.auto_cover_pending("A", dry_run=False, now=time.time())
     assert res[0]["action"] == "skip" and "等待" in res[0]["reason"]

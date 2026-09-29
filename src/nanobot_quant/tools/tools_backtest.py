@@ -211,9 +211,28 @@ def _auto_backtest_options(
     def _run():
         from nanobot_quant.backtest.options_driver import (
             DEFAULT_INITIAL_CASH,
+            DEFAULT_SETTLE_WINDOW_MIN,
             DEFAULT_SLIPPAGE_PCT,
             OptionsBacktestDriver,
         )
+
+        # 资金链段开关（§33.43 Step 6 / C41b）不是策略参数，不进 opt_params：
+        # 它们是“本次回测怎么建模”的开关，与实盘 option_params 无关。
+        ov = dict(overrides or {})
+
+        def _pop_bool(key: str, default: bool = True) -> bool:
+            v = ov.pop(key, None)
+            if v is None or v == "":
+                return default
+            return str(v).lower() not in ("0", "false", "off", "no")
+
+        chain_enabled = _pop_bool("chain_enabled", True)
+        call_enabled = _pop_bool("call_enabled", True)
+        cover_mode = ov.pop("cover_mode", None) or None
+        cover_discount = ov.pop("cover_discount_pct", None)
+        cover_timeout = ov.pop("cover_timeout_hours", None)
+        tp_call = ov.pop("tp_pct_call", None)
+        settle_win = ov.pop("settle_window_min", None)
 
         def _progress(prog):
             """把 driver 进度写进 run 文件（页面轮询读它）；写盘失败不影响回测。"""
@@ -237,8 +256,16 @@ def _auto_backtest_options(
             slippage_pct=float(slippage)
             if slippage is not None and slippage != ""
             else DEFAULT_SLIPPAGE_PCT,
-            opt_params=_merge_opt_params(overrides, timestep),
+            opt_params=_merge_opt_params(ov, timestep),
             progress_cb=_progress,
+            cover_enabled=chain_enabled,
+            cover_mode=cover_mode,
+            cover_discount_pct=float(cover_discount) if cover_discount not in (None, "") else None,
+            cover_timeout_hours=float(cover_timeout) if cover_timeout not in (None, "") else None,
+            call_enabled=call_enabled and chain_enabled,
+            tp_call_pct=float(tp_call) if tp_call not in (None, "") else None,
+            settle_window_min=int(settle_win) if settle_win not in (None, "")
+            else DEFAULT_SETTLE_WINDOW_MIN,
         )
         return d.run()
 
