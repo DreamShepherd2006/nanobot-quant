@@ -35,12 +35,14 @@ AXIS_LABELS = {
 
 def _base_opt_params(*, iv_gate: float, tp: float, expiry: tuple[float, float],
                      min_net_yield: float, td_period: str,
-                     max_contracts: int) -> dict:
+                     max_contracts: int,
+                     iv_pct_window_days: float = 7.0) -> dict:
     return {
         "entry_setup": 9, "entry_countdown": 13, "td_period": td_period,
         "max_contracts_per_family": max_contracts,
         "max_contracts_total": max_contracts,
         "iv_min_percentile": float(iv_gate),
+        "iv_pct_window_days": float(iv_pct_window_days),
         "take_profit_pct": float(tp),
         "tp_pct_call": 30.0,
         "selector": {
@@ -64,6 +66,7 @@ def run_grid(
     tps: tuple[float, ...] = (50.0,),
     chain_modes: tuple[str, ...] = ("full",),
     min_net_yields: tuple[float, ...] = (0.0,),
+    iv_pct_window_days: float = 7.0,
     settle_window_min: int = DEFAULT_SETTLE_WINDOW_MIN,
     end_ts: Optional[int] = None,
     data_source: Any = None,
@@ -102,7 +105,7 @@ def run_grid(
         full = chain == "full"
         op = _base_opt_params(iv_gate=iv, tp=tp, expiry=expiry,
                               min_net_yield=mny, td_period=timestep,
-                              max_contracts=10)
+                              max_contracts=10, iv_pct_window_days=iv_pct_window_days)
         drv = OptionsBacktestDriver(
             family, timestep=timestep, start_ts=start, end_ts=end,
             td_bars=td_bars, td_params={}, opt_params=op,
@@ -114,7 +117,8 @@ def run_grid(
         k = out.get("kpi") or {}
         rows.append({
             "combo": {"iv_gate": iv, "expiry": f"{expiry[0]:g}-{expiry[1]:g}",
-                      "tp": tp, "min_net_yield": mny, "chain": chain},
+                      "tp": tp, "min_net_yield": mny, "chain": chain,
+                      "iv_pct_window_days": iv_pct_window_days},
             "label": (f"IV{iv:g}/档{expiry[0]:g}-{expiry[1]:g}/TP{tp:g}"
                       f"/净{mny:g}/{'全链' if full else '仅put'}"),
             "roi_pct": k.get("roi_pct"),
@@ -203,6 +207,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tp", default="50", help="逗号分隔，如 30,50,70")
     ap.add_argument("--chain", default="full", help="逗号分隔：full,off")
     ap.add_argument("--min-net-yield", default="0", help="逗号分隔")
+    ap.add_argument("--iv-window", type=float, default=7.0,
+                    help="IV 分位滚动窗口（天），默认 7")
     ap.add_argument("--settle-window", type=int, default=DEFAULT_SETTLE_WINDOW_MIN)
     ap.add_argument("--out", default="", help="markdown 输出路径")
     a = ap.parse_args(argv)
@@ -215,6 +221,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         tps=tuple(float(x) for x in a.tp.split(",") if x.strip()),
         chain_modes=tuple(x.strip() for x in a.chain.split(",") if x.strip()),
         min_net_yields=tuple(float(x) for x in a.min_net_yield.split(",") if x.strip()),
+        iv_pct_window_days=a.iv_window,
         settle_window_min=a.settle_window,
     )
     md = render_grid_markdown(grid)

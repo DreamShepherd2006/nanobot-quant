@@ -212,7 +212,8 @@
     <div class="field"><span class="f-label">入场 Setup</span><input type="number" id="opt-entry" min="1" max="20" placeholder="跟随实盘"><span class="f-hint">setup_buy ≥ 该值 → 卖 put（实盘现值 9）</span></div>
     <div class="field"><span class="f-label">入场 Countdown</span><input type="number" id="opt-cd" min="1" max="20" placeholder="跟随实盘"><span class="f-hint">cd_buy ≥ 该值 → 卖 put（实盘现值 13）</span></div>
     <div class="field"><span class="f-label">张数上限</span><input type="number" id="opt-szlimit" min="1" max="50" placeholder="跟随实盘"><span class="f-hint">同时持有的最大张数（实盘现值 1）</span></div>
-    <div class="field"><span class="f-label">IV 闸门</span><input type="number" id="opt-ivgate" min="0" max="1" step="0.05" placeholder="跟随实盘"><span class="f-hint">IV 分位低于该值不卖（0 = 关（实盘现值 0）</span></div>
+    <div class="field"><span class="f-label">IV 闸门</span><input type="number" id="opt-ivgate" min="0" max="100" step="5" placeholder="跟随实盘"><span class="f-hint">当前 IV 在滚动窗口里的分位低于该值就不卖（0 = 关；实盘现值 0）</span></div>
+    <div class="field"><span class="f-label">IV 分位窗口（天）</span><input type="number" id="opt-ivwin" min="1" max="60" step="1" placeholder="跟随实盘"><span class="f-hint">分位用最近多少天的 IV 样本（默认 7 天；样本不足则 fail-open 放行）</span></div>
     <div class="field"><span class="f-label">止盈（%）</span><input type="number" id="opt-tp" min="1" max="99" placeholder="跟随实盘"><span class="f-hint">权利金回落多少买回（实盘现值 50）</span></div>
     <div class="field"><span class="f-label">最小距离（%）</span><input type="number" id="opt-dist" min="0" max="50" step="0.5" placeholder="跟随实盘"><span class="f-hint">strike 必须 ≤ 现价 ×(1−该值)（实盘现值 5）</span></div>
     <div class="field"><span class="f-label">Delta 带</span><input type="number" id="opt-dmin" min="0.01" max="0.9" step="0.01" placeholder="跟随">～<input type="number" id="opt-dmax" min="0.01" max="0.9" step="0.01" placeholder="跟随"><span class="f-hint">只选该区间的档（实盘现值 0.05～0.35）</span></div>
@@ -777,7 +778,7 @@ async function initOptForm() {
 const OPT_OV_MAP = {
   "opt-entry": "entry_setup", "opt-cd": "entry_countdown",
   "opt-szlimit": "max_contracts_per_family",
-  "opt-ivgate": "iv_min_percentile",
+  "opt-ivgate": "iv_min_percentile", "opt-ivwin": "iv_pct_window_days",
   "opt-tp": "take_profit_pct", "opt-dist": "min_distance_pct",
   "opt-dmin": "delta_min", "opt-dmax": "delta_max",
   "opt-emin": "expiry_min_days", "opt-emax": "expiry_max_days",
@@ -900,6 +901,22 @@ function chainTxt(chain) {
   return `补买 ${cv} · 卖 call ${cl}`;
 }
 
+function ivPctTxt(res) {
+  // IV 分位闸门实际生效情况（闸门开着却无样本时必须写明 fail-open 放行）
+  const iv = res.iv_pct;
+  if (!iv) return "—（旧记录无该字段）";
+  const gate = iv.gate || 0, win = iv.window_days || 0;
+  if (!gate) return `0（关）· 窗口 ${win} 天`;
+  let t = `${gate} 分位 · 参考 ${iv.target_dte_days || 0} 天档平值 IV · 窗口 ${win} 天（${iv.window_bars} 根）`
+        + ` · 可算分位 ${iv.ready}/${iv.bars} 根 · 入场 ${iv.entries} 次`;
+  if (iv.entry_pct_median != null) {
+    t += `（分位中位 ${fmtN(iv.entry_pct_median, 1)} 分 · ${fmtN(iv.entry_pct_min, 0)}~${fmtN(iv.entry_pct_max, 0)}）`;
+  }
+  const na = (iv.entries_na || 0) + (iv.signal_na || 0);
+  if (na) t += ` · 样本不足 fail-open 放行 ${na} 次`;
+  return t;
+}
+
 function renderOptResult(res, runId) {
   if (res.error && !res.kpi) {
     return `<div class="empty">❌ ${escapeHtml(res.error)}<br><br>${(res.notes || []).map(escapeHtml).join("<br>")}</div>`;
@@ -932,6 +949,7 @@ function renderOptResult(res, runId) {
       ? `到期前 ${res.chain.settle_window_min} 分钟标的均价（回放按 ${res.timestep} 粒度取均值）`
       : "到期前 30 分钟标的均价（官方口径）"],
     ["合约总数", `${(res.contracts || {}).in_archive} 档 · 有 IV ${(res.contracts || {}).with_iv}`],
+    ["IV 分位（生效）", ivPctTxt(res)],
   ];
   for (const [a, b] of p) html += `<tr><td style="width:150px;color:#666;">${a}</td><td>${b ?? "—"}</td></tr>`;
   html += `</tbody></table>`;

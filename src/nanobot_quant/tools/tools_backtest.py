@@ -289,7 +289,7 @@ def _opt_ts_seconds(value: str | None) -> int | None:
 _OPT_NUM_KEYS = (
     "td_bars", "entry_setup", "entry_countdown",
     "max_contracts_per_family", "max_contracts_total",
-    "iv_min_percentile", "take_profit_pct",
+    "iv_min_percentile", "take_profit_pct", "iv_pct_window_days",
 )
 _OPT_INT_KEYS = (
     "td_bars", "entry_setup", "entry_countdown",

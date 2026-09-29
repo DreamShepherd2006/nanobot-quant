@@ -203,6 +203,27 @@ class OptionsReplayDataSource:
         j = bisect.bisect_right(self._spot_ts, int(ts_ms)) - 1
         return self._spot_px[j] if j >= 0 else None
 
+    def spot_at(self, ts=None) -> Optional[float]:
+        """该时刻标的收盘价（公开入口，供 IV 分位参考档取 spot）。
+
+        内部走 ``_spot_at_ms`` —— 与 IV 反解同一份取价逻辑，避免两处口径漂移。
+        """
+        t = ts if ts is not None else self._current_ts
+        if t is None:
+            return None
+        t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
+        return self._spot_at_ms(t_ms)
+
+    def expiries_at(self, ts=None) -> list[int]:
+        """该时刻「在售」合约的到期时刻（去重升序）—— IV 分位参考档选择用。"""
+        t = ts if ts is not None else self._current_ts
+        if t is None:
+            return []
+        t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
+        out = {int(m.get("exp_ms") or 0) for m in self._contracts.values()
+               if int(m.get("list_ms") or 0) <= t_ms < int(m.get("exp_ms") or 0)}
+        return sorted(e for e in out if e > 0)
+
     def window_spot_stats(self) -> Optional[dict]:
         """评估区间的标的价统计：首 / 尾 / 最高 / 最低。
 

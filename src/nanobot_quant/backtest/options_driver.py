@@ -138,6 +138,12 @@ class OptionsBacktestDriver:
         data_source: Any = None,
     ) -> None:
         self.family = str(family).upper()
+        # IV 分位（滚动序列 → 分位）—— 预计算前先置空，闸门拿不到分位时按 fail-open
+        self._iv_pct_map: dict[str, Optional[float]] = {}
+        self._iv_iv_map: dict[str, Optional[float]] = {}
+        self._iv_pct_meta: dict[str, Any] = {}
+        self._iv_pct_entries: list[Optional[float]] = []
+        self._iv_gate_na = 0
         self.timestep = timestep
         self.start_ts = start_ts
         self.end_ts = int(end_ts or time.time())
@@ -614,6 +620,103 @@ class OptionsBacktestDriver:
             fee = min(fee, OPTION_FEE_CAP_RATIO * premium)
         return fee
 
+    # ── IV 分位（滚动序列 → 分位；§33.43 Step 6 补齐）──────────
+
+    def _iv_pct_window_days(self) -> float:
+        """IV 分位滚动窗口（天）—— 取策略参数，缺省 7 天。"""
+        from nanobot_quant.iv_percentile import DEFAULT_WINDOW_DAYS
+
+        try:
+            v = float(self._opt_params().get("iv_pct_window_days"))
+        except (TypeError, ValueError):
+            v = 0.0
+        return v if v > 0 else DEFAULT_WINDOW_DAYS
+
+    def _build_iv_pct(self) -> None:
+        """预计算每根 bar 的 IV 分位（滚动窗口、只用历史）。
+
+        闸门吃的是 ``iv_percentile``，但在此之前没人算它（阈值形同虚设、
+        IV 0 与 70 的结果逐对相同）。这里一次性算出整段序列：
+
+        * 参考 IV = 参考到期档（目标 7 天）微笑在 K=现货 处的平值 IV
+        * 分位 = 当前值在 trailing 窗口（默认 7 天）内的百分位（0–100）
+        * 样本不足 → ``None``（fail-open 放行 + 计数，不静默当成 0 分）
+
+        纯本地计算（曲面已在内存），不为它增加任何网络请求。
+        """
+        from statistics import median
+
+        from nanobot_quant.iv_percentile import (
+            DEFAULT_TARGET_DTE_DAYS,
+            min_samples_for,
+            ref_atm_iv,
+            rolling_percentile,
+            window_bars_for,
+        )
+
+        self._iv_pct_map: dict[str, Optional[float]] = {}
+        self._iv_iv_map: dict[str, Optional[float]] = {}
+        self._iv_pct_meta: dict[str, Any] = {}
+        self._iv_pct_entries: list[Optional[float]] = []
+        self._iv_gate_na = 0
+        bt = list(getattr(self.data, "bar_times", None) or [])
+        if not bt:
+            return
+        # bar 秒数直接从时间轴差分取（不另引一张周期表，避免两处口径）
+        deltas = [(bt[i + 1] - bt[i]).total_seconds()
+                  for i in range(min(len(bt) - 1, 50))]
+        bar_s = float(median([d for d in deltas if d > 0] or [0])) or 3600.0
+        days = self._iv_pct_window_days()
+        wb = window_bars_for(days, bar_s)
+        ms = min_samples_for(wb)
+        surface = getattr(self.data, "_surface", None)
+        ivs: list[Optional[float]] = []
+        for ts in bt:
+            ts_ms = int(ts.timestamp() * 1000)
+            spot = float(self.data.spot_at(ts) or 0.0)
+            ivs.append(ref_atm_iv(surface, self.data.expiries_at(ts), ts_ms, spot))
+        pcts = rolling_percentile(ivs, window=wb, min_samples=ms)
+        self._iv_pct_map = {str(t): p for t, p in zip(bt, pcts)}
+        self._iv_iv_map = {str(t): v for t, v in zip(bt, ivs)}
+        obs = sum(1 for v in ivs if v is not None)
+        ready = sum(1 for p in pcts if p is not None)
+        self._iv_pct_meta = {
+            "window_days": days, "window_bars": wb, "min_samples": ms,
+            "target_dte_days": DEFAULT_TARGET_DTE_DAYS,
+            "bars": len(bt), "obs": obs, "ready": ready,
+        }
+        self._log(
+            f"IV 分位：参考={DEFAULT_TARGET_DTE_DAYS:g}天档平值 put IV · "
+            f"窗口={days:g}天（{wb} 根，bar={bar_s:g}s）· 窗口最小样本={ms} · "
+            f"参考 IV 有效 {obs}/{len(bt)} 根 · 可算分位 {ready} 根"
+            + ("" if ready else "（样本不足 → 闸门 fail-open 放行、单独计数）")
+        )
+
+    def _iv_pct_at(self, ts) -> Optional[float]:
+        """该 bar 的 IV 分位（未预计算 → None）。"""
+        return getattr(self, "_iv_pct_map", {}).get(str(ts))
+
+    def _iv_pct_report(self) -> dict:
+        """结果字典里的 IV 分位块 —— 生效窗口/样本/入场分位都要看得见。"""
+        rep = dict(getattr(self, "_iv_pct_meta", {}) or {})
+        ent = list(getattr(self, "_iv_pct_entries", []))
+        vals = [p for p in ent if p is not None]
+        try:
+            gate = float(self._opt_params().get("iv_min_percentile") or 0)
+        except (TypeError, ValueError):
+            gate = 0.0
+        rep.update({
+            "gate": gate,
+            "entries": len(ent),
+            "entries_na": sum(1 for p in ent if p is None),
+            "signal_na": int(getattr(self, "_iv_gate_na", 0)),
+            "entry_pct_median": (round(sorted(vals)[len(vals) // 2], 2)
+                                 if vals else None),
+            "entry_pct_min": round(min(vals), 2) if vals else None,
+            "entry_pct_max": round(max(vals), 2) if vals else None,
+        })
+        return rep
+
     def _try_entry(self, ts, positions: list, fills: list,
                    cash: float, sig: Optional[dict] = None) -> float:
         """TD 衰竭信号 + 选档 + 记账 —— 复用实盘 ``evaluate_entry()``。
@@ -650,15 +753,21 @@ class OptionsBacktestDriver:
 
         chain = self.data.chain_dict_at(ts, opt_type="P", dsigma_pts=self.dsigma_pts,
                                         tick=self.tick, slippage=self.slippage)
+        # IV 分位喂进闸门 —— 不传的话阈值填任何值都形同虚设
+        # （2026-09-29 实测：IV 闸门 0 与 70 的 8 组结果逐对完全相同）。
+        iv_pct = self._iv_pct_at(ts)
+        if iv_pct is None and float(self._opt_params().get("iv_min_percentile") or 0) > 0:
+            self._iv_gate_na += 1     # 样本不足 → fail-open 放行，但要记账
         d, note = evaluate_entry(
             self.family, td_signal=sig, params=self._opt_params(),
             open_contracts=len(puts), total_contracts=len(puts),
-            chain=chain, base_px=spot,
+            chain=chain, base_px=spot, iv_percentile=iv_pct,
             # 与实盘同一道现金担保门（§33.43 Step 3）：可用现金 < 全损担保 → fail-closed
             cash_avail=float(cash) - sum(p.collateral for p in puts))
         if d is None:
             self.skips.append(note)
             return cash
+        self._iv_pct_entries.append(iv_pct)
         # 现金担保铁律：占用 = strike × 面值 × 张数
         occupied = sum(p.collateral for p in puts)
         lot = float(chain.get("lot_coin") or 0.1)
@@ -1006,6 +1115,7 @@ class OptionsBacktestDriver:
         )
         for n in self.data.notes:
             self._log(f"数据备注：{n}")
+        self._build_iv_pct()
 
         total = len(bt) - idx
         step = max(1, total // 20)          # 每 ~5% 打一次进度
@@ -1081,6 +1191,7 @@ class OptionsBacktestDriver:
             "covers_pending": len(self._covers),
             "cost_bases": list(self._cost_bases),
         }
+        out["iv_pct"] = self._iv_pct_report()
         out["chain"] = {
             "cover_enabled": self.cover_enabled,
             "cover_mode": ccfg["mode"] if self.cover_enabled else None,

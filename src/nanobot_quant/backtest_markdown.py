@@ -244,6 +244,32 @@ def _settle_txt(res: dict) -> str:
     return f"到期前 {win} 分钟标的均价（回放按 {res.get('timestep')} 粒度取均值）"
 
 
+def _iv_pct_txt(res: dict) -> str:
+    """IV 分位闸门实际生效情况：闸门值 · 参考档/窗口/样本 · 入场分位中位。
+
+    闸门开着却没有任何有效样本时必须写清「fail-open 放行」—— 否则读者会把
+    「闸门开了」误读成「闸门拦过东西」（IV 轴曾整段没接线，回测结果看不出）。
+    """
+    iv = res.get("iv_pct") or {}
+    if not iv:
+        return "—（旧记录无该字段）"
+    gate = _num(iv.get("gate"), 0)
+    win = _num(iv.get("window_days"), 0)
+    if not gate:
+        return f"0（关）· 窗口 {win:g} 天"
+    txt = (f"{gate:g} 分位 · 参考 {_num(iv.get('target_dte_days'), 0):g} 天档平值 IV"
+           f" · 窗口 {win:g} 天（{_num(iv.get('window_bars'), 0)} 根）"
+           f" · 可算分位 {_num(iv.get('ready'), 0)}/{_num(iv.get('bars'), 0)} 根"
+           f" · 入场 {_num(iv.get('entries'), 0)} 次")
+    if iv.get("entry_pct_median") is not None:
+        txt += (f"（分位中位 {_num(iv.get('entry_pct_median'), 1)} 分"
+                f" · {_num(iv.get('entry_pct_min'), 0)}~{_num(iv.get('entry_pct_max'), 0)}）")
+    na = int(iv.get("entries_na") or 0) + int(iv.get("signal_na") or 0)
+    if na:
+        txt += f" · 样本不足 fail-open 放行 {na} 次"
+    return txt
+
+
 def _options_md(res: dict) -> str:
     kpi = res.get("kpi") or {}
     bars = res.get("bars") or {}
@@ -270,6 +296,7 @@ def _options_md(res: dict) -> str:
         ("价差模型", res.get('spread_model_note') or res.get('spread_model') or "—"),
         ("手续费率", _pct((res.get('fee_rate') or 0) * 100)),
         ("止盈线", f"put {_pct(res.get('tp_pct'), 0)} / call {_pct(res.get('tp_pct_call'), 0)}"),
+        ("IV 分位（生效）", _iv_pct_txt(res)),
         ("资金链", _chain_txt(res.get("chain"))),
         ("结算价口径", _settle_txt(res)),
         ("合约总数", f"{contracts.get('in_archive', 0)} 档 · 有 IV {contracts.get('with_iv', 0)}"),
