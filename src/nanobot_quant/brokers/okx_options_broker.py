@@ -39,6 +39,12 @@ logger = logging.getLogger("nanobot_quant.brokers.okx_options")
 # 现金币种（期权保证金/权利金以 USDC/USD 结算）
 _CASH_CCY = ("USDC", "USD", "USDG", "USDT")
 
+# 「已受理、未定案」状态（不是失败也不是成功）：台账 pending 行接管，
+# 下一轮复检定案。含 unknown —— 状态查不清时寧可等复检，不能当成失败重发单。
+_IN_FLIGHT_STATUSES = frozenset({
+    "pending", "unknown", "live", "open", "partially_filled", "submitted",
+})
+
 
 class _OptionsDummyDataSource:
     """占位 data source（Broker.__init__ 要求非 None）；期权链走 option_source。"""
@@ -140,10 +146,26 @@ class OkxOptionsBroker(Broker):
         if order.identifier:
             self._tracked[order.identifier] = meta
         status = str(res.get("status") or "")
+        # 状态透传给策略（三档判定用：filled / 在途未定案 / 失败）——
+        # 不能只靠 order.error 二分：IOC 在 5s 轮询窗口内常报在途、随后成交。
+        order.custom_params = order.custom_params or {}
+        order.custom_params["opt_status"] = status
+        order.custom_params["opt_note"] = str(res.get("note") or "")
         if status in ("filled", "closed"):
             order.set_filled()
-        elif status in ("failed", "error", "cancelled"):
-            order.set_error(res.get("note") or f"订单状态 {status}")
+        elif status in _IN_FLIGHT_STATUSES:
+            # 交易所已受理、尚未定案（IOC 在途 / 限价未成交 / 状态查询失败）——
+            # **不是失败**：台账已留下 pending 行接管（has_pending_ledger 防重），
+            # 下一轮复检定案（2026-09-29 实测：14:05 的 IOC 在 5s 窗口内报 live，
+            # 随后成交，却被打成「卖出失败」）。仍不算成功：不计成交量、
+            # is_filled() 为假。
+            pass
+        else:
+            # 真正的失败（撤销 / 拒单 / 空状态）必须如实上报，禁止假成功：
+            # pending/unknown 曾被当成成功 → 页面显示「已买回」而持仓未动、
+            # 每 60s 重复提交（2026-09-29 实测）。
+            order.set_error(res.get("note")
+                            or f"订单未成交（状态 {status or 'unknown'}）")
         return order
 
     def cancel_order(self, order: Order) -> None:

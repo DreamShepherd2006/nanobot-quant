@@ -327,7 +327,7 @@ def _row_right(row: dict) -> str:
 
 
 def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT,
-                   opt_type: str = "P") -> list[ExitDecision]:
+                   opt_type: str = "P", now_ms: int | None = None) -> list[ExitDecision]:
     """权利金回落止盈：mark 价跌到开仓价的 (1 − tp_pct%) 以下 → 买回。
 
     Args:
@@ -336,11 +336,17 @@ def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT,
         opt_type: 只评估该方向的卖开仓（``"P"`` 卖 put 线 / ``"C"`` 卖 call 线）。
             方向隔离是硬约束 —— 卖 put 的止盈线不得平掉卖 call 仓（call 另有自己的
             止盈线），反之亦然（docs/quant-system.md §24 C42）。
+        now_ms: 当前时间（毫秒），仅用于「已到期」判定；缺省取当前 UTC 时间。
+
+    已到期（``exp_ms <= now_ms``）的仓不再产生买回建议 —— 改发一条
+    ``reason="expired"`` 的决策（调用方据此记录「已到期，不提交」，避免静默
+    跳过；2026-09-29：到期后 11 分钟里对死合约反复提交买回，交易所必拒）。
     """
     out: list[ExitDecision] = []
     want = str(opt_type or "P").strip().upper()
     if not tp_pct or tp_pct <= 0:
         return out
+    now = float(now_ms) if now_ms is not None else datetime.now(timezone.utc).timestamp() * 1000.0
     for row in positions or []:
         if str((row or {}).get("side") or "").lower() not in ("short", "net_short"):
             continue  # 只处理卖开仓（买 call / 长仓不归本策略管）
@@ -350,7 +356,14 @@ def evaluate_exits(positions, *, tp_pct: float = DEFAULT_TP_PCT,
         mark = _f(row.get("mark_px"))
         sz = _f(row.get("pos"))
         inst = str(row.get("inst_id") or "")
-        if not entry or entry <= 0 or mark is None or not sz or sz <= 0 or not inst:
+        if not sz or sz <= 0 or not inst:
+            continue
+        exp = _f(row.get("exp_ms")) or 0.0
+        if exp and exp <= now:
+            out.append(ExitDecision(inst_id=inst, sz=int(sz), entry_px=entry or 0.0,
+                                    mark_px=mark or 0.0, drop_pct=0.0, reason="expired"))
+            continue
+        if not entry or entry <= 0 or mark is None or mark <= 0:
             continue
         drop = (entry - mark) / entry * 100.0
         if drop >= tp_pct:

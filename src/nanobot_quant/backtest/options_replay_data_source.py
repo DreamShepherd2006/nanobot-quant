@@ -182,6 +182,7 @@ class OptionsReplayDataSource:
         self._surface: Optional[IVSurface] = None
         self._spot_ts: list[int] = []
         self._spot_px: list[float] = []
+        self._prepared = False          # prefetch() 是否已跑（网格复用同一数据源）
         self.notes: list[str] = []
 
     # ── 标的价索引 ────────────────────────────────────────
@@ -201,6 +202,27 @@ class OptionsReplayDataSource:
             return None
         j = bisect.bisect_right(self._spot_ts, int(ts_ms)) - 1
         return self._spot_px[j] if j >= 0 else None
+
+    def spot_at(self, ts=None) -> Optional[float]:
+        """该时刻标的收盘价（公开入口，供 IV 分位参考档取 spot）。
+
+        内部走 ``_spot_at_ms`` —— 与 IV 反解同一份取价逻辑，避免两处口径漂移。
+        """
+        t = ts if ts is not None else self._current_ts
+        if t is None:
+            return None
+        t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
+        return self._spot_at_ms(t_ms)
+
+    def expiries_at(self, ts=None) -> list[int]:
+        """该时刻「在售」合约的到期时刻（去重升序）—— IV 分位参考档选择用。"""
+        t = ts if ts is not None else self._current_ts
+        if t is None:
+            return []
+        t_ms = int(t.timestamp() * 1000) if isinstance(t, datetime) else int(t)
+        out = {int(m.get("exp_ms") or 0) for m in self._contracts.values()
+               if int(m.get("list_ms") or 0) <= t_ms < int(m.get("exp_ms") or 0)}
+        return sorted(e for e in out if e > 0)
 
     def window_spot_stats(self) -> Optional[dict]:
         """评估区间的标的价统计：首 / 尾 / 最高 / 最低。
@@ -289,11 +311,18 @@ class OptionsReplayDataSource:
         self._underlying = df.rename(columns=str.lower).sort_index()
         self._bar_times = list(self._underlying.index)
         if not self._bar_times:
+            self._prepared = True       # 无 bar 也算跑过，避免上层反复重拉
             return
         self._index_spot()
 
         # ② 归档成交 → IV 曲面（已到期合约的唯一可用来源）
         self._load_archive_iv(start_ts, end_ts)
+        self._prepared = True
+
+    @property
+    def prepared(self) -> bool:
+        """``prefetch()`` 是否已跑过 —— 网格共享数据源时避免重复拉取。"""
+        return bool(self._prepared)
 
     def _family_contracts(self) -> dict[str, dict]:
         """家族全部合约的元数据（在售 ∪ 已到期，含从未成交的档位）。"""

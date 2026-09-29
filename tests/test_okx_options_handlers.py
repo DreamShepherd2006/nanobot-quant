@@ -383,3 +383,27 @@ def test_options_page_polish_markers():
     assert "该合约已过到期时刻（08:00 UTC）" in h
     # ④ 循环启动提示
     assert "不会自动恢复" in h and "确认无误后再取消勾选" in h
+
+
+# ── 未成交诚实上报 + 去重（2026-09-29）页面/快照标记 ───────────────
+
+def test_page_labels_pending_confirm_not_failure():
+    """⏳ 待确认 不得渲染成「❌ 失败」；且轮次快照必须带 dry_run。"""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+    h = (root / "okx_options_page.html").read_text(encoding="utf-8")
+    assert 'st === "pending_confirm"' in h          # 策略事件列表
+    assert 'd === "pending_confirm"' in h           # 最近一轮策略行
+    assert 'd === "skipped_expired"' in h           # 已到期不下单（可见）
+    assert "⏳ 待确认" in h
+    # 快照 dry_run：缺失时页面按 dry=true 渲染（真实下单被标成「仅记录」）
+    for p in ("okx_options_page.html",):
+        assert "strat.dry_run !== false" in h
+    s = (root / "strategies" / "okx_options_put_strategy.py").read_text(encoding="utf-8")
+    assert '"dry_run": dry,' in s
+    assert "def _resolve_pending(" in s
+    assert "has_pending_ledger" in s
+    t = (root / "okx_options_trade.py").read_text(encoding="utf-8")
+    assert "def resolve_pending(" in t and "def has_pending_ledger(" in t
+    b = (root / "brokers" / "okx_options_broker.py").read_text(encoding="utf-8")
+    assert "订单未成交" in b                         # 非 filled 一律不报成功

@@ -320,6 +320,23 @@ def find_entry(pred: Callable[[dict], bool]) -> Optional[dict]:
 
 # ── instrument / 盘口辅助 ──────────────────────────────────────
 
+def inst_expiry_ms(inst_id: str) -> int:
+    """``SOL-USD_UM-260929-118-P`` → 到期时刻毫秒（当日 **08:00 UTC**）；解析失败 → 0。
+
+    OKX 期权每日到期统一在 08:00 UTC（与 ``okx_options_data`` 同口径）。此函数是
+    「已到期不再下单」门的输入（2026-09-29：15:49–16:00 对已到期合约反复提交买回，
+    交易所必拒；现在提前拦下并在轮次快照里显式可见）。
+    """
+    parts = str(inst_id or "").split("-")
+    if len(parts) < 5:
+        return 0
+    try:
+        d = datetime.strptime(parts[-3], "%y%m%d")
+    except (ValueError, IndexError):
+        return 0
+    return int((d.replace(tzinfo=timezone.utc).timestamp() + 8 * 3600.0) * 1000)
+
+
 def inst_family_of(inst_id: str) -> str:
     """从 instId 解析 instFamily（如 SOL-USD_UM-260905-101-P → SOL-USD_UM）。
 
@@ -955,6 +972,75 @@ def has_pending_inst(account: str, family: str, inst_id: str) -> bool:
     return any(str(r.get("inst_id") or "") == str(inst_id) for r in rows or [])
 
 
+def has_pending_ledger(inst_id: str,
+                       kinds: tuple = ("open_put",)) -> bool:
+    """该合约是否已有**未定案**台账行（同 kind 组）——防重复下单。
+
+    与 ``has_pending_inst`` 互补：后者查交易所在途委托（限价单有效），前者查
+    台账中 status=pending 的行——IOC 未成交时交易所在途查不到、但本地台账会
+    留下 pending 行（下单后 5s 轮询未定案）。两者叠加才能堵住「每轮重复提交
+    同一合约」（2026-09-29 实测：买回 IOC 未成交被报成成交，60s 一轮重复提交）。
+
+    台账读取失败 fail-closed 返回 True（宁可这轮不下）。
+    """
+    if not inst_id:
+        return False
+    try:
+        for e in load_ledger():
+            if (str(e.get("inst_id") or "") == str(inst_id)
+                    and str(e.get("status") or "") == "pending"
+                    and str(e.get("kind") or "") in kinds):
+                return True
+    except Exception:  # noqa: BLE001 —— 查不清就当作有
+        return True
+    return False
+
+
+def resolve_pending(account: str = "") -> list[dict]:
+    """复检未定案台账行（status=pending 且有 ord_id）——每轮开头跑一次。
+
+    IOC 下单后 5s 内未定案的行（state=live/unknown）既不能当成交、也不该阻塞
+    后续轮次：这里按交易所结果落定——filled → 完成开/平仓回填（含保证金追加、
+    盈亏、关账），cancelled → 标「未成交（IOC 未匹配，已自动撤单）」。
+
+    返回每行复检结果供策略轮次日志/事件展示；复检异常不抛给调用方。
+    """
+    a: dict = {}
+    out: list[dict] = []
+    for e in list(load_ledger()):
+        if e.get("status") != "pending" or not e.get("ord_id"):
+            continue
+        if not a:
+            a = _entry_account(account)  # 只在真有未定案行时才解析凭证
+        kind = str(e.get("kind") or "")
+        try:
+            if kind in ("close_put", "close_call"):
+                op = (find_entry(lambda x: x["id"] == e.get("open_id"))
+                      if e.get("open_id") else None)
+                if op is None:
+                    update_ledger(lambda x: x["id"] == e["id"], status="failed",
+                                  note="复检：找不到对应 open 台账行")
+                    out.append({"id": e["id"], "inst_id": e.get("inst_id"),
+                                "kind": kind, "status": "failed"})
+                    continue
+                r = _settle_close_entry(a["creds"], e, op)
+            elif kind in ("open_put", "open_call"):
+                r = _settle_open_entry(a["creds"], e, kind=kind)
+            else:
+                continue
+        except Exception as ex:  # noqa: BLE001 —— 复检失败不杀轮
+            out.append({"id": e["id"], "inst_id": e.get("inst_id"),
+                        "kind": kind, "status": "unknown",
+                        "error": f"{type(ex).__name__}: {ex}"})
+            continue
+        r = r or {}
+        out.append({"id": e.get("id"), "inst_id": e.get("inst_id"),
+                    "kind": kind, "status": r.get("status"),
+                    "filled_px": r.get("filled_px"),
+                    "ref_bid": e.get("ref_bid"), "ref_ask": e.get("ref_ask")})
+    return out
+
+
 def open_put(account: str, *, inst_id: str, sz: int,
              ord_type: str = "limit", px: Optional[float] = None) -> dict:
     """卖 put 开仓（真实下单）。成功后写入台账（pending → 轮询 filled）。"""
@@ -1103,9 +1189,13 @@ def _settle_open_entry(creds: dict, entry: dict, kind: str = "open_put") -> dict
             return upd or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
-                                 status="cancelled") or entry
+                                 status="cancelled",
+                                 note="未成交（IOC 未匹配盘口，已自动撤单）") or entry
         time.sleep(0.5)
-    return entry  # 仍 pending，等页面刷新再轮询
+    # 未定案：不报成交（诚实状态），下一轮复检
+    return update_ledger(
+        lambda x: x["id"] == entry["id"], status="pending",
+        note="未定案（IOC 未在 5s 内定案）——下一轮复检") or entry
 
 
 def _position_margin(creds: dict, inst_id: str) -> tuple[float, str]:
@@ -1239,9 +1329,13 @@ def _settle_close_entry(creds: dict, entry: dict, open_entry: dict) -> dict:
             return update_ledger(lambda x: x["id"] == entry["id"]) or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
-                                 status="cancelled") or entry
+                                 status="cancelled",
+                                 note="未成交（IOC 未匹配盘口，已自动撤单）") or entry
         time.sleep(0.5)
-    return entry
+    # 未定案：不报成交（诚实状态），下一轮复检
+    return update_ledger(
+        lambda x: x["id"] == entry["id"], status="pending",
+        note="未定案（IOC 未在 5s 内定案）——下一轮复检") or entry
 
 
 def spot_cover(account: str, *, spot_inst: str,
@@ -1610,6 +1704,29 @@ def refresh_cost_bases(family: str = "") -> int:
     return n
 
 
+COVERAGE_TOL = 0.99          # covered 覆盖容差（现货 ≥ 面值×99% 即视为覆盖 1 张）
+
+
+def covered_sellable_sz(spot_avail: float, lot_coin: float) -> int:
+    """现货能覆盖的 call 张数 —— **单一来源**（实盘 covered 门 / 回测模拟共用）。
+
+    容差 1%：补买扣 0.1% 手续费后到货 0.0999 SOL，按面值整数判据会把自己刚
+    补的货判成「裸卖」；且 U 本位期权为现金结算（被行权只赔现金差价、不交币），
+    现货是对冲工具而非交割物。
+    """
+    try:
+        lot = float(lot_coin)
+        qty = float(spot_avail)
+    except (TypeError, ValueError):
+        return 0
+    if not (math.isfinite(lot) and math.isfinite(qty)):
+        return 0
+    need = lot * COVERAGE_TOL
+    if need <= 0 or qty <= 0:
+        return 0
+    return int(qty / need + 1e-6)
+
+
 def covered_context(account: str, family: str) -> dict:
     """卖 call（covered call）上下文：现货对冲覆盖 + 成本锚 C 建议（只读）。
 
@@ -1638,9 +1755,7 @@ def covered_context(account: str, family: str) -> dict:
             break
     if lot and lot > 0:
         # 每张对冲需求 = 面值；容差 1%（补买扣 fee 后 ~99.9% 覆盖即视为可卖）
-        need_per = lot * 0.99
-        if need_per > 0:
-            out["sellable_sz"] = int(out["spot_avail"] / need_per + 1e-6)
+        out["sellable_sz"] = covered_sellable_sz(out["spot_avail"], lot)
         if out["spot_avail"] > 0:
             out["spot_cov_pct"] = round(out["spot_avail"] / lot * 100, 1)
     # 成本锚 C（§33.43 Step 2）：先按实际支出幂等回写，再取各已接货行的核算成本
@@ -1716,6 +1831,7 @@ def _normalize_position(r: dict) -> dict:
         "mark_px": _f(r.get("markPx")),
         "upl": _f(r.get("upl")),
         "upl_ratio": _f(r.get("uplRatio")),
+        "exp_ms": inst_expiry_ms(inst),   # 到期时刻（「已到期不下单」门的输入）
         "mgn_mode": r.get("mgnMode", ""),
         "lever": r.get("lever", ""),
         # 逐仓实际冻结保证金（margin 0/空时回退 imr）；足额担保时 OKX 无强平价（--）

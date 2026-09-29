@@ -72,7 +72,7 @@ class TestBrokerSubmitOrder:
 
         def _op(acc, **kw):
             seen.update({"acc": acc, **kw})
-            return {"ord_id": "111", "status": "pending"}
+            return {"ord_id": "111", "status": "filled"}
 
         monkeypatch.setattr(oot, "open_put", _op)
         order = _broker()._submit_order(_order("SOL-USD_UM-260918-94-P", "sell"))
@@ -80,6 +80,35 @@ class TestBrokerSubmitOrder:
         assert seen["sz"] == 1 and seen["ord_type"] == "ioc" and seen["px"] == 0.27
         assert seen["acc"] == "DreamShepherdbot1"
         assert order.identifier == "111" and order.error is None
+        assert order.is_filled()
+
+    def test_unfilled_status_is_never_success(self, monkeypatch):
+        """未成交 / 未定案不得报成功（2026-09-29：IOC 未成交被当成交，\n        页面显示「已买回」而持仓未动、每 60s 重复提交）。
+
+        三档（同日定稿）：``pending``/``unknown`` 等属**在途未定案**——
+        不是成功（is_filled() 为假、不计成交量），也不算失败（不算在途则
+        下轮会重复提交）；只有撤销/拒单/空状态才是失败。"""
+        self._patch_px(monkeypatch)
+        for st in ("pending", "unknown", "live", "open"):
+            monkeypatch.setattr(
+                oot, "close_put",
+                lambda acc, _st=st, **kw: {
+                    "ord_id": "9", "status": _st,
+                    "note": "未成交（IOC 未匹配盘口，已自动撤单）"})
+            order = _broker()._submit_order(_order("SOL-USD_UM-260918-94-P", "buy"))
+            assert not order.is_filled(), f"status={st!r} 不得报成交"
+            assert order.custom_params["opt_status"] == st
+        # 真正的失败：必须带 error（如实上报）
+        for st in ("cancelled", "failed", ""):
+            monkeypatch.setattr(
+                oot, "close_put",
+                lambda acc, _st=st, **kw: {
+                    "ord_id": "9", "status": _st,
+                    "note": "未成交（IOC 未匹配盘口，已自动撤单）"})
+            order = _broker()._submit_order(_order("SOL-USD_UM-260918-94-P", "buy"))
+            assert order.error, f"status={st!r} 不得报成功"
+            assert "未成交" in order.error
+            assert not order.is_filled()
 
     def test_sell_call_routes_to_open_call_with_cost_basis(self, monkeypatch):
         self._patch_px(monkeypatch, px=0.5)

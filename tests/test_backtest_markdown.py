@@ -166,9 +166,9 @@ def test_pipe_and_newline_in_cells_are_escaped():
     res = _opt_result()
     res["fills"][0]["reason"] = "a|b\nc"
     md = render_markdown(res)
-    row = [ln for ln in md.splitlines() if "a" in ln and "c" in ln]
-    assert row, "含竖线/换行的单元格应仍在一行内"
-    assert "a\\|b c" in row[0]
+    # 竖线要转义、换行要归一化成空格（否则表格会被撑破）
+    assert "a\\|b c" in md
+    assert "a|b" not in md
 
 
 def test_missing_fields_degrade_to_dash():
@@ -200,7 +200,7 @@ def test_missing_numbers_render_dash_not_dash_percent():
     res["tp_pct"] = None
     res["fills"][1]["iv"] = None
     md = render_markdown(res)
-    assert "| 止盈线 | — |" in md
+    assert "| 止盈线 | put — / call — |" in md
     assert "—%" not in md
 
 
@@ -223,9 +223,9 @@ def test_premium_accounting_rows_present():
     （2026-09-26 复验：7 笔止盈收益 ~0.286 在 KPI 里完全看不到）。
     """
     md = render_markdown(_opt_result())
-    assert "| 权利金收入（毛） | $1.2911 |" in md
+    assert "| 权利金收入（毛） | $1.2911" in md      # 后面跟 put/call 拆分，用前缀断言
     assert "| 买回支出 | $0.4102 |" in md
-    assert "| 赔付支出 | $0.0390 |" in md
+    assert "| 赔付支出 | $0.0390" in md      # 后面跟 call 拆分，用前缀断言
     assert "| 手续费合计 | $0.0481 |" in md
     assert "| 净交易损益（毛权利金−买回−赔付−手续费） | $0.7938 |" in md
 

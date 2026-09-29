@@ -528,7 +528,7 @@ def _callstrat(_strat, monkeypatch):
 
     def _submit(self, dec, p, closing=False):
         orders["buy" if closing else "sell"].append(dec)
-        return True, None
+        return "filled", None
 
     monkeypatch.setattr(_S, "_submit_option", _submit)
     return orders
@@ -608,3 +608,134 @@ class TestCallLine:
         assert s["take_profit_pct_call"] == 30
         assert s["max_calls_per_family"] == 1 and s["max_calls_total"] == 2
         assert s["allow_no_cost_basis"] is False
+
+
+# ── 下单参数顺序回归（2026-09-29 线上事故）──────────────────────────────
+# 真实 lumibot 签名 = create_order(asset, quantity, side)。期权线曾写成
+# (asset, side, sz) → Order(quantity="sell", side=1) → entities/order.py 的
+# `quantity < 0` 抛 TypeError: '<' not supported between instances of 'str'
+# and 'int'（每 60s 重复「❌ 失败」，永远下不出单）。conftest 的 lumibot stub
+# 已镜像该类型校验，这里再锁一层调用形状。
+
+def test_submit_option_passes_quantity_not_side(monkeypatch):
+    import types
+
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as S,
+    )
+
+    s = S()
+    s.parameters = {**dict(S.parameters), "live_mode": True}
+    seen = {}
+
+    class _Order:
+        error = None
+
+    def fake_create_order(asset, quantity, side, **kw):
+        seen.update(asset=asset, quantity=quantity, side=side)
+        return _Order()
+
+    monkeypatch.setattr(s, "create_order", fake_create_order)
+    submitted = {}
+    monkeypatch.setattr(s, "submit_order",
+                        lambda order, **kw: submitted.update(order=order))
+    dec = types.SimpleNamespace(inst_id="SOL-USD_UM-260929-118-P", sz=1)
+
+    ok, err = s._submit_option(dec, {})
+    assert ok == "filled" and err is None, err
+    assert submitted.get("order") is not None, (
+        "必须调 submit_order —— lumibot create_order 只建对象不提交（2026-09-29 根因）"
+    )
+    assert seen["quantity"] == 1 and isinstance(seen["quantity"], int)
+    assert seen["side"] == "sell"
+    assert getattr(seen["asset"], "symbol", None) == "SOL"
+
+    # 旧写法（side/sz 写反）必须报错且原因可见 —— 不得静默通过
+    import pytest as _pt
+
+    monkeypatch.delattr(s, "create_order")  # 回落到底层 lumibot stub
+    with _pt.raises(TypeError):
+        S.create_order(s, seen["asset"], "sell", 1)  # quantity="sell"
+    with _pt.raises(ValueError):
+        S.create_order(s, seen["asset"], 1, 1)  # side=1
+
+
+# ── 止盈买回去重门（2026-09-29：每 60s 重复提交同一合约）────────────
+
+def test_exits_skip_when_pending_ledger_row(monkeypatch):
+    """同合约已有未定案买回行 → 本轮不重复下单，状态标 pending_confirm。"""
+    import types
+
+    from nanobot_quant import okx_options_strategy as _st
+    from nanobot_quant import okx_options_trade as _ot
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as S,
+    )
+
+    inst = "SOL-USD_UM-260929-118-P"
+
+    class _Row:
+        inst_id = inst
+        sz = 1
+        reason = "take_profit"   # 与真实 ExitDecision 对齐（新增字段须同步否则 stub 掩盖崩溃）
+
+        def to_event(self):
+            return {"inst_id": inst, "sz": 1, "entry_px": 0.76,
+                    "mark_px": 0.03, "drop_pct": 96.0}
+
+    s = S()
+    s.parameters = {**dict(S.parameters), "live_mode": True}
+    monkeypatch.setattr(_st, "evaluate_exits", lambda *a, **k: [_Row()])
+    monkeypatch.setattr(_ot, "has_pending_ledger", lambda *a, **k: True)
+    monkeypatch.setattr(_ot, "has_pending_inst", lambda *a, **k: False)
+    submitted = []
+    monkeypatch.setattr(s, "_submit_option",
+                        lambda *a, **k: (submitted.append(a) or ("filled", None)),
+                        raising=False)
+    monkeypatch.setattr(s, "_record", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(s, "_log", lambda *a, **k: None, raising=False)
+
+    recs = s._exits("DreamShepherdbot1", {"take_profit_pct": 50}, False,
+                    [types.SimpleNamespace(inst_id=inst, qty=1.0,
+                                           avg_px=0.76, mark_px=0.03)],
+                    opt_type="P")
+    assert submitted == []                     # 未重复下单
+    assert recs and recs[0]["status"] == "pending_confirm"
+    assert "未定案" in recs[0]["note"]
+
+
+def test_exits_submits_when_no_pending_row(monkeypatch):
+    """无未定案行 → 正常提交（去重门不得阻断正常路径）。"""
+    import types
+
+    from nanobot_quant import okx_options_strategy as _st
+    from nanobot_quant import okx_options_trade as _ot
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as S,
+    )
+
+    inst = "SOL-USD_UM-260929-118-P"
+
+    class _Row:
+        inst_id = inst
+        sz = 1
+        reason = "take_profit"   # 与真实 ExitDecision 对齐（新增字段须同步否则 stub 掩盖崩溃）
+
+        def to_event(self):
+            return {"inst_id": inst, "sz": 1, "entry_px": 0.76,
+                    "mark_px": 0.03, "drop_pct": 96.0}
+
+    s = S()
+    s.parameters = {**dict(S.parameters), "live_mode": True}
+    monkeypatch.setattr(_st, "evaluate_exits", lambda *a, **k: [_Row()])
+    monkeypatch.setattr(_ot, "has_pending_ledger", lambda *a, **k: False)
+    monkeypatch.setattr(s, "_submit_option",
+                        lambda *a, **k: ("filled", None), raising=False)
+    monkeypatch.setattr(s, "_record", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(s, "_log", lambda *a, **k: None, raising=False)
+
+    recs = s._exits("DreamShepherdbot1", {"take_profit_pct": 50}, False,
+                    [types.SimpleNamespace(inst_id=inst, qty=1.0,
+                                           avg_px=0.76, mark_px=0.03)],
+                    opt_type="P")
+    assert recs and recs[0]["status"] == "bought_back"

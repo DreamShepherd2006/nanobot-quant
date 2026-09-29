@@ -1552,3 +1552,76 @@ def test_backfill_reports_missing_bill(monkeypatch, tmp_path):
     assert res["scanned"] == 1 and res["filled"] == []
     assert res["skipped"] and "未找到交割账单" in res["skipped"][0]["reason"]
     assert ot.load_ledger()[0].get("settle_px") is None
+
+
+# ── 未定案行复检 / 去重门（2026-09-29）────────────────────────────────
+# 背景：买回 IOC 未成交时返回内存 pending 状态 → 上层当成交（页面「✅ 已买回」
+# 而持仓未动），且每 60s 重复提交同一合约。修复 = 诚实状态 + 台账级去重 +
+# 每轮复检未定案行。
+
+def test_has_pending_ledger_matches_inst_and_kind(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    inst = "SOL-USD_UM-260929-118-P"
+    ot.add_ledger(kind="close_put", account="default", inst_id=inst,
+                  side="buy", sz=1, ord_id="OID1", open_id="OPEN1",
+                  status="pending")
+    assert ot.has_pending_ledger(inst, ("close_put", "close_call")) is True
+    assert ot.has_pending_ledger(inst, ("open_put",)) is False
+    assert ot.has_pending_ledger("SOL-USD_UM-260930-120-P", ("close_put",)) is False
+    # 定案后不再拦
+    ot.update_ledger(lambda x: x.get("ord_id") == "OID1", status="cancelled")
+    assert ot.has_pending_ledger(inst, ("close_put",)) is False
+
+
+def test_resolve_pending_marks_cancelled_and_releases_gate(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    inst = "SOL-USD_UM-260929-118-P"
+    op = ot.add_ledger(kind="open_put", account="default", inst_id=inst,
+                       side="sell", sz=1, status="open", filled_px=0.76)
+    cl = ot.add_ledger(kind="close_put", account="default", inst_id=inst,
+                       side="buy", sz=1, ord_id="OID9", open_id=op["id"],
+                       status="pending", ref_ask=0.05)
+    monkeypatch.setattr(ot, "_entry_account",
+                        lambda a: {"creds": {}, "name": "default", "uid": ""})
+    monkeypatch.setattr(ot, "poll_order", lambda *a, **k: {
+        "state": "canceled", "status": "cancelled", "ord_id": "OID9",
+        "avg_px": 0.0, "acc_fill_sz": 0.0, "fee": 0.0, "fee_ccy": ""})
+
+    rows = ot.resolve_pending("default")
+    assert len(rows) == 1 and rows[0]["status"] == "cancelled"
+    row = ot.find_entry(lambda x: x["id"] == cl["id"])
+    assert row["status"] == "cancelled"
+    assert "未成交" in (row.get("note") or "")
+    # 开仓行保持 open（未成交不得关账）
+    assert ot.find_entry(lambda x: x["id"] == op["id"])["status"] == "open"
+    # 去重门释放（已定案）
+    assert ot.has_pending_ledger(inst, ("close_put",)) is False
+
+
+def test_resolve_pending_filled_closes_ledger(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    inst = "SOL-USD_UM-260929-118-P"
+    op = ot.add_ledger(kind="open_put", account="default", inst_id=inst,
+                       side="sell", sz=1, status="open", filled_px=0.76,
+                       filled_sz=1, exp_ms=1790668800000, strike=118,
+                       opt_type="P")
+    cl = ot.add_ledger(kind="close_put", account="default", inst_id=inst,
+                       side="buy", sz=1, ord_id="OID7", open_id=op["id"],
+                       status="pending")
+    monkeypatch.setattr(ot, "_entry_account",
+                        lambda a: {"creds": {}, "name": "default", "uid": ""})
+    monkeypatch.setattr(ot, "poll_order", lambda *a, **k: {
+        "state": "filled", "status": "filled", "ord_id": "OID7",
+        "avg_px": 0.03, "acc_fill_sz": 1.0, "fee": 0.0001, "fee_ccy": "USDC"})
+
+    rows = ot.resolve_pending("default")
+    assert rows and rows[0]["status"] == "closed"
+    assert ot.find_entry(lambda x: x["id"] == op["id"])["status"] == "closed"
+    assert ot.find_entry(lambda x: x["id"] == cl["id"])["status"] == "closed"
+
+
+def test_resolve_pending_is_silent_without_rows(monkeypatch, tmp_path):
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_put", account="default", inst_id="X",
+                  side="sell", sz=1, status="open")
+    assert ot.resolve_pending("default") == []

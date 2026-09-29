@@ -29,22 +29,29 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import pandas as pd
+
 DEFAULT_SLIPPAGE_PCT = 0.0    # 价差之上**额外**的对称价格滑点（%）；默认 0
 # —— 盘口价差由「家族 Δσ + tick 地板」模型给出（okx_options_trade.
 # FAMILY_DSIGMA_PTS / FAMILY_TICK，生产 tape 实测，C43-① 方案 A）；
 # 填入 >0 表示在此之上再加一层价格滑点（压力测试/保守估计用）。
 DEFAULT_FEE_RATE = 0.0003     # 期权 taker 名义费率（OKX 按名义价值收，非权利金比例）
 DEFAULT_INITIAL_CASH = 10000.0
+DEFAULT_SETTLE_WINDOW_MIN = 30   # 结算价窗口：官方口径 = 到期前 30 分钟标的均价
+DEFAULT_SPOT_FEE_RATE = 0.001    # 现货 taker 0.1%（补买接货；实盘从到货基础币扣）
+DEFAULT_TP_CALL_PCT = 30.0       # 卖 call 止盈回落默认（§24 C41 D2，与 put 的 50% 分开）
 # 合约枚举尾部延伸由 OptionsReplayDataSource 内置（_ENUM_TAIL_DAYS = 7）——
 # 区间尾部持有的 put 常在 end_ts 之后才到期，只枚举到 end_ts 会无链可卖。
 
 
 @dataclass
 class SimPosition:
-    """模拟空头 put 持仓。
+    """模拟空头期权持仓（put / call）。
 
     字段刻意与 ``okx_options_trade.open_option_positions()`` 同形状，使
     ``evaluate_exits()`` 能原样复用 —— 回测不另写一套出场判定。
+    ``opt_type`` 对应台账的 P/C：止盈线、保本与结算口径都按方向分派
+    （§33.39 方向隔离 —— 卖 put 的止盈线不得平掉 call 仓）。
     """
 
     inst_id: str
@@ -56,15 +63,47 @@ class SimPosition:
     entry_ts: Any
     entry_reason: str
     lot_coin: float
+    opt_type: str = "P"      # P=卖 put（现金担保）/ C=卖 call（covered）
 
     @property
     def collateral(self) -> float:
-        """现金担保额 = 行权价 × 面值 × 张数（铁律：足额现金，无杠杆）。"""
+        """现金担保额 = 行权价 × 面值 × 张数（铁律：足额现金，无杠杆）。
+
+        仅对卖 put 成立 —— 卖 call 的担保是现货（covered），不占现金。
+        """
+        if self.opt_type == "C":
+            return 0.0
         return self.strike * self.lot_coin * self.sz
 
     def as_position_row(self, mark_px: Optional[float]) -> dict:
         return {"inst_id": self.inst_id, "side": "short", "pos": self.sz,
-                "avg_px": self.entry_px, "mark_px": mark_px}
+                "avg_px": self.entry_px, "mark_px": mark_px,
+                "opt_type": self.opt_type}
+
+
+@dataclass
+class SpotCoverTask:
+    """一笔「被行权 → 补买接货」的在途任务（§33.43 资金链段）。
+
+    决策与实盘 ``option_params.cover`` 三模式同构：每一步都交给
+    ``okx_options_strategy.evaluate_cover()``（同一份纯函数），本类只保存
+    回放需要的状态（目标价 / 起始时刻 / 对应台账行）。
+    """
+
+    settle_row: dict         # 对应的到期台账行（回填 cost_basis / cover_status）
+    inst_id: str             # 触发接货的 put 合约（归因）
+    strike: float
+    settle_px: float
+    sz: int
+    lot_coin: float
+    payout_usd: float        # 现金赔付（ITM 内在价值）
+    mode: str                # limit / immediate / signal
+    discount_pct: float
+    timeout_hours: float
+    started_ts: Any
+    started_epoch: float
+    target_px: Optional[float] = None
+    status: str = "waiting"  # waiting / done
 
 
 class OptionsBacktestDriver:
@@ -88,8 +127,23 @@ class OptionsBacktestDriver:
         dsigma_pts: Optional[float] = None,
         tick: Optional[float] = None,
         progress_cb: Any = None,
+        cover_enabled: bool = True,
+        cover_mode: Optional[str] = None,
+        cover_discount_pct: Optional[float] = None,
+        cover_timeout_hours: Optional[float] = None,
+        call_enabled: bool = True,
+        tp_call_pct: Optional[float] = None,
+        settle_window_min: int = DEFAULT_SETTLE_WINDOW_MIN,
+        spot_fee_rate: float = DEFAULT_SPOT_FEE_RATE,
+        data_source: Any = None,
     ) -> None:
         self.family = str(family).upper()
+        # IV 分位（滚动序列 → 分位）—— 预计算前先置空，闸门拿不到分位时按 fail-open
+        self._iv_pct_map: dict[str, Optional[float]] = {}
+        self._iv_iv_map: dict[str, Optional[float]] = {}
+        self._iv_pct_meta: dict[str, Any] = {}
+        self._iv_pct_entries: list[Optional[float]] = []
+        self._iv_gate_na = 0
         self.timestep = timestep
         self.start_ts = start_ts
         self.end_ts = int(end_ts or time.time())
@@ -108,12 +162,34 @@ class OptionsBacktestDriver:
         # 进度回调（接入层用来把 progress 写进 run 文件）；日志走 stderr
         self._progress_cb = progress_cb
 
+        # ── 资金链段（§33.43 Step 6 / C41b）─────────────────────
+        # 默认「建模全链」（被行权 → 补买 → 成本锚 → covered 卖 call）：回测的
+        # 用途就是裁决这条链，关掉它反而看不到真实资金占用。模式/折让/超时
+        # 未显式传入时跟随 opt_params.cover（再退实盘 cover_params() 磁盘配置）。
+        self.cover_enabled = bool(cover_enabled)
+        self.cover_mode = cover_mode
+        self.cover_discount_pct = cover_discount_pct
+        self.cover_timeout_hours = cover_timeout_hours
+        self.call_enabled = bool(call_enabled)
+        self.tp_call_pct = tp_call_pct
+        self.settle_window_min = max(0, int(settle_window_min))
+        self.spot_fee_rate = max(0.0, float(spot_fee_rate))
+        self._injected_data = data_source
+
         self.data = None
         self.notes: list[str] = []
         self.skips: list[str] = []
         self._ask_fallback_logged: set[str] = set()   # 出场回退留痕去重
         self._opt_cache: Optional[dict] = None
         self._effective_cap: Optional[int] = None
+        self._cover_cache: Optional[dict] = None
+        self._settle_note_logged = False
+        self._dedupe_note_logged = False
+        # 接货现货（模拟子账号余额）：数量扣除 0.1% 手续费后的到货量
+        self._spot_qty = 0.0
+        self._spot_spend = 0.0            # 补买累计现金支出
+        self._covers: list[SpotCoverTask] = []
+        self._cost_bases: list[dict] = []  # 每笔接货的核算成本 C（= 卖 call 的成本锚）
 
     # ── 日志 / 进度 ─────────────────────────────────────────
 
@@ -142,8 +218,16 @@ class OptionsBacktestDriver:
     def _fill_line(f: dict, cash: float) -> str:
         """一条成交的单行摘要（开仓/平仓/到期三种口径）。"""
         side = {"sell_open": "开仓 SELL", "sell_close": "平仓 BUY",
-                "settle_otm": "到期作废 OTM", "settle_itm": "到期被行权 ITM"}.get(
+                "settle_otm": "到期作废 OTM", "settle_itm": "到期被行权 ITM",
+                "cover": "补买接货 BUY"}.get(
                     f.get("side"), str(f.get("side")))
+        if f.get("opt_type") == "C":
+            side += "(call)"
+        if f.get("side") == "cover":
+            return (f"{side} {f.get('ts')} {f.get('inst_id')} "
+                    f"数量={f.get('qty')} @{f.get('avg_px')} "
+                    f"成本锚C={f.get('cost_basis')} 付款={f.get('cost_usd')} "
+                    f"模式={f.get('mode')} | cash={cash:.2f}")
         head = (f"{side} {f.get('ts')} {f.get('inst_id')} sz={f.get('sz')} "
                 f"K={f.get('strike')}")
         if f.get("side") == "sell_open":
@@ -160,6 +244,12 @@ class OptionsBacktestDriver:
     # ── 构造 ────────────────────────────────────────────────
 
     def _build_data(self) -> Any:
+        if self._injected_data is not None:
+            # 多组参数扫描（网格裁决）共用一份已预取的数据源：
+            # prefetch 是每次回测的真正耗时大头，重拉一次 = 白烧一遍网络。
+            return self._injected_data
+        if self.data is not None:
+            return self.data          # 调用方/单测已注入
         from nanobot_quant.backtest.options_replay_data_source import (
             OptionsReplayDataSource,
         )
@@ -173,6 +263,124 @@ class OptionsBacktestDriver:
             start_ts=int(start), end_ts=self.end_ts,
             length=self.td_bars,
         )
+
+    # ── 资金链段辅助（结算口径 / 补买 / covered）──────────
+
+    def _epoch(self, ts) -> float:
+        """bar 时刻 → epoch 秒（``evaluate_cover`` 的 ``now`` 参数用）。"""
+        if isinstance(ts, datetime):
+            return ts.timestamp()
+        try:
+            v = float(ts)
+        except (TypeError, ValueError):
+            return time.time()
+        return v / 1000.0 if v > 1e11 else v
+
+    def _underlying_col(self, name: str) -> Optional[str]:
+        """标的数据帧里的列名（大小写宽容 —— 各数据源大小写不一致）。"""
+        df = getattr(self.data, "_underlying", None)
+        if df is None:
+            return None
+        for c in df.columns:
+            if str(c).lower() == str(name).lower():
+                return c
+        return None
+
+    def _bar_low(self, ts) -> Optional[float]:
+        col = self._underlying_col("Low")
+        if col is None:
+            return None
+        try:
+            val = self.data._underlying.loc[ts, col]
+        except Exception:  # noqa: BLE001 —— 取不到就当作无盘中信息
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    def _settle_px_at(self, exp_ms: int) -> tuple[float, str]:
+        """到期结算价 —— 官方口径「到期前 30 分钟标的均价」的回放近似。
+
+        实盘口径（2026-09-16 定案）= 到期前 30 分钟标的指数算术平均。回放只有
+        timestep 粒度的标的 K 线，所以取窗口内的**收盘均值**；窗口内无 bar
+        （数据断档 / 区间尾部）时退回「≤ 到期时刻的最后一根收盘」并留痕。
+        旧实现用「到期时刻现价」——被行权盈亏会系统性偏。
+        """
+        df = getattr(self.data, "_underlying", None)
+        col = self._underlying_col("Close")
+        if df is None or df.empty or col is None:
+            return 0.0, "无标的 K 线，结算价不可得"
+        exp = datetime.fromtimestamp(exp_ms / 1000.0, tz=timezone.utc)
+        up_to = df.loc[:exp]
+        if up_to.empty:
+            return 0.0, f"到期 {exp:%Y-%m-%d %H:%M} UTC 前无 K 线"
+        win = self.settle_window_min * 60
+        if win > 0:
+            mask = up_to.index >= (exp - pd.Timedelta(seconds=win))
+            inside = up_to.loc[mask]
+        else:
+            inside = up_to
+        if inside.empty:
+            inside = up_to.tail(1)
+            note = (f"结算价：窗口内无 bar → 退回最后收盘价"
+                    f"（{inside.index[-1]:%Y-%m-%d %H:%M} UTC）")
+        else:
+            note = (f"结算价：到期前 {self.settle_window_min} 分钟均价"
+                    f"（{len(inside)} 根 {self.timestep} 收盘均值）")
+        try:
+            px = float(inside[col].mean())
+        except Exception:  # noqa: BLE001
+            return 0.0, "结算价计算失败"
+        if not self._settle_note_logged:
+            self._settle_note_logged = True
+            self.notes.append(note)
+        return px, note
+
+    def _cover_cfg(self) -> dict:
+        """补买建模参数：显式传入 > opt_params.cover > 实盘磁盘配置 > 内置默认。
+
+        内置默认 = 实盘默认（limit 1% 24h），使「没传参就回测」也能看到资金链。
+        """
+        if self._cover_cache is not None:
+            return self._cover_cache
+        raw = self._opt_params().get("cover")
+        raw = raw if isinstance(raw, dict) else {}
+        live: dict = {}
+        try:
+            from nanobot_quant.okx_options_trade import cover_params
+            live = cover_params() or {}
+        except Exception:  # noqa: BLE001 —— 配置不可读不阻塞回测
+            live = {}
+
+        def pick(key: str, ctor, default):
+            if ctor is not None:
+                return ctor
+            for src in (raw, live):
+                v = src.get(key)
+                if v not in (None, ""):
+                    return v
+            return default
+
+        cfg = {
+            "mode": str(pick("mode", self.cover_mode, "limit") or "limit"),
+            "discount_pct": float(pick("discount_pct", self.cover_discount_pct, 1.0)),
+            "timeout_hours": float(pick("timeout_hours", self.cover_timeout_hours, 24.0)),
+        }
+        self._cover_cache = cfg
+        return cfg
+
+    def _resolve_tp_call_pct(self, op: dict) -> float:
+        """卖 call 止盈线：显式 > opt_params.tp_pct_call > 默认 30%"""
+        if self.tp_call_pct is not None:
+            try:
+                return float(self.tp_call_pct)
+            except (TypeError, ValueError):
+                pass
+        try:
+            return float(op.get("tp_pct_call") or DEFAULT_TP_CALL_PCT)
+        except (TypeError, ValueError):
+            return DEFAULT_TP_CALL_PCT
 
     def _strategy_and_params(self) -> tuple[str, dict]:
         """策略变体与 TD 参数 —— 默认跟随实盘配置，允许显式注入覆盖。"""
@@ -250,43 +458,105 @@ class OptionsBacktestDriver:
 
     def _settle_expired(self, ts, positions: list, fills: list,
                         cash: float) -> float:
-        """到期现金结算（先于止盈/入场 —— 到期仓位不再有选择权）。"""
+        """到期现金结算（先于止盈/入场 —— 到期仓位不再有选择权）。
+
+        结算价口径 = ``_settle_px_at()``（到期前 30 分钟标的均价，官方口径的
+        回放近似）。方向分派：put ITM = 结算价 < strike；call ITM = 结算价 >
+        strike（covered：现金结算、现货保留不交币）。
+
+        put 被行权且开了补买建模 → 建一条 ``SpotCoverTask`` 交给后续 bar 的
+        ``_tick_covers()``（三模式与实盘 ``evaluate_cover()`` 同源）。
+        """
         ts_ms = _to_ms(ts)
         still: list = []
         for p in positions:
             if p.exp_ms > ts_ms:
                 still.append(p)
                 continue
-            settle = self.data.price_of()       # 到期时刻的标的价格（近似结算价）
-            itm = settle > 0 and settle < p.strike
-            payout = (p.strike - settle) * p.lot_coin * p.sz if itm else 0.0
+            settle, why = self._settle_px_at(p.exp_ms)
+            if settle <= 0:
+                settle = float(self.data.price_of() or 0.0)
+                self.notes.append(
+                    f"结算价不可得（{p.inst_id}）：{why} → 回退最后收盘 {settle:g}")
+            if p.opt_type == "C":
+                itm = settle > p.strike
+                payout = (settle - p.strike) * p.lot_coin * p.sz if itm else 0.0
+            else:
+                itm = settle < p.strike
+                payout = (p.strike - settle) * p.lot_coin * p.sz if itm else 0.0
             cash -= payout
-            fills.append({
-                "ts": str(ts), "inst_id": p.inst_id, "side": "settle_itm" if itm else "settle_otm",
-                "sz": p.sz, "strike": p.strike, "settle_px": settle,
+            reason = "到期被行权" if itm else "到期作废（全收权利金）"
+            if itm and p.opt_type == "C":
+                reason += "·covered 现金结算，现货保留"
+            row = {
+                "ts": str(ts), "inst_id": p.inst_id,
+                "side": "settle_itm" if itm else "settle_otm",
+                "opt_type": p.opt_type,
+                "sz": p.sz, "strike": p.strike, "settle_px": round(settle, 6),
                 "spot": round(self.data.price_of() or 0.0, 4),
                 "payout_usd": round(payout, 6),
                 "premium_usd": round(p.entry_px * p.lot_coin * p.sz, 6),
                 "pnl_usd": round(p.entry_px * p.lot_coin * p.sz - payout, 6),
-                "reason": "到期被行权" if itm else "到期作废（全收权利金）",
-            })
+                "reason": reason,
+            }
+            if itm and p.opt_type == "P":
+                if self.cover_enabled:
+                    cfg = self._cover_cfg()
+                    task = SpotCoverTask(
+                        settle_row=row, inst_id=p.inst_id, strike=p.strike,
+                        settle_px=settle, sz=p.sz, lot_coin=p.lot_coin,
+                        payout_usd=payout, mode=cfg["mode"],
+                        discount_pct=cfg["discount_pct"],
+                        timeout_hours=cfg["timeout_hours"],
+                        started_ts=ts, started_epoch=self._epoch(ts))
+                    if task.mode == "limit":
+                        task.target_px = round(
+                            settle * (1 - task.discount_pct / 100.0), 8)
+                    row["cover_status"] = "waiting"
+                    row["cost_basis"] = None
+                    self._covers.append(task)
+                    self._log(
+                        f"补买任务 {p.inst_id} 模式={task.mode} "
+                        f"数量={p.lot_coin * p.sz:g} 结算价={settle:.4f}"
+                        + (f" 限价目标={task.target_px:.4f}" if task.target_px else "")
+                        + f" 超时={task.timeout_hours:g}h（超时→撤单+市价）")
+                else:
+                    row["cover_status"] = "manual"
+                    row["note"] = "补买建模关闭（cover_enabled=False）"
+            fills.append(row)
         positions[:] = still
         return cash
 
     def _check_exits(self, ts, positions: list, fills: list,
                      cash: float) -> float:
-        """权利金回落止盈 —— 复用实盘 ``evaluate_exits()``。"""
+        """权利金回落止盈 —— 复用实盘 ``evaluate_exits()``，put / call 分开走。
+
+        §33.39 方向隔离：put 的止盈线（默认 50%）不得平掉 call 仓，call 用
+        自己的线（默认 30%）。实盘策略也是两次调用，回测保持同构。
+        """
+        cash = self._exit_pass(ts, "P", self.tp_pct, positions, fills, cash)
+        if self.call_enabled:
+            cash = self._exit_pass(ts, "C", self.tp_call_pct, positions, fills, cash)
+        return cash
+
+    def _exit_pass(self, ts, right: str, tp, positions: list, fills: list,
+                   cash: float) -> float:
+        """单方向止盈买回（``right`` = P / C）。"""
         from nanobot_quant.okx_options_strategy import evaluate_exits
 
+        if not any(p.opt_type == right for p in positions):
+            return cash
         rows, alive = [], []
         for p in positions:
+            if p.opt_type != right:
+                continue
             mark = self.data.premium_of(p.inst_id, ts)
             if mark is None or mark <= 0:
                 alive.append(p)          # 无 mark 的持仓保持不动（fail-safe）
                 continue
             alive.append(p)
             rows.append(p.as_position_row(mark))
-        exits = evaluate_exits(rows, tp_pct=self.tp_pct, opt_type="P")
+        exits = evaluate_exits(rows, tp_pct=tp, opt_type=right)
         if not exits:
             return cash
         by_inst = {p.inst_id: p for p in positions}
@@ -318,12 +588,13 @@ class OptionsBacktestDriver:
             pnl = (p.entry_px - buy_px) * p.lot_coin * e.sz - e_fee - fee
             fills.append({
                 "ts": str(ts), "inst_id": p.inst_id, "side": "close",
+                "opt_type": right,
                 "sz": e.sz, "strike": p.strike, "strategy_px": p.entry_px,
                 "avg_px": round(buy_px, 6), "fee_usd": round(fee, 6),
                 "close_cost_usd": round(buy_px * p.lot_coin * e.sz, 6),
                 "pnl_usd": round(pnl, 6),
                 "spot": round(self.data.price_of() or 0.0, 4),
-                "reason": f"止盈（回落 {e.drop_pct:.1f}% ≥ {self.tp_pct:g}%）",
+                "reason": f"止盈（回落 {e.drop_pct:.1f}% ≥ {tp:g}%）",
             })
             done.append(e.inst_id)
         if done:
@@ -349,9 +620,109 @@ class OptionsBacktestDriver:
             fee = min(fee, OPTION_FEE_CAP_RATIO * premium)
         return fee
 
+    # ── IV 分位（滚动序列 → 分位；§33.43 Step 6 补齐）──────────
+
+    def _iv_pct_window_days(self) -> float:
+        """IV 分位滚动窗口（天）—— 取策略参数，缺省 7 天。"""
+        from nanobot_quant.iv_percentile import DEFAULT_WINDOW_DAYS
+
+        try:
+            v = float(self._opt_params().get("iv_pct_window_days"))
+        except (TypeError, ValueError):
+            v = 0.0
+        return v if v > 0 else DEFAULT_WINDOW_DAYS
+
+    def _build_iv_pct(self) -> None:
+        """预计算每根 bar 的 IV 分位（滚动窗口、只用历史）。
+
+        闸门吃的是 ``iv_percentile``，但在此之前没人算它（阈值形同虚设、
+        IV 0 与 70 的结果逐对相同）。这里一次性算出整段序列：
+
+        * 参考 IV = 参考到期档（目标 7 天）微笑在 K=现货 处的平值 IV
+        * 分位 = 当前值在 trailing 窗口（默认 7 天）内的百分位（0–100）
+        * 样本不足 → ``None``（fail-open 放行 + 计数，不静默当成 0 分）
+
+        纯本地计算（曲面已在内存），不为它增加任何网络请求。
+        """
+        from statistics import median
+
+        from nanobot_quant.iv_percentile import (
+            DEFAULT_TARGET_DTE_DAYS,
+            min_samples_for,
+            ref_atm_iv,
+            rolling_percentile,
+            window_bars_for,
+        )
+
+        self._iv_pct_map: dict[str, Optional[float]] = {}
+        self._iv_iv_map: dict[str, Optional[float]] = {}
+        self._iv_pct_meta: dict[str, Any] = {}
+        self._iv_pct_entries: list[Optional[float]] = []
+        self._iv_gate_na = 0
+        bt = list(getattr(self.data, "bar_times", None) or [])
+        if not bt:
+            return
+        # bar 秒数直接从时间轴差分取（不另引一张周期表，避免两处口径）
+        deltas = [(bt[i + 1] - bt[i]).total_seconds()
+                  for i in range(min(len(bt) - 1, 50))]
+        bar_s = float(median([d for d in deltas if d > 0] or [0])) or 3600.0
+        days = self._iv_pct_window_days()
+        wb = window_bars_for(days, bar_s)
+        ms = min_samples_for(wb)
+        surface = getattr(self.data, "_surface", None)
+        ivs: list[Optional[float]] = []
+        for ts in bt:
+            ts_ms = int(ts.timestamp() * 1000)
+            spot = float(self.data.spot_at(ts) or 0.0)
+            ivs.append(ref_atm_iv(surface, self.data.expiries_at(ts), ts_ms, spot))
+        pcts = rolling_percentile(ivs, window=wb, min_samples=ms)
+        self._iv_pct_map = {str(t): p for t, p in zip(bt, pcts)}
+        self._iv_iv_map = {str(t): v for t, v in zip(bt, ivs)}
+        obs = sum(1 for v in ivs if v is not None)
+        ready = sum(1 for p in pcts if p is not None)
+        self._iv_pct_meta = {
+            "window_days": days, "window_bars": wb, "min_samples": ms,
+            "target_dte_days": DEFAULT_TARGET_DTE_DAYS,
+            "bars": len(bt), "obs": obs, "ready": ready,
+        }
+        self._log(
+            f"IV 分位：参考={DEFAULT_TARGET_DTE_DAYS:g}天档平值 put IV · "
+            f"窗口={days:g}天（{wb} 根，bar={bar_s:g}s）· 窗口最小样本={ms} · "
+            f"参考 IV 有效 {obs}/{len(bt)} 根 · 可算分位 {ready} 根"
+            + ("" if ready else "（样本不足 → 闸门 fail-open 放行、单独计数）")
+        )
+
+    def _iv_pct_at(self, ts) -> Optional[float]:
+        """该 bar 的 IV 分位（未预计算 → None）。"""
+        return getattr(self, "_iv_pct_map", {}).get(str(ts))
+
+    def _iv_pct_report(self) -> dict:
+        """结果字典里的 IV 分位块 —— 生效窗口/样本/入场分位都要看得见。"""
+        rep = dict(getattr(self, "_iv_pct_meta", {}) or {})
+        ent = list(getattr(self, "_iv_pct_entries", []))
+        vals = [p for p in ent if p is not None]
+        try:
+            gate = float(self._opt_params().get("iv_min_percentile") or 0)
+        except (TypeError, ValueError):
+            gate = 0.0
+        rep.update({
+            "gate": gate,
+            "entries": len(ent),
+            "entries_na": sum(1 for p in ent if p is None),
+            "signal_na": int(getattr(self, "_iv_gate_na", 0)),
+            "entry_pct_median": (round(sorted(vals)[len(vals) // 2], 2)
+                                 if vals else None),
+            "entry_pct_min": round(min(vals), 2) if vals else None,
+            "entry_pct_max": round(max(vals), 2) if vals else None,
+        })
+        return rep
+
     def _try_entry(self, ts, positions: list, fills: list,
-                   cash: float) -> float:
-        """TD 衰竭信号 + 选档 + 记账 —— 复用实盘 ``evaluate_entry()``。"""
+                   cash: float, sig: Optional[dict] = None) -> float:
+        """TD 衰竭信号 + 选档 + 记账 —— 复用实盘 ``evaluate_entry()``。
+
+        ``sig`` 已给（主循环每 bar 只算一次）则不重复算 TD。
+        """
         from nanobot_quant.okx_options_strategy import (
             cycle_gate,
             cycle_mark_bought,
@@ -361,9 +732,11 @@ class OptionsBacktestDriver:
         spot = self.data.price_of()
         if spot <= 0:
             return cash
-        sig = self._td_signal_at(ts)
+        sig = sig if sig is not None else self._td_signal_at(ts)
         if sig is None:
             return cash
+        # put 额度与波锁只看 put 仓（call 额度独立，§33.39 方向隔离）
+        puts = [p for p in positions if p.opt_type == "P"]
 
         # 信号周期门控（与实盘策略同一份纯函数）—— 同一衰竭波只开一次，
         # 避免 setup 9→10→11 连开多张把样本打虚（实测虚高 1.7 倍）。
@@ -373,23 +746,30 @@ class OptionsBacktestDriver:
         gate = cycle_gate(
             self._cycle_state, self.family, td_signal=sig,
             params=self._opt_params(),
-            has_position=any(getattr(p, "family", None) == self.family
-                             for p in positions))
+            has_position=any(getattr(p, "family", None) == self.family for p in puts))
         if gate:
             self.skips.append(f"周期门控：{gate}")
             return cash
 
         chain = self.data.chain_dict_at(ts, opt_type="P", dsigma_pts=self.dsigma_pts,
                                         tick=self.tick, slippage=self.slippage)
+        # IV 分位喂进闸门 —— 不传的话阈值填任何值都形同虚设
+        # （2026-09-29 实测：IV 闸门 0 与 70 的 8 组结果逐对完全相同）。
+        iv_pct = self._iv_pct_at(ts)
+        if iv_pct is None and float(self._opt_params().get("iv_min_percentile") or 0) > 0:
+            self._iv_gate_na += 1     # 样本不足 → fail-open 放行，但要记账
         d, note = evaluate_entry(
             self.family, td_signal=sig, params=self._opt_params(),
-            open_contracts=len(positions), total_contracts=len(positions),
-            chain=chain, base_px=spot)
+            open_contracts=len(puts), total_contracts=len(puts),
+            chain=chain, base_px=spot, iv_percentile=iv_pct,
+            # 与实盘同一道现金担保门（§33.43 Step 3）：可用现金 < 全损担保 → fail-closed
+            cash_avail=float(cash) - sum(p.collateral for p in puts))
         if d is None:
             self.skips.append(note)
             return cash
+        self._iv_pct_entries.append(iv_pct)
         # 现金担保铁律：占用 = strike × 面值 × 张数
-        occupied = sum(p.collateral for p in positions)
+        occupied = sum(p.collateral for p in puts)
         lot = float(chain.get("lot_coin") or 0.1)
         collateral = d.strike * lot * d.sz
         if occupied + collateral > cash:
@@ -417,6 +797,174 @@ class OptionsBacktestDriver:
             # 只落在开仓记录上：到期记录也带同名字段（那张的权利金），不能混求。
             "premium_usd": round(sell_px * lot * d.sz, 6),
             "reason": d.entry_reason,
+        })
+        return cash
+
+    # ── 资金链段：补买接货 → covered 卖 call（§33.43 Step 6 / C41b）──
+
+    def _tick_covers(self, ts, sig, fills: list, cash: float) -> float:
+        """推进在途补买任务（三模式与实盘 ``evaluate_cover()`` 同源）。
+
+        限价模式用本 bar 最低价近似盘中触碰；超时兜底交给纯函数（超时优先于
+        进行中幂等）。**建立任务的那一根 bar 不动手** —— 结算发生在 bar 中间，
+        拿整根 bar 的最低价当盘中路径会系统性占便宜。
+        """
+        if not self._covers:
+            return cash
+        from nanobot_quant.okx_options_strategy import evaluate_cover
+
+        op = self._opt_params()
+        try:
+            e_setup = int(op.get("entry_setup") or 9)
+            e_cd = int(op.get("entry_countdown") or 13)
+        except (TypeError, ValueError):
+            e_setup, e_cd = 9, 13
+        now = self._epoch(ts)
+        keep: list[SpotCoverTask] = []
+        for t in self._covers:
+            if t.status != "waiting":
+                continue
+            if abs(now - t.started_epoch) < 1e-6:
+                keep.append(t)                    # 建立当根 bar 不成交
+                continue
+            px: Optional[float] = None
+            # ① 限价触碰：本 bar 最低价跑到了目标价之下
+            if t.mode == "limit" and t.target_px:
+                low = self._bar_low(ts)
+                if low is not None and low <= t.target_px:
+                    px = float(t.target_px)
+            # ② 决策（超时兜底 / signal 模式）—— 实盘同一份纯函数
+            if px is None:
+                row = dict(t.settle_row)
+                row["cover_status"] = ""         # 不填状态，否则被幂等门拦住
+                row["cover_started_at"] = t.started_epoch
+                row["settle_px"] = t.settle_px
+                dec = evaluate_cover(row, mode=t.mode,
+                                     discount_pct=t.discount_pct,
+                                     timeout_hours=t.timeout_hours,
+                                     signal=sig, now=now,
+                                     entry_setup=e_setup,
+                                     entry_countdown=e_cd)
+                act = dec.get("action")
+                if act == "market":
+                    px = float(self.data.price_of() or 0.0)
+                    t.settle_row["cover_reason"] = dec.get("reason") or ""
+                    if px <= 0:
+                        self.notes.append(
+                            f"[补买] {t.inst_id} {dec.get('reason')} "
+                            f"但取价失败 → 下轮重试")
+                        keep.append(t)
+                        continue
+                elif act == "limit":
+                    tp = dec.get("target_px")
+                    if tp:
+                        t.target_px = float(tp)
+                    keep.append(t)
+                    continue
+                else:                            # skip / wait_signal
+                    keep.append(t)
+                    continue
+            cash = self._fill_cover(t, px, ts, fills, cash)
+        self._covers = keep
+        return cash
+
+    def _fill_cover(self, t: SpotCoverTask, px: float, ts, fills: list,
+                    cash: float) -> float:
+        """补买成交记账：现金支出 → 现货到货（扣 0.1%）→ 成本锚 C 回写台账行。
+
+        C =（现金赔付 + 实际补买支出 + 费）÷（面值×张数）——与实盘
+        ``refresh_cost_bases()`` 同一口径，也是卖 call 保本门的成本锚。
+        """
+        qty = t.lot_coin * t.sz
+        spend = qty * px
+        fee_usd = spend * self.spot_fee_rate
+        got = qty * (1 - self.spot_fee_rate)
+        cash -= spend
+        self._spot_qty += got
+        self._spot_spend += spend
+        c = (t.payout_usd + spend + fee_usd) / qty if qty > 0 else None
+        t.status = "done"
+        t.settle_row["cover_status"] = "done"
+        t.settle_row["cost_basis"] = round(c, 4) if c else None
+        t.settle_row["cover_spend_usd"] = round(spend, 6)
+        if c:
+            self._cost_bases.append({"inst_id": t.inst_id, "sz": t.sz,
+                                     "cost_basis": round(c, 4), "ts": str(ts)})
+        fills.append({
+            "ts": str(ts), "inst_id": t.inst_id, "side": "cover",
+            "opt_type": "P", "sz": t.sz,
+            "avg_px": round(px, 6), "qty": round(got, 8),
+            "cost_usd": round(spend, 6), "fee_usd": round(fee_usd, 6),
+            "payout_usd": round(t.payout_usd, 6),
+            "cost_basis": round(c, 4) if c else None,
+            "mode": t.mode,
+            "spot": round(self.data.price_of() or 0.0, 4),
+            "reason": (f"补买接货（{t.mode}）成本锚 C=({t.payout_usd:.4f}+"
+                       f"{spend:.4f}+{fee_usd:.4f})/{qty:g}"
+                       + (f"={c:.4f}" if c else "")),
+        })
+        return cash
+
+    def _try_call_entry(self, ts, positions: list, fills: list, cash: float,
+                        sig: Optional[dict] = None) -> float:
+        """covered 卖 call 支线（C41b）—— 与实盘 ``evaluate_call_entry()`` 同源。
+
+        担保是现货而非现金：容量 = 现货覆盖张数（**扣除在仓 short call**，
+        §33.40.3 累计口径）——防「现货只够 1 张却分两笔各卖 1 张」。
+        去重门（§33.43 Step 4b）在回测中退化为恒放行（模拟即时成交、无在途
+        委托），门的正确性由单测 + 实盘实测覆盖。
+        """
+        if not self.call_enabled or self._spot_qty <= 0:
+            return cash
+        from nanobot_quant.okx_options_strategy import evaluate_call_entry
+        from nanobot_quant.okx_options_trade import FAMILY_LOT, covered_sellable_sz
+
+        base = self.family.split("-")[0]
+        lot = float(FAMILY_LOT.get(base) or 0.0)
+        if lot <= 0:
+            self.skips.append(f"无 {base} 面值常量（FAMILY_LOT）→ 跳过卖 call")
+            return cash
+        spot = self.data.price_of()
+        if spot <= 0:
+            return cash
+        op = self._opt_params()
+        sellable = covered_sellable_sz(self._spot_qty, lot)
+        calls = [p for p in positions if p.opt_type == "C"]
+        cost_hint = max((c["cost_basis"] for c in self._cost_bases), default=None)
+        covered = {"sellable_sz": sellable,
+                   "spot_avail": round(self._spot_qty, 8),
+                   "base": base, "lot_coin": lot, "cost_hint": cost_hint,
+                   "cost_pending": False, "note": "回测模拟现货持仓"}
+        chain = self.data.chain_dict_at(ts, opt_type="C", dsigma_pts=self.dsigma_pts,
+                                        tick=self.tick, slippage=self.slippage)
+        d, note = evaluate_call_entry(
+            self.family, params=op, covered=covered,
+            open_calls=len(calls), total_calls=len(calls),
+            cost_basis=cost_hint, chain=chain, base_px=spot)
+        if d is None:
+            self.skips.append(note)
+            return cash
+        if not self._dedupe_note_logged:
+            self._dedupe_note_logged = True
+            self.notes.append(
+                "卖 call 去重门（§33.43 Step 4b）在回测中退化为恒放行"
+                "（模拟即时成交、不存在在途委托）——门的正确性由单测/实盘实测覆盖")
+        sell_px = d.bid
+        fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px)
+        cash += sell_px * lot * d.sz - fee
+        positions.append(SimPosition(
+            inst_id=d.inst_id, family=self.family, strike=d.strike,
+            exp_ms=_exp_ms_of(d.inst_id, ts), sz=d.sz, entry_px=sell_px,
+            entry_ts=ts, entry_reason=d.entry_reason or "covered",
+            lot_coin=lot, opt_type="C"))
+        fills.append({
+            "ts": str(ts), "inst_id": d.inst_id, "side": "sell_open",
+            "opt_type": "C", "sz": d.sz, "strike": d.strike,
+            "avg_px": round(sell_px, 6), "fee_usd": round(fee, 6),
+            "spot": round(spot, 4), "iv": d.iv, "delta": d.delta, "days": d.days,
+            "net_yield_pct": d.net_yield_pct,
+            "premium_usd": round(sell_px * lot * d.sz, 6),
+            "reason": d.entry_reason or "covered call",
         })
         return cash
 
@@ -463,6 +1011,16 @@ class OptionsBacktestDriver:
         # 立即返回空 —— 全程零止盈买回、离场全靠到期，而启动行照打「止盈=50%」：
         # 日志与实际行为不一致（2026-09-25 复验：期末浮盈 99.91% 的持仓不被平仓）。
         self.tp_pct = self._resolve_tp_pct(op)
+        self.tp_call_pct = self._resolve_tp_call_pct(op)
+        ccfg = self._cover_cfg()
+        cc = (f"补买=开（{ccfg['mode']} @结算价×(1−{ccfg['discount_pct']:g}%) · "
+              f"超时 {ccfg['timeout_hours']:g}h→撤单+市价）" if self.cover_enabled
+              else "补买=关（不计现货接货）")
+        cl = (f"卖 call=开（止盈 {self.tp_call_pct:g}% · 上限 "
+              f"{op.get('max_calls_per_family')}/{op.get('max_calls_total')}）"
+              if self.call_enabled else "卖 call=关")
+        self._log(f"资金链：{cc} · {cl} · 结算价口径=到期前 "
+                  f"{self.settle_window_min} 分钟标的均价（回放近似）")
         # selector 不在策略参数里（它是 option_params.json 的兄弟字段）——
         # 统一走 selector_params() 这个唯一入口，没传就用实盘磁盘配置。
         from nanobot_quant.okx_options_select import selector_params
@@ -496,7 +1054,8 @@ class OptionsBacktestDriver:
             pass
         self._progress("prefetch", 0, 1)
         self.data = self._build_data()
-        self.data.prefetch()
+        if not getattr(self.data, "prepared", False):
+            self.data.prefetch()          # 网格共享数据源：已预取就不重拉
 
         bt = self.data.bar_times
         from nanobot_quant.okx_options_trade import (
@@ -518,6 +1077,7 @@ class OptionsBacktestDriver:
                  f"tick={family_tick(self.family):g}）")
                 + f"；额外滑点 {self.slippage * 100:.2f}%"),
             "td_bars": self.td_bars, "tp_pct": self.tp_pct,
+            "tp_pct_call": self.tp_call_pct if self.call_enabled else None,
             "bars": {"fetched": len(bt), "evaluated": 0},
             "contracts": {"in_archive": len(self.data._contracts),
                           "with_iv": (len({p.inst_id
@@ -555,6 +1115,7 @@ class OptionsBacktestDriver:
         )
         for n in self.data.notes:
             self._log(f"数据备注：{n}")
+        self._build_iv_pct()
 
         total = len(bt) - idx
         step = max(1, total // 20)          # 每 ~5% 打一次进度
@@ -563,9 +1124,12 @@ class OptionsBacktestDriver:
             self.data.seek(ts)
             if self.data.price_of() <= 0:
                 continue
+            sig = self._td_signal_at(ts)      # 每 bar 只算一次：put/call/补买共用
             cash = self._settle_expired(ts, positions, fills, cash)
+            cash = self._tick_covers(ts, sig, fills, cash)
             cash = self._check_exits(ts, positions, fills, cash)
-            cash = self._try_entry(ts, positions, fills, cash)
+            cash = self._try_entry(ts, positions, fills, cash, sig=sig)
+            cash = self._try_call_entry(ts, positions, fills, cash, sig=sig)
 
             # 新成交逐笔上日志（开仓 / 平仓 / 到期三种都经这里落出）
             while seen < len(fills):
@@ -605,11 +1169,38 @@ class OptionsBacktestDriver:
             })
 
         # 卖出开仓收到的权利金已在 ``cash`` 里，而期末持仓是**负债** —— 还欠市场
-        # 一张 put，按「如现在全部买回」的口径应当**扣减** ``open_value``，不是相加。
-        # 原先写成 ``cash + open_value`` 把负债当资产，净值被高估 2 × open_value。
-        net = cash - open_value
+        # 一张 put，按「如现在全部买回」的口径应当**扣减** ``open_value``。
+        # 接货现货是**资产**（资金链段的战利品），按最后 bar 现价计价加上去。
+        spot_last = float(self.data.price_of() or 0.0)
+        spot_value = self._spot_qty * spot_last
+        if self._covers:
+            self.notes.append(
+                f"期末仍有 {len(self._covers)} 笔补买未完成"
+                f"（区间尾部/超时未到）："
+                + "、".join(f"{t.inst_id}({t.mode})" for t in self._covers[:3]))
+        net = cash - open_value + spot_value
         out["fills"] = fills
         out["final_positions"] = open_rows
+        out["cash"] = round(cash, 4)          # 期末现金（净值 = 现金 − 持仓负债 + 现货市值）
+        out["spot"] = {
+            "qty": round(self._spot_qty, 8),
+            "px": round(spot_last, 4),
+            "value_usd": round(spot_value, 4),
+            "spend_usd": round(self._spot_spend, 4),
+            "covers_done": len(self._cost_bases),
+            "covers_pending": len(self._covers),
+            "cost_bases": list(self._cost_bases),
+        }
+        out["iv_pct"] = self._iv_pct_report()
+        out["chain"] = {
+            "cover_enabled": self.cover_enabled,
+            "cover_mode": ccfg["mode"] if self.cover_enabled else None,
+            "cover_discount_pct": ccfg["discount_pct"] if self.cover_enabled else None,
+            "cover_timeout_hours": ccfg["timeout_hours"] if self.cover_enabled else None,
+            "call_enabled": self.call_enabled,
+            "tp_call_pct": self.tp_call_pct if self.call_enabled else None,
+            "settle_window_min": self.settle_window_min,
+        }
         out["skips"] = _count_skips(self.skips)
         # 生效张数上限（页面/日志同源）—— 「填了 10 却只开 3」这类闷棍靠它显形
         out["max_contracts"] = {
@@ -623,16 +1214,40 @@ class OptionsBacktestDriver:
         # 期末净值 = 初始 + 净交易损益 − 期末未平仓市值。
         premium_gross = sum(f.get("premium_usd") or 0 for f in fills
                             if f.get("side") == "sell_open")
+        premium_put = sum(f.get("premium_usd") or 0 for f in fills
+                          if f.get("side") == "sell_open"
+                          and (f.get("opt_type") or "P") != "C")
+        premium_call = sum(f.get("premium_usd") or 0 for f in fills
+                           if f.get("side") == "sell_open"
+                           and f.get("opt_type") == "C")
         buyback = sum(f.get("close_cost_usd") or 0 for f in fills
                       if f.get("side") == "close")
-        payout_total = sum(f.get("payout_usd") or 0 for f in fills)
+        payout_total = sum(f.get("payout_usd") or 0 for f in fills
+                           if f.get("side") in ("settle_itm", "settle_otm"))
+        payout_call = sum(f.get("payout_usd") or 0 for f in fills
+                          if f.get("side") == "settle_itm"
+                          and f.get("opt_type") == "C")
+        cover_spend = sum(f.get("cost_usd") or 0 for f in fills
+                          if f.get("side") == "cover")
+        cover_qty = sum(f.get("qty") or 0 for f in fills
+                        if f.get("side") == "cover")
         fees_total = sum(f.get("fee_usd") or 0 for f in fills)
+        cbs = [c["cost_basis"] for c in self._cost_bases]
         out["kpi"] = {
             "final_net_usd": round(net, 4),
             "roi_pct": round((net - self.initial_cash) / self.initial_cash * 100, 4),
             "premium_income_usd": round(premium_gross, 4),
+            "premium_put_usd": round(premium_put, 4),
+            "premium_call_usd": round(premium_call, 4),
             "buyback_cost_usd": round(buyback, 4),
             "payout_usd": round(payout_total, 4),
+            "payout_call_usd": round(payout_call, 4),
+            "cover_spend_usd": round(cover_spend, 4),
+            "cover_qty": round(cover_qty, 8),
+            "spot_qty": round(self._spot_qty, 8),
+            "spot_value_usd": round(spot_value, 4),
+            "cost_basis_avg": round(sum(cbs) / len(cbs), 4) if cbs else None,
+            "cost_basis_max": round(max(cbs), 4) if cbs else None,
             "fees_usd": round(fees_total, 4),
             "net_trading_usd": round(premium_gross - buyback - payout_total - fees_total, 4),
             "open_premium_usd": round(open_premium, 4),
@@ -648,9 +1263,12 @@ class OptionsBacktestDriver:
             f"完成 用时={out['elapsed_s']}s 评估={out['bars']['evaluated']} 根 "
             f"成交={k['fills']}（盈 {k['wins']} / 亏 {k['losses']}） "
             f"期末持仓={len(open_rows)} 净值={k['final_net_usd']} "
-            f"ROI={k['roi_pct']}% 毛权利金={k['premium_income_usd']} "
+            f"ROI={k['roi_pct']}% 毛权利金={k['premium_income_usd']}"
+            f"（put {k['premium_put_usd']} / call {k['premium_call_usd']}） "
             f"买回={k['buyback_cost_usd']} 赔付={k['payout_usd']} "
-            f"手续费={k['fees_usd']} 净交易={k['net_trading_usd']}"
+            f"补买支出={k['cover_spend_usd']}（{k['cover_qty']:g} 币） "
+            f"现货={k['spot_value_usd']} 手续费={k['fees_usd']} "
+            f"净交易={k['net_trading_usd']}"
         )
         if out["skips"]:
             self._log(f"SKIP 汇总：{out['skips']}")
@@ -711,6 +1329,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tick", type=float, default=None, help="px tick 覆盖（实验）")
     ap.add_argument("--tp", type=float, default=None, help="止盈回落%%（缺省跟随实盘）")
     ap.add_argument("--cash", type=float, default=DEFAULT_INITIAL_CASH)
+    ap.add_argument("--cover-off", action="store_true",
+                    help="关闭补买建模（不计现货接货 → covered 卖 call 也无容量）")
+    ap.add_argument("--cover-mode", default=None,
+                    choices=["limit", "signal", "immediate"],
+                    help="补买模式（缺省跟随 opt_params.cover）")
+    ap.add_argument("--cover-discount", type=float, default=None,
+                    help="限价折让%%（缺省 1）")
+    ap.add_argument("--cover-timeout", type=float, default=None,
+                    help="超时兜底小时（缺省 24）")
+    ap.add_argument("--call-off", action="store_true", help="关闭 covered 卖 call 支线")
+    ap.add_argument("--tp-call", type=float, default=None, help="卖 call 止盈%%（缺省 30）")
+    ap.add_argument("--settle-window", type=int, default=DEFAULT_SETTLE_WINDOW_MIN,
+                    help="结算价窗口分钟（官方口径 30）")
     ap.add_argument("--out", default="")
     a = ap.parse_args(argv)
 
@@ -718,7 +1349,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         a.family, timestep=a.timestep, end_ts=int(time.time()),
         start_ts=int(time.time()) - a.days * 86400,
         td_bars=a.td_bars, slippage_pct=a.slippage, tp_pct=a.tp,
-        initial_cash=a.cash, dsigma_pts=a.dsigma, tick=a.tick)
+        initial_cash=a.cash, dsigma_pts=a.dsigma, tick=a.tick,
+        cover_enabled=not a.cover_off, cover_mode=a.cover_mode,
+        cover_discount_pct=a.cover_discount, cover_timeout_hours=a.cover_timeout,
+        call_enabled=not a.call_off, tp_call_pct=a.tp_call,
+        settle_window_min=a.settle_window)
     res = drv.run()
     if a.out:
         from pathlib import Path

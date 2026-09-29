@@ -251,11 +251,20 @@ def test_settle_itm_pays_intrinsic():
                        _IDX[0], "buy9", 0.1)]
     fills: list[dict] = []
     d.data.seek(_IDX[40])
-    settle = d.data.price_of()
-    assert 0 < settle < 200               # 前置校验：确实是 ITM 场景
+    spot_now = d.data.price_of()
+    assert 0 < spot_now < 200             # 前置校验：确实是 ITM 场景
+    # 结算价口径 = 到期前 30 分钟标的均价（不再是「评估 bar 现价」——
+    # 旧口径拿的是到期之后的 bar，被行权盈亏会系统性偏）
+    exp_dt = datetime.fromtimestamp(_exp_ms(inst) / 1000, tz=timezone.utc)
+    win = d.data._underlying
+    win = win.loc[win.index >= exp_dt - pd.Timedelta(minutes=30)]
+    win = win.loc[win.index <= exp_dt]
+    settle_exp = float(win["close"].mean())
     cash = d._settle_expired(_IDX[40], pos, fills, 1000.0)
-    payout = (200.0 - settle) * 0.1 * 2
+    payout = (200.0 - settle_exp) * 0.1 * 2
     assert fills[0]["side"] == "settle_itm"
+    assert fills[0]["settle_px"] == pytest.approx(settle_exp, rel=1e-9)
+    assert fills[0]["settle_px"] != pytest.approx(spot_now)   # 口径回归闸
     assert cash == pytest.approx(1000.0 - payout, rel=1e-9)
 
 
@@ -318,7 +327,13 @@ def test_sim_position_collateral_matches_strike_times_lot():
     p = SimPosition("X", "SOL-USD_UM", 100.0, 0, 3, 1.0, _IDX[0], "buy9", 0.1)
     assert p.collateral == pytest.approx(100.0 * 0.1 * 3)
     assert p.as_position_row(2.5) == {"inst_id": "X", "side": "short",
-                                      "pos": 3, "avg_px": 1.0, "mark_px": 2.5}
+                                      "pos": 3, "avg_px": 1.0, "mark_px": 2.5,
+                                      "opt_type": "P"}
+    # 卖 call 的担保是现货（covered），不占现金担保额度
+    c = SimPosition("Y", "SOL-USD_UM", 100.0, 0, 1, 1.0, _IDX[0], "covered", 0.1,
+                    opt_type="C")
+    assert c.collateral == 0.0
+    assert c.as_position_row(2.5)["opt_type"] == "C"
 
 
 # ── 端到端（假数据全链路） ─────────────────────────────────────────
