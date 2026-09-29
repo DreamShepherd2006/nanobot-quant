@@ -460,7 +460,11 @@ class OkxOptionsPutStrategy(Strategy):
         try:
             asset = self._asset_for(dec)
             side = "buy" if closing else "sell"
-            order = self.create_order(asset, side, int(dec.sz))
+            # lumibot v4.5.78 签名 = create_order(asset, quantity, side, ...)：
+            # 参数写反（asset, side, sz）会让 quantity="sell"、side=1，
+            # Order.__init__ 的 `quantity < 0` 直接 TypeError（与现货线
+            # td_sequential_strategy/portfolio.engine 保持同一写法）。
+            order = self.create_order(asset, int(dec.sz), side)
             if order is None:
                 return False, "create_order 返回 None"
             err = getattr(order, "error", None) or getattr(order, "_error", None)

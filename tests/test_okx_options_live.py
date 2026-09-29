@@ -608,3 +608,47 @@ class TestCallLine:
         assert s["take_profit_pct_call"] == 30
         assert s["max_calls_per_family"] == 1 and s["max_calls_total"] == 2
         assert s["allow_no_cost_basis"] is False
+
+
+# ── 下单参数顺序回归（2026-09-29 线上事故）──────────────────────────────
+# 真实 lumibot 签名 = create_order(asset, quantity, side)。期权线曾写成
+# (asset, side, sz) → Order(quantity="sell", side=1) → entities/order.py 的
+# `quantity < 0` 抛 TypeError: '<' not supported between instances of 'str'
+# and 'int'（每 60s 重复「❌ 失败」，永远下不出单）。conftest 的 lumibot stub
+# 已镜像该类型校验，这里再锁一层调用形状。
+
+def test_submit_option_passes_quantity_not_side(monkeypatch):
+    import types
+
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as S,
+    )
+
+    s = S()
+    s.parameters = {**dict(S.parameters), "live_mode": True}
+    seen = {}
+
+    class _Order:
+        error = None
+
+    def fake_create_order(asset, quantity, side, **kw):
+        seen.update(asset=asset, quantity=quantity, side=side)
+        return _Order()
+
+    monkeypatch.setattr(s, "create_order", fake_create_order)
+    dec = types.SimpleNamespace(inst_id="SOL-USD_UM-260929-118-P", sz=1)
+
+    ok, err = s._submit_option(dec, {})
+    assert ok and err is None, err
+    assert seen["quantity"] == 1 and isinstance(seen["quantity"], int)
+    assert seen["side"] == "sell"
+    assert getattr(seen["asset"], "symbol", None) == "SOL"
+
+    # 旧写法（side/sz 写反）必须报错且原因可见 —— 不得静默通过
+    import pytest as _pt
+
+    monkeypatch.delattr(s, "create_order")  # 回落到底层 lumibot stub
+    with _pt.raises(TypeError):
+        S.create_order(s, seen["asset"], "sell", 1)  # quantity="sell"
+    with _pt.raises(ValueError):
+        S.create_order(s, seen["asset"], 1, 1)  # side=1

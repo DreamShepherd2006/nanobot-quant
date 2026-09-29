@@ -56,6 +56,15 @@ except ImportError:
             # 镜像 lumibot v4.5.78：create_order 接受 str symbol 或 Asset。
             if isinstance(asset, str):
                 asset = Asset(asset, "crypto")
+            # 镜像真实库的类型校验（entities/order.py: `quantity < 0`）——
+            # 参数写反（asset, side, sz）时真实库会 TypeError 而 stub 静默通过，
+            # 曾让期权线下单参数写反的 bug 在单测全绿的情况下上线（2026-09-29）。
+            if not isinstance(quantity, (int, float)):
+                raise TypeError(
+                    f"create_order: quantity 必须是数字（收到 {type(quantity).__name__}）"
+                )
+            if side not in ("buy", "sell"):
+                raise ValueError(f"create_order: side 必须是 buy/sell（收到 {side!r}）")
             return Order(
                 strategy=self, asset=asset, quantity=quantity, side=side, **kwargs
             )
