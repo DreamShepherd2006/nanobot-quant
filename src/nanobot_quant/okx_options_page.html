@@ -1555,7 +1555,7 @@ async function loadParams() {
       if ($("coverHint")) $("coverHint").textContent = (cov.auto ? "已启用" : "未启用（默认关）") +
         " · 模式 " + (cov.mode || "limit");
     }
-  } catch (e) { $("paramHint").textContent = "读取失败"; }
+  } catch (e) { $("paramHint").textContent = "读取失败：" + (e && e.message ? e.message : e); }
 }
 async function saveParams() {
   const ratio = parseInt($("mCollRatio").value, 10);
@@ -1776,6 +1776,7 @@ function renderLiveStrategy(strat) {
       let label;
       if (noAction) label = "· 无动作";
       else if (d === "pending_confirm") label = "⏳ 待确认（未定案单，本轮不重复提交）";
+      else if (d === "skipped_expired") label = "· 已到期（等结算判定，不下单）";
       else if (kind === "entry") label = (dry || d.indexOf("dry_run") === 0)
         ? "🖐 打算卖" : (d === "sold" ? "✅ 已卖" : "❌ 下单失败");
       else label = (dry || d.indexOf("dry_run") === 0)

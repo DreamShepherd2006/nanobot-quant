@@ -300,3 +300,41 @@ class TestCostBasis:
         ctx = ot.covered_context("A", FAMILY)      # 回写失败不影响只读上下文
         assert ctx["cost_hint"] == 118.0
         assert ctx["cost_pending"] is True
+
+
+# ── 「已到期不再下单」门（2026-09-29：15:49–16:00 对死合约反复提交买回） ──
+
+def test_inst_expiry_ms_is_0800_utc():
+    import datetime as _dt
+    from nanobot_quant.okx_options_trade import inst_expiry_ms
+    assert inst_expiry_ms("SOL-USD_UM-260929-118-P") == \
+        int(_dt.datetime(2026, 9, 29, 8, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    assert inst_expiry_ms("bad") == 0 and inst_expiry_ms("") == 0
+
+
+def test_evaluate_exits_expired_is_visible_not_silent():
+    from nanobot_quant.okx_options_strategy import evaluate_exits
+    from nanobot_quant.okx_options_trade import inst_expiry_ms
+    inst = "SOL-USD_UM-260929-118-P"
+    exp = inst_expiry_ms(inst)
+    row = {"inst_id": inst, "side": "short", "pos": 1, "avg_px": 0.76,
+           "mark_px": 0.02, "exp_ms": exp}
+    # 到期前 1 分钟：正常止盈买回
+    d = evaluate_exits([row], tp_pct=50, opt_type="P", now_ms=exp - 60_000)
+    assert [x.reason for x in d] == ["take_profit"]
+    # 到期后：不发买回建议，改发 expired（可见，不静默跳过）
+    d = evaluate_exits([row], tp_pct=50, opt_type="P", now_ms=exp + 1)
+    assert [x.reason for x in d] == ["expired"]
+    assert d[0].inst_id == inst and d[0].sz == 1
+    # 无 exp_ms（旧数据/回测链）→ 保持旧行为，时间参数不影响
+    row2 = {k: v for k, v in row.items() if k != "exp_ms"}
+    d = evaluate_exits([row2], tp_pct=50, opt_type="P", now_ms=exp + 1)
+    assert [x.reason for x in d] == ["take_profit"]
+
+
+def test_position_rows_carry_exp_ms():
+    from nanobot_quant.okx_options_trade import _normalize_position
+    r = _normalize_position({"instId": "SOL-USD_UM-260929-118-P", "posSide": "net",
+                             "pos": "-1", "avgPx": "0.76", "markPx": "0.02"})
+    assert r["side"] == "short" and r["exp_ms"] > 0
+    assert r["exp_ms"] > 1759000000000  # 2026-09-29 08:00 UTC 附近（毫秒）

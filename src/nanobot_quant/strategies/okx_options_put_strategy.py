@@ -467,7 +467,12 @@ class OkxOptionsPutStrategy(Strategy):
         out: list[dict] = []
         for x in rows:
             rec = {**x.to_event(), "dry_run": dry, "opt_type": opt_type}
-            if dry:
+            if x.reason == "expired":
+                # 已到期：交易所在该合约上已停止接单（IOC 必拒）——不提交、但显式可见
+                rec["status"] = "skipped_expired"
+                rec["note"] = "已到期，不提交买回（等台账到期判定闭回）"
+                self._log(f"⏳ {tag} 已到期 {x.inst_id} ×{x.sz} → 不提交买回（等结算判定）")
+            elif dry:
                 rec["status"] = "dry_run(would_buy_back)"
                 self._log(f"{tag} → 【dry-run】买回 {x.inst_id} ×{x.sz} | "
                           f"开仓 {rec.get('entry_px')} → 现价 {rec.get('mark_px')} "

@@ -320,6 +320,23 @@ def find_entry(pred: Callable[[dict], bool]) -> Optional[dict]:
 
 # ── instrument / 盘口辅助 ──────────────────────────────────────
 
+def inst_expiry_ms(inst_id: str) -> int:
+    """``SOL-USD_UM-260929-118-P`` → 到期时刻毫秒（当日 **08:00 UTC**）；解析失败 → 0。
+
+    OKX 期权每日到期统一在 08:00 UTC（与 ``okx_options_data`` 同口径）。此函数是
+    「已到期不再下单」门的输入（2026-09-29：15:49–16:00 对已到期合约反复提交买回，
+    交易所必拒；现在提前拦下并在轮次快照里显式可见）。
+    """
+    parts = str(inst_id or "").split("-")
+    if len(parts) < 5:
+        return 0
+    try:
+        d = datetime.strptime(parts[-3], "%y%m%d")
+    except (ValueError, IndexError):
+        return 0
+    return int((d.replace(tzinfo=timezone.utc).timestamp() + 8 * 3600.0) * 1000)
+
+
 def inst_family_of(inst_id: str) -> str:
     """从 instId 解析 instFamily（如 SOL-USD_UM-260905-101-P → SOL-USD_UM）。
 
@@ -1814,6 +1831,7 @@ def _normalize_position(r: dict) -> dict:
         "mark_px": _f(r.get("markPx")),
         "upl": _f(r.get("upl")),
         "upl_ratio": _f(r.get("uplRatio")),
+        "exp_ms": inst_expiry_ms(inst),   # 到期时刻（「已到期不下单」门的输入）
         "mgn_mode": r.get("mgnMode", ""),
         "lever": r.get("lever", ""),
         # 逐仓实际冻结保证金（margin 0/空时回退 imr）；足额担保时 OKX 无强平价（--）

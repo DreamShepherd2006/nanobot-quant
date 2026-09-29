@@ -671,6 +671,7 @@ def test_exits_skip_when_pending_ledger_row(monkeypatch):
     class _Row:
         inst_id = inst
         sz = 1
+        reason = "take_profit"   # 与真实 ExitDecision 对齐（新增字段须同步否则 stub 掩盖崩溃）
 
         def to_event(self):
             return {"inst_id": inst, "sz": 1, "entry_px": 0.76,
@@ -712,6 +713,7 @@ def test_exits_submits_when_no_pending_row(monkeypatch):
     class _Row:
         inst_id = inst
         sz = 1
+        reason = "take_profit"   # 与真实 ExitDecision 对齐（新增字段须同步否则 stub 掩盖崩溃）
 
         def to_event(self):
             return {"inst_id": inst, "sz": 1, "entry_px": 0.76,

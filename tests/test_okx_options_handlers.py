@@ -394,6 +394,7 @@ def test_page_labels_pending_confirm_not_failure():
     h = (root / "okx_options_page.html").read_text(encoding="utf-8")
     assert 'st === "pending_confirm"' in h          # 策略事件列表
     assert 'd === "pending_confirm"' in h           # 最近一轮策略行
+    assert 'd === "skipped_expired"' in h           # 已到期不下单（可见）
     assert "⏳ 待确认" in h
     # 快照 dry_run：缺失时页面按 dry=true 渲染（真实下单被标成「仅记录」）
     for p in ("okx_options_page.html",):
