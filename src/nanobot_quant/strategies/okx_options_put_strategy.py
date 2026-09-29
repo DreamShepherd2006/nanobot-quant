@@ -137,6 +137,8 @@ class OkxOptionsPutStrategy(Strategy):
         self._log("── 巡检轮次开始 ──")
 
         settled = self._settle_expired()
+        # 未定案复检（IOC 未成交 / 未定案的行）——先落定再决策，避免重复下单
+        self._resolve_pending(account)
 
         positions = self._positions(account)
         if positions is None:
@@ -163,8 +165,36 @@ class OkxOptionsPutStrategy(Strategy):
                                "call_entries": call_entries,
                                "call_exits": call_exits,
                                "covers": covers,
+                               # dry_run 必须随快照下发：缺失时页面按「dry=true」渲染
+                               # （2026-09-29 实测：真实下单的轮次被标成「仅记录」）
+                               "dry_run": dry,
                                "counts": counts, "call_counts": call_counts},
                      None)
+
+    def _resolve_pending(self, account: str) -> list[dict]:
+        """复检未定案台账行（IOC 未成交 / 未定案）——每轮开头一次。
+
+    2026-09-29 实测：买回 IOC 未成交时返回内存 pending 状态，被上层当成成功
+    （页面显示「已买回」而持仓未动），每 60s 重复提交同一合约。本方法把状态
+    按交易所结果落定（filled → 完成回填/关账；cancelled → 标未成交），
+    与 ``has_pending_ledger`` 去重门配合：先复检、再决策。
+    """
+        try:
+            rows = ot.resolve_pending(account)
+        except Exception as e:  # noqa: BLE001 —— 复检失败不杀轮
+            self._log(f"⚠️ 未定案复检失败：{type(e).__name__}: {e}")
+            return []
+        for r in rows:
+            kind = "买回" if str(r.get("kind") or "").startswith("close") else "卖出"
+            extra = ""
+            if r.get("filled_px"):
+                extra += f" 成交价={r['filled_px']}"
+            if r.get("ref_ask"):
+                extra += f" ref_ask={r['ref_ask']}"
+            if r.get("error"):
+                extra += f" 错误={r['error']}"
+            self._log(f"复检 | {kind} {r.get('inst_id')} → 状态={r.get('status')}{extra}")
+        return rows
 
     # ══════════════════════ ①' 自动补买（接货闭环）══════════════════════
 
@@ -330,15 +360,22 @@ class OkxOptionsPutStrategy(Strategy):
                           f"IV={rec.get('iv')} delta={rec.get('delta')} "
                           f"天数={rec.get('days')} | 理由={dec.entry_reason}")
             else:
-                ok, err = self._submit_option(dec, p)
-                rec["status"] = "sold" if ok else "failed"
-                if err:
-                    rec["error"] = err
-                    self._log(f"⚠️ PUT {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
+                # 去重门：同合约已有未定案开仓台账行 → 不重复提交（IOC 未成交时
+                # 交易所在途查不到，必须靠台账行拦住重复下单）
+                if ot.has_pending_ledger(dec.inst_id, ("open_put",)):
+                    rec["status"] = "pending_confirm"
+                    rec["note"] = f"已有未定案卖出单（{dec.inst_id}）——本轮不重复提交，等复检"
+                    self._log(f"⏳ PUT {base} 卖出跳过 {dec.inst_id} ×{dec.sz}：{rec['note']}")
                 else:
-                    counts[base] = counts.get(base, 0) + dec.sz
-                    total += dec.sz
-                    self._log(f"PUT {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
+                    ok, err = self._submit_option(dec, p)
+                    rec["status"] = "sold" if ok else "failed"
+                    if err:
+                        rec["error"] = err
+                        self._log(f"⚠️ PUT {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
+                    else:
+                        counts[base] = counts.get(base, 0) + dec.sz
+                        total += dec.sz
+                        self._log(f"PUT {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
             out.append(rec)
             # 建仓（含 dry-run 意图）即置位 —— 之后同周期不再开仓
             self._cycle_mark_bought(family, sig)
@@ -376,7 +413,10 @@ class OkxOptionsPutStrategy(Strategy):
 
             # 去重门（§33.43 Step 4b）：同合约已有在途委托 → 不重复提交
             # （重复卖出 = 超额 short；covered 门扣的「在仓 call」只管已成交部分）
-            if ot.has_pending_inst(account, family, dec.inst_id):
+            # 叠加台账未定案行判定（2026-09-29）：IOC 未成交时交易所在途查不到，
+            # 只能靠本地 pending 行拦住重复下单。
+            if (ot.has_pending_inst(account, family, dec.inst_id)
+                    or ot.has_pending_ledger(dec.inst_id, ("open_call",))):
                 note = f"已有在途委托（{dec.inst_id}）→ 跳过（去重，fail-closed）"
                 self._log(f"CALL {base} → 无动作：{note}")
                 out.append({"family": base, "opt_type": "C",
@@ -433,13 +473,20 @@ class OkxOptionsPutStrategy(Strategy):
                           f"开仓 {rec.get('entry_px')} → 现价 {rec.get('mark_px')} "
                           f"（回落 {rec.get('drop_pct')} ≥ 止盈线 {tp}%）")
             else:
-                ok, err = self._submit_option(x, p, closing=True)
-                rec["status"] = "bought_back" if ok else "failed"
-                if err:
-                    rec["error"] = err
-                    self._log(f"⚠️ {tag} 买回失败 {x.inst_id} ×{x.sz}：{err}")
+                # 去重门（2026-09-29）：同合约已有未定案台账行（IOC 未成交但已
+                # 留下 pending 行）或交易所在途委托 → 不重复提交，先等复检
+                if ot.has_pending_ledger(x.inst_id, ("close_put", "close_call")):
+                    rec["status"] = "pending_confirm"
+                    rec["note"] = f"已有未定案买回单（{x.inst_id}）——本轮不重复提交，等复检"
+                    self._log(f"⏳ {tag} 买回跳过 {x.inst_id} ×{x.sz}：{rec['note']}")
                 else:
-                    self._log(f"{tag} → 已提交买回 {x.inst_id} ×{x.sz}")
+                    ok, err = self._submit_option(x, p, closing=True)
+                    rec["status"] = "bought_back" if ok else "failed"
+                    if err:
+                        rec["error"] = err
+                        self._log(f"⚠️ {tag} 买回失败 {x.inst_id} ×{x.sz}：{err}")
+                    else:
+                        self._log(f"{tag} → 已提交买回 {x.inst_id} ×{x.sz}")
             out.append(rec)
             self._record({"type": "exit", **rec})
         if not rows and positions:

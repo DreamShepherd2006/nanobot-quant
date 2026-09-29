@@ -1715,7 +1715,8 @@ function renderLiveEvents(evs) {
       const st = String(e.status || "");
       const label = st.indexOf("dry_run") === 0
         ? (isEntry ? "🖐 打算卖" : "🖐 打算买回")
-        : (st === "sold" || st === "bought_back" ? "✅ " + (isEntry ? "已卖" : "已买回") : "❌ 失败");
+        : (st === "sold" || st === "bought_back" ? "✅ " + (isEntry ? "已卖" : "已买回")
+          : (st === "pending_confirm" ? "⏳ 待确认（未定案单，不重复提交）" : "❌ 失败"));
       const expired = instExpired(e.inst_id);     // 已过到期时刻的历史意图：淡化 + 打标
       return "<div style='padding:3px 0" + (expired ? ";opacity:.55" : "") + "'>" + icon + " " + label + " · " + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " +
         locTs(Date.parse(e.ts)) +
@@ -1774,6 +1775,7 @@ function renderLiveStrategy(strat) {
       const noAction = (d === "no_action" || d === "no_signal" || d === "cycle_wait");
       let label;
       if (noAction) label = "· 无动作";
+      else if (d === "pending_confirm") label = "⏳ 待确认（未定案单，本轮不重复提交）";
       else if (kind === "entry") label = (dry || d.indexOf("dry_run") === 0)
         ? "🖐 打算卖" : (d === "sold" ? "✅ 已卖" : "❌ 下单失败");
       else label = (dry || d.indexOf("dry_run") === 0)

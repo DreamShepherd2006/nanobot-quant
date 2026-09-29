@@ -142,8 +142,12 @@ class OkxOptionsBroker(Broker):
         status = str(res.get("status") or "")
         if status in ("filled", "closed"):
             order.set_filled()
-        elif status in ("failed", "error", "cancelled"):
-            order.set_error(res.get("note") or f"订单状态 {status}")
+        else:
+            # 未成交 / 未定案必须如实上报（禁止假成功）：pending/unknown/空状态
+            # 曾被当成成功 → 页面显示「已买回」而持仓未动、每 60s 重复提交
+            # （2026-09-29 实测）。failed/cancelled 时 note 优先。
+            order.set_error(res.get("note")
+                            or f"订单未成交（状态 {status or 'unknown'}）")
         return order
 
     def cancel_order(self, order: Order) -> None:

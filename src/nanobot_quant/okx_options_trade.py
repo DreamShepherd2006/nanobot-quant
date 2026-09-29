@@ -955,6 +955,75 @@ def has_pending_inst(account: str, family: str, inst_id: str) -> bool:
     return any(str(r.get("inst_id") or "") == str(inst_id) for r in rows or [])
 
 
+def has_pending_ledger(inst_id: str,
+                       kinds: tuple = ("open_put",)) -> bool:
+    """该合约是否已有**未定案**台账行（同 kind 组）——防重复下单。
+
+    与 ``has_pending_inst`` 互补：后者查交易所在途委托（限价单有效），前者查
+    台账中 status=pending 的行——IOC 未成交时交易所在途查不到、但本地台账会
+    留下 pending 行（下单后 5s 轮询未定案）。两者叠加才能堵住「每轮重复提交
+    同一合约」（2026-09-29 实测：买回 IOC 未成交被报成成交，60s 一轮重复提交）。
+
+    台账读取失败 fail-closed 返回 True（宁可这轮不下）。
+    """
+    if not inst_id:
+        return False
+    try:
+        for e in load_ledger():
+            if (str(e.get("inst_id") or "") == str(inst_id)
+                    and str(e.get("status") or "") == "pending"
+                    and str(e.get("kind") or "") in kinds):
+                return True
+    except Exception:  # noqa: BLE001 —— 查不清就当作有
+        return True
+    return False
+
+
+def resolve_pending(account: str = "") -> list[dict]:
+    """复检未定案台账行（status=pending 且有 ord_id）——每轮开头跑一次。
+
+    IOC 下单后 5s 内未定案的行（state=live/unknown）既不能当成交、也不该阻塞
+    后续轮次：这里按交易所结果落定——filled → 完成开/平仓回填（含保证金追加、
+    盈亏、关账），cancelled → 标「未成交（IOC 未匹配，已自动撤单）」。
+
+    返回每行复检结果供策略轮次日志/事件展示；复检异常不抛给调用方。
+    """
+    a: dict = {}
+    out: list[dict] = []
+    for e in list(load_ledger()):
+        if e.get("status") != "pending" or not e.get("ord_id"):
+            continue
+        if not a:
+            a = _entry_account(account)  # 只在真有未定案行时才解析凭证
+        kind = str(e.get("kind") or "")
+        try:
+            if kind in ("close_put", "close_call"):
+                op = (find_entry(lambda x: x["id"] == e.get("open_id"))
+                      if e.get("open_id") else None)
+                if op is None:
+                    update_ledger(lambda x: x["id"] == e["id"], status="failed",
+                                  note="复检：找不到对应 open 台账行")
+                    out.append({"id": e["id"], "inst_id": e.get("inst_id"),
+                                "kind": kind, "status": "failed"})
+                    continue
+                r = _settle_close_entry(a["creds"], e, op)
+            elif kind in ("open_put", "open_call"):
+                r = _settle_open_entry(a["creds"], e, kind=kind)
+            else:
+                continue
+        except Exception as ex:  # noqa: BLE001 —— 复检失败不杀轮
+            out.append({"id": e["id"], "inst_id": e.get("inst_id"),
+                        "kind": kind, "status": "unknown",
+                        "error": f"{type(ex).__name__}: {ex}"})
+            continue
+        r = r or {}
+        out.append({"id": e.get("id"), "inst_id": e.get("inst_id"),
+                    "kind": kind, "status": r.get("status"),
+                    "filled_px": r.get("filled_px"),
+                    "ref_bid": e.get("ref_bid"), "ref_ask": e.get("ref_ask")})
+    return out
+
+
 def open_put(account: str, *, inst_id: str, sz: int,
              ord_type: str = "limit", px: Optional[float] = None) -> dict:
     """卖 put 开仓（真实下单）。成功后写入台账（pending → 轮询 filled）。"""
@@ -1103,9 +1172,13 @@ def _settle_open_entry(creds: dict, entry: dict, kind: str = "open_put") -> dict
             return upd or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
-                                 status="cancelled") or entry
+                                 status="cancelled",
+                                 note="未成交（IOC 未匹配盘口，已自动撤单）") or entry
         time.sleep(0.5)
-    return entry  # 仍 pending，等页面刷新再轮询
+    # 未定案：不报成交（诚实状态），下一轮复检
+    return update_ledger(
+        lambda x: x["id"] == entry["id"], status="pending",
+        note="未定案（IOC 未在 5s 内定案）——下一轮复检") or entry
 
 
 def _position_margin(creds: dict, inst_id: str) -> tuple[float, str]:
@@ -1239,9 +1312,13 @@ def _settle_close_entry(creds: dict, entry: dict, open_entry: dict) -> dict:
             return update_ledger(lambda x: x["id"] == entry["id"]) or entry
         if o["status"] == "cancelled":
             return update_ledger(lambda x: x["id"] == entry["id"],
-                                 status="cancelled") or entry
+                                 status="cancelled",
+                                 note="未成交（IOC 未匹配盘口，已自动撤单）") or entry
         time.sleep(0.5)
-    return entry
+    # 未定案：不报成交（诚实状态），下一轮复检
+    return update_ledger(
+        lambda x: x["id"] == entry["id"], status="pending",
+        note="未定案（IOC 未在 5s 内定案）——下一轮复检") or entry
 
 
 def spot_cover(account: str, *, spot_inst: str,

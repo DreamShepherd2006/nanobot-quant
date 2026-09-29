@@ -652,3 +652,82 @@ def test_submit_option_passes_quantity_not_side(monkeypatch):
         S.create_order(s, seen["asset"], "sell", 1)  # quantity="sell"
     with _pt.raises(ValueError):
         S.create_order(s, seen["asset"], 1, 1)  # side=1
+
+
+# ── 止盈买回去重门（2026-09-29：每 60s 重复提交同一合约）────────────
+
+def test_exits_skip_when_pending_ledger_row(monkeypatch):
+    """同合约已有未定案买回行 → 本轮不重复下单，状态标 pending_confirm。"""
+    import types
+
+    from nanobot_quant import okx_options_strategy as _st
+    from nanobot_quant import okx_options_trade as _ot
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as S,
+    )
+
+    inst = "SOL-USD_UM-260929-118-P"
+
+    class _Row:
+        inst_id = inst
+        sz = 1
+
+        def to_event(self):
+            return {"inst_id": inst, "sz": 1, "entry_px": 0.76,
+                    "mark_px": 0.03, "drop_pct": 96.0}
+
+    s = S()
+    s.parameters = {**dict(S.parameters), "live_mode": True}
+    monkeypatch.setattr(_st, "evaluate_exits", lambda *a, **k: [_Row()])
+    monkeypatch.setattr(_ot, "has_pending_ledger", lambda *a, **k: True)
+    monkeypatch.setattr(_ot, "has_pending_inst", lambda *a, **k: False)
+    submitted = []
+    monkeypatch.setattr(s, "_submit_option",
+                        lambda *a, **k: (submitted.append(a) or (True, None)),
+                        raising=False)
+    monkeypatch.setattr(s, "_record", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(s, "_log", lambda *a, **k: None, raising=False)
+
+    recs = s._exits("DreamShepherdbot1", {"take_profit_pct": 50}, False,
+                    [types.SimpleNamespace(inst_id=inst, qty=1.0,
+                                           avg_px=0.76, mark_px=0.03)],
+                    opt_type="P")
+    assert submitted == []                     # 未重复下单
+    assert recs and recs[0]["status"] == "pending_confirm"
+    assert "未定案" in recs[0]["note"]
+
+
+def test_exits_submits_when_no_pending_row(monkeypatch):
+    """无未定案行 → 正常提交（去重门不得阻断正常路径）。"""
+    import types
+
+    from nanobot_quant import okx_options_strategy as _st
+    from nanobot_quant import okx_options_trade as _ot
+    from nanobot_quant.strategies.okx_options_put_strategy import (
+        OkxOptionsPutStrategy as S,
+    )
+
+    inst = "SOL-USD_UM-260929-118-P"
+
+    class _Row:
+        inst_id = inst
+        sz = 1
+
+        def to_event(self):
+            return {"inst_id": inst, "sz": 1, "entry_px": 0.76,
+                    "mark_px": 0.03, "drop_pct": 96.0}
+
+    s = S()
+    s.parameters = {**dict(S.parameters), "live_mode": True}
+    monkeypatch.setattr(_st, "evaluate_exits", lambda *a, **k: [_Row()])
+    monkeypatch.setattr(_ot, "has_pending_ledger", lambda *a, **k: False)
+    monkeypatch.setattr(s, "_submit_option",
+                        lambda *a, **k: (True, None), raising=False)
+    monkeypatch.setattr(s, "_record", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(s, "_log", lambda *a, **k: None, raising=False)
+
+    recs = s._exits("DreamShepherdbot1", {"take_profit_pct": 50}, False,
+                    [types.SimpleNamespace(inst_id=inst, qty=1.0,
+                                           avg_px=0.76, mark_px=0.03)],
+                    opt_type="P")
+    assert recs and recs[0]["status"] == "bought_back"
