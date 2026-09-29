@@ -228,3 +228,22 @@ def test_try_entry_counts_na_when_gate_on_without_samples(monkeypatch):
     d._try_entry(ts, [], [], 1000.0, sig=_SIG)
     assert d._iv_gate_na == 1
     assert d._iv_pct_report()["signal_na"] == 1
+
+
+# ── 报告层（markdown 与页面同口径）─────────────────────────────
+
+def test_markdown_iv_row_off_and_on():
+    """IV 分位行必须如实反映「关 / 开了且算得出 / 开了但无样本 fail-open」。"""
+    from nanobot_quant.backtest_markdown import _iv_pct_txt
+
+    assert _iv_pct_txt({}) == "—（旧记录无该字段）"
+    assert _iv_pct_txt({"iv_pct": {"gate": 0, "window_days": 7}}).startswith("0（关）")
+
+    on = _iv_pct_txt({"iv_pct": {
+        "gate": 70, "window_days": 7, "window_bars": 168, "bars": 720,
+        "ready": 700, "entries": 8, "entries_na": 0, "signal_na": 2,
+        "entry_pct_median": 82.5, "entry_pct_min": 71.0, "entry_pct_max": 100.0,
+        "target_dte_days": 7.0,
+    }})
+    assert "70 分位" in on and "可算分位 700/720 根" in on
+    assert "入场 8 次" in on and "fail-open 放行 2 次" in on and "82.5" in on

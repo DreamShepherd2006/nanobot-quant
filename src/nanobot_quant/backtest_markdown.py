@@ -244,6 +244,14 @@ def _settle_txt(res: dict) -> str:
     return f"到期前 {win} 分钟标的均价（回放按 {res.get('timestep')} 粒度取均值）"
 
 
+def _fnum(v: Any, d: float = 0.0) -> float:
+    """容错取数（报告层用）：取不到就回默认值，不让展示层抛异常。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return d
+
+
 def _iv_pct_txt(res: dict) -> str:
     """IV 分位闸门实际生效情况：闸门值 · 参考档/窗口/样本 · 入场分位中位。
 
@@ -253,18 +261,18 @@ def _iv_pct_txt(res: dict) -> str:
     iv = res.get("iv_pct") or {}
     if not iv:
         return "—（旧记录无该字段）"
-    gate = _num(iv.get("gate"), 0)
-    win = _num(iv.get("window_days"), 0)
+    gate = _fnum(iv.get("gate"))
+    win = _fnum(iv.get("window_days"))
     if not gate:
-        return f"0（关）· 窗口 {win:g} 天"
-    txt = (f"{gate:g} 分位 · 参考 {_num(iv.get('target_dte_days'), 0):g} 天档平值 IV"
-           f" · 窗口 {win:g} 天（{_num(iv.get('window_bars'), 0)} 根）"
+        return f"0（关）· 窗口 {_num(win, 0)} 天"
+    txt = (f"{_num(gate, 0)} 分位 · 参考 {_num(iv.get('target_dte_days'), 0)} 天档平值 IV"
+           f" · 窗口 {_num(win, 0)} 天（{_num(iv.get('window_bars'), 0)} 根）"
            f" · 可算分位 {_num(iv.get('ready'), 0)}/{_num(iv.get('bars'), 0)} 根"
            f" · 入场 {_num(iv.get('entries'), 0)} 次")
     if iv.get("entry_pct_median") is not None:
         txt += (f"（分位中位 {_num(iv.get('entry_pct_median'), 1)} 分"
                 f" · {_num(iv.get('entry_pct_min'), 0)}~{_num(iv.get('entry_pct_max'), 0)}）")
-    na = int(iv.get("entries_na") or 0) + int(iv.get("signal_na") or 0)
+    na = int(_fnum(iv.get("entries_na"))) + int(_fnum(iv.get("signal_na")))
     if na:
         txt += f" · 样本不足 fail-open 放行 {na} 次"
     return txt
