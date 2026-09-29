@@ -60,6 +60,18 @@ def _utc_now() -> str:
 _ENTRY_ACTION_STATUSES = frozenset({"sold", "dry_run(would_sell)"})
 _EXIT_ACTION_STATUSES = frozenset({"bought_back", "dry_run(would_buy_back)"})
 _FAILED_STATUSES = frozenset({"failed"})
+# 「交易所已受理、未定案」——不是成交也不是失败，单独计（仪表盘显「在途 N」）：
+# 台账已留 pending 行 + 去重门拦住重复提交，下一轮复检定案。
+_PENDING_STATUSES = frozenset({"pending"})
+# lumibot Order.custom_params["opt_status"] 中的在途状态（broker 透传）
+_IN_FLIGHT_ORDER_STATUSES = frozenset({
+    "pending", "unknown", "live", "open", "partially_filled", "submitted",
+})
+
+# 提交三档 → 记录 status（2026-09-29 定稿；见 _submit_option）
+_SUBMIT_STATE_ENTRY = {"filled": "sold", "pending": "pending", "failed": "failed"}
+_SUBMIT_STATE_EXIT = {"filled": "bought_back", "pending": "pending",
+                     "failed": "failed"}
 
 
 def _count_status(rows: Any, statuses: frozenset) -> int:
@@ -367,15 +379,23 @@ class OkxOptionsPutStrategy(Strategy):
                     rec["note"] = f"已有未定案卖出单（{dec.inst_id}）——本轮不重复提交，等复检"
                     self._log(f"⏳ PUT {base} 卖出跳过 {dec.inst_id} ×{dec.sz}：{rec['note']}")
                 else:
-                    ok, err = self._submit_option(dec, p)
-                    rec["status"] = "sold" if ok else "failed"
-                    if err:
-                        rec["error"] = err
-                        self._log(f"⚠️ PUT {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
-                    else:
+                    state, err = self._submit_option(dec, p)
+                    rec["status"] = _SUBMIT_STATE_ENTRY.get(state, "failed")
+                    if state == "filled":
                         counts[base] = counts.get(base, 0) + dec.sz
                         total += dec.sz
-                        self._log(f"PUT {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
+                        self._log(f"PUT {base} → ✅ 卖出成交 {dec.inst_id} ×{dec.sz}")
+                    elif state == "pending":
+                        # 在途：交易所已受理、未定案 —— 不算卖出（不报成交），
+                        # 但照旧占用本周期（防重复提交），台账 pending 行 + 复检接管。
+                        counts[base] = counts.get(base, 0) + dec.sz
+                        total += dec.sz
+                        rec["error"] = err
+                        self._log(f"⏳ PUT {base} 挂单在途 {dec.inst_id} ×{dec.sz}：{err}"
+                                  "（台账 pending 行接管，下一轮复检定案）")
+                    else:
+                        rec["error"] = err
+                        self._log(f"⚠️ PUT {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
             out.append(rec)
             # 建仓（含 dry-run 意图 / 在途未定案）即置位 —— 之后同周期不再开仓。
             # 例外：**提交失败不置位**（交易所在所无单），否则一次薄盘口 IOC
@@ -436,15 +456,21 @@ class OkxOptionsPutStrategy(Strategy):
                           f"delta={rec.get('delta')} 天数={rec.get('days')} "
                           f"成本锚 C={rec.get('cost_basis')} | 理由={dec.entry_reason}")
             else:
-                ok, err = self._submit_option(dec, p)
-                rec["status"] = "sold" if ok else "failed"
-                if err:
-                    rec["error"] = err
-                    self._log(f"⚠️ CALL {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
-                else:
+                state, err = self._submit_option(dec, p)
+                rec["status"] = _SUBMIT_STATE_ENTRY.get(state, "failed")
+                if state == "filled":
                     call_counts[base] = call_counts.get(base, 0) + dec.sz
                     call_total += dec.sz
-                    self._log(f"CALL {base} → 已提交卖出 {dec.inst_id} ×{dec.sz}")
+                    self._log(f"CALL {base} → ✅ 卖出成交 {dec.inst_id} ×{dec.sz}")
+                elif state == "pending":
+                    call_counts[base] = call_counts.get(base, 0) + dec.sz
+                    call_total += dec.sz
+                    rec["error"] = err
+                    self._log(f"⏳ CALL {base} 挂单在途 {dec.inst_id} ×{dec.sz}：{err}"
+                              "（下一轮复检定案）")
+                else:
+                    rec["error"] = err
+                    self._log(f"⚠️ CALL {base} 卖出失败 {dec.inst_id} ×{dec.sz}：{err}")
             out.append(rec)
             self._record({"type": "entry", **rec})
         return out
@@ -489,13 +515,17 @@ class OkxOptionsPutStrategy(Strategy):
                     rec["note"] = f"已有未定案买回单（{x.inst_id}）——本轮不重复提交，等复检"
                     self._log(f"⏳ {tag} 买回跳过 {x.inst_id} ×{x.sz}：{rec['note']}")
                 else:
-                    ok, err = self._submit_option(x, p, closing=True)
-                    rec["status"] = "bought_back" if ok else "failed"
-                    if err:
+                    state, err = self._submit_option(x, p, closing=True)
+                    rec["status"] = _SUBMIT_STATE_EXIT.get(state, "failed")
+                    if state == "filled":
+                        self._log(f"{tag} → ✅ 买回成交 {x.inst_id} ×{x.sz}")
+                    elif state == "pending":
+                        rec["error"] = err
+                        self._log(f"⏳ {tag} 买回在途 {x.inst_id} ×{x.sz}：{err}"
+                                  "（下一轮复检定案）")
+                    else:
                         rec["error"] = err
                         self._log(f"⚠️ {tag} 买回失败 {x.inst_id} ×{x.sz}：{err}")
-                    else:
-                        self._log(f"{tag} → 已提交买回 {x.inst_id} ×{x.sz}")
             out.append(rec)
             self._record({"type": "exit", **rec})
         if not rows and positions:
@@ -511,7 +541,14 @@ class OkxOptionsPutStrategy(Strategy):
         """决策 → lumibot ``create_order`` → ``OkxOptionsBroker._submit_order``。
 
         卖开：side="sell"（broker 按 ``right`` 分派 open_put/open_call）；
-        买回：side="buy"（走 close_*）。返回 ``(ok, error_message)``。
+        买回：side="buy"（走 close_*）。
+
+        返回 **三档** ``(state, note)``（2026-09-29 定稿）：
+
+        * ``"filled"``  —— 已成交（note 为 None）；
+        * ``"pending"`` —— 交易所已受理、未定案（IOC 在途 / 限价未成交 / 状态
+          查不清）：**不是失败**，台账 pending 行接管，下一轮复检定案；
+        * ``"failed"``  —— 本轮无单（撤销 / 拒单 / 异常）：不占本周期，下轮可重试。
         """
         try:
             asset = self._asset_for(dec)
@@ -522,7 +559,7 @@ class OkxOptionsPutStrategy(Strategy):
             # td_sequential_strategy/portfolio.engine 保持同一写法）。
             order = self.create_order(asset, int(dec.sz), side)
             if order is None:
-                return False, "create_order 返回 None"
+                return "failed", "create_order 返回 None"
             # ★ lumibot v4.5.78 的 ``Strategy.create_order`` **只创建 Order 对象、
             # 不提交**（docstring: "Once created, an order must still be submitted."）
             # —— 漏掉 submit_order 会让整条期权线变「假成功」：日志报「已提交卖出」
@@ -530,12 +567,19 @@ class OkxOptionsPutStrategy(Strategy):
             # 卖 SOL-USD_UM-261002-114-P ×1 报成功，OKX 无委托/无仓位、
             # frozen=0、台账无新行）。现货线一直显式 `submit_order`，故只有期权线中招。
             self.submit_order(order)
+            cp = getattr(order, "custom_params", None) or {}
+            raw = str(cp.get("opt_status") or "")
             err = getattr(order, "error", None) or getattr(order, "_error", None)
-            if err:
-                return False, str(err)
-            return True, None
+            if not err:
+                return "filled", None
+            # 在途（broker 明确标记 live/open/pending/unknown）≠ 失败：
+            # 当作失败会让本周期不占位 → 下轮重复提交（实测 2026-09-29 14:05：
+            # IOC 在 5s 窗口报 live、随后成交，却被记成「卖出失败」）。
+            if raw in _IN_FLIGHT_ORDER_STATUSES:
+                return "pending", str(err)
+            return "failed", str(err)
         except Exception as e:  # noqa: BLE001 —— 失败必须可见，不静默
-            return False, f"{type(e).__name__}: {e}"
+            return "failed", f"{type(e).__name__}: {e}"
 
     def _asset_for(self, dec):
         """决策里的 inst_id → lumibot 期权 Asset（instId 解析在 assets 模块）。"""
@@ -593,6 +637,8 @@ class OkxOptionsPutStrategy(Strategy):
                      if str(r.get("action")) in ("market", "limit", "filled"))
         failed = sum(_count_status(rows.get(k), _FAILED_STATUSES)
                      for k in ("entries", "exits", "call_entries", "call_exits"))
+        pending = sum(_count_status(rows.get(k), _PENDING_STATUSES)
+                      for k in ("entries", "exits", "call_entries", "call_exits"))
         self._bump("entries", entries)
         self._bump("exits", exits)
         self._bump("call_entries", c_entries)
@@ -606,6 +652,7 @@ class OkxOptionsPutStrategy(Strategy):
                   f"策略 卖put {entries} / 买回put {exits} · "
                   f"卖call {c_entries} / 买回call {c_exits}"
                   + (f" · 补买 {covers}" if covers else "")
+                  + (f" · 在途 {pending}" if pending else "")
                   + (f" · 失败 {failed}" if failed else "")
                   + (f" · error={error}" if error else ""))
 

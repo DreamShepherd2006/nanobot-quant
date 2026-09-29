@@ -528,7 +528,7 @@ def _callstrat(_strat, monkeypatch):
 
     def _submit(self, dec, p, closing=False):
         orders["buy" if closing else "sell"].append(dec)
-        return True, None
+        return "filled", None
 
     monkeypatch.setattr(_S, "_submit_option", _submit)
     return orders
@@ -642,7 +642,7 @@ def test_submit_option_passes_quantity_not_side(monkeypatch):
     dec = types.SimpleNamespace(inst_id="SOL-USD_UM-260929-118-P", sz=1)
 
     ok, err = s._submit_option(dec, {})
-    assert ok and err is None, err
+    assert ok == "filled" and err is None, err
     assert submitted.get("order") is not None, (
         "必须调 submit_order —— lumibot create_order 只建对象不提交（2026-09-29 根因）"
     )
@@ -690,7 +690,7 @@ def test_exits_skip_when_pending_ledger_row(monkeypatch):
     monkeypatch.setattr(_ot, "has_pending_inst", lambda *a, **k: False)
     submitted = []
     monkeypatch.setattr(s, "_submit_option",
-                        lambda *a, **k: (submitted.append(a) or (True, None)),
+                        lambda *a, **k: (submitted.append(a) or ("filled", None)),
                         raising=False)
     monkeypatch.setattr(s, "_record", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(s, "_log", lambda *a, **k: None, raising=False)
@@ -730,7 +730,7 @@ def test_exits_submits_when_no_pending_row(monkeypatch):
     monkeypatch.setattr(_st, "evaluate_exits", lambda *a, **k: [_Row()])
     monkeypatch.setattr(_ot, "has_pending_ledger", lambda *a, **k: False)
     monkeypatch.setattr(s, "_submit_option",
-                        lambda *a, **k: (True, None), raising=False)
+                        lambda *a, **k: ("filled", None), raising=False)
     monkeypatch.setattr(s, "_record", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(s, "_log", lambda *a, **k: None, raising=False)
 
