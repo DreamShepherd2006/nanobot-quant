@@ -443,16 +443,16 @@ def test_normalize_position_net_mode_sign():
 
 # ── instId 到期/行权解析（持仓卡片展示）────────────
 
-def test_parse_exp_um_suffix():
-    # U 本位 _UM 后缀：SOL-USD_UM-260905-99-P → 2026-09-05（曾取 parts[1]=USD_UM 失败 → 1970-01-01）
-    e = ot._parse_exp("SOL-USD_UM-260905-99-P")
-    assert e is not None and e == int(datetime(2026, 9, 5, tzinfo=timezone.utc).timestamp() * 1000)
+def test_inst_expiry_and_strike_from_inst_id():
+    # 到期时刻 = 该日期 08:00 UTC（U 本位 _UM 后缀；曾取 parts[1]=USD_UM 失败 → 1970-01-01）
+    e = ot.inst_expiry_ms("SOL-USD_UM-260905-99-P")
+    assert e == int(datetime(2026, 9, 5, 8, tzinfo=timezone.utc).timestamp() * 1000)
     # 无 _UM 后缀（币本位参考格式）同样按倒数第 3 段
-    e2 = ot._parse_exp("BTC-USD-260904-80000-C")
-    assert e2 == int(datetime(2026, 9, 4, tzinfo=timezone.utc).timestamp() * 1000)
-    # 畸形段 → None（不落 1970）
-    assert ot._parse_exp("BAD") is None
-    assert ot._parse_exp("SOL-USD_UM-ABCDE-99-P") is None
+    assert ot.inst_expiry_ms("BTC-USD-260904-80000-C") == \
+        int(datetime(2026, 9, 4, 8, tzinfo=timezone.utc).timestamp() * 1000)
+    # 畸形 instId → 0（不落 1970）
+    assert ot.inst_expiry_ms("BAD") == 0
+    assert ot.inst_expiry_ms("SOL-USD_UM-ABCDE-99-P") == 0
     assert ot._parse_strike("SOL-USD_UM-260905-99-P") == 99.0
 
 
