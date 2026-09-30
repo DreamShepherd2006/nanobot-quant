@@ -333,8 +333,22 @@ def test_evaluate_exits_expired_is_visible_not_silent():
 
 
 def test_position_rows_carry_exp_ms():
-    from nanobot_quant.okx_options_trade import _normalize_position
-    r = _normalize_position({"instId": "SOL-USD_UM-260929-118-P", "posSide": "net",
+    """持仓行的到期时刻必须 = 该 instId 的 08:00 UTC。
+
+    它是「已到期不再下单」门的输入。2026-09-30 曾因 `_normalize_position` 返回的
+    dict 里 `exp_ms` 键写了两遍（后者 `_parse_exp` = 当天 0 点，覆盖前者
+    `inst_expiry_ms` = 08:00 UTC），使「已到期」提前 8 小时——到期日 08:00 北京起
+    止盈买回被整段跳过、且每轮往事件文件里刷一条 skipped_expired。
+    """
+    import datetime as _dt
+    from nanobot_quant.okx_options_trade import _normalize_position, inst_expiry_ms
+    inst = "SOL-USD_UM-260929-118-P"
+    r = _normalize_position({"instId": inst, "posSide": "net",
                              "pos": "-1", "avgPx": "0.76", "markPx": "0.02"})
-    assert r["side"] == "short" and r["exp_ms"] > 0
-    assert r["exp_ms"] > 1759000000000  # 2026-09-29 08:00 UTC 附近（毫秒）
+    assert r["side"] == "short"
+    assert r["exp_ms"] == inst_expiry_ms(inst)
+    assert r["exp_ms"] == int(_dt.datetime(2026, 9, 29, 8, 0,
+                                           tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    # 根因断言：绝不能落到当天 0 点
+    assert r["exp_ms"] != int(_dt.datetime(2026, 9, 29, 0, 0,
+                                           tzinfo=_dt.timezone.utc).timestamp() * 1000)
