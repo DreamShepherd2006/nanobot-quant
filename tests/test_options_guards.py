@@ -352,3 +352,34 @@ def test_position_rows_carry_exp_ms():
     # 根因断言：绝不能落到当天 0 点
     assert r["exp_ms"] != int(_dt.datetime(2026, 9, 29, 0, 0,
                                            tzinfo=_dt.timezone.utc).timestamp() * 1000)
+
+
+# ══════════════════ 执行层现金担保门（2026-09-30）══════════════════
+
+def test_usdc_avail_reads_avail_bal_and_zero_when_missing(monkeypatch):
+    """计价币可用额取 `avail_bal`；币种不存在 = 0；查询失败向上抛（调用方 fail-closed）。"""
+    monkeypatch.setattr(ot, "account_balance", lambda account="": {"details": [
+        {"ccy": "XCRCL", "avail_bal": "0.66"},
+        {"ccy": "USDC", "avail_bal": "12.5"}]})
+    assert ot.usdc_avail("bot1") == pytest.approx(12.5)
+    monkeypatch.setattr(ot, "account_balance", lambda account="": {"details": []})
+    assert ot.usdc_avail("bot1") == 0.0
+
+    def _boom(account=""):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ot, "account_balance", _boom)
+    with pytest.raises(RuntimeError):
+        ot.usdc_avail("bot1")          # 查询失败向上抛 → 调用方 fail-closed
+
+
+def test_collateral_required_follows_ratio(monkeypatch, tmp_path):
+    """全损担保目标 = strike × 每张面值 × 张数 × 比例%（开仓门与追保共用同一公式）。"""
+    monkeypatch.setattr(ot, "params_path",
+                        lambda: tmp_path / "okx_options_params.json")
+    assert ot.collateral_required(101.0, 0.1, 1) == pytest.approx(10.1)
+    assert ot.collateral_required(101.0, 0.1, 2) == pytest.approx(20.2)
+    ot.save_option_params(collateral_ratio_pct=50)
+    assert ot.collateral_required(101.0, 0.1, 1) == pytest.approx(5.05)
+    ot.save_option_params(collateral_ratio_pct=0)
+    assert ot.collateral_required(101.0, 0.1, 1) == 0.0
