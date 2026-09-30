@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,12 +196,43 @@ def load_ledger() -> list[dict]:
         return []
 
 
-def save_ledger(entries: list[dict]) -> None:
-    p = ledger_path()
+# 同一把进程内锁串行化「读-改-写」：策略循环线程（LiveRunnerBase daemon）与
+# HTTP handler（asyncio.to_thread）会并发写同一份台账/参数文件。
+_LEDGER_LOCK = threading.RLock()
+
+
+def _atomic_write_json(p: Path, payload) -> None:
+    """原子写 JSON（同目录 tmp → replace）。
+
+    2026-09-30 实盘 bug：手动平仓返回 500 —— 固定 tmp 名 + 无锁，两个写者并发时
+    一个把另一个的 tmp 搬走（订单已成交、只是台账落盘报错）：
+      FileNotFoundError: '…okx_options_ledger.json.tmp' -> '…json'
+    修复：① tmp 名带 pid/线程/序数（各写各的，互不干扰）；
+    ② FUSE（``/data`` 是 hf-mount）抖动重试 3 次；
+    ③ 仍失败显式抛错 —— 台账写不下去必须可见，不做静默降级。
+    """
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(p)
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    with _LEDGER_LOCK:
+        last: Optional[Exception] = None
+        for attempt in range(3):
+            tmp = p.with_name(f"{p.name}.tmp.{os.getpid()}.{threading.get_ident()}.{attempt}")
+            try:
+                tmp.write_text(data, "utf-8")
+                os.replace(tmp, p)
+                return
+            except OSError as e:      # FileNotFoundError ⊂ OSError（FUSE 抖动）
+                last = e
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                time.sleep(0.05 * (attempt + 1))
+        raise RuntimeError(f"台账/参数原子写失败（已重试 3 次）：{p} · {last}")
+
+
+def save_ledger(entries: list[dict]) -> None:
+    _atomic_write_json(ledger_path(), entries)
 
 
 # ── 期权参数（WebUI 担保设置，独立于现货 exec_params）───────────
@@ -269,10 +302,7 @@ def save_option_params(**fields) -> dict:
         tol = DEFAULT_PX_TOLERANCE_PCT
     d["px_tolerance_pct"] = min(max(tol, PX_TOLERANCE_MIN), PX_TOLERANCE_MAX)
     p = params_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(p)
+    _atomic_write_json(p, d)
     return d
 
 
@@ -349,22 +379,24 @@ def _utc_now() -> str:
 
 def add_ledger(**fields) -> dict:
     entry = {"id": _new_id(), "ts": _utc_now(), "status": "pending", **fields}
-    entries = load_ledger()
-    entries.append(entry)
-    save_ledger(entries)
+    with _LEDGER_LOCK:
+        entries = load_ledger()
+        entries.append(entry)
+        save_ledger(entries)
     return entry
 
 
 def update_ledger(pred: Callable[[dict], bool], **fields) -> Optional[dict]:
-    entries = load_ledger()
-    hit = None
-    for e in entries:
-        if pred(e):
-            e.update(fields)
-            hit = e
-            break
-    if hit is not None:
-        save_ledger(entries)
+    with _LEDGER_LOCK:
+        entries = load_ledger()
+        hit = None
+        for e in entries:
+            if pred(e):
+                e.update(fields)
+                hit = e
+                break
+        if hit is not None:
+            save_ledger(entries)
     return hit
 
 
@@ -551,13 +583,13 @@ def spot_limits(account: str = "", spot_inst: str = "",
         out["err"] = "缺少现货对"
         return out
     try:
-        rows = okx_sdk.check(okx_sdk.market().get_instruments(
+        rows = okx_sdk.check(okx_sdk.public().get_instruments(
             instType="SPOT", instId=spot_inst))
         r = rows[0] if isinstance(rows, list) and rows else {}
         out["lot_sz"] = _f(r.get("lotSz"))
         out["min_sz"] = _f(r.get("minSz"))
         out["tick_sz"] = _f(r.get("tickSz"))
-    except (okx_sdk.OkxSdkError, RuntimeError) as e:
+    except Exception as e:  # noqa: BLE001 —— 合约本函数的契约：取数失败不抛错
         out["err"] = f"交易对精度查询失败：{e}"
     try:
         bal = account_balance(account)
@@ -566,7 +598,7 @@ def spot_limits(account: str = "", spot_inst: str = "",
                 out["avail"] = _f(d.get("avail_bal"))
             elif d.get("ccy") == quote:
                 out["quote_avail"] = _f(d.get("avail_bal"))
-    except (okx_sdk.OkxSdkError, RuntimeError) as e:
+    except Exception as e:  # noqa: BLE001 —— 同上
         out["err"] = ((out["err"] + "；") if out["err"] else "") + f"余额查询失败：{e}"
     out["sellable"] = _floor_step(out["avail"], out["lot_sz"])
     try:
@@ -1514,13 +1546,26 @@ _SPOT_CCY = {"XAU": "XAUT"}
 def spot_pair_of(inst_id: str) -> str:
     """期权 instId → 现货交易对。
 
-    SOL-USD_UM-260909-106-C → SOL-USD（USD 对，2026-09-23 起另有 USDC 对）
-    XAU-USD_UM-…            → XAUT-USDT（黄金现货标的是 XAUT）
+    SOL-USD_UM-260909-106-C → **SOL-USDC**（2026-09-30 08:00 UTC 起 OKX 下架
+    除 USDT-USDⓢ 外的全部 Crypto-USDⓢ 现货对 —— 实测挂 SOL-USD 报
+    51087 Listing canceled for this crypto）；界面仍显示 XXX-USD（统一 USD 订单簿）
+    XAU-USD_UM-…            → XAUT-USDT（黄金现货标的是 XAUT，未受影响）
     """
     base = (inst_id or "").split("-")[0].upper()
     if not base:
         return ""
-    return _SPOT_PAIR.get(base, base + "-USD")
+    return _SPOT_PAIR.get(base, base + "-USDC")
+
+
+def resolve_spot_inst(inst_id: str, given: str = "") -> str:
+    """下单用现货对 —— **服务端解析为单一来源**，前端传入值仅作兼底。
+
+    2026-09-30：OKX 下架 Crypto-USDⓢ 现货对后，页面旧公式（币种-USD）会算出
+    已下架的对 → 挂单报 51087；只要 `inst_id` 可解析就一律以后端解析为准，
+    前端（含浏览器缓存住的旧 JS）算错也影响不了下单。
+    """
+    resolved = spot_pair_of(inst_id) if inst_id else ""
+    return resolved or (given or "").strip().upper()
 
 
 def spot_exit(account: str, *, spot_inst: str,

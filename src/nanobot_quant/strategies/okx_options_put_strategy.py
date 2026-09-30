@@ -561,6 +561,15 @@ class OkxOptionsPutStrategy(Strategy):
             order = self.create_order(asset, int(dec.sz), side)
             if order is None:
                 return "failed", "create_order 返回 None"
+            # 卖 call 的成本锚 C 随订单下传（covered call 保本门）：lumibot 的
+            # ``create_order`` 不接收自定义 kwarg（会被静默丢弃 —— 与 data_source
+            # 同坑），只能经 ``order.custom_params`` 传；broker 侧按 **order** 读。
+            # 2026-09-30 实测：断在这里 → broker 拿不到 C → 自动卖 call 每轮被
+            # 保本门 fail-closed（页面手动卖 call 显式传 C，不受影响）。
+            cb = getattr(dec, "cost_basis", None)
+            if cb and not closing:
+                order.custom_params = getattr(order, "custom_params", None) or {}
+                order.custom_params["cost_basis"] = float(cb)
             # ★ lumibot v4.5.78 的 ``Strategy.create_order`` **只创建 Order 对象、
             # 不提交**（docstring: "Once created, an order must still be submitted."）
             # —— 漏掉 submit_order 会让整条期权线变「假成功」：日志报「已提交卖出」

@@ -121,6 +121,19 @@ class TestBrokerSubmitOrder:
         assert seen["inst_id"].endswith("-110-C")
         assert seen["cost_basis"] == 101.0  # covered call 保本门参数透传
 
+    def test_sell_call_cost_basis_from_order_wins_over_map(self, monkeypatch):
+        """逐单 C（order.custom_params）优先于构造期 map —— 自动循环走这条。"""
+        self._patch_px(monkeypatch, px=0.5)
+        seen = {}
+        monkeypatch.setattr(oot, "open_call",
+                            lambda acc, **kw: (seen.update(kw) or {"ord_id": "222"}))
+        b = _broker()
+        b._cost_basis_map = {"SOL": 101.0}
+        o = _order("SOL-USD_UM-261003-130-C", "sell")
+        o.custom_params = {"cost_basis": 122.37}
+        b._submit_order(o)
+        assert seen["cost_basis"] == 122.37
+
     def test_buy_routes_to_close_put(self, monkeypatch):
         self._patch_px(monkeypatch)
         seen = {}
