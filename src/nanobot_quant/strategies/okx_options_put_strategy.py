@@ -41,6 +41,7 @@ from typing import Any, Optional
 
 from lumibot.strategies.strategy import Strategy
 
+from .. import event_log
 from .. import okx_options_trade as ot
 from .. import okx_options_strategy as st
 from .. import okx_options_live_state as lst
@@ -663,13 +664,20 @@ class OkxOptionsPutStrategy(Strategy):
         print(f"[OPT-LIVE] {msg}", file=sys.stderr, flush=True)
 
     def _record(self, event: dict) -> None:
-        """append-only 事件落盘（仅实盘；回测置 live_mode=False 不污染监控）。"""
+        """append-only 事件落盘（仅实盘；回测置 live_mode=False 不污染监控）。
+
+        同类「无动作」事件（skipped_* / failed / dry_run* …）按
+        (inst_id, type, status) 抑制重复（见 event_log）——首条必记、之后至少间隔
+        1 小时，避免到期日 480 条 skipped_expired 把真事件淹在噪音里。
+        """
         if not self.parameters.get("live_mode"):
             return
         try:
+            row = {"ts": _utc_now(), **event}
+            if not event_log.should_log_event(row):
+                return
             p = self._events_path()
             p.parent.mkdir(parents=True, exist_ok=True)
-            row = {"ts": _utc_now(), **event}
             with open(p, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:  # noqa: BLE001 —— 事件是 UX 信息，不阻塞业务

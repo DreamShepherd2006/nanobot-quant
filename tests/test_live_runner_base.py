@@ -139,6 +139,20 @@ def test_load_events_missing_file(tmp_path):
     assert r.load_events() == []
 
 
+def test_append_event_suppresses_repeated_no_action(tmp_path):
+    """同类「无动作」事件只记首条（2026-09-30）：到期日 480 条噪音 → 首条 + 每小时续一条。"""
+    r = _Stub(tmp_path)
+    ev = {"type": "exit", "inst_id": "SOL-USD_UM-260930-123-P",
+          "status": "skipped_expired", "note": "已到期，不提交买回"}
+    for _ in range(4):
+        r._append_event(dict(ev))
+    path = tmp_path / "test_events.jsonl"
+    assert len(path.read_text(encoding="utf-8").strip().split("\n")) == 1
+    r._append_event(dict(ev, status="settled_otm"))   # 真实判定不受限
+    r._append_event({"kind": "a"})                    # 无 status 的普通事件照记
+    assert len(path.read_text(encoding="utf-8").strip().split("\n")) == 3
+
+
 def test_bump_totals(tmp_path):
     r = _Stub(tmp_path)
     r._bump("x")

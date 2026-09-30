@@ -582,3 +582,18 @@ def _isolate_price_cache():
     CexBroker._price_cache.clear()
     TdSequentialStrategy._price_cache.clear()
 
+
+@pytest.fixture(autouse=True)
+def _isolate_event_throttle():
+    """测试隔离事件去重记忆（2026-09-30）。
+
+    event_log 的「无动作事件去重」记忆是**模块级进程状态**：前一个用例记过
+    (inst_id, type, status) 后，后一个用例（即使换了 tmp 目录）同键事件会被
+    静默抑制 → any(...) 式断言失败。每个用例前后清空。
+    """
+    from nanobot_quant import event_log
+
+    event_log.reset()
+    yield
+    event_log.reset()
+

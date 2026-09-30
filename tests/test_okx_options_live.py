@@ -739,3 +739,27 @@ def test_exits_submits_when_no_pending_row(monkeypatch):
                                            avg_px=0.76, mark_px=0.03)],
                     opt_type="P")
     assert recs and recs[0]["status"] == "bought_back"
+
+
+def test_record_suppresses_repeated_skipped_events(tmp_path, monkeypatch):
+    """到期日同类 skipped 事件只记首条（2026-09-30；曾一天 480 条噪音）。"""
+    from nanobot_quant.strategies.okx_options_put_strategy import OkxOptionsPutStrategy
+
+    s = OkxOptionsPutStrategy()
+    s.parameters["live_mode"] = True
+    p = tmp_path / "okx_options_live_events.jsonl"
+    monkeypatch.setattr(s, "_events_path", lambda: p)
+    ev = {"type": "exit", "inst_id": "SOL-USD_UM-260930-123-P", "sz": 1,
+          "reason": "expired", "status": "skipped_expired",
+          "note": "已到期，不提交买回（等台账到期判定闭回）"}
+    for _ in range(5):
+        s._record(dict(ev))
+    lines = p.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 1 and '"status": "skipped_expired"' in lines[0]
+    # 状态变化 / 真实动作不受抑制：skipped(1) + failed(1) + sold(2) = 4 条
+    s._record(dict(ev, status="failed"))
+    s._record(dict(ev, status="sold"))
+    s._record(dict(ev, status="sold"))
+    lines2 = p.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines2) == 4
+    assert '"status": "sold"' in lines2[2] and '"status": "sold"' in lines2[3]
