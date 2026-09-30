@@ -62,7 +62,8 @@ class OkxOptionsBroker(Broker):
     Parameters:
         account: 期权子账号名/label（如 ``DreamShepherdbot1``），空 = 默认账号。
         cost_basis_map: {base: 成本锚 C}——卖 call（covered）保本门用；
-            也可逐单经 ``order.custom_params['cost_basis']`` 覆盖。
+            **逐单经 ``order.custom_params['cost_basis']`` 优先**（自动循环走这条路，
+            因为 C 是每轮由 covered_context 现算的动态值）。
         option_source: lumibot 期权 DataSource（OkxOptionsDataSource）。
     """
 
@@ -82,11 +83,19 @@ class OkxOptionsBroker(Broker):
     def _creds(self) -> dict:
         return oot.account_creds(self.account)
 
-    def _cost_basis_for(self, asset) -> Optional[float]:
+    def _cost_basis_for(self, order) -> Optional[float]:
+        """卖 call 的成本锚 C：逐单 ``order.custom_params['cost_basis']`` 优先，
+        构造期 ``cost_basis_map`` 兼底。
+
+        ⚠️ 必须从 **order** 读（不是 asset）：``Asset`` 上没有 custom_params 约定，
+        早期版本读 ``asset.custom_params`` 永远为空 → 逐单通道形同死代码，
+        自动卖 call 每轮因缺 C 被保本门 fail-closed（2026-09-30 实测）。
+        """
+        asset = getattr(order, "asset", None)
         base = str(getattr(asset, "symbol", "") or "").upper()
-        ov = getattr(asset, "custom_params", None)
-        if isinstance(ov, dict) and ov.get("cost_basis"):
-            return float(ov["cost_basis"])
+        cp = getattr(order, "custom_params", None)
+        if isinstance(cp, dict) and cp.get("cost_basis"):
+            return float(cp["cost_basis"])
         v = self._cost_basis_map.get(base)
         return float(v) if v else None
 
@@ -123,7 +132,7 @@ class OkxOptionsBroker(Broker):
                 if right == "C":
                     res = oot.open_call(self.account, inst_id=inst_id, sz=sz,
                                         ord_type=ord_type, px=float(px),
-                                        cost_basis=self._cost_basis_for(asset))
+                                        cost_basis=self._cost_basis_for(order))
                 else:
                     res = oot.open_put(self.account, inst_id=inst_id, sz=sz,
                                        ord_type=ord_type, px=float(px))

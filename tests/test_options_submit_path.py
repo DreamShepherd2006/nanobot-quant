@@ -67,6 +67,57 @@ def test_submit_option_must_call_submit_order(monkeypatch):
     assert (state, err) == ("filled", None)
 
 
+# ─────────────────────── 成本锚 C 随订单下传（2026-09-30 根因） ───────────────────────
+
+def test_submit_option_stamps_cost_basis_for_call(monkeypatch):
+    """卖 call 决策算出的成本锚 C 必须写到 order.custom_params 上（broker 据此校验保本门）。
+
+    2026-09-30 实测：策略算出了 C，但 ``create_order`` 不带 kwarg、也没写
+    custom_params → broker 拿到 None → 自动卖 call 每轮被保本门 fail-closed。
+    """
+    order = _order()
+    order.custom_params = None          # 真实 v4.5.78 默认即 None（写入前需先置 dict）
+    _prepare_submit(monkeypatch, order)
+    dec = types.SimpleNamespace(inst_id=_INST.replace("-P", "-C"), sz=1, cost_basis=122.37)
+
+    state, err = _strategy()._submit_option(dec, {})
+
+    assert order.custom_params == {"cost_basis": 122.37}, "C 必须随订单下传"
+    assert (state, err) == ("filled", None)
+
+
+def test_submit_option_no_cost_basis_key_when_absent(monkeypatch):
+    """卖 put（无 C）不得凭空塞 cost_basis；买回（closing）同样不塞。"""
+    order = _order()
+    _prepare_submit(monkeypatch, order)
+    _strategy()._submit_option(types.SimpleNamespace(inst_id=_INST, sz=1), {})
+    assert "cost_basis" not in order.custom_params
+
+    order2 = _order()
+    _prepare_submit(monkeypatch, order2)
+    _strategy()._submit_option(
+        types.SimpleNamespace(inst_id=_INST, sz=1, cost_basis=122.37), {}, closing=True)
+    assert "cost_basis" not in order2.custom_params
+
+
+def test_broker_reads_cost_basis_from_order_not_asset(monkeypatch):
+    """broker 侧：C 从 order.custom_params 读（旧代码读 asset → 永远为空）。"""
+    from nanobot_quant.brokers.okx_options_broker import OkxOptionsBroker
+
+    class _Asset:
+        symbol = "SOL"
+        custom_params = {"cost_basis": 999.0}   # asset 上的同名值不得生效
+
+    b = OkxOptionsBroker.__new__(OkxOptionsBroker)
+    b._cost_basis_map = {"SOL": 101.0}
+    assert b._cost_basis_for(types.SimpleNamespace(
+        asset=_Asset(), custom_params={"cost_basis": 122.37})) == 122.37
+    # order 上没有 → 回退构造期 map（兼容手动建 broker 的老用法）
+    assert b._cost_basis_for(types.SimpleNamespace(asset=_Asset(), custom_params=None)) == 101.0
+    b._cost_basis_map = {}
+    assert b._cost_basis_for(types.SimpleNamespace(asset=_Asset(), custom_params=None)) is None
+
+
 # ─────────────────────── 三档判定 ───────────────────────
 
 @pytest.mark.parametrize("raw", ["pending", "unknown", "live", "open",

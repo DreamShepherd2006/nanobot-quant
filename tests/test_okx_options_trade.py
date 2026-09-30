@@ -7,6 +7,7 @@ mock 对象替代 okx_sdk.public/market/trade_for/account_for 与凭证存储，
 
 import time
 from datetime import datetime, timezone
+import threading
 
 import pytest
 
@@ -21,9 +22,18 @@ from nanobot_quant.okx_sdk import OkxSdkError
 # ── fixtures ──────────────────────────────────────────────
 
 class _FakeInst:
-    """mock public().get_instruments(instType=OPTION, instId=...)"""
+    """mock public().get_instruments —— OPTION 返回合约规格、SPOT 返回现货对精度。
+
+    注意：instruments 属于 `okx_sdk.public()`（Public）；`market()` **没有**
+    `get_instruments`（2026-09-30 实盘首跑自动补买时由 AttributeError 实证）。
+    """
 
     def get_instruments(self, instType=None, instId=None, **kw):
+        if instType == "SPOT":
+            # 现货对精度（spot_limits 用）：SOL-USDC 实测 lotSz/minSz=0.001、tickSz=0.01
+            return {"code": "0", "data": [{
+                "instId": instId, "lotSz": "0.001", "minSz": "0.001", "tickSz": "0.01",
+            }]}
         parts = instId.split("-")
         stk, typ = parts[-2], parts[-1]
         return {"code": "0", "data": [{
@@ -37,13 +47,6 @@ class _FakeMarket:
     def get_ticker(self, instId=None, **kw):
         return {"code": "0", "data": [{
             "instId": instId, "bidPx": "100.0", "askPx": "110.0", "last": "105.0",
-        }]}
-
-    def get_instruments(self, instType=None, instId=None, **kw):
-        # 现货对精度（spot_limits 用）：SOL-USDC 实测 lotSz/minSz = 0.001
-        return {"code": "0", "data": [{
-            "instId": instId, "lotSz": "0.001", "minSz": "0.001",
-            "tickSz": "0.01",
         }]}
 
     def get_books(self, instId=None, sz=None, **kw):
@@ -1310,9 +1313,11 @@ def test_settle_put_px_equal_strike_still_otm(_mock_sdk, _patch_entry):
 
 
 def test_spot_pair_of():
-    assert ot.spot_pair_of("SOL-USD_UM-260909-106-C") == "SOL-USD"
-    assert ot.spot_pair_of("BTC-USD_UM-260904-80000-P") == "BTC-USD"
-    # XAU 的现货标的是 XAUT（Tether Gold）→ OKX 现货对 XAUT-USDT
+    # 2026-09-30 08:00 UTC 起 Crypto-USDⓢ 现货对已下架（除 USDT-USDⓢ）→ 一律走 USDC 对
+    assert ot.spot_pair_of("SOL-USD_UM-260909-106-C") == "SOL-USDC"
+    assert ot.spot_pair_of("BTC-USD_UM-260904-80000-P") == "BTC-USDC"
+    assert ot.spot_pair_of("ETH-USD_UM-260904-3000-P") == "ETH-USDC"
+    # XAU 的现货标的是 XAUT（Tether Gold）→ OKX 现货对 XAUT-USDT（未受迁移影响）
     assert ot.spot_pair_of("XAU-USD_UM-260904-4000-P") == "XAUT-USDT"
     assert ot.spot_pair_of("") == ""
 
@@ -1391,9 +1396,77 @@ def test_spot_limits_floors_to_lot(monkeypatch):
     assert lim["err"] == ""
 
 
+def test_resolve_spot_inst_server_side_wins():
+    """下单用现货对以服务端解析为准（2026-09-30 页面旧公式传 SOL-USD 致 51087）。"""
+    assert ot.resolve_spot_inst("SOL-USD_UM-260930-123-P", "SOL-USD") == "SOL-USDC"
+    assert ot.resolve_spot_inst("SOL-USD_UM-260930-123-P", "") == "SOL-USDC"
+    assert ot.resolve_spot_inst("XAU-USD_UM-260930-4000-P", "XAU-USD") == "XAUT-USDT"
+    # inst_id 缺失时退回调用方传入值（兼容旧调用）
+    assert ot.resolve_spot_inst("", "SOL-USDC") == "SOL-USDC"
+    assert ot.resolve_spot_inst("", "") == ""
+
+
 def test_spot_limits_without_spot_pair():
     lim = ot.spot_limits("bot1", "")
     assert lim["err"] and lim["sellable"] == 0.0
+
+
+def test_save_ledger_survives_concurrent_writers(monkeypatch, tmp_path):
+    """并发写台账不得互搬 tmp、不得丢失更新（2026-09-30 手动平仓 500 根因）。
+
+    现场：固定 tmp 名 + 无锁，策略循环线程与 HTTP handler 并发
+    → FileNotFoundError: '…okx_options_ledger.json.tmp' -> '…json'。
+    """
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    errs: list = []
+
+    def _add(i):
+        try:
+            ot.add_ledger(kind="open_put", seq=i)
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    ts = [threading.Thread(target=_add, args=(i,)) for i in range(16)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert errs == [], f"并发写报错：{errs[:1]}"
+    assert len(ot.load_ledger()) == 16, "丢失更新（读-改-写未串行）"
+
+
+def test_atomic_write_retries_on_fuse_jitter(monkeypatch, tmp_path):
+    """FUSE（/data 是 hf-mount）抖动：replace 失败一次 → 重试后成功。"""
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    real_replace = ot.os.replace
+    calls = {"n": 0}
+
+    def _flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ot.os, "replace", _flaky)
+    ot.save_ledger([{"id": "x", "status": "open"}])
+    assert calls["n"] >= 2, "未重试"
+    assert ot.load_ledger()[0]["id"] == "x"
+
+
+def test_spot_limits_instruments_from_public_api(monkeypatch):
+    """现货精度必须经 `okx_sdk.public()` 取 —— `market()` 没有 get_instruments。
+
+    回归用例：2026-09-30 自动补买首跑真实挂单前暴露
+    `AttributeError: 'Market' object has no attribute 'get_instruments'`
+    → 每轮 COVER 跳过（fail-closed、补买落不了地）。
+    本用例严格跑真实函数体（只换 SDK 层），因此桩必须与真实库同形：
+    `_FakeInst`（public）带 SPOT 分支，`_FakeMarket` 不带 get_instruments。
+    """
+    _patch_balances(monkeypatch)
+    lim = ot.spot_limits("bot1", "SOL-USD", 101.66)
+    assert lim["err"] == "", f"现货精度取数失败：{lim['err']}"
+    assert lim["lot_sz"] == pytest.approx(0.001)
+    assert lim["tick_sz"] == pytest.approx(0.01)
 
 
 def test_exit_prefill_caps_qty_to_avail(monkeypatch):

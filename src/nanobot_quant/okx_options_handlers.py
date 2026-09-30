@@ -841,11 +841,12 @@ def register_okx_options_routes(app, gatekeeper) -> None:
         if jerr:
             return JSONResponse({"ok": False, "error": jerr})
         account = (body.get("account") or "").strip()
-        spot_inst = (body.get("spot_inst") or "").strip().upper()
+        # 现货对以服务端解析为准（单一来源）：前端传值仅当 inst_id 缺失时作兼底
+        spot_inst = ot.resolve_spot_inst(body.get("inst_id") or "", body.get("spot_inst") or "")
         base_qty = _num(body, "base_qty")
         quote_amt = _num(body, "quote_amt")
         if not spot_inst:
-            return JSONResponse({"ok": False, "error": "缺少 spot_inst（现货交易对，如 BTC-USDC）"})
+            return JSONResponse({"ok": False, "error": "缺少 spot_inst（现货交易对，如 SOL-USDC）"})
         if (base_qty is None or base_qty <= 0) and (quote_amt is None or quote_amt <= 0):
             return JSONResponse({"ok": False, "error": "需指定 base_qty 或 quote_amt"})
         prev = {"spot_inst": spot_inst, "base_qty": base_qty, "quote_amt": quote_amt,
@@ -885,11 +886,12 @@ def register_okx_options_routes(app, gatekeeper) -> None:
             return JSONResponse({"ok": False, "error": jerr})
         account = (body.get("account") or "").strip()
         inst_id = (body.get("inst_id") or "").strip().upper()
-        spot_inst = (body.get("spot_inst") or "").strip().upper()
+        # 现货对以服务端解析为准（单一来源）——与补买同规则
+        spot_inst = ot.resolve_spot_inst(inst_id, body.get("spot_inst") or "")
         base_qty = _num(body, "base_qty")
         quote_amt = _num(body, "quote_amt")
         if not spot_inst:
-            return JSONResponse({"ok": False, "error": "缺少 spot_inst（现货交易对，如 SOL-USD）"})
+            return JSONResponse({"ok": False, "error": "缺少 spot_inst（现货交易对，如 SOL-USDC）"})
         if (base_qty is None or base_qty <= 0) and (quote_amt is None or quote_amt <= 0):
             return JSONResponse({"ok": False, "error": "需指定 base_qty 或 quote_amt"})
         prev = {"spot_inst": spot_inst, "base_qty": base_qty, "quote_amt": quote_amt,

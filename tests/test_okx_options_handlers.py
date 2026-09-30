@@ -409,6 +409,27 @@ def test_page_labels_pending_confirm_not_failure():
     assert "订单未成交" in b                         # 非 filled 一律不报成功
 
 
+def test_page_cover_sends_inst_id_and_no_usd_spot_pair():
+    """现货对不得由前端定稿（2026-09-30 51087 根因）。
+
+    OKX 当日 08:00 UTC 下架 Crypto-USDⓢ 现货对后，页面旧公式 `famBase + "-USD"`
+    把已下架的对传给 /cover/start → 挂单 51087。现在：① 页面一律走 -USDC；
+    ② 补买下单体带上 inst_id，服务端按 inst_id 重新解析（单一来源）；
+    ③ 后端解析值回写弹窗文案（mSpotPair）。
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+    h = (root / "okx_options_page.html").read_text(encoding="utf-8")
+    assert 'famBase + "-USD"' not in h
+    assert h.count('famBase + "-USDC"') >= 2          # 补买 + 出货
+    assert 'spot_inst: spotUse, inst_id: modalInst' in h  # 下单体带 inst_id
+    assert "coverSpot = j.spot_inst" in h and 'id=\\"mSpotPair\\"' in h
+    t = (root / "okx_options_trade.py").read_text(encoding="utf-8")
+    assert "def resolve_spot_inst(" in t
+    d = (root / "okx_options_handlers.py").read_text(encoding="utf-8")
+    assert d.count("ot.resolve_spot_inst(") == 2       # 补买 + 出货两条路径
+
+
 def test_page_labels_skipped_not_failure():
     """skipped_* 必须显示「⏭ 已跳过」并渲染 note/reason（2026-09-30）。
 

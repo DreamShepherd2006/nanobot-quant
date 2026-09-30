@@ -1094,6 +1094,7 @@ const overlay = $("modalOverlay");
 let modalMode = null;      // sell | close | cover
 let modalInst = null;      // 期权 inst_id 或 spot_inst
 let exitSpot = null;       // 出货用现货对（后端 prefill 可覆盖）
+let coverSpot = null;      // 补买用现货对（后端 prefill 为准；下单后端还会再解析）
 let modalPayload = null;   // preview/sell/close 上下文
 let modalOpt = "P";        // sell 模式：P（卖 put）| C（卖 call covered）
 let coveredCtx = null;     // covered 上下文（现货可用/可卖张数/成本锚建议）
@@ -1248,12 +1249,12 @@ function openClose(instId) {
   $("mGo").onclick = () => doClose();
 }
 function openCover(instId, szArg) {
-  modalMode = "cover"; modalInst = instId;
+  modalMode = "cover"; modalInst = instId; coverSpot = null;
   const famBase = (instId || "").split("-")[0]; // 基础币：SOL/BTC/ETH/XAU（期权家族 _UM 段不参与）
-  // 现货对：默认 币种-USD（官网 SOL/USDⓈ）；XAU 的现货标的是 XAUT（Tether Gold）→ XAUT-USDT
-  // （与后端 okx_options_trade._SPOT_PAIR 一致）；SOL-USDC 2026-09-23 才开放、现在下单 51155 合规拒
-  let spot = famBase === "XAU" ? "XAUT-USDT" : famBase + "-USD";
-  $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 到期 ITM 现金结算后的现货补买 → 现货对 <b>" + esc(spot) + "</b>（市价单）";
+  // 现货对：仅作**展示兼底** —— 下单时后端按 inst_id 重新解析（单一来源）。
+  // 2026-09-30 08:00 UTC 起 OKX 下架 Crypto-USDⓢ 现货对，已改走 币种-USDC。
+  let spot = famBase === "XAU" ? "XAUT-USDT" : famBase + "-USDC";
+  $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 到期 ITM 现金结算后的现货补买 → 现货对 <b id=\"mSpotPair\">" + esc(spot) + "</b>（市价单）";
   $("mRowSz").style.display = "none"; $("mRowType").style.display = "none"; $("mRowPx").style.display = "none";
   $("mRowAmt").style.display = ""; $("mRowQty").style.display = "";
   $("mAmt").value = ""; $("mQty").value = "";
@@ -1271,6 +1272,10 @@ async function prefillCover(instId, szArg, spot) {
       encodeURIComponent(instId) + "&sz=" + encodeURIComponent(szArg || "1") +
       "&account=" + encodeURIComponent((accSel && accSel.value) || ""))).json();
     if (!j.ok) throw new Error(j.error || "HTTP " + j.status);
+    if (j.spot_inst && j.spot_inst !== spot) {   // 后端解析为准（与下单同源）
+      coverSpot = j.spot_inst;
+      const el = $("mSpotPair"); if (el) el.textContent = j.spot_inst;
+    }
     const srcTxt = {spot: "现货现价", settle: "结算价", strike: "行权价"}[j.px_src] || "";
     if (j.qty) { $("mQty").value = j.qty; $("mAmt").value = (j.amount || j.qty * j.px).toFixed(2); }
     $("mSpec").innerHTML += "<div class=\"hint\">预填：数量 = 行权面值 × 张数（" + j.qty + "）；金额 = 数量 × " + srcTxt + " " +
@@ -1288,8 +1293,8 @@ async function prefillCover(instId, szArg, spot) {
 function openExit(instId, szArg) {
   modalMode = "exit"; modalInst = instId; exitSpot = null;
   const famBase = (instId || "").split("-")[0]; // 基础币：SOL/BTC/ETH/XAU
-  // 现货对：默认 币种-USD；XAU 的现货标的是 XAUT（Tether Gold）→ XAUT-USDT
-  let spot = famBase === "XAU" ? "XAUT-USDT" : famBase + "-USD";
+  // 现货对：仅作展示兼底 —— 下单时后端按 inst_id 重新解析（与补买同规则）
+  let spot = famBase === "XAU" ? "XAUT-USDT" : famBase + "-USDC";
   $("mSpec").innerHTML = "<b>" + esc(instId) + "</b> 到期被行权（ITM）后的现货出货 → 现货对 <b>" + esc(spot) + "</b>（市价卖出 ≈ 等效按 K 出货，把 covered 组合闭回无持仓）";
   $("mRowSz").style.display = "none"; $("mRowType").style.display = "none"; $("mRowPx").style.display = "none";
   $("mRowAmt").style.display = ""; $("mRowQty").style.display = "";
@@ -1520,12 +1525,13 @@ async function doCover(spot) {
   if ((!qty || qty <= 0) && (!amt || amt <= 0)) {
     const b = $("mErr"); b.textContent = "❌ 需填写补买金额或数量"; b.style.display = "block"; return;
   }
-  const f = {account: accSel.value || "", spot_inst: spot};
+  const spotUse = coverSpot || spot;   // prefill 已用后端解析值覆盖；下单后端再解析一次
+  const f = {account: accSel.value || "", spot_inst: spotUse, inst_id: modalInst || ""};
   if (qty && qty > 0) f.base_qty = qty;
   else f.quote_amt = amt;
   try {
     const s = await jpost("/config/okx-options/cover/start", f);
-    const ok = confirm("确认现货补买 " + spot + (qty && qty > 0 ? " × " + qty : " 金额 $" + amt) + "？\n（市价单，30 秒内有效）");
+    const ok = confirm("确认现货补买 " + spotUse + (qty && qty > 0 ? " × " + qty : " 金额 $" + amt) + "？\n（市价单，30 秒内有效）");
     if (!ok) return;
     const j = await jpost("/config/okx-options/cover/confirm", {tx_id: s.stage.tx_id});
     $("mPreview").innerHTML = "✅ 补买已提交：状态 " + esc(j.entry.status);
