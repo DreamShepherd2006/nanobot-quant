@@ -282,6 +282,63 @@ def collateral_ratio_pct() -> int:
         "collateral_ratio_pct", DEFAULT_COLLATERAL_RATIO_PCT)
 
 
+def collateral_required(strike, lot, sz, ratio: Optional[float] = None) -> float:
+    """全损担保目标（USD）= strike × 每张面值 × 张数 × 比例%。
+
+    比例缺省取「⚙️ 担保设置」的 collateral_ratio_pct（默认 100 = 全损；0 = 关闭）。
+    **开仓前置门与成交后自动追保共用本公式**（单一口径，不两处各写一遍）。
+    """
+    r = float(collateral_ratio_pct() if ratio is None else ratio)
+    return round(float(strike) * float(lot) * float(sz) * r / 100.0, 2)
+
+
+def _margin_unsettled_rows() -> list:
+    """台账中「成交后自动追保失败」的 open 行（担保未到位）。"""
+    return [e for e in load_ledger()
+            if e.get("status") == "open"
+            and "追加失败" in str(e.get("margin_note") or "")]
+
+
+def _assert_put_cash_collateral(account: str, spec: dict, sz: int) -> None:
+    """卖 put 的**执行层**前置门（fail-closed；2026-09-30 由策略层下沉至此）。
+
+    动因：该门原先只装在自动循环的策略决策层（evaluate_entry(cash_avail=…)），
+    页面手动卖 put（handlers → open_put）绕过它 —— 实测出现过「可用 USDC 远小于
+    全损担保仍然成交，事后靠人工补保证金」。门下沉到 _open_option 后，自动循环、
+    页面手动、以后任何新入口都必须过同一道门。
+
+    ① **现金担保门**：可用 USDC ≥ 全损担保目标（strike×面值×张数×比例%）。比例随
+       「⚙️ 担保设置」走（默认 100；调低则门槛同步放宽，0 = 关闭本门，仅交易所 IM
+       兜底）。余额查询失败一律拒绝，不按「够」假设放行。
+    ② **未到位担保门**：台账存在 margin_note=「追加失败…」的 open 行时拒绝新开仓
+       —— 那笔仓位本身已有强平路径，不允许继续加仓。
+    """
+    stuck = _margin_unsettled_rows()
+    if stuck:
+        rows = "、".join(str(e.get("inst_id")) for e in stuck[:3])
+        raise OkxSdkError(
+            f"担保未到位门不通过（fail-closed，不下单）：台账存在 {len(stuck)} 笔"
+            f"「成交后自动追保失败」的 open 仓位（{rows}）—— 该仓位担保未达目标、"
+            "存在强平路径（保证金追加被交易所拒绝或资金不足），请先在 OKX 手动补足"
+            "保证金或平掉该仓，再开新仓。")
+    need = collateral_required(spec["strike"], spec["lot"], sz)
+    if need <= 0:
+        return                     # 比例 0%（自动追加已关闭）→ 本门随之关闭
+    try:
+        avail = float(usdc_avail(account))
+    except Exception as e:  # noqa: BLE001 —— 查不到余额一律不卖（不用「够」假设）
+        raise OkxSdkError(
+            f"现金担保门不通过（fail-closed，不下单）：可用 USDC 查询失败"
+            f"（{type(e).__name__}: {e}）—— 无法核对现金时一律不卖 put。") from e
+    if avail < need - 1e-9:
+        raise OkxSdkError(
+            f"现金担保门不通过（fail-closed，不下单）：可用 USDC ${avail:.2f} < "
+            f"全损担保 ${need:.2f}（= strike {spec['strike']:g} × 面值 {spec['lot']:g}"
+            f" × {sz} 张 × {collateral_ratio_pct():g}%）。"
+            "足额现金担保是「无强平路径」的前提；请先划入资金，"
+            "或到「⚙️ 担保设置」调低比例后再卖 put。")
+
+
 def _new_id() -> str:
     return f"{int(time.time()*1000):x}{secrets.token_hex(3)}"
 
@@ -1097,6 +1154,9 @@ def _open_option(account: str, *, inst_id: str, sz: int,
             f"（opt_type={spec['opt_type']}，请选 {'P' if want == 'P' else 'C'} 侧合约）")
     if int(sz) <= 0:
         raise OkxSdkError("张数 sz 必须为正整数")
+    if kind == "open_put":
+        # 现金担保 + 未到位担保前置门（fail-closed；2026-09-30 下沉到执行层）
+        _assert_put_cash_collateral(account or a["label"], spec, int(sz))
     if kind == "open_call":
         # covered 门（fail-closed，后端强制）：现货不足 = 裸空 call，一律拒绝。
         # 累计口径（2026-09-24 修）：必须减去**已在仓的 short call 张数** —— 否则
@@ -1232,7 +1292,7 @@ def _ensure_collateral(creds: dict, entry: dict) -> Optional[dict]:
             lambda x: x["id"] == entry["id"],
             collateral_usd=None, margin_added=None,
             margin_note="自动担保已关闭（比例 0%，仅平台 IM 冻结）")
-    target = round(strike * lot * filled * ratio / 100.0, 2)
+    target = collateral_required(strike, lot, filled, ratio)
     if target <= 0:
         return None
     cur, _mgn_mode = _position_margin(creds, entry["inst_id"])

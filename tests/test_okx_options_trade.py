@@ -158,6 +158,8 @@ def _mock_sdk(monkeypatch, tmp_path):
     monkeypatch.setattr(ot.okx_sdk, "account_for", lambda creds: fake_account)
     monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
     monkeypatch.setattr(ot, "params_path", lambda: tmp_path / "okx_options_params.json")
+    # 计价币可用额：默认资金充足（卖 put 现金担保门的单测自行改写为不足/报错）
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 1_000_000.0)
     fake_trade.account = fake_account
     return fake_trade
 
@@ -1625,3 +1627,96 @@ def test_resolve_pending_is_silent_without_rows(monkeypatch, tmp_path):
     ot.add_ledger(kind="open_put", account="default", inst_id="X",
                   side="sell", sz=1, status="open")
     assert ot.resolve_pending("default") == []
+
+
+# ── 卖 put 现金担保前置门（执行层，2026-09-30）────────────
+
+def test_open_put_rejected_when_cash_below_collateral(_mock_sdk, _patch_entry, monkeypatch):
+    """可用 USDC < 全损担保 → 执行层直接拒绝：不下单、不落台账、不追保。
+
+    动因（实盘实测）：该门原先只装在自动循环的策略层，页面手动卖 put
+    （handlers → open_put）绕过它 —— 出现「可用 USDC 远小于全损担保仍然成交，
+    事后靠人工补保证金」。
+    """
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 100.0)   # BTC 80000-P 全损担保 = 800
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    msg = str(ei.value)
+    assert "现金担保门不通过" in msg
+    assert "100.00" in msg and "800.00" in msg
+    assert _mock_sdk.calls == []                  # 未构造下单
+    assert ot.load_ledger() == []                 # 无 phantom 台账
+    assert _mock_sdk.account.margin_calls == []   # 也未追保
+
+
+def test_open_put_allowed_at_exact_collateral(_mock_sdk, _patch_entry, monkeypatch):
+    """恰好足额 → 放行（边界：>= 全损担保）。"""
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 800.0)
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert e["status"] == "open"
+
+
+def test_open_put_cash_gate_follows_collateral_ratio(_mock_sdk, _patch_entry, monkeypatch):
+    """门槛随「⚙️ 担保设置」比例缩放：50% → 400；0% → 本门关闭（仅交易所 IM）。"""
+    ot.save_option_params(collateral_ratio_pct=50)
+    assert ot.collateral_required(80000.0, 0.01, 1) == pytest.approx(400.0)
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 399.0)
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert "400.00" in str(ei.value)
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 400.0)
+    assert ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                       ord_type="limit", px=110.0)["status"] == "open"
+    # 比例 0 = 关闭自动追加 ⇒ 前置门随之关闭（语义自知：仅平台 IM 兜底）
+    ot.save_option_params(collateral_ratio_pct=0)
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 0.0)
+    assert ot.open_put("bot1", inst_id="BTC-USD_UM-260904-82000-P", sz=1,
+                       ord_type="limit", px=50.0)["status"] == "open"
+
+
+def test_open_put_cash_gate_fail_closed_on_balance_error(_mock_sdk, _patch_entry, monkeypatch):
+    """余额查询失败 → 拒绝（不按「够」假设放行）。"""
+    def _boom(account=""):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(ot, "usdc_avail", _boom)
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert "查询失败" in str(ei.value) and _mock_sdk.calls == []
+
+
+def test_open_put_blocked_by_unsettled_margin_row(_mock_sdk, _patch_entry):
+    """台账有「追保失败」的 open 行 → 拒绝新开仓（先补担保或平仓）。"""
+    ot.add_ledger(kind="open_put", account="bot1",
+                  inst_id="SOL-USD_UM-260930-123-P", side="sell", sz=1,
+                  status="open",
+                  margin_note="追加失败（仓位已开，担保未到位）: 59301 ...")
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    msg = str(ei.value)
+    assert "担保未到位门不通过" in msg and "SOL-USD_UM-260930-123-P" in msg
+    assert _mock_sdk.calls == []
+
+
+def test_open_put_not_blocked_by_disabled_auto_margin(_mock_sdk, _patch_entry):
+    """「自动担保已关闭（比例 0%）」的 open 行不算未到位（那是显式选择）。"""
+    ot.add_ledger(kind="open_put", account="bot1",
+                  inst_id="SOL-USD_UM-260930-123-P", side="sell", sz=1,
+                  status="open",
+                  margin_note="自动担保已关闭（比例 0%，仅平台 IM 冻结）")
+    e = ot.open_put("bot1", inst_id="BTC-USD_UM-260904-80000-P", sz=1,
+                    ord_type="limit", px=110.0)
+    assert e["status"] == "open"
+
+
+def test_open_call_not_gated_by_put_cash_gate(_mock_sdk, _patch_entry, monkeypatch):
+    """卖 call 的担保是现货（covered）+ 成本锚，不适用卖 put 的现金担保门。"""
+    monkeypatch.setattr(ot, "usdc_avail", lambda account="": 0.0)
+    with pytest.raises(OkxSdkError) as ei:
+        ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                     ord_type="limit", px=10.0)
+    assert "现金担保门" not in str(ei.value)
