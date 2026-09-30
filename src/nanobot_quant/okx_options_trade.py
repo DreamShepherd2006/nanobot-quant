@@ -509,6 +509,24 @@ def _floor_step(value: float, step: float) -> float:
     return round(max(0.0, v), 10)
 
 
+def floor_to_tick(px: float, tick: float) -> float:
+    """把价格**向下**取整到交易所最小变动单位（``tickSz``）。
+
+    OKX 现货要求 ``px`` 是 ``tickSz`` 的整数倍；**合成价**（如补买目标价 =
+    结算价×(1−折让%)）不是自然对齐的，直接下发会被以「价格精度」拒单
+    （2026-09-30 定位：自动补买 limit 模式的首个真实风险点）。
+    向下取整对买单更保守——限价只会更低，绝不会比预期贵。
+    ``tick`` 缺失/≤0（如取数失败）时原样透传（由交易所裁决）。
+    """
+    t = float(tick or 0.0)
+    if t <= 0:
+        return round(float(px), 8)
+    # 先 round 商再 floor：消掉浮点误差（117.86/0.01 = 11785.999999999998），
+    # 避免「恰好整 tick」被误琢一档。
+    n = int(math.floor(round(float(px) / t, 9)))
+    return round(t * max(n, 0), 8)
+
+
 def spot_limits(account: str = "", spot_inst: str = "",
                 px: Optional[float] = None) -> dict:
     """现货出货/补买上下文（只读）：可用余额 + 交易对精度 → 可卖/可买量。
@@ -516,6 +534,7 @@ def spot_limits(account: str = "", spot_inst: str = "",
     - avail：基础币可用余额（出货的可卖上限来源）
     - quote_avail：计价币（USDC）可用（补买的金额上限来源）
     - lot_sz/min_sz：OKX public instruments 的数量步进/最小下单量
+    - tick_sz：OKX public instruments 的价格最小变动单位（合成价下发前须先向下取整）
     - sellable：按 lot_sz 向下取整后的最大可卖量（≤ avail）
     - buyable_qty：quote_avail ÷ px 再按 lot_sz 向下取整（px 缺失 → None）
 
@@ -526,6 +545,7 @@ def spot_limits(account: str = "", spot_inst: str = "",
     quote = "USDC"   # 统一 USD 订单簿以 USDC 结算（Crypto-USDC 对 2026-09-23 上架）
     out = {"spot_inst": spot_inst, "base": base, "quote": quote,
            "avail": 0.0, "quote_avail": 0.0, "lot_sz": 0.0, "min_sz": 0.0,
+           "tick_sz": 0.0,
            "sellable": 0.0, "buyable_qty": None, "err": ""}
     if not base or not spot_inst:
         out["err"] = "缺少现货对"
@@ -536,6 +556,7 @@ def spot_limits(account: str = "", spot_inst: str = "",
         r = rows[0] if isinstance(rows, list) and rows else {}
         out["lot_sz"] = _f(r.get("lotSz"))
         out["min_sz"] = _f(r.get("minSz"))
+        out["tick_sz"] = _f(r.get("tickSz"))
     except (okx_sdk.OkxSdkError, RuntimeError) as e:
         out["err"] = f"交易对精度查询失败：{e}"
     try:
@@ -2626,6 +2647,15 @@ def _cover_row(account: str, row: dict, *, cp: dict, dry_run: bool, now: float,
     if target <= 0:
         res.update(action="skip", reason="目标价非法 → fail-closed")
         return res
+    # 合成价（结算价×折让）不是自然 tick 对齐的 → 向下取整到 tickSz 再下发，
+    # 否则 OKX 会以「价格精度」拒单（2026-09-30）。取整后日志/台账口径一致。
+    target = floor_to_tick(target, lim.get("tick_sz"))
+    if target <= 0:
+        res.update(action="skip",
+                   reason=(f"目标价按 tick（{lim.get('tick_sz') or 0:g}）向下取整后不足一档"
+                           " → fail-closed（不挂单）"))
+        return res
+    res["target_px"] = target
     try:
         entry = spot_cover_limit(a["label"], spot_inst=spot_inst, px=target,
                                  base_qty=qty, ref_id=str(row.get("id") or ""))

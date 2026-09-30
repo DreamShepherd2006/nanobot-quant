@@ -1382,6 +1382,7 @@ def test_spot_limits_floors_to_lot(monkeypatch):
     _patch_balances(monkeypatch)
     lim = ot.spot_limits("bot1", "SOL-USD", 101.66)
     assert lim["lot_sz"] == pytest.approx(0.001)
+    assert lim["tick_sz"] == pytest.approx(0.01), "价格步进必须透出（限价下发前 tick 对齐用）"
     assert lim["avail"] == pytest.approx(0.0999)
     # 2026-09-14 实测：补买 0.1% 手续费使到账 0.0999 → 按 0.001 步进下取整 = 0.099
     assert lim["sellable"] == pytest.approx(0.099)
