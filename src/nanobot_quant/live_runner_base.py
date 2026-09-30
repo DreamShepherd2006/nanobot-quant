@@ -46,6 +46,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from . import event_log
+
 # 优雅停止：等待当前业务轮结束的最长时间（秒）。超时不强杀，只放弃等待。
 STOP_WAIT_TIMEOUT = 90.0
 
@@ -117,12 +119,19 @@ class LiveRunnerBase:
         return self.storage_dir() / self.EVENTS_NAME
 
     def _append_event(self, event: dict) -> None:
-        """append-only 落盘；失败静默（事件是 UX 信息，不阻塞业务）。"""
+        """append-only 落盘；失败静默（事件是 UX 信息，不阻塞业务）。
+
+        同类「无动作」事件（skipped_* / failed / pending_confirm / dry_run* …）
+        按 (inst_id, type, status) 抑制重复 —— 首条必记、之后至少间隔 1 小时，
+        避免到期日一天几百条同类噪音淹掉真事件（见 event_log）。
+        """
         try:
-            p = self.events_path()
-            p.parent.mkdir(parents=True, exist_ok=True)
             row = dict(event or {})
             row.setdefault("ts", _utc_now())
+            if not event_log.should_log_event(row):
+                return
+            p = self.events_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:

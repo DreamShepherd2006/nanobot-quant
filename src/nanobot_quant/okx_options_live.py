@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import event_log
 from . import okx_options_trade as ot
 from .live_runner_base import STOP_WAIT_TIMEOUT, LiveRunnerBase
 
@@ -86,6 +87,8 @@ def _utc_now() -> str:
 
 
 def _append_event(ev: dict) -> None:
+    if not event_log.should_log_event(ev):
+        return
     p = events_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:

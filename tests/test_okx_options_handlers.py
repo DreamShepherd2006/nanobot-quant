@@ -407,3 +407,18 @@ def test_page_labels_pending_confirm_not_failure():
     assert "def resolve_pending(" in t and "def has_pending_ledger(" in t
     b = (root / "brokers" / "okx_options_broker.py").read_text(encoding="utf-8")
     assert "订单未成交" in b                         # 非 filled 一律不报成功
+
+
+def test_page_labels_skipped_not_failure():
+    """skipped_* 必须显示「⏭ 已跳过」并渲染 note/reason（2026-09-30）。
+
+    此前渲染兜底分支把一切非 sold/bought_back/pending_confirm/dry_run 的状态
+    打成「❌ 失败」，且只渲染 error、不渲染 note —— 到期日的
+    「已到期，不提交买回」看起来像故障且看不到原因。
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "src" / "nanobot_quant"
+    h = (root / "okx_options_page.html").read_text(encoding="utf-8")
+    assert 'st.indexOf("skipped") === 0 ? "⏭ 已跳过"' in h
+    assert "e.note" in h and "e.reason" in h
+    assert "「跳过」必须能看到为什么" in h

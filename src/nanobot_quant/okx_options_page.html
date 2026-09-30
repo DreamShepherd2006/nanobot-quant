@@ -1716,12 +1716,18 @@ function renderLiveEvents(evs) {
       const label = st.indexOf("dry_run") === 0
         ? (isEntry ? "🖐 打算卖" : "🖐 打算买回")
         : (st === "sold" || st === "bought_back" ? "✅ " + (isEntry ? "已卖" : "已买回")
-          : (st === "pending_confirm" ? "⏳ 待确认（未定案单，不重复提交）" : "❌ 失败"));
+          : (st === "pending_confirm" ? "⏳ 待确认（未定案单，不重复提交）"
+            : (st.indexOf("skipped") === 0 ? "⏭ 已跳过" : "❌ 失败")));
       const expired = instExpired(e.inst_id);     // 已过到期时刻的历史意图：淡化 + 打标
+      // 原因渲染：error（红）> note（琥珀，人可读）> reason（灰，机读码）
+      //  —— 「跳过」必须能看到为什么，不能只剩一个 ❌
+      const why = e.error ? "<span style='color:#c62828'>" + esc(e.error) + "</span>"
+        : (e.note ? "<span style='color:#8a6d3b'>" + esc(e.note) + "</span>"
+          : (e.reason ? "<span style='color:#777'>" + esc(e.reason) + "</span>" : ""));
       return "<div style='padding:3px 0" + (expired ? ";opacity:.55" : "") + "'>" + icon + " " + label + " · " + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " +
         locTs(Date.parse(e.ts)) +
         (expired ? " · <span class='itm-tag' title='该合约已过到期时刻（08:00 UTC），此条仅为历史记录'>已到期</span>" : "") +
-        (e.error ? " · <span style='color:#c62828'>" + esc(e.error) + "</span>" : "") + "</div>";
+        (why ? " · " + why : "") + "</div>";
     }).join("");
   }
   if (covs.length) {
