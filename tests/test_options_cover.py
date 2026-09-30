@@ -25,7 +25,8 @@ HOUR = 3600.0
 def env(tmp_path, monkeypatch):
     """隔离台账/参数路径 + mock 下单与取价；返回记录器。"""
     rec = {"cover_calls": [], "limit_calls": [], "cancel_calls": [],
-           "balance": {"lot_sz": 0.001, "min_sz": 0.001, "quote_avail": 1000.0},
+           "balance": {"lot_sz": 0.001, "min_sz": 0.001, "quote_avail": 1000.0,
+                       "tick_sz": 0.01},
            "ask": 120.0, "ord_state": {"status": "open", "avg_px": 0.0, "acc_fill_sz": 0.0}}
     monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
     monkeypatch.setattr(ot, "params_path", lambda: tmp_path / "okx_options_params.json")
@@ -373,3 +374,42 @@ def test_auto_cover_signal_error_does_not_kill_round(env):
     res = ot.auto_cover_pending("A", dry_run=False, now=time.time(), signal_fn=_boom)
     assert res[0]["action"] == "wait_signal", "信号取数失败 → 保守等待（不莽撞下单）"
     assert "信号取数失败" in res[0]["reason"] or "无信号" in res[0]["reason"]
+
+
+# ── 限价目标价的 tick 对齐（2026-09-30）──────────────────────
+
+def test_floor_to_tick_never_rounds_up():
+    """合成价向下取整：恰好在 tick 上不被浮点琢掉一档；无 tick 信息则原样透传。"""
+    assert ot.floor_to_tick(117.8694, 0.01) == pytest.approx(117.86)
+    assert ot.floor_to_tick(117.86, 0.01) == pytest.approx(117.86)
+    assert ot.floor_to_tick(99.0, 0.01) == pytest.approx(99.0)
+    assert ot.floor_to_tick(117.8694, 0.0) == pytest.approx(117.8694)
+    assert ot.floor_to_tick(0.999, 1.0) == 0.0
+
+
+def test_auto_cover_limit_px_aligned_to_tick(env):
+    """目标价 = 结算价×0.99 是合成价，必须按 tickSz 取整后再下发。
+
+    OKX 现货要求 px 是 tickSz 的整数倍；否则以「价格精度」拒单 →
+    cover_status=failed 退回人工（2026-09-30 定位的实盘风险）。
+    """
+    _set_params(env, auto=True, mode="limit", discount_pct=1.0, timeout_hours=24)
+    env["write_ledger"]([_row(settle_px=119.06)])        # 119.06 × 0.99 = 117.8694
+    env["balance"]["tick_sz"] = 0.01
+    res = ot.auto_cover_pending("A", dry_run=False, now=time.time())
+    assert env["limit_calls"][0]["px"] == pytest.approx(117.86), "下单价必须 tick 对齐"
+    assert res[0]["target_px"] == pytest.approx(117.86), "展示口径 = 下单价"
+    row = env["read_ledger"]()[0]
+    assert row["cover_target_px"] == pytest.approx(117.86)
+    assert "117.86" in row["cover_note"]
+
+
+def test_auto_cover_limit_px_fail_closed_when_floor_zero(env):
+    """向下取整后不足一档（=0）→ fail-closed：不挂单、台账不动。"""
+    _set_params(env, auto=True, mode="limit", discount_pct=1.0, timeout_hours=24)
+    env["write_ledger"]([_row(settle_px=0.5)])           # 0.5 × 0.99 = 0.495
+    env["balance"]["tick_sz"] = 1.0                      # floor → 0
+    res = ot.auto_cover_pending("A", dry_run=False, now=time.time())
+    assert res[0]["action"] == "skip" and env["limit_calls"] == []
+    assert "取整" in res[0]["reason"]
+    assert not env["read_ledger"]()[0].get("cover_status")
