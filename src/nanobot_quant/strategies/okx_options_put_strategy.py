@@ -167,12 +167,23 @@ class OkxOptionsPutStrategy(Strategy):
                   f"在仓 call {call_total} 张 分家族={call_counts or '{}'} "
                   f"明细={[(x.get('inst_id'), x.get('pos')) for x in positions]}")
 
-        covers = self._auto_cover(account, p, dry)
+        # 子线开关（2026-10-01）：关某条线 = 该方向不卖、不补买、不止盈。
+        # 此前 put_enabled/call_enabled 只关「开仓支线」，止盈巡检恒跑 —— 关掉
+        # 「卖 call」仍会自动买回 call 仓，无法手动接管。到期判定恒跑（它只处理
+        # 已到期合约、负责闭账，不干扰手动操作）。
+        put_on = bool(p.get("put_enabled", True))
+        call_on = bool(p.get("call_enabled"))
+        if not put_on:
+            self._log("PUT 线关闭（put_enabled=false）→ 跳过卖 put / 自动补买 / put 止盈巡检；到期判定照常")
+        if not call_on:
+            self._log("CALL 线关闭（call_enabled=false）→ 跳过卖 call / call 止盈巡检；到期判定照常")
+        covers = self._auto_cover(account, p, dry) if put_on else []
         entries = self._entries(account, p, dry, counts, total, positions)
         call_entries = self._call_entries(account, p, dry, positions,
                                           call_counts, call_total)
-        exits = self._exits(account, p, dry, positions, opt_type="P")
-        call_exits = self._exits(account, p, dry, positions, opt_type="C")
+        exits = self._exits(account, p, dry, positions, opt_type="P") if put_on else []
+        call_exits = (self._exits(account, p, dry, positions, opt_type="C")
+                      if call_on else [])
 
         self._finish(settled, {"entries": entries, "exits": exits,
                                "call_entries": call_entries,
