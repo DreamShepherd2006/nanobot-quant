@@ -299,6 +299,7 @@
       <input type="checkbox" id="liveDryRun" checked>
     </label>
     <button class="btn-ghost" id="saveLiveBtn">保存</button>
+    <button class="btn-ghost" id="loopToggleBtn" title="一步启停常驻循环：等效「勾选/取消开启 + 保存」，只改 enabled、不动其他参数。停止为优雅停止——当前轮跑完再退，不强杀；到期判定也随之停止（不影响钱，交易所仍会自动行权/结算）">⏹ 停止循环</button>
     <span class="hint" id="liveStatus"></span>
   </div>
   <div class="hint" style="margin-top:2px">ℹ️ 空间重建 / 重启后循环<b>不会自动恢复</b> —— 需要在这里点一次「保存」把它拉起来（dry-run 默认勾选 = 只记意图不下单，确认无误后再取消勾选）。</div>
@@ -337,7 +338,7 @@
       <input type="checkbox" id="liveAllowNoC">
     </label>
   </div>
-  <div class="note" id="liveNote">常驻循环每周期三件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 支线</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → <b>现金担保门</b>（可用 USDC ≥ 全损担保 = strike×面值×张数）→ 候选选档）；<b>③ 卖 call 支线（covered）</b>（开关键 <code>🟠 卖 call</code>；无信号择时——covered 容量（现货 ≥ 面值×99%，<b>并扣除在仓 call</b>）→ 成本锚 C（= (现金赔付+实际补买支出)÷(面值×张数)；尚未补买的行暂以行权价 K 计）→ 保本门 <code>K+px ≥ C</code> → <b>去重门</b>（同合约已有在途委托则跳过，防重复卖出）→ call 张数上限 → 候选选档；被行权=现金结算赔付、现货对冲，不交出币）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法/无成本锚/现金不足/在途未清一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。</div>
+  <div class="note" id="liveNote">常驻循环每周期三件事：<b>① 到期判定</b>（到期后查 OKX 交割账单——到期作废(OTM) 自动关账、到期被行权(ITM) 记赔付；账单未出保持 open 下轮重试、判定矛盾挂「待核对」）；<b>② 卖 put 支线</b>（标的 TD 衰竭信号 <code>setup_buy≥买9</code> 或 <code>cd_buy≥CD</code> → IV 环境闸门 → 张数上限 → <b>现金担保门</b>（可用 USDC ≥ 全损担保 = strike×面值×张数）→ 候选选档）；<b>③ 卖 call 支线（covered）</b>（开关键 <code>🟠 卖 call</code>；无信号择时——covered 容量（现货 ≥ 面值×99%，<b>并扣除在仓 call</b>）→ 成本锚 C（= (现金赔付+实际补买支出)÷(面值×张数)；尚未补买的行暂以行权价 K 计）→ 保本门 <code>K+px ≥ C</code> → <b>去重门</b>（同合约已有在途委托则跳过，防重复卖出）→ call 张数上限 → 候选选档；被行权=现金结算赔付、现货对冲，不交出币）。<b style="color:#c62828">dry-run 默认勾选</b>：此时只记录「打算卖什么/买回什么」不下单；确认正常后取消勾选才会真实下单。取价失败/张数非法/无成本锚/现金不足/在途未清一律拒绝下单（fail-closed）。事件逐笔落盘（跨重启保留）。<b>子线开关（2026-10-01）</b>：关「<code>put 线</code>」= 不卖 put、不自动补买、不止盈 put；关「<code>🟠 卖 call</code>」= 不卖 call、不止盈 call —— 两条线都关时循环只剩「到期判定 + 状态落盘」，可安全手动接管持仓；<b>到期判定恒跑</b>（只处理已到期合约、负责闭账，不干扰手动）。</div>
   <div id="liveStrategy"><div class="empty">最近一轮策略：暂无（开启循环后显示决策与原因）</div></div>
   <div id="liveEvents"><div class="empty">暂无判定事件（开启巡检后，到期的 put 会自动判定落盘）</div></div>
   </div>
@@ -1819,6 +1820,7 @@ function renderLiveStrategy(strat) {
 // ── 自动策略：家族多选 + 顶部状态条（策略层沉底，看板层不被夹在中间）──
 let availFams = [];        // 后端 available_families（与顶部「标的」同源）
 let liveFamsCache = [];    // 磁盘上当前配置的家族（用于「未保存」判定）
+let liveRunning = false;   // 循环运行态（loadLive 刷新；启停按钮据此切文案）
 
 function renderFamilyChecks(selected) {
   const box = $("liveFamilies");
@@ -1873,6 +1875,9 @@ async function loadLive() {
     const lv = j.live, cfg = lv.config || {};
     if (Array.isArray(j.available_families)) availFams = j.available_families;
     $("liveEnabled").checked = !!cfg.enabled;
+    liveRunning = !!lv.running;
+    const ltb = $("loopToggleBtn");
+    if (ltb) { ltb.textContent = liveRunning ? "⏹ 停止循环" : "▶️ 启动循环"; }
     $("liveInterval").value = cfg.interval_s || 60;
     const s = cfg.strategy || {};
     $("liveDryRun").checked = s.dry_run !== false;
@@ -1911,6 +1916,25 @@ async function loadLive() {
     }
   } catch (e) { /* 静默 */ }
 }
+async function toggleLoop() {
+  // 一步启停（2026-10-01）：只 POST enabled，不动 interval/strategy。
+  // 停止走优雅停止：当前业务轮自然跑完才退（与 td live 同一套 LiveRunnerBase）。
+  const want = !liveRunning;
+  const btn = $("loopToggleBtn");
+  if (btn) { btn.disabled = true; btn.textContent = want ? "⏳ 启动中…" : "⏳ 停止中…"; }
+  try {
+    const j = await jpost("/config/okx-options/live", { enabled: want });
+    if (!j || !j.ok) { showErr((j && j.error) || "循环启停失败"); return; }
+    $("liveEnabled").checked = !!(j.config && j.config.enabled);
+    liveRunning = !!(j.live && j.live.running);
+  } catch (e) {
+    showErr("循环启停失败：" + e);
+  } finally {
+    if (btn) { btn.disabled = false; }
+    await loadLive();
+  }
+}
+
 async function saveLive() {
   const enabled = $("liveEnabled").checked;
   const interval_s = parseInt($("liveInterval").value, 10);
@@ -2103,6 +2127,7 @@ btn.addEventListener("click", loadChain);
 accSel.addEventListener("change", () => { if (curTab === "pos") loadPositions(); });
 $("saveParamsBtn").addEventListener("click", saveParams);
 $("saveLiveBtn").addEventListener("click", saveLive);
+$("loopToggleBtn").addEventListener("click", toggleLoop);
 $("saveTapeBtn").addEventListener("click", saveTape);
 loadAccounts();
 loadExpiries();   // 内部负责首次默认最近到期后的 loadChain
