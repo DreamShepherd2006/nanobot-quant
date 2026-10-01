@@ -646,6 +646,9 @@ function renderChain(data) {
     return;
   }
   let html = "";
+  // ① 报价单位说明（此前只写在顶部「每张面值」栏，表格里容易看漏）
+  html += '<div class="note" style="margin:0 0 6px">📐 报价单位 = <b>USD / 1 个名义 ' + esc(base) +
+    '</b>，每张金额 = 报价 × 面值（' + fmt(data.lot_coin, 4) + ' ' + esc(base) + '）</div>';
   for (const g of data.groups) {
     // ATM 行 = |strike − spot| 最小档（白框标记）；默认单到期 → 省略组标题，紧凑
     let atmStrike = null, atmDist = Infinity;
@@ -659,7 +662,7 @@ function renderChain(data) {
       html += '<div class="grp-title">📅 ' + g.date + ' <span class="tag">' + g.days + ' 天后到期</span> <span class="tag">' + g.rows.length + ' 档</span></div>';
     html += '<div style="overflow-x:auto"><table class="tdchain"><thead><tr>' +
       '<th class="stk">Strike</th>' +
-      '<th colspan="3" class="sec call">Call</th>' +
+      '<th colspan="5" class="sec call">Call（卖 call 视角）</th>' +
       '<th colspan="3" class="sec put">Put（卖 put 视角）</th>' +
       '<th class="sec put">权利金/张(ask)</th><th class="sec put">年化(ask)</th>' +
       '<th class="sec put" title="卖方吃买一价（bid）实收：毛权利金，未扣手续费">卖方实收/张(bid)</th>' +
@@ -667,6 +670,8 @@ function renderChain(data) {
       '<th></th>' +
       '</tr><tr>' +
       '<th></th><th>bid/ask</th><th>IV</th><th>Δ</th>' +
+      '<th title="卖方吃买一价（bid）实收 —— 与 put 侧同口径，供两边年化直接对比">卖方实收/张(bid)</th>' +
+      '<th title="call 卖方年化（bid ÷ 现货价 × 365/天数，毛）">卖方年化(bid)</th>' +
       '<th>bid/ask</th><th>IV</th><th>Δ</th>' +
       '<th>USD</th><th>率</th><th>USD</th><th>率</th><th></th>' +
       '</tr></thead><tbody>';
@@ -676,6 +681,8 @@ function renderChain(data) {
       const clsC = !isNaN(spotNum) && k < spotNum ? "bgi-c" : "";
       const clsP = !isNaN(spotNum) && k > spotNum ? "bgi-p" : "";
       const pItm = !isNaN(spotNum) && k > spotNum;   // put 实值（strike > 现货）→ 年化不显示
+      const cItm = !isNaN(spotNum) && k < spotNum;   // call 实值（strike < 现货）→ 年化不显示
+      const ITM_TIP = '实值（ITM）档不显示年化：实值权利金以内在价值为主，按现货价折算的年化会失真';
       const isAtm = atmStrike === r.strike;
       const sellBtn = (p.inst_id && p.bid !== null)
         ? '<a class="act put-sell" onclick="openSell(' + g.exp_ms + ',' + r.strike + ')">卖 put</a>'
@@ -692,20 +699,23 @@ function renderChain(data) {
       html += '<tr' + (isAtm ? ' class="atm"' : '') + '><td class="stk">' + Number(r.strike).toLocaleString("en-US") +
         (isAtm ? ' <span class="pos-tick">▼</span>' : '') + '</td>' +
         cellHtml(c, clsC) +
+        '<td>' + (c.bid_usd ? "$" + fmt(c.bid_usd, 2) : '<span class="na">—</span>') + '</td>' +
+        '<td>' + (cItm ? '<span class="itm-tag" title="' + ITM_TIP + '">实值</span>'
+          : (c.bid_apr_pct ? '<span class="apr' + (c.bid_apr_pct >= 20 ? " hi" : "") + '">' + fmt(c.bid_apr_pct, 1) + '%</span>' : '<span class="na">—</span>')) + '</td>' +
         cellHtml(p, clsP) +
         '<td>' + (p.prem_usd ? "$" + fmt(p.prem_usd, 2) : '<span class="na">—</span>') + '</td>' +
         '<td>' + (pItm
-          ? '<span class="itm-tag" title="实值（ITM）档不显示年化：实值权利金以内在价值为主，按现货价折算的年化会失真">实值</span>'
+          ? '<span class="itm-tag" title="' + ITM_TIP + '">实值</span>'
           : (p.apr_pct ? '<span class="apr' + (p.apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.apr_pct, 1) + '%</span>' : '<span class="na">—</span>')) + '</td>' +
         '<td>' + (p.bid_usd ? "$" + fmt(p.bid_usd, 2) : '<span class="na">—</span>') + '</td>' +
         '<td>' + (pItm
-          ? '<span class="na" title="实值档不显示年化">—</span>'
+          ? '<span class="itm-tag" title="' + ITM_TIP + '">实值</span>'
           : (p.bid_apr_pct ? '<span class="apr' + (p.bid_apr_pct >= 20 ? " hi" : "") + '">' + fmt(p.bid_apr_pct, 1) + '%</span>' : '<span class="na">—</span>')) + '</td>' +
         '<td>' + lcBtnC + ' ' + sellCallBtn + '<br>' + lcBtn + ' ' + sellBtn + '</td></tr>';
     }
     html += '</tbody></table></div>';
   }
-  html += '<div class="note" style="margin-top:2px">🔻 <b>「实值」标记</b> = 该 put 已实值（strike &gt; 现货），其「年化」两列不显示 —— 实值权利金以内在价值为主，按现货价折算的年化没有意义（会爆表）。卖 put 选档请以「🎯 卖 put 候选」表的净权利金 / 净收益率为准。</div>';
+  html += '<div class="note" style="margin-top:2px">🔻 <b>「实值」标记</b> = 该合约已实值（put: strike &gt; 现货；call: strike &lt; 现货），其「年化」两列不显示 —— 实值权利金以内在价值为主，按现货价折算的年化没有意义（会爆表）。卖 put 选档请以「🎯 卖 put 候选」表的净权利金 / 净收益率为准。</div>';
   wrap.innerHTML = html;
   $("priceNote").textContent = data.price_note || "";
 }
@@ -864,13 +874,14 @@ async function loadPositions() {
     }
     if (open.length) {
       html += '<div class="grp-title" style="margin-top:14px">本地台账 open（跨重启保留）</div><table><thead><tr>' +
-        '<th>合约</th><th>strike</th><th>到期</th><th>张数</th><th>开仓价(限)</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>状态</th></tr></thead><tbody>';
+        '<th>合约</th><th>strike</th><th>到期</th><th>张数</th><th>开仓价(限)</th><th title="OKX 回报的实际成交均价（filled_px）——与左侧委托价并列，便于核对滑点">实际成交均价</th><th>权利金(USD)</th><th>担保目标(USD)</th><th>状态</th></tr></thead><tbody>';
       for (const e of open) {
         const coll = e.collateral_usd ? usd(e.collateral_usd)
           : (e.margin_note && String(e.margin_note).indexOf("已关闭") >= 0 ? "关闭" : '<span class="na">—</span>');
         const warn = e.margin_note && String(e.margin_note).indexOf("追加失败") >= 0;
         html += '<tr title="' + esc(e.margin_note || "") + '"><td class="mono">' + esc(e.inst_id) + '</td><td>' + fmt(e.strike, 0) + '</td><td>' + locDate(e.exp_ms) +
-          '</td><td>' + esc(e.sz) + '</td><td>' + fmt(e.px, 2) + '</td><td>' + usd(e.premium_usd) + '</td><td>' +
+          '</td><td>' + esc(e.sz) + '</td><td>' + fmt(e.px, 2) + '</td><td>' +
+          (e.filled_px ? fmt(e.filled_px, 2) : '<span class="na">—</span>') + '</td><td>' + usd(e.premium_usd) + '</td><td>' +
           coll + (warn ? ' <span style="color:#c62828" title="担保未到位：追加失败，仓位裸奔中">⚠</span>' : '') +
           '</td><td>' + esc(e.status) + '</td></tr>';
       }
@@ -1770,7 +1781,7 @@ function renderLiveEvents(evs) {
           : (e.reason ? "<span style='color:#777'>" + esc(e.reason) + "</span>" : ""));
       return "<div style='padding:3px 0" + (expired ? ";opacity:.55" : "") + "'>" + icon + " " + label + " · " + esc(e.inst_id) + " · " + (e.sz ?? 1) + " 张 · " +
         locTs(Date.parse(e.ts)) +
-        (expired ? " · <span class='itm-tag' title='该合约已过到期时刻（08:00 UTC），此条仅为历史记录'>已到期</span>" : "") +
+        (expired ? " · <span class='itm-tag' title='页面按当前时刻打的标：该合约已过到期时刻（08:00 UTC），此条本身是历史记录'>（现已到期）</span>" : "") +
         (why ? " · " + why : "") + "</div>";
     }).join("");
   }
@@ -2169,6 +2180,8 @@ $("saveTapeBtn").addEventListener("click", saveTape);
 loadAccounts();
 loadExpiries();   // 内部负责首次默认最近到期后的 loadChain
 loadReminder();
+// ⑥ 到期提醒纳入轮询：此前只在页面加载时拉一次，已平仓/已结算的合约会一直残留在 banner 上
+setInterval(loadReminder, 30000);
 loadParams();
 loadSelector();
 loadLive();

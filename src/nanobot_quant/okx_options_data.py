@@ -534,7 +534,9 @@ def fetch_chain(family: str, expiries: list[int] | None = None,
                     iv = _f(os_.get("markVol"))
                     cell["iv"] = iv * 100 if iv is not None else None
                     cell["delta"] = _f(os_.get("delta"))
-                    if side == "P" and lot and spot:
+                    if lot and spot and side in ("C", "P"):
+                        # 双向同口径：call 支线同样需要「卖方实收(bid) / 年化(bid)」
+                        # （回测/选档的 Δσ 价差口径也以 bid 卖方视角为准）
                         exp_days = max((exp - now) / 86400000.0, 1 / 365.0)
                         if cell["ask"] is not None:
                             ask = cell["ask"]
@@ -543,7 +545,7 @@ def fetch_chain(family: str, expiries: list[int] | None = None,
                             cell["prem_pct"] = ask / spot * 100.0
                             cell["apr_pct"] = cell["prem_pct"] * 365.0 / exp_days
                         if cell["bid"] is not None:
-                            # 卖方实收：卖 put 吃买一价（与 ask 口径并存、不可混用）
+                            # 卖方实收：卖方吃买一价（bid）——call / put 同一口径（毛权利金，未扣手续费）
                             cell["bid_usd"] = cell["bid"] * lot
                             cell["bid_pct"] = cell["bid"] / spot * 100.0
                             cell["bid_apr_pct"] = cell["bid_pct"] * 365.0 / exp_days
