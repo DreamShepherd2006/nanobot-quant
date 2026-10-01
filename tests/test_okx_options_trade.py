@@ -922,6 +922,23 @@ def test_open_call_guard_fail_closed(_patch_entry, _covered_ok):
     assert "保本门不通过" in str(ei.value)
 
 
+def test_open_call_ack_waives_guard_even_with_cost_basis(_mock_sdk, _patch_entry, _covered_ok):
+    """2026-10-01 修复（a+b）：勾选 ack = **显式放弃保本门** —— 即便 C 有值且 K+px < C 也放行，
+    台账无条件记 no_cost_ack。
+
+    动因：此前 ack 只在「C 留空」时生效（`cost_basis is None and not ack` + 单独的
+    `if cost_basis is not None: 强制保本门`），而页面会为 call **自动带出 C** ⇒ 用户勾了 ack
+    也永远过不去（2026-10-01 实测连续失败 3 次）。
+    """
+    entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
+                         ord_type="limit", px=110.0, cost_basis=80200.0,  # K+px=80110 < C
+                         no_cost_basis_ack=True)
+    assert entry["status"] == "open"
+    assert entry["no_cost_ack"] is True
+    assert entry["cost_basis"] == pytest.approx(80200.0)   # C 仍入台账（供审计）
+    assert _mock_sdk.calls[-1]["side"] == "sell"
+
+
 def test_open_call_guard_ok(_mock_sdk, _patch_entry, _covered_ok):
     """保本门通过：K+px ≥ C → 正常开仓，台账记录 cost_basis。"""
     entry = ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
@@ -1088,12 +1105,17 @@ def test_open_call_no_cost_basis_ack_allows_and_marks_ledger(_mock_sdk, _patch_e
     assert _mock_sdk.calls[-1]["side"] == "sell"
 
 
-def test_open_call_ack_does_not_bypass_cost_basis_guard(_patch_entry, _covered_ok):
-    """C46：确认只能跳过「无 C」，不能跳过保本门——给了 C 照样校验 K+px ≥ C。"""
+def test_open_call_guard_still_blocks_without_ack(_patch_entry, _covered_ok):
+    """保本门回归：给了 C、**未勾选 ack** 时照样拦 K+px < C（ack 才是放弃开关）。
+
+    变更记录（2026-10-01）：本用例原名 `test_open_call_ack_does_not_bypass_cost_basis_guard`，
+    锁定的是旧契约「ack 不能跳过保本门」（当时 ack 仅在 C 留空时生效，而页面会为 call
+    自动带出 C ⇒ 勾了也过不去，用户实测连续失败 3 次）。现改为「ack = 显式放弃保本门」
+    （见 test_open_call_ack_waives_guard_even_with_cost_basis），未勾选时的拦截行为不变。
+    """
     with pytest.raises(OkxSdkError) as ei:
         ot.open_call("bot1", inst_id="BTC-USD_UM-260904-80000-C", sz=1,
-                     ord_type="limit", px=110.0, cost_basis=80200.0,
-                     no_cost_basis_ack=True)
+                     ord_type="limit", px=110.0, cost_basis=80200.0)
     assert "保本门不通过" in str(ei.value)
 
 
