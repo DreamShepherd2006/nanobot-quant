@@ -1176,10 +1176,15 @@ def open_call(account: str, *, inst_id: str, sz: int,
     K + px ≥ C。**未提供 C 时后端默认拒绝**（不可静默跳过保本门）；确需放弃保本门
     （如手动补买现货后卖 call、接货价不便填）必须显式确认——传
     no_cost_basis_ack=True（页面勾选「确认无成本锚卖出」），台账会记 no_cost_ack
-    标记备查。
+    标记备查。**该标志同时是「显式放弃保本门」的覆盖开关**（2026-10-01）：勾选后即使
+    填了 C、且 K + px < C，本次卖出仍放行（台账照样记 no_cost_ack）——页面勾选时会自动
+    清空并禁用 C 输入框，避免「C 有值 → 勾了也没用」的误导。
 
     ③ 保本门（§33.23）：提供 C 时要求 strike + px ≥ C（px 为 IOC 保底线 =
     最差接受成交价，门成立则实际成交必成立）；不满足直接拒绝该轮，不硬卖。
+    **例外（2026-10-01）：no_cost_basis_ack=True = 显式放弃保本门** —— 无论 C 是否填写都放行
+    （页面勾选「无成本锚确认」），台账一律记「⚠️ 无成本锚」备查；此前 ack 仅在 C 留空时
+    生效，而页面会为 call 自动带出 C ⇒ 勾了 ack 也过不去。
 
     担保差异：call 上行无界，**不做全损现金担保**（_ensure_collateral 仅用于
     卖 put）——covered 语义 = 现货在手，被行权 = 现金结算赔付后现货市价卖出
@@ -1233,14 +1238,18 @@ def _open_option(account: str, *, inst_id: str, sz: int,
                 "（=接货价）才能校验 K + px ≥ C。若确认放弃保本门（例如手动补买现货后"
                 "卖 call、接货价不便填写），请在页面勾选「确认无成本锚卖出」后重试——"
                 "该次卖出会在台账标记「无成本锚」备查。")
-        # ③ 保本门：提供 C 时强制 K + px ≥ C
-        if cost_basis is not None:
+        # ③ 保本门：提供 C 时强制 K + px ≥ C。
+        #    **勾选 ack = 显式放弃保本门**（2026-10-01 修）：此前 ack 只在「C 留空」时生效，
+        #    而页面会为 call 自动带出 C ⇒ 勾了 ack 也过不去（实测连续失败 3 次）。
+        #    现为：ack=True 即覆盖（无论 C 是否填写），台账无条件记「⚠️ 无成本锚」备查。
+        if not no_cost_basis_ack and cost_basis is not None:
             guard = spec["strike"] + (px or 0.0)
             if guard < float(cost_basis) - 1e-9:
                 raise OkxSdkError(
                     f"保本门不通过（fail-closed，该轮跳过）：K({spec['strike']})"
                     f" + px({px or 0}) = {guard:.4f} < 成本锚 C({float(cost_basis):.4f})。"
-                    "请抬高行权价、等待权利金回升，或上调成本锚后再卖 call。")
+                    "请抬高行权价、等待权利金回升，或上调成本锚后再卖 call；"
+                    "确需放弃保本门请在页面勾选「无成本锚确认」（勾选后本次不校验）。")
     # 开盘前快照盘口供参考（下单后立即轮询会很快，先落台账 pending）
     q = ticker_quote(inst_id)
     entry = add_ledger(
@@ -1249,8 +1258,7 @@ def _open_option(account: str, *, inst_id: str, sz: int,
         family=spec["inst_family"], side="sell", ord_type=ord_type,
         px=px,
         sz=int(sz), status="pending", ref_bid=q["bid"], ref_ask=q["ask"],
-        **({"no_cost_ack": True} if (kind == "open_call" and cost_basis is None
-                                     and no_cost_basis_ack) else {}),
+        **({"no_cost_ack": True} if (kind == "open_call" and no_cost_basis_ack) else {}),
     )
     if kind == "open_call" and cost_basis is not None:
         update_ledger(lambda x: x["id"] == entry["id"], cost_basis=round(float(cost_basis), 6))

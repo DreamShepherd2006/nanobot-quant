@@ -407,9 +407,9 @@
       <label>无成本锚确认</label>
       <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400">
         <input type="checkbox" id="mNoCostAck" style="width:auto;margin:0">
-        我确认放弃保本门卖出（无 C）
+        我确认放弃保本门卖出
       </label>
-      <span class="hint">未填 C 时<b>后端默认拒绝</b>（保本门不可判定，fail-closed）；仅用于「手动补买现货后卖 call、接货价不便填」等场景——勾选后本次卖出放行，并在台账标记「⚠️ 无成本锚」备查。</span>
+      <span class="hint">勾选 = <b>显式放弃保本门</b>：无论是否填 C，本次卖出都不校验 K + px ≥ C（勾选时 C 输入框自动清空并禁用），台账一律标记「⚠️ 无成本锚」备查；取消勾选即恢复保本门。</span>
     </div>
     <div class="row" id="mRowAmt" style="display:none">
       <label>补买金额(USD)</label><input type="number" id="mAmt" step="any" min="0" placeholder="quote_amt（或下方数量二选一）">
@@ -620,6 +620,12 @@ function instExpired(instId) {            // 期权合约是否已过到期时�
   const exp = Date.UTC(2000 + Number(seg.slice(0, 2)), Number(seg.slice(2, 4)) - 1,
                        Number(seg.slice(4, 6)), 8, 0, 0);
   return Date.now() >= exp;
+}
+function instStrike(instId) {             // 合约行权价（SOL-USD_UM-260905-99-P → 99；BTC-…-80000-C → 80000）
+  const parts = String(instId || "").split("-");
+  const seg = parts.length >= 2 ? parts[parts.length - 2] : "";
+  const v = parseFloat(seg);
+  return isNaN(v) ? null : v;
 }
 function renderChain(data) {
   chainData = data;
@@ -1139,7 +1145,8 @@ async function openSellFor(instId) {
     // covered 上下文：现货可用/可卖张数 + 成本锚 C 建议
     $("mRowCost").style.display = ""; $("mCost").value = "";
     $("mRowCostAck").style.display = ""; $("mNoCostAck").checked = false;
-    $("mCostHint").textContent = "保本门：K_call + px ≥ C 才可卖 call（页面预校验 + 后端强制）。默认带出该标的被行权 put（settled_itm）行权价 = 被动持仓成本；混批多批时取最大（最保守）。";
+    syncNoCostAckUI();   // 恢复 C 输入框可编辑状态
+    $("mCostHint").textContent = "保本门：K_call + px ≥ C 才可卖 call（页面预校验 + 后端强制）。默认带出该标的被行权 put（settled_itm）行权价 = 被动持仓成本；混批多批时取最大（最保守）。勾选「无成本锚确认」= 显式放弃本门（本次放行、台账标记）。";
     $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 call（covered call，收权利金）<br>每张面值 ' + fmt(lot, 4) +
       ' ' + esc(base) + ' · 逐仓(isolated) · <b>不做全损现金担保</b>（call 上行无界）——covered 由现货在手实现；被行权=现金结算赔付后现货市价卖出（等效按 K 出货）。';
     $("mTypeHint").textContent = "OKX 期权无纯市价单（50016）；卖 call 立即成交：IOC 保底 px ≤ bid（正常吃最优买价、盘口崩至保底以下拒单）。";
@@ -1147,6 +1154,7 @@ async function openSellFor(instId) {
   } else {
     $("mRowCost").style.display = "none";
     $("mRowCostAck").style.display = "none"; $("mNoCostAck").checked = false;
+    syncNoCostAckUI();
     $("mSpec").innerHTML = '<b>' + esc(instId) + '</b> 卖 put（收权利金）<br>每张面值 ' + fmt(lot, 4) +
       ' ' + esc(base) + ' · 逐仓(isolated) · 成交后自动追加至担保目标（比例见「⚙️ 担保设置」）';
     $("mTypeHint").textContent = "OKX 期权无纯市价单（50016）；卖 put 立即成交：限价 px=盘口 bid，或 IOC 保底价 ≤bid（如 0.01）扫单";
@@ -1352,6 +1360,7 @@ async function doExit(spot) {
   }
 }
 $("mCancel").addEventListener("click", modalClose);
+$("mNoCostAck").addEventListener("change", syncNoCostAckUI);
 $("mSz").addEventListener("input", () => {
   // 张数联动盘口模拟（C22a）+ 保护线跟随（C22b）：平仓刷新模拟，卖 put 重跑预览
   if (modalMode === "close") { renderSim("buy"); }
@@ -1387,6 +1396,23 @@ function formVal() {
     f.no_cost_ack = true;
   }
   return f;
+}
+
+const NOCOST_C_PLACEHOLDER = "默认=已接货成本 C（赔付+补买支出）÷面值";
+function syncNoCostAckUI() {
+  // a+b 修复（2026-10-01）：勾选 ack = 显式放弃保本门 ⇒ 清空并禁用 C 输入框，
+  // 不再出现「C 有值 → 勾了也没用」的误导（后端同步改为 ack 即覆盖）。
+  const ack = $("mNoCostAck"), c = $("mCost");
+  if (!ack || !c) return;
+  if (ack.checked) {
+    if (c.value) { c.dataset.prev = c.value; }
+    c.value = ""; c.disabled = true;
+    c.placeholder = "已勾选「无成本锚确认」→ 本次不校验保本门";
+  } else {
+    c.disabled = false; c.placeholder = NOCOST_C_PLACEHOLDER;
+    if (!c.value && c.dataset.prev) { c.value = c.dataset.prev; }
+    c.dataset.prev = "";
+  }
 }
 
 async function renderSim(side) {
@@ -1428,18 +1454,18 @@ async function doPreview(mode) {
     if (modalOpt === "C") {
       // covered call：不做全损担保；显示保本门状态
       const cb = f.cost_basis;
-      if (cb) {
+      if (f.no_cost_ack) {
+        extraTxt = "<b>保本门：</b><span class='warn'>🟠 已确认放弃（无成本锚）</span>——后端将放行本次卖出（无论是否填 C），台账会标记「⚠️ 无成本锚」；K+px ≥ C 无法校验，请自行确认 K 足够高";
+      } else if (cb) {
         const g = p.gate;
         extraTxt = g && g.ok
           ? "<b>保本门：</b><span style='color:#2e7d32'>🟢 通过</span>（K=" + fmt(p.strike, 4) + " + px=" + fmt(p.px, 4) +
             " = " + fmt(g.guard, 4) + " ≥ C=" + fmt(cb, 4) + "）——被行权不亏本金"
           : "<b>保本门：</b><span style='color:#c62828'>🔴 不通过（该轮跳过，fail-closed）</span>（K=" + fmt(p.strike, 4) +
             " + px=" + fmt(p.px, 4) + " = " + fmt(g && g.guard, 4) + " &lt; C=" + fmt(cb, 4) +
-            "）——请抬高行权价 / 等待权利金回升 / 上调 C 后再卖";
-      } else if (f.no_cost_ack) {
-        extraTxt = "<b>保本门：</b><span class='warn'>🟠 已确认放弃（无成本锚）</span>——后端将放行本次卖出，台账会标记「⚠️ 无成本锚」；K+px ≥ C 无法校验，请自行确认 K 足够高";
+            "）——请抬高行权价 / 等待权利金回升 / 上调 C 后再卖；确需放弃保本门请勾选上方「无成本锚确认」";
       } else {
-        extraTxt = "<b>保本门：</b><span style='color:#c62828'>🔴 未填成本锚 C——后端默认拒绝（fail-closed，该轮跳过）</span>。若确认放弃保本门（如手动补买现货后卖 call），请勾选上方「我确认放弃保本门卖出（无 C）」后重试。";
+        extraTxt = "<b>保本门：</b><span style='color:#c62828'>🔴 未填成本锚 C——后端默认拒绝（fail-closed，该轮跳过）</span>。若确认放弃保本门（如手动补买现货后卖 call），请勾选上方「我确认放弃保本门卖出」后重试。";
       }
       extraTxt += "<br><b>担保：</b>不做全损现金担保（上行无界）——covered 由现货在手实现，isolated 仅平台 IM 冻结，暴涨接近强平价需主动买回平仓或补保证金";
     } else {
@@ -1481,6 +1507,17 @@ async function doStageSell() {
     if (modalOpt === "C" && gateDisabled) { throw new Error("无现货可卖 call（covered 禁止裸卖上行）——请先补足现货后重开本弹窗"); }
     if (modalOpt === "C" && !f.cost_basis && !f.no_cost_ack) {
       throw new Error("未填成本锚 C 且未勾选「无成本锚确认」——后端默认拒绝（fail-closed）。请填 C，或勾选确认后重试");
+    }
+    if (modalOpt === "C" && f.cost_basis && !f.no_cost_ack) {
+      // 保本门预校验（与后端同判据 K + px ≥ C）：红的时候直接拦在发令牌之前，
+      // 不再出现「预览+令牌都给了，② 才报保本门」的陷阱。
+      const K = instStrike(modalInst);
+      const guard = (K == null ? NaN : K + (Number(f.px) || 0));
+      if (!isNaN(guard) && guard < Number(f.cost_basis) - 1e-9) {
+        throw new Error("保本门不通过：K(" + K + ") + px(" + (f.px || 0) + ") = " + guard.toFixed(4) +
+          " < C(" + Number(f.cost_basis).toFixed(4) + ")。请抬高行权价 / 等权利金回升 / 上调 C；" +
+          "确需放弃保本门请先勾选「无成本锚确认」（勾选后本次不校验）。");
+      }
     }
     const j = await jpost("/config/okx-options/sell/start", f);
     stageInfo = j.stage;
