@@ -2145,8 +2145,8 @@ def backfill_settlements(now_ms=None, lookback_days: int = 90) -> dict:
         if st not in (STATUS_SETTLED_ITM, STATUS_SETTLED_OTM,
                       STATUS_SETTLED_REVIEW):
             continue
-        if e.get("settle_px"):          # 已有赔付数据 → 无需回填
-            continue
+        if e.get("settle_px") and e.get("settle_fee") is not None:
+            continue                    # 已有赔付数据且已记录行权费 → 无需回填
         exp_ms = int(e.get("exp_ms") or 0)
         if not exp_ms or exp_ms > now_ms:
             continue

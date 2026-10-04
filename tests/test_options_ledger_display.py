@@ -37,6 +37,9 @@ def test_settle_fee_merged_into_fee_column():
     assert "function feeUsd(e)" in PAGE and "e.settle_fee" in PAGE
     # 后端两处（判定 + 历史回填）都要落 settle_fee
     assert TRADE.count('"settle_fee": (abs(_f(row.get("fee")))') == 2
+    # 回填的跳过条件必须带上 settle_fee：否则已 settled 但缺行权费的历史行
+    # （如 114-C，结算发生在补字段之前）永远补不上
+    assert 'if e.get("settle_px") and e.get("settle_fee") is not None:' in TRADE
 
 
 def test_filled_px_tooltip_mentions_bill_basis():
