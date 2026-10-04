@@ -626,6 +626,43 @@ class OptionsBacktestDriver:
 
     # ── IV 分位（滚动序列 → 分位；§33.43 Step 6 补齐）──────────
 
+    # ── F1 环境闸门（与实盘同一函数/同一序列；2026-10-04 接线）──────
+
+    def _build_f1(self) -> dict:
+        """预计算每根 bar 的 F1 环境读数（ATR_n[t] / ATR_n[t-lookback]）。
+
+        与实盘策略调同一个 environment.sensors.compute_f1、同一 lookback 归一化
+        （f1_lookback_for，3h 语义）：回测与实盘口径不一致的话参数裁决没意义。
+
+        * 序列取回放数据源缓存的底层价（与 TD/止损同源，零额外网络请求）；
+        * ATR 是因果滚动统计量，整段一次算与逐 bar 算数值一致（与实盘同值）；
+        * 预热不足/NaN 的 bar 不入表（闸门按样本不足 fail-open + 计数）。
+        """
+        from nanobot_quant.environment.sensors import compute_f1, f1_lookback_for
+
+        self._f1_gate_na = 0
+        df = getattr(self.data, "_underlying", None)
+        if df is None or len(df) == 0:
+            return {}
+        period = (getattr(self, "timestep", None)
+                  or self._opt_params().get("td_period") or "15m")
+        try:
+            s = compute_f1(df, lookback=f1_lookback_for(period))
+        except Exception:  # noqa: BLE001  宁可全放行，不可静默当成“安全”
+            return {}
+        out = {}
+        for k, v in s.items():
+            if v == v:                      # 跳过 NaN
+                out[k] = float(v)
+        return out
+
+    def _f1_at(self, ts):
+        """当前 bar 的 F1（首次调用时惰性预计算）。"""
+        m = getattr(self, "_f1_map", None)
+        if m is None:
+            m = self._f1_map = self._build_f1()
+        return m.get(ts)
+
     def _iv_pct_window_days(self) -> float:
         """IV 分位滚动窗口（天）—— 取策略参数，缺省 7 天。"""
         from nanobot_quant.iv_percentile import DEFAULT_WINDOW_DAYS
@@ -762,10 +799,14 @@ class OptionsBacktestDriver:
         iv_pct = self._iv_pct_at(ts)
         if iv_pct is None and float(self._opt_params().get("iv_min_percentile") or 0) > 0:
             self._iv_gate_na += 1     # 样本不足 → fail-open 放行，但要记账
+        # F1 环境闸门（2026-10-04）：与实盘同一函数/同一序列；默认关 ⇒ 不计算、不影响
+        f1v = self._f1_at(ts) if self._opt_params().get("f1_gate_enabled") else None
+        if f1v is None and self._opt_params().get("f1_gate_enabled"):
+            self._f1_gate_na = getattr(self, "_f1_gate_na", 0) + 1   # 记账，不静默
         d, note = evaluate_entry(
             self.family, td_signal=sig, params=self._opt_params(),
             open_contracts=len(puts), total_contracts=len(puts),
-            chain=chain, base_px=spot, iv_percentile=iv_pct,
+            chain=chain, base_px=spot, iv_percentile=iv_pct, f1=f1v,
             # 与实盘同一道现金担保门（§33.43 Step 3）：可用现金 < 全损担保 → fail-closed
             cash_avail=float(cash) - sum(p.collateral for p in puts))
         if d is None:
