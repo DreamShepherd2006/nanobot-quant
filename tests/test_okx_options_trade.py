@@ -1618,12 +1618,25 @@ def test_backfill_skips_rows_with_settled_data(monkeypatch, tmp_path):
     monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
     ot.add_ledger(kind="open_put", inst_id="SOL-USD_UM-260907-106-P", sz=1,
                   strike=106, status=ot.STATUS_SETTLED_ITM, settle_px=104.4,
-                  settle_pnl=-0.06, exp_ms=1757260800000)
+                  settle_pnl=-0.06, settle_fee=0.0024, exp_ms=1757260800000)
     called = []
     monkeypatch.setattr(ot, "_find_delivery_bill",
                         lambda *a, **kw: called.append(a) or None)
     res = ot.backfill_settlements(now_ms=1757500000000)
     assert res["scanned"] == 0 and called == [] and res["filled"] == []
+
+
+def test_backfill_reprocesses_settled_row_missing_settle_fee(monkeypatch, tmp_path):
+    """settle_px 有、settle_fee 缺（字段加入前结算的历史行）⇒ 必须被重扫。"""
+    monkeypatch.setattr(ot, "ledger_path", lambda: tmp_path / "ledger.json")
+    ot.add_ledger(kind="open_call", inst_id="SOL-USD_UM-261002-114-C", sz=1,
+                  strike=114, status=ot.STATUS_SETTLED_ITM, settle_px=121.22,
+                  settle_pnl=-0.3359, exp_ms=1759392000000)
+    called = []
+    monkeypatch.setattr(ot, "_find_delivery_bill",
+                        lambda *a, **kw: called.append(a) or None)
+    res = ot.backfill_settlements(now_ms=1759600000000)
+    assert res["scanned"] == 1 and len(called) == 1
 
 
 def test_backfill_skips_unexpired_and_open(monkeypatch, tmp_path):

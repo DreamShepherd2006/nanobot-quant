@@ -243,7 +243,9 @@ def _select_options(family: str, right: str, base_px: float | None = None,
                     not (sel["delta_min"] <= ad <= sel["delta_max"]):
                 filtered["delta"] += 1
                 continue
-            notional = strike * lot
+            # 名义基准 = 标的指数价 × 面值（官方实测：0.0035355 = 117.85×0.1×0.03%），
+            # 非 strike×面值——后者系统性偏低 ~0.35%，会轻微高估薄权利金合约的净收益率
+            notional = (spot or strike) * lot
             prem = bid * lot
             # 官方口径：Min(名义费率, 7% 权利金) —— 薄权利金合约受 cap 保护，
             # 不套 cap 会系统性压低这类合约的净收益率排名

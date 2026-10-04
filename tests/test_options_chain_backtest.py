@@ -196,7 +196,8 @@ def test_call_entry_opens_covered_position_and_pays_premium():
     f = fills[-1]
     assert f["side"] == "sell_open" and f["opt_type"] == "C"
     premium = 2.0 * _LOT * 1
-    fee = min(120.0 * _LOT * 0.0003, 0.07 * premium)
+    basis = d.data.price_of()          # 名义基准 = 标的指数价（官方口径）
+    fee = min(basis * _LOT * 0.0003, 0.07 * premium)
     assert cash == pytest.approx(100.0 + premium - fee, rel=1e-9)
     assert any("去重门" in n for n in d.notes)      # 回测里退化为恒放行的留痕
 

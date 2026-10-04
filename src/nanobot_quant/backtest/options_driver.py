@@ -578,7 +578,8 @@ class OptionsBacktestDriver:
                     self._ask_fallback_logged.add(p.inst_id)
                     self.notes.append(
                         f"[出场] {p.inst_id} 无 ask（Δσ 模型）→ 回退 mark×(1+滑点)")
-            fee = self._option_fee(p.strike, p.lot_coin, e.sz, premium_px=buy_px)
+            fee = self._option_fee(p.strike, p.lot_coin, e.sz, premium_px=buy_px,
+                                   basis_px=(self.data.price_of() or None))
             cash -= buy_px * p.lot_coin * e.sz + fee
             e_fee = open_fee.get(p.inst_id, 0.0)
             # 这张的净盈亏 =（卖出价 − 买回价）× 面值 × 张数 − 两笔手续费。
@@ -602,19 +603,22 @@ class OptionsBacktestDriver:
         return cash
 
     def _option_fee(self, strike: float, lot: float, sz: int,
-                    premium_px: float | None = None) -> float:
+                    premium_px: float | None = None,
+                    basis_px: float | None = None) -> float:
         """期权手续费 = Min(名义价值 × fee_rate, 7% × 权利金)。
 
-        OKX 期权 taker 费率作用于名义（strike × 面值 × 张数）—— 实盘
-        ``okx_options_trade.option_fee_est()`` 就是这个口径。回测原先写成
-        ``权利金 × fee_rate``，与实盘差 strike/premium 倍（实测 98-P 差 81 倍），
-        手续费被系统性少扣、PnL 高估。
+        名义基准 = **标的指数价 × 面值 × 张数**（``basis_px``；缺省回退 strike），
+        与实盘 ``okx_options_trade.option_fee_est()`` 同口径（官方实测：
+        0.00353550 = 117.85×0.1×0.0003）。回测原先写成 ``权利金 × fee_rate``，
+        与实盘差 strike/premium 倍（实测 98-P 差 81 倍），手续费被系统性少扣、
+        PnL 高估。
 
         ``premium_px`` 传入时再套官方 cap（7% 权利金）——薄权利金合约受其保护，
         不套会让回测扣费高于实盘、ROI 被低估（与实盘口径同步）。
         """
         from nanobot_quant.okx_options_trade import OPTION_FEE_CAP_RATIO
-        fee = abs(float(strike) * float(lot) * int(sz)) * self.fee_rate
+        base = float(basis_px) if basis_px else float(strike)
+        fee = abs(base * float(lot) * int(sz)) * self.fee_rate
         if premium_px is not None:
             premium = abs(float(premium_px)) * float(lot) * int(sz)
             fee = min(fee, OPTION_FEE_CAP_RATIO * premium)
@@ -777,7 +781,8 @@ class OptionsBacktestDriver:
                 f"担保不足：需 {collateral:.2f} + 已占 {occupied:.2f} > 可用 {cash:.2f}")
             return cash
         sell_px = d.bid                     # 家族 Δσ 模型的买一价（选档成交同口径）
-        fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px)
+        fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px,
+                               basis_px=(self.data.price_of() or None))
         premium = sell_px * lot * d.sz - fee
         cash += premium
         positions.append(SimPosition(
@@ -950,7 +955,8 @@ class OptionsBacktestDriver:
                 "卖 call 去重门（§33.43 Step 4b）在回测中退化为恒放行"
                 "（模拟即时成交、不存在在途委托）——门的正确性由单测/实盘实测覆盖")
         sell_px = d.bid
-        fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px)
+        fee = self._option_fee(d.strike, lot, d.sz, premium_px=sell_px,
+                               basis_px=(self.data.price_of() or None))
         cash += sell_px * lot * d.sz - fee
         positions.append(SimPosition(
             inst_id=d.inst_id, family=self.family, strike=d.strike,
