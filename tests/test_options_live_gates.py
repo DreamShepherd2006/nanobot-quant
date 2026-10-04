@@ -59,3 +59,13 @@ def test_pass_case_gets_through_gate(monkeypatch):
          "f1_gate": {FAM: {"threshold": 1.0, "direction": "low_ok"}}}
     dec, note = oss.evaluate_entry(FAM, td_signal=SIG, params=p, f1=0.9)
     assert dec is None and "无合格候选" in note
+
+
+def test_page_exposes_f1_gate_fields():
+    """页面字段（接线批次 2）：开关 + 按家族阈值/方向，默认关。"""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1]
+            / "src/nanobot_quant/okx_options_page.html").read_text(encoding="utf-8")
+    for marker in ("liveF1Gate", "ensureF1GateUI", "renderF1Rows", "readF1Rows",
+                   "f1_gate_enabled:", "f1_gate: readF1Rows()"):
+        assert marker in html, marker
