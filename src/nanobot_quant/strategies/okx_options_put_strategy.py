@@ -365,10 +365,18 @@ class OkxOptionsPutStrategy(Strategy):
                 out.append({"family": base, "status": "cycle_wait", "note": gate})
                 continue
 
+            f1v = None
+            if p.get("f1_gate_enabled"):
+                f1v = self._f1_value(family, p)
+                gcfg = (p.get("f1_gate") or {}).get(family) or {}
+                self._log(
+                    f"PUT {base} F1 | f1={f1v if f1v is None else round(f1v, 3)} "
+                    f"阈值={gcfg.get('threshold')} "
+                    f"方向={gcfg.get('direction') or 'low_ok'}（闸门开；None=样本不足→放行）")
             dec, note = st.evaluate_entry(
                 family, td_signal=sig, params=p,
                 open_contracts=counts.get(base, 0), total_contracts=total,
-                cash_avail=cash)
+                cash_avail=cash, f1=f1v)
             if dec is None:
                 self._log(f"PUT {base} → 无动作：{note}")
                 out.append({"family": base, "status": "no_action", "note": note})
@@ -608,6 +616,22 @@ class OkxOptionsPutStrategy(Strategy):
         return inst_to_asset(dec.inst_id)
 
     # ══════════════════════ 数据 / 状态 ══════════════════════
+
+    def _f1_value(self, family: str, p: dict) -> Optional[float]:
+        """F1 环境读数（复用与 TD 同一份 K 线缓存；失败/样本不足 → None=放行）。"""
+        from ..environment.sensors import compute_f1, f1_lookback_for
+        from ..okx_options_data import td_kline
+
+        try:
+            df, _err = td_kline(family, period=str(p.get("td_period") or "5m"),
+                                bars=int(p.get("td_bars") or 120))
+            if df is None or len(df) == 0:
+                return None
+            v = float(compute_f1(df, lookback=f1_lookback_for(p.get("td_period"))).iloc[-1])
+            return v if v == v else None
+        except Exception as e:  # noqa: BLE001
+            self._log(f"F1 读数失败：{type(e).__name__}: {e}（闸门按样本不足处理）")
+            return None
 
     def _td_signal(self, family: str, base: str, p: dict) -> Optional[dict]:
         """标的 TD 信号 —— OKX K 线（与期权执行同源），原版 TD 引擎。"""

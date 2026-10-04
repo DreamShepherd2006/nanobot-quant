@@ -118,6 +118,7 @@ def td_entry_reason(td_signal: dict, *, entry_setup: int,
 def evaluate_entry(family: str, *, td_signal: dict, params: dict,
                    open_contracts: int = 0, total_contracts: int = 0,
                    iv_percentile: Optional[float] = None,
+                   f1: Optional[float] = None,
                    selector: Optional[dict] = None,
                    chain: Optional[dict] = None,
                    base_px: Optional[float] = None,
@@ -131,6 +132,11 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
             iv_min_percentile / selector）。
         open_contracts: 该家族当前在仓张数；total_contracts: 全局在仓张数。
         iv_percentile: 当前 IV 分位（0–100）；None = 样本不足（fail-open）。
+        f1: 当前 F1 环境读数（波动率扩张率，ATR[t]/ATR[t−lookback]）；None = 样本不足。
+            F1 闸门（``params["f1_gate_enabled"]``，默认关）按家族配置生效：
+            ``params["f1_gate"][family] = {"threshold": 0.9, "direction": "low_ok"}``
+            —— ``low_ok``（默认）低分位放行、F1 高于阈值即跳过；``high_ok`` 反向。
+            绝不设全局方向：三资产实测符号不一致（SOL/ETH 低分位更安全、BTC 相反）。
         cash_avail: 子账号可用现金（USDC）；**None = 不做现金担保校验**（回测/纯
             信号路径）。传入时启用⑤现金担保前置门（§33.43 Step 3）：可用现金 <
             全损担保（strike × 每张面值 × 张数）→ fail-closed 拒绝建仓（负数
@@ -167,6 +173,26 @@ def evaluate_entry(family: str, *, td_signal: dict, params: dict,
             return None, f"IV 闸门：{iv_percentile:.0f} 分位 < {iv_min:g}（恐慌未定价，跳过）"
         else:
             notes.append(f"IV 闸门：{iv_percentile:.0f} 分位 ≥ {iv_min:g}")
+
+    # ③b F1 环境闸门（默认关，2026-10-04 接线；只接线、不改行为）
+    #     按家族配置方向（三资产实测符号不一致，不做全局一个方向）。
+    if p.get("f1_gate_enabled"):
+        gcfg = (p.get("f1_gate") or {}).get(family) or {}
+        thr = gcfg.get("threshold")
+        direction = str(gcfg.get("direction") or "low_ok")
+        if thr is None:
+            notes.append(f"F1 闸门：{family} 未配置阈值 → 放行")
+        elif f1 is None:
+            notes.append(f"F1 闸门：样本不足，放行（家族={family} "
+                         f"阈值 {float(thr):g} 方向 {direction}）")
+        else:
+            f1v, thr_f = float(f1), float(thr)
+            unsafe = (f1v > thr_f) if direction == "low_ok" else (f1v < thr_f)
+            if unsafe:
+                if direction == "low_ok":
+                    return None, f"F1 闸门：F1={f1v:.2f} > {thr_f:g}（波动扩张区，跳过）"
+                return None, f"F1 闸门：F1={f1v:.2f} < {thr_f:g}（波动收缩区，跳过）"
+            notes.append(f"F1 闸门：F1={f1v:.2f} 通过（阈值 {thr_f:g} 方向 {direction}）")
 
     # ④ 选档（复用 C28 1a）
     sel = p.get("selector") if isinstance(p.get("selector"), dict) else selector
