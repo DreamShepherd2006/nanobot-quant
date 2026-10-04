@@ -269,7 +269,7 @@ def test_auto_cover_immediate_market_path(env):
     env["write_ledger"]([_row()])
     res = ot.auto_cover_pending("A", dry_run=False, now=time.time())
     assert res[0]["action"] == "filled"
-    assert env["cover_calls"][0]["spot_inst"] == "SOL-USD"
+    assert env["cover_calls"][0]["spot_inst"] == "SOL-USDC"
     assert env["cover_calls"][0]["qty"] == pytest.approx(0.1)
     assert env["cover_calls"][0]["ref_id"] == "r1", \
         "补买下单须带台账行 ref_id（§33.43 Step 2 成本锚 C 归因）"

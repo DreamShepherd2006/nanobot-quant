@@ -2096,6 +2096,7 @@ def settle_expired_puts(now_ms=None) -> list:
             "settle_subtype": sub,
             "settle_px": px,
             "settle_pnl": round(pnl, 6),
+            "settle_fee": (abs(_f(row.get("fee"))) if row.get("fee") is not None else None),
             "settle_ts": _utc_now(),
         }
         # ITM：毛赔付 = 实值部分×面值×张数（净盈亏 settle_pnl 已含权利金收入）
@@ -2171,6 +2172,7 @@ def backfill_settlements(now_ms=None, lookback_days: int = 90) -> dict:
         result = _classify_settlement(sub, px, strike, opt_type)
         fields = {"settle_subtype": sub, "settle_px": px,
                   "settle_pnl": round(pnl, 6), "settle_ts": _utc_now(),
+                  "settle_fee": (abs(_f(row.get("fee"))) if row.get("fee") is not None else None),
                   "settle_backfilled": True}
         if result["status"] == STATUS_SETTLED_ITM:
             base = (inst_id or "").split("-")[0]

@@ -283,7 +283,7 @@
 </div>
 
 <div class="card" id="ledCard" style="display:none">
-  <h3>🧾 卖 put 台账</h3>
+  <h3>🧾 期权台账</h3>
   <div id="ledBody"><div class="empty">加载中…</div></div>
 </div>
 <details class="settings" id="liveSection" open>
@@ -478,6 +478,16 @@ async function jpost(url, body) {
 }
 
 // ── 子账号 ──────────────────────────────────────────────
+// 台账「账号」列统一显示子账号名（UID→名字映射，UID 放 tooltip）——
+// 台账行的 account 可能是 UID（API 路径写入）也可能是名字（页面路径写入），
+// 两种表示混在同一列会让读者以为是不同的账号。
+let ACCT_LABEL = {};
+function acctLabel(acc) {
+  if (!acc) return "";
+  const name = ACCT_LABEL[String(acc)];
+  if (!name) return esc(acc);
+  return '<span title="子账号 UID ' + esc(acc) + '">' + esc(name) + '</span>';
+}
 async function loadAccounts() {
   try {
     const r = await fetch("/config/okx-options/accounts");
@@ -491,6 +501,7 @@ async function loadAccounts() {
         opt.value = a.uid || a.name || "";
         opt.textContent = (a.name || "?") + (a.uid ? " · " + a.uid : "") + (a.configured ? "" : "（未配齐）");
         accSel.appendChild(opt);
+        if (a.uid && a.name) ACCT_LABEL[String(a.uid)] = a.name;
       }
       if (!cfg.length) accSel.innerHTML = '<option value="">无完整凭证的子账号</option>';
     } else {
@@ -913,9 +924,16 @@ async function loadPositions() {
 // 且币种未记录（OKX 现货买单手续费以基础币扣，数值≠USD）——显示原值并标注。
 function feeUsd(e) {
   if (!e) return '<span class="na">—</span>';
-  const raw = e.fee, usd = e.fee_usd;
-  const okUsd = usd !== null && usd !== undefined && usd !== "" && !isNaN(Number(usd));
-  const okRaw = raw !== null && raw !== undefined && raw !== "" && !isNaN(Number(raw));
+  const num = v => (v === null || v === undefined || v === "" || isNaN(Number(v))) ? null : Number(v);
+  const raw = num(e.fee), usd = num(e.fee_usd), settleFee = num(e.settle_fee);
+  // settled 行：开仓手续费 + 行权费（官方交割账单 fee 列）合并显示，tooltip 拆项
+  if (settleFee !== null) {
+    const openTxt = (usd !== null ? "$" + Math.abs(usd).toFixed(4) : "—");
+    const tip = "累计手续费：开仓 " + openTxt + " + 行权 $" + settleFee.toFixed(4) +
+      "（行权费由交易所按结算价×面值×0.02% 扣收）";
+    return '<span title="' + tip + '">$' + ((usd !== null ? Math.abs(usd) : 0) + settleFee).toFixed(4) + '</span>';
+  }
+  const okUsd = usd !== null, okRaw = raw !== null;
   if (!okUsd && !okRaw) return '<span class="na">—</span>';
   if (!okUsd) return '<span title="历史记录：仅存数值、未记录币种（OKX 现货买单手续费以基础币扣，该数值不是 USD）">' + Math.abs(Number(raw)).toFixed(4) + '</span>';
   const ccy = (e.fee_ccy || "USDC");
@@ -963,7 +981,7 @@ async function loadLedger() {
     if (!rows.length) { $("ledBody").innerHTML = '<div class="empty">台账为空（尚未卖出期权）</div>'; return; }
     let html = '<div style="margin:0 0 8px"><button onclick="backfillLedger()" title="对已结算但缺赔付数据的台账行，按 OKX 交割账单补回填结算价/毛赔付/净盈亏（纯本地记账，不改状态、不涉及资金流）">🩹 回填历史赔付</button></div>';
     html += '<table><thead><tr><th>时间(UTC)</th><th>动作</th><th>合约</th><th>方向</th><th>类型</th>' +
-      '<th>张数</th><th>价格</th><th>成交价</th><th>权利金(USD)</th><th>手续费(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
+      '<th>张数</th><th>价格</th><th title="台账取 OKX 成交均价（avgPx）；官方账单「成交价」列是交易所原值，两者可能有约 1% 的展示口径差，对账以官方账单为准">成交价</th><th>权利金(USD)</th><th>手续费(USD)</th><th>担保目标(USD)</th><th>盈亏(USD)</th><th title="交割账单成交价列 = OKX 结算价（到期前 30 分钟标的指数算术平均）；仅 settled 行有值">结算价</th><th title="毛赔付 = 实值部分 × 面值 × 张数（put: K−结算价；call: 结算价−K）；仅 settled ITM 行有值">毛赔付(USD)</th><th>状态</th><th>账号</th><th>操作</th></tr></thead><tbody>';
     // 到期动作入口按台账自身状态判定（不依赖判定事件）——覆盖遗留 settled_itm 行
     const filledCovers = new Set(), filledExits = new Set();
     for (const x of rows) {
@@ -1003,9 +1021,11 @@ async function loadLedger() {
         esc(e.inst_id || e.spot_inst || "") + '</td><td>' + esc(e.side || "") + '</td><td>' + esc(e.ord_type || "") +
         '</td><td>' + esc(e.sz ?? "") + '</td><td>' + fmt(e.px, 4) + '</td><td>' + fmt(e.filled_px, 4) +
         '</td><td>' + usd(e.premium_usd) + '</td><td class="mono">' + feeUsd(e) + '</td><td>' + (e.collateral_usd ? usd(e.collateral_usd) : (e.kind === "open_call" && e.margin_note ? '<span class="na" title="' + esc(e.margin_note) + '">covered</span>' : '<span class="na">—</span>')) +
-        '</td><td>' + pnlUsd(e) + '</td><td>' + esc(e.status) +
+        '</td><td>' + pnlUsd(e) + '</td><td>' +
+        (e.settle_px !== undefined && e.settle_px !== null && e.settle_px !== "" ? fmt(e.settle_px, 2) : '<span class="na">—</span>') + '</td><td>' +
+        (e.settle_payout !== undefined && e.settle_payout !== null && e.settle_payout !== "" ? usd(e.settle_payout) : '<span class="na">—</span>') + '</td><td>' + esc(e.status) +
         (e.no_cost_ack ? ' <span class="warn" title="无成本锚卖出：用户显式确认（页面勾选），保本门未校验——K + px ≥ C 不可判定">⚠️无成本锚</span>' : '') +
-        '</td><td>' + esc(e.account || "") + '</td><td>' + act + '</td></tr>';
+        '</td><td>' + acctLabel(e.account) + '</td><td>' + act + '</td></tr>';
     }
     html += '</tbody></table>';
     $("ledBody").innerHTML = html;
