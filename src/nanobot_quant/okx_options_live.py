@@ -57,6 +57,12 @@ DEFAULT_STRATEGY: dict = {
     "entry_setup": 9,                    # 买 9 阈值
     "entry_countdown": 13,               # countdown 13 阈值
     "iv_min_percentile": 0,              # IV 环境闸门（0 = 关）
+    # ── F1 环境闸门（2026-10-04 接线，**默认关**；只接线、零行为变更）──
+    # 按家族配置方向，不做全局方向：三资产 30 天实测符号不一致
+    #   （SOL/ETH 低分位更安全、BTC 相反）⇒ 每家族各填一套。
+    #   "f1_gate": {"SOL-USD_UM": {"threshold": 0.9, "direction": "low_ok"}}
+    "f1_gate_enabled": False,            # 总开关（默认关；用户在页面手动开）
+    "f1_gate": {},                       # {家族: {threshold, direction: low_ok|high_ok}}
     "take_profit_pct": 50,               # put 线权利金回落止盈线（%）
     "max_contracts_per_family": 1,
     "max_contracts_total": 3,

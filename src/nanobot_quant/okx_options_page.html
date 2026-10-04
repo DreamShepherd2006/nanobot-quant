@@ -1955,6 +1955,10 @@ async function loadLive() {
     $("liveEntrySetup").value = s.entry_setup ?? 9;
     $("liveEntryCd").value = s.entry_countdown ?? 13;
     $("liveIvMin").value = s.iv_min_percentile ?? 0;
+    // F1 环境闸门（接线批次 2）：控件由 JS 动态生成，默认关
+    ensureF1GateUI();
+    if ($("liveF1Gate")) $("liveF1Gate").checked = !!s.f1_gate_enabled;
+    renderF1Rows(s.f1_gate || {});
     $("liveTp").value = s.take_profit_pct ?? 50;
     $("liveMaxFam").value = s.max_contracts_per_family ?? 1;
     $("liveMaxAll").value = s.max_contracts_total ?? 3;
@@ -2015,6 +2019,8 @@ async function saveLive() {
       entry_setup: parseInt($("liveEntrySetup").value, 10) || 9,
       entry_countdown: parseInt($("liveEntryCd").value, 10) || 13,
       iv_min_percentile: parseInt($("liveIvMin").value, 10) || 0,
+      f1_gate_enabled: !!($("liveF1Gate") || {}).checked,
+      f1_gate: readF1Rows(),
       take_profit_pct: parseFloat($("liveTp").value) || 0,
       max_contracts_per_family: parseInt($("liveMaxFam").value, 10) || 0,
       max_contracts_total: parseInt($("liveMaxAll").value, 10) || 0,
@@ -2210,6 +2216,49 @@ loadTd();
 setInterval(loadTd, 10000);   // 标的 TD 状态（与自动循环同源，只读）
 setInterval(loadLive, 30000);  // 自动策略状态（含状态条 / 家族清单刷新）
 setInterval(loadTape, 30000);  // 盘口采集状态（只读）
+
+// ── F1 环境闸门 UI（2026-10-04 接线批次 2：页面字段，默认关）────────
+// 只接线、不改行为：开关默认不勾、家族阈值留空 ⇒ 保存后 f1_gate_enabled=false。
+function ensureF1GateUI() {
+  if ($("liveF1Wrap")) return;
+  const anchor = $("liveIvMin");
+  if (!anchor) return;
+  const row = anchor.closest("label") || anchor.parentElement;
+  const wrap = document.createElement("div");
+  wrap.id = "liveF1Wrap";
+  wrap.innerHTML =
+    '<label style="display:block;margin:6px 0"><input type="checkbox" id="liveF1Gate">' +
+    ' F1 环境闸门（默认关；阈值/方向按家族配置）</label>' +
+    '<div id="liveF1Rows" style="margin:0 0 8px 0"></div>';
+  if (row && row.parentElement) row.after(wrap); else document.body.appendChild(wrap);
+}
+
+function renderF1Rows(cfg) {
+  const box = $("liveF1Rows"); if (!box) return;
+  cfg = cfg || {};
+  box.innerHTML = (liveFamsCache || []).map(function (f) {
+    const c = cfg[f] || {};
+    const d = c.direction === "high_ok" ? "high_ok" : "low_ok";
+    return '<span style="margin-right:12px;white-space:nowrap">' + f.split("-")[0] +
+      ' <input type="number" step="0.01" style="width:70px" data-f1thr="' + f + '" value="' +
+      (c.threshold == null ? "" : c.threshold) + '">' +
+      ' <select data-f1dir="' + f + '">' +
+      ['low_ok', 'high_ok'].map(function (k) {
+        return '<option value="' + k + '"' + (k === d ? " selected" : "") + '>' +
+          (k === "low_ok" ? "低分位放行" : "高分位放行") + '</option>';
+      }).join("") + '</select></span>';
+  }).join("");
+}
+
+function readF1Rows() {
+  const out = {};
+  document.querySelectorAll("[data-f1thr]").forEach(function (i) {
+    const f = i.dataset.f1thr, t = parseFloat(i.value);
+    const d = document.querySelector('[data-f1dir="' + f + '"]');
+    if (isFinite(t)) out[f] = { threshold: t, direction: (d && d.value) || "low_ok" };
+  });
+  return out;
+}
 </script>
 </body>
 </html>
