@@ -33,5 +33,6 @@ def test_selector_and_driver_use_spot_basis():
     root = Path(__file__).resolve().parents[1]
     sel = (root / "src/nanobot_quant/okx_options_select.py").read_text(encoding="utf-8")
     drv = (root / "src/nanobot_quant/backtest/options_driver.py").read_text(encoding="utf-8")
-    assert "notional = (spot or strike) * lot" in sel          # 选档：指数价基准
+    assert "fee_basis = (spot or strike) * lot" in sel          # 手续费名义基准
+    assert "notional = (strike * lot) if not (is_call and spot)" in sel   # 收益率分母（put=strike）
     assert drv.count("basis_px=(self.data.price_of() or None)") == 3   # 回测 3 处调用点

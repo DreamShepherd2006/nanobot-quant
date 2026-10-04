@@ -243,19 +243,23 @@ def _select_options(family: str, right: str, base_px: float | None = None,
                     not (sel["delta_min"] <= ad <= sel["delta_max"]):
                 filtered["delta"] += 1
                 continue
-            # 名义基准 = 标的指数价 × 面值（官方实测：0.0035355 = 117.85×0.1×0.03%），
-            # 非 strike×面值——后者系统性偏低 ~0.35%，会轻微高估薄权利金合约的净收益率
-            notional = (spot or strike) * lot
+            # ① 手续费名义基准 = 标的指数价 × 面值（官方实测：0.0035355 = 117.85×0.1×0.03%）；
+            #    非 strike×面值（后者系统性偏低 ~0.35%）。
+            #    注意：这只用于**扣费**，不等于收益率分母（见下方 coll）。
+            fee_basis = (spot or strike) * lot
             prem = bid * lot
             # 官方口径：Min(名义费率, 7% 权利金) —— 薄权利金合约受 cap 保护，
             # 不套 cap 会系统性压低这类合约的净收益率排名
-            fee = min(notional * f_rate, OPTION_FEE_CAP_RATIO * prem)
+            fee = min(fee_basis * f_rate, OPTION_FEE_CAP_RATIO * prem)
             net = prem - fee
             if net <= 0:                          # 扣手续费后无利可图（薄权利金）
                 filtered["net"] += 1
                 continue
-            # 收益率分母：put = 名义（现金担保）；call = 现货市值（covered 占用现货）
-            coll = (spot * lot) if (is_call and spot) else notional
+            # ② 收益率分母（与手续费基准是两回事）：
+            #    put = strike × 面值×张数（全损现金担保额，与现金担保门同口径）；
+            #    call = 现货市值（covered 占用现货、非现金）
+            notional = (strike * lot) if not (is_call and spot) else (spot * lot)
+            coll = notional
             if coll <= 0:
                 filtered["net"] += 1
                 continue

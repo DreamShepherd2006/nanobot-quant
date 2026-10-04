@@ -102,12 +102,13 @@ def test_net_premium_and_yield_use_bid_minus_fee():
         {"strike": 95.0, "P": _put("260920-95-P", 0.5, -0.25)},
     ])])
     c = osel.select_puts("SOL-USD_UM", chain=chain)["candidates"][0]
-    notional = 100.0 * 0.1        # 指数价 × 面值（官方手续基数口径）
+    notional = 95.0 * 0.1        # put 的收益率分母 = strike × 面值（全损现金担保）
+    fee_basis = 100.0 * 0.1      # 手续费名义基准 = 指数价 × 面值（官方口径）
     assert c["notional_usd"] == pytest.approx(notional, rel=1e-9)
     assert c["premium_usd"] == pytest.approx(0.5 * 0.1, rel=1e-9)
-    assert c["fee_usd"] == pytest.approx(notional * FEE, rel=1e-9)
-    assert c["net_premium_usd"] == pytest.approx(0.05 - notional * FEE, rel=1e-9)
-    assert c["net_yield_pct"] == pytest.approx((0.05 - notional * FEE) / notional * 100, rel=1e-3)
+    assert c["fee_usd"] == pytest.approx(fee_basis * FEE, rel=1e-9)
+    assert c["net_premium_usd"] == pytest.approx(0.05 - fee_basis * FEE, rel=1e-9)
+    assert c["net_yield_pct"] == pytest.approx((0.05 - fee_basis * FEE) / notional * 100, rel=1e-3)
 
 
 def test_cap_keeps_thin_premium_alive():
