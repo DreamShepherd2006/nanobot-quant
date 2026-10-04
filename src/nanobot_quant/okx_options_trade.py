@@ -512,15 +512,22 @@ OPTION_FEE_CAP_RATIO = 0.07
 
 
 def option_fee_est(strike: float, lot: float, sz: int,
-                   premium_px: float | None = None) -> float:
+                   premium_px: float | None = None,
+                   basis_px: float | None = None) -> float:
     """期权吃单手续费预估（USD）= Min(名义价值 × 吃单费率, cap × 权利金)。
 
     ``premium_px``（每名义币的权利金，与 strike 同尺度）为 None 时退化为纯名义
     口径（向后兼容）；调用方拿得到权利金时**务必传入**，否则薄权利金合约的
     手续费会被高估（实测最高 40 倍），进而低估其净收益率、埋没优质的薄权利金档。
+
+    ``basis_px`` = 名义计价基准（每名义币的**标的指数价**）。官方实测口径：
+    SOL-USD_UM-261002-114-C（strike 114、面值 0.1、1 张、权利金 px 3.8）实际
+    扣 0.00353550 USDC = 117.85×0.1×0.0003，即名义基准是**指数价**而非 strike；
+    按 strike 算得 0.00342（偏低 ~0.35%）。缺省时回退 strike（旧行为，向后兼容）。
     """
     try:
-        fee = float(strike) * float(lot) * int(sz) * OPTION_FEE_RATE_TAKER
+        base = float(basis_px) if basis_px else float(strike)
+        fee = float(base) * float(lot) * int(sz) * OPTION_FEE_RATE_TAKER
         if premium_px is not None:
             premium = abs(float(premium_px)) * float(lot) * int(sz)
             fee = min(fee, OPTION_FEE_CAP_RATIO * premium)

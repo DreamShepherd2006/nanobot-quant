@@ -55,8 +55,9 @@ def test_select_calls_collateral_is_spot_value():
     res = osel.select_calls("SOL-USD_UM", base_px=100.0, chain=chain)
     c = res["candidates"][0]
     assert c["collateral_usd"] == pytest.approx(10.0)        # spot × lot，非 110×0.1
-    assert c["notional_usd"] == pytest.approx(11.0)          # 名义仍 = strike × lot（手续费基数）
-    prem, fee = 1.0 * 0.1, min(11.0 * FEE, 0.07 * 1.0 * 0.1)
+    # 名义（手续基数）= 指数价 × lot —— 官方实测口径（2026-10-04 账单反推）
+    assert c["notional_usd"] == pytest.approx(10.0)
+    prem, fee = 1.0 * 0.1, min(10.0 * FEE, 0.07 * 1.0 * 0.1)
     assert c["net_yield_pct"] == pytest.approx((prem - fee) / 10.0 * 100, rel=1e-3)
     assert c["covered"] is True
 
@@ -97,16 +98,17 @@ def test_hard_filters_expiry_bid_distance_delta():
 
 
 def test_net_premium_and_yield_use_bid_minus_fee():
-    chain = _chain(groups=[_group(2, 2, [
+    chain = _chain(spot=100.0, groups=[_group(2, 2, [
         {"strike": 95.0, "P": _put("260920-95-P", 0.5, -0.25)},
     ])])
     c = osel.select_puts("SOL-USD_UM", chain=chain)["candidates"][0]
-    notional = 95.0 * 0.1
+    notional = 95.0 * 0.1        # put 的收益率分母 = strike × 面值（全损现金担保）
+    fee_basis = 100.0 * 0.1      # 手续费名义基准 = 指数价 × 面值（官方口径）
     assert c["notional_usd"] == pytest.approx(notional, rel=1e-9)
     assert c["premium_usd"] == pytest.approx(0.5 * 0.1, rel=1e-9)
-    assert c["fee_usd"] == pytest.approx(notional * FEE, rel=1e-9)
-    assert c["net_premium_usd"] == pytest.approx(0.05 - notional * FEE, rel=1e-9)
-    assert c["net_yield_pct"] == pytest.approx((0.05 - notional * FEE) / notional * 100, rel=1e-3)
+    assert c["fee_usd"] == pytest.approx(fee_basis * FEE, rel=1e-9)
+    assert c["net_premium_usd"] == pytest.approx(0.05 - fee_basis * FEE, rel=1e-9)
+    assert c["net_yield_pct"] == pytest.approx((0.05 - fee_basis * FEE) / notional * 100, rel=1e-3)
 
 
 def test_cap_keeps_thin_premium_alive():
