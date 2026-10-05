@@ -26,6 +26,7 @@ from .exec_params import (
     DEFAULT_SCENES,
     DEFAULT_SUB_ACCOUNTS,
     GROUP_TITLES,
+    RENDER_SKIP_GROUPS,
     PARAM_META,
     SCENES,
     SCENE_FIELD_MAP,
@@ -440,7 +441,8 @@ def _render_page(params: dict, message: str = "") -> str:
     gate_accounts = _gate_accounts()
     groups = "".join(
         _group_html(g, params, token_opts, family)
-        for g in ("risk", "exec", "td")
+        for g in GROUP_TITLES
+        if g not in RENDER_SKIP_GROUPS       # 单一来源：新增分组自动出现（2026-10-05）
     )
     scenes = params.get("scenes") or {}
     scene_cards = "".join(

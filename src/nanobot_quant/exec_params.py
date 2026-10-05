@@ -440,6 +440,13 @@ GROUP_TITLES = {
     "f1gate": "⑤ F1 闸门（贝叶斯 — 仅回测）",
 }
 
+# 有「专属渲染路径」的分组：不在 /config/exec 的通用分组卡里渲染。
+#   scene → 由多场景卡片（_scene_card_html）呈现；扁平 scene 键仅为 execute_signal 兼容保留。
+# 渲染侧一律遍历 GROUP_TITLES 再扣除本集合（单一来源）——
+# 2026-10-05：gate_enabled/gate_red_min 迁到 f1gate 时，渲染侧还维护着一份硬编码列表
+#            ⇒ 该组从那天起在页面上静默消失，故改为单一来源 + 防回归测试。
+RENDER_SKIP_GROUPS: tuple[str, ...] = ("scene",)
+
 
 # ── Path / load / save ───────────────────────────────────────────────────
 
