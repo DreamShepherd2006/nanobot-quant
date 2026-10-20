@@ -685,6 +685,9 @@ class BacktestDriver:
                     or "fixed"
                 ),
                 "slippage": self.slippage,
+                # 手续费率实际生效值（2026-10-20）：此前快照缺该键，报告回退 0
+                # → 误显示「手续费率 0.00%」，而撮合其实按 0.1% 扣（成交价可反推）
+                "fee_rate": self.fee_rate,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）
                 "entry_setup": (strategy._td_params or {}).get("entry_setup"),
