@@ -832,6 +832,9 @@ class TdSequentialStrategy(Strategy):
         prefetched=(bars, fetch_len, drop_in_progress, exc)：并发预取路径
         传入，跳过拉取；None 时内部拉取（串行/回测路径）。
         """
+        # 每标的每次评估先重置闸门状态（早退路径也保持「无候选」语义，避免
+        # 上一标的/上一轮的状态被 driver 读成当前 bar 的决策）
+        self._last_ema_gate_state = ""
         if prefetched is not None:
             bars, fetch_len, drop_in_progress, exc = prefetched
             if bars is None:
@@ -1155,23 +1158,37 @@ class TdSequentialStrategy(Strategy):
         # 全序列**上算——n=144 ≈ 5τ 远超策略 TD 窗口（120~200 根），用窗口
         # 算会静默失真。td_live 不注入 → 实盘恒 False；预热不足/ATR≤0 →
         # fail-open 并计数 ema_gate_na（数据不足不作惩罚，与 IV/F1 闸门同规）。
+        # 计数口径（2026-10-20 修正）：只记**候选买入**（buy_signal 且 score
+        # 过阈值）——旧实现按全 bar 计数，把「这段时间 EMA 向下走多少分钟」
+        # 当成「拦了多少笔买入」（实测 1374 次 vs 实际 7 笔买入），SKIP 统计
+        # 与逐 bar 表闸门列双双失真。``_last_ema_gate_state`` 供 driver 渲染
+        # 逐 bar 表：""=该 bar 无候选买信号（闸门未被问到）/pass/block/na。
         ema_gate_blocked = False
+        self._last_ema_gate_state = ""
         if self.parameters.get("ema_gate_enabled", False):
             ev = getattr(self, "_ema_gate_value", None)
+            _cand = bool(buy_signal and score > score_threshold)
             if ev is None or ev[1] is None:
-                self._bump_skip("ema_gate_na")
+                self._last_ema_gate_state = "na"
+                if _cand:
+                    self._bump_skip("ema_gate_na")
             elif ev[1] <= 0:
+                # 决策位与旧实现完全一致（slope≤0 恒置位，只拦 BUY）——
+                # 观测层收窄不改决策，两臂 ROI/成交笔数必须逐位不变。
                 ema_gate_blocked = True
-                self._bump_skip("ema_gate")
-                print(
-                    f"[TD] EMA GATE BLOCK | symbol={self.symbol} "
-                    f"slope={ev[1]:+.3f} ≤ 0（趋势向下禁买）",
-                    file=sys.stderr, flush=True,
-                )
-                self._record(
-                    "WAIT", "EMA 趋势闸门拦截（slope≤0）", symbol=self.symbol
-                )
-            else:
+                if _cand:
+                    self._last_ema_gate_state = "block"
+                    self._bump_skip("ema_gate")
+                    print(
+                        f"[TD] EMA GATE BLOCK | symbol={self.symbol} "
+                        f"slope={ev[1]:+.3f} ≤ 0（趋势向下禁买）",
+                        file=sys.stderr, flush=True,
+                    )
+                    self._record(
+                        "WAIT", "EMA 趋势闸门拦截（slope≤0）", symbol=self.symbol
+                    )
+            elif _cand:
+                self._last_ema_gate_state = "pass"
                 self._ema_gate_pass = int(getattr(self, "_ema_gate_pass", 0)) + 1
 
         # ── BUY signal: setup_buy >= entry_setup, score above threshold, slot available ──

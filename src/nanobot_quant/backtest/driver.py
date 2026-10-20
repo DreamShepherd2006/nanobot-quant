@@ -661,7 +661,10 @@ class BacktestDriver:
                 _bar_events.clear()
                 strategy._evaluate_symbol()
                 sig = getattr(strategy, "_last_signal", {}) or {}
-                gate = "" if slope_v is None else ("pass" if slope_v > 0 else "block")
+                # 闸门列 = 策略自己的判定结果（候选买入口径，2026-10-20）：
+                # ""=该 bar 无候选买信号（闸门未被问到）/pass/block/na。
+                # 不再由 slope 符号反推——否则「状态」会伪装成「决策」。
+                gate = str(getattr(strategy, "_last_ema_gate_state", "") or "")
                 # HOLD 是每根 bar 都有的心跳事件，不算「有意思」——否则精简
                 # 模式退化成全量（2026-10-20 测试实测 61/61 全被保留）
                 _evs = [

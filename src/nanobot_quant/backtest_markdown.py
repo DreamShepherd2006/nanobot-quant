@@ -188,6 +188,8 @@ _SKIP_LABELS = {
     "batch_wait": "周期门控/波锁等待",
     "gate_blocked": "贝叶斯闸门拦截",
     "gate_na": "闸门数据不足(NA)",
+    "ema_gate": "EMA 趋势闸门拦（候选买入）",
+    "ema_gate_na": "EMA 预热不足(NA，fail-open)",
 }
 
 
@@ -474,7 +476,7 @@ def _spot_md(res: dict) -> str:
         _rate = f"{_pass / _tot * 100:.1f}%" if _tot else "—"
         md.append(
             f"\n> 🌊 EMA 闸门：{'开' if _eg.get('enabled') else '关'} · "
-            f"通过 {_pass} / 拦截 {_block}（通过率 {_rate}）· "
+            f"通过 {_pass} / 拦截 {_block}（通过率 {_rate}，候选买入口径）· "
             f"预热不足 NA {int(_eg.get('na') or 0)}（fail-open）\n"
         )
 

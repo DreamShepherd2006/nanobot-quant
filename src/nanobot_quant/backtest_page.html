@@ -630,7 +630,7 @@ const SKIP_LABELS = {
   batch_wait: "周期门控/波锁等待",
   gate_blocked: "贝叶斯闸门拦截",
   gate_na: "闸门数据不足(NA)",
-  ema_gate: "EMA 趋势闸门拦截",
+  ema_gate: "EMA 趋势闸门拦（候选买入）",
   ema_gate_na: "EMA 预热不足(NA，fail-open)",
 };
 function skipBox(skips) {
@@ -653,13 +653,14 @@ function emaBox(eg) {
     ["EMA 周期 n", eg.n],
     ["斜率跨度 k", eg.k],
     ["预热(bar)", eg.warmup],
-    ["通过 / 拦截", `${eg.pass || 0} / ${eg.block || 0}`],
-    ["通过率", rate],
+    ["通过 / 拦截（候选买入）", `${eg.pass || 0} / ${eg.block || 0}`],
+    ["通过率（候选买入）", rate],
     ["预热不足 NA（fail-open）", eg.na || 0],
   ].map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`).join("");
   return `<div class="bt-params"><div class="bt-params-title">🌊 趋势闸门（EMA · 只拦 BUY）</div>` +
     `<table class="bt-params-table">${rows}</table>` +
-    `<div class="f-hint">研究变量（docs §24 C73）：n=144 为预注册值，族内切换仅作探索、不作裁决依据</div></div>`;
+    `<div class="f-hint">通过/拦截按<b>候选买入</b>计数（有买信号且 score 过阈值），不含无信号 bar；` +
+    `「少做了多少笔」看两臂成交差。研究变量（docs §24 C73）：n=144 为预注册值，族内切换仅作探索、不作裁决依据</div></div>`;
 }
 
 // ── ⚖️ 两臂对照（EMA 闸门开 vs 关，2026-10-20）─────────────────
@@ -721,7 +722,10 @@ function _renderBars() {
   const start = _barsCache.page * _barsCache.size;
   const slice = rows.slice(start, start + _barsCache.size);
   const trs = slice.map(r => {
-    const gate = r.gate === "block" ? "⛔ 拦" : (r.gate === "pass" ? "✅ 放行" : "—");
+    // 闸门列三态（候选买入口径，2026-10-20）：无候选买信号 → "—"，
+    // 不把「该 bar EMA 在向下走」伪装成「拦了一笔买入」。
+    const gate = r.gate === "block" ? "⛔ 拦"
+      : (r.gate === "pass" ? "✅ 放行" : (r.gate === "na" ? "— 预热不足" : "—"));
     const sl = r.slope;
     const slTxt = sl === null || sl === undefined ? "—"
       : (sl >= 0 ? "+" : "") + Number(sl).toFixed(3);
@@ -742,6 +746,15 @@ function _renderBars() {
     : '<div class="empty">当前筛选下无行</div>';
   const info = $("bars-pageinfo");
   if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${rows.length} 行`;
+  // 表头两个数分开标（2026-10-20）：采集总数 vs 当前筛选——并排一个数
+  // 会和分页的「共 N 行」对不上账，看起来像 bug。
+  const fi = $("bars-filter-info");
+  if (fi) {
+    const collected = (_barsCache.rows || []).length;
+    fi.textContent = collected === rows.length
+      ? `采集 ${collected} 行`
+      : `采集 ${collected} 行 · 当前筛选 ${rows.length} 行`;
+  }
 }
 function barsBox(res) {
   if (!Array.isArray(res.bars_rows)) {
@@ -755,8 +768,8 @@ function barsBox(res) {
   const modeTxt = meta.mode === "full" ? "全量" : "精简";
   return `<div class="bt-params">` +
     `<div class="bt-params-title">📊 逐 bar 明细（TD + EMA）` +
-    `<span class="f-hint" style="font-weight:400;"> ${modeTxt} · ${meta.count != null ? meta.count : rows.length} 行` +
-    `${meta.capped ? "（已截断到上限）" : ""} · 拉取 ${meta.fetched_bars != null ? meta.fetched_bars : "—"} 根` +
+    `<span class="f-hint" style="font-weight:400;"> ${modeTxt}` +
+    `${meta.capped ? "（已截断到上限）" : ""} · <span id="bars-filter-info"></span> · 拉取 ${meta.fetched_bars != null ? meta.fetched_bars : "—"} 根` +
     ` / TD 预热 ${meta.td_warmup_bars != null ? meta.td_warmup_bars : "—"}` +
     ` / EMA 预热 ${meta.ema_warmup_bars != null ? meta.ema_warmup_bars : "—"}</span></div>` +
     `<div style="display:flex;gap:8px;align-items:center;margin:6px 0;font-size:.82em;flex-wrap:wrap;">` +
