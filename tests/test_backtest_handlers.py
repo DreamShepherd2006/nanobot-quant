@@ -187,3 +187,25 @@ def test_start_passes_overrides(client, monkeypatch):
         "momentum_exit": True,
         "td_sell_all": False,
     }
+
+
+def test_page_has_quantity_mode_override():
+    """数量模式覆盖 + 固定金额框仅固定金额模式可用（2026-10-20）。
+
+    背景：2026-10-20 线上回测 0 成交——场景 fixed × 10 SOL 撞 position_limit，
+    而旧的「TD 固定金额」只覆盖金额不覆盖模式 ⇒ 填了也不生效。
+    """
+    from pathlib import Path
+
+    html = Path(bh._HERE) / "backtest_page.html"
+    html = html.read_text(encoding="utf-8")
+    assert 'id="quantity_mode"' in html
+    assert 'value="fixed_amount"' in html
+    # 覆盖体里透传（留空=跟随场景）
+    assert "overrides.quantity_mode = qm" in html
+    # 固定金额框随模式启用/禁用
+    assert 'id="fixed_amount_hint"' in html
+    assert "function syncFixedAmountField" in html
+    assert "input.disabled = !active" in html
+    # 报告展示实际生效的数量模式
+    assert '"数量模式"' in html
