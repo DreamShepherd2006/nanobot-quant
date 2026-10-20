@@ -186,6 +186,30 @@ def test_coerce_overrides():
         bh._coerce_overrides({"entry_setup": "abc"})
 
 
+def test_coerce_overrides_accepts_ema_and_bars_mode():
+    """EMA 趋势变量 / 逐 bar 表模式也要能覆盖（2026-10-20）。
+
+    白名单没收录的键会走直通分支——以前 f1_gate_enabled 就是因此
+    「页面填了也不生效」，所以这里用显式断言锁住类型转换。
+    """
+    assert bh._coerce_overrides(
+        {
+            "ema_gate_enabled": "on",
+            "ema_n": "89",
+            "ema_k": "5",
+            "bars_mode": "full",
+        }
+    ) == {
+        "ema_gate_enabled": True,
+        "ema_n": 89,
+        "ema_k": 5,
+        "bars_mode": "full",
+    }
+    assert bh._coerce_overrides({"ema_gate_enabled": "off"}) == {
+        "ema_gate_enabled": False
+    }
+
+
 def test_start_passes_overrides(client, monkeypatch):
     """回测启动请求携带 overrides → run_backtest 原样透传（仅本次回测）。"""
     client, gk = client

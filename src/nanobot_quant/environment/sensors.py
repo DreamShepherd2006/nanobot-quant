@@ -93,6 +93,53 @@ def compute_f1(df: pd.DataFrame, atr_n: int = ATR_N,
     return atr / atr.shift(lookback)
 
 
+# ── EMA 趋势变量（C73/C74 研究线，2026-10-20）─────────────────────────────
+#
+# 口径（已冻结，见 docs/quant-system.md §24 C73）：同周期、同序列，
+# slope_k = (EMA_t − EMA_{t−k}) / (k × ATR_n)，ATR 与 EMA 对齐同一根已收盘 bar。
+# **这是回测侧研究变量，默认关、不接实盘交易路径。**
+
+#: 斐波那契族候选（界面下拉来源）。**候选集 ≠ 数学优势**——裁决只用事先
+#: 冻结的那一个 n，界面可切换的结果只能当探索。
+EMA_FIB: tuple[int, ...] = (5, 8, 13, 21, 34, 55, 89, 144)
+
+#: 默认周期（C73 冻结值）
+EMA_TREND_N = 144
+
+
+def ema_series(close: pd.Series, n: int = EMA_TREND_N) -> pd.Series:
+    """EMA(n)：α = 2/(n+1)、adjust=False（首根作初值）——C73 冻结口径。
+
+    注意：与同长度 SMA 相比，噪声抑制同为 1/n、相位滞后同为 (n−1)/2；
+    「EMA 更灵敏/滞后更小」是误解（§24 C72 已记）。
+    """
+    return close.astype(float).ewm(span=max(1, int(n)), adjust=False).mean()
+
+
+def ema_warmup_bars(n: int = EMA_TREND_N) -> int:
+    """EMA 预热根数（自动推算）：5τ，τ=(n−1)/2，至少 50 根。
+
+    n=144 → 5×(145/2) ≈ 362 根。界面只读显示、不允许手填更小——
+    预热不足时 EMA 尚未收敛，信号会静默失真（而非报错）。
+    """
+    return max(50, int(5 * (max(1, int(n)) + 1) / 2))
+
+
+def ema_trend(df: pd.DataFrame, n: int = EMA_TREND_N, k: int = 3,
+              atr_n: int = ATR_N) -> pd.DataFrame:
+    """趋势变量：``ema`` 与 ``slope``（ATR 单位），index 与输入对齐。
+
+    ATR ≤ 0 或窗口不足 → NaN（调用方 fail-open 并计数，与 IV/F1 闸门同规）。
+    """
+    d = _norm_columns(df)
+    ema = ema_series(d["Close"], n)
+    atr = atr_series(d, atr_n)
+    kk = max(1, int(k))
+    slope = (ema - ema.shift(kk)) / (kk * atr)
+    slope = slope.where(atr > 0)
+    return pd.DataFrame({"ema": ema, "slope": slope}, index=d.index)
+
+
 def sensor_frame(df: pd.DataFrame, ema_n: int = EMA_N, atr_n: int = ATR_N,
                  lookback: int = F1_LOOKBACK) -> pd.DataFrame:
     """一屏返回 {X3, F1, ATR}，index 与输入对齐（窗口期 NaN）。"""

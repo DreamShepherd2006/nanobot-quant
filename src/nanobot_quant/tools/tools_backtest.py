@@ -125,6 +125,43 @@ def _auto_backtest(
     _run_guarded(run_id, prep=_prep, run=_run)
 
 
+def _arm_summary(res: dict) -> dict:
+    """单臂摘要（只取可比项；不包含逐 bar / 成交明细等大字段）。"""
+    skips = res.get("skip_counts") or {}
+    eg = res.get("ema_gate") or {}
+    return {
+        "roi_pct": (res.get("roi") or 0.0) * 100,
+        "final_net": res.get("final_net"),
+        "fills": res.get("fills"),
+        "ema_pass": eg.get("pass"),
+        "ema_block": eg.get("block"),
+        "ema_na": eg.get("na"),
+        "skip_total": sum(int(v or 0) for v in skips.values()),
+        "skip": dict(skips),
+    }
+
+
+def _arms_compare(gated: dict, baseline: dict) -> dict:
+    """两臂对照（EMA 闸门开 vs 关）。
+
+    **仅展示**：两臂跑的是同一段行情、同一批信号，是两条路径而不是两个
+    独立样本 ⇒ 不得做配对推断，也不得把差值当成闸门效应量（C73 要求
+    单规则预注册 + 组合层 walk-forward 样本外裁决）。
+    """
+    g = _arm_summary(gated)
+    b = _arm_summary(baseline)
+    return {
+        "gated": g,
+        "baseline": b,
+        "delta_roi_pct": round((g["roi_pct"] or 0.0) - (b["roi_pct"] or 0.0), 4),
+        "delta_fills": (g.get("fills") or 0) - (b.get("fills") or 0),
+        "note": (
+            "仅展示：两臂为同一段行情的两条路径（非独立样本），"
+            "差值不得当成闸门效应量、禁配对推断"
+        ),
+    }
+
+
 def _parse_ts(value: str | None):
     """start/end → datetime。无时区输入明确按 UTC
     （页面提交已由前端把本地时间转成 UTC ISO）。"""
@@ -168,22 +205,43 @@ def _auto_backtest_driver(
         from nanobot_quant.backtest.fetchers import DEFAULT_SOURCE
         from nanobot_quant.onchainos_cli import backtests_dir
 
+        def _build(ov: dict | None, progress_path=None):
+            return BacktestDriver(
+                scene=scene,
+                symbols=symbols,
+                start_ts=_parse_ts(start),
+                end_ts=_parse_ts(end),
+                initial_quote=initial_quote,
+                batches=batches,
+                slippage=slippage,
+                fixed_amount=fixed_amount,
+                overrides=ov,
+                source=source or DEFAULT_SOURCE,
+                progress_path=progress_path,
+            )
+
         # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
         # {status: running, progress}，返回后 _backtest_log 覆写 done/error
-        d = BacktestDriver(
-            scene=scene,
-            symbols=symbols,
-            start_ts=_parse_ts(start),
-            end_ts=_parse_ts(end),
-            initial_quote=initial_quote,
-            batches=batches,
-            slippage=slippage,
-            fixed_amount=fixed_amount,
-            overrides=overrides,
-            source=source or DEFAULT_SOURCE,
-            progress_path=backtests_dir() / f"{run_id}.json",
-        )
-        return d.run()
+        res = _build(overrides, backtests_dir() / f"{run_id}.json").run()
+
+        # 两臂对照（2026-10-20 拍板）：闸门开时顺带跑一遍无闸门基线。
+        # 仅作**展示**——两臂是同一段行情的两条路径，不是独立样本，
+        # 禁止配对推断（与 C73 预注册纪律一致）。
+        _ov = overrides or {}
+        _gate_on = _ov.get("ema_gate_enabled")
+        _want = _ov.get("ema_compare_baseline")
+        if _gate_on and (_want is None or bool(_want)):
+            try:
+                _base = _build(
+                    {k: v for k, v in _ov.items() if k != "ema_compare_baseline"}
+                    | {"ema_gate_enabled": False},
+                    None,
+                ).run()
+                res["arms"] = _arms_compare(res, _base)
+            except Exception as exc:  # noqa: BLE001
+                # 基线臂失败不得拖垮主结果——显式记下原因，不静默
+                res["arms"] = {"error": f"基线臂失败: {exc}"}
+        return res
 
     _run_guarded(run_id, prep=_prep, run=_run)
 

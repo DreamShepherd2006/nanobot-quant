@@ -4,9 +4,14 @@ import pandas as pd
 import pytest
 
 from nanobot_quant.environment.sensors import (
+    EMA_FIB,
+    EMA_TREND_N,
     atr_series,
     compute_f1,
     compute_x3,
+    ema_series,
+    ema_trend,
+    ema_warmup_bars,
     latest_state,
     sensor_frame,
 )
@@ -107,3 +112,47 @@ def test_latest_state():
     st = latest_state(df)
     assert set(st) == {"x3", "f1", "atr"}
     assert st["x3"] is not None and st["f1"] is not None
+
+
+# ── EMA 趋势变量（C73/C74 研究线，2026-10-20）──────────────────────
+
+def test_ema_series_uses_alpha_2_over_n_plus_1():
+    """EMA(n)：首根作初值、α = 2/(n+1)（C73 冻结口径）。"""
+    close = pd.Series([100.0, 110.0, 100.0, 110.0])
+    out = ema_series(close, n=3)
+    assert out.iloc[0] == pytest.approx(100.0)  # adjust=False → 首根作初值
+    alpha = 2 / (3 + 1)
+    assert out.iloc[1] == pytest.approx(100 + alpha * (110 - 100))
+
+
+def test_ema_warmup_bars_is_5_tau_with_floor():
+    """预热 = 5τ，τ=(n−1)/2；至少 50 根（界面只读展示的就是这个值）。"""
+    assert ema_warmup_bars(144) == int(5 * (144 + 1) / 2)
+    assert ema_warmup_bars(89) == int(5 * (89 + 1) / 2)
+    assert ema_warmup_bars(5) == 50  # 下限
+    assert ema_warmup_bars(144) > ema_warmup_bars(89)  # n 越大预热越长
+
+
+def test_ema_trend_slope_sign_follows_trend():
+    """slope_k = (EMA_t − EMA_{t−k}) / (k·ATR)：上涨为正、下跌为负。"""
+    n = 200
+    up = pd.DataFrame({
+        "Close": [100 + i * 0.5 for i in range(n)],
+        "High": [100 + i * 0.5 + 0.2 for i in range(n)],
+        "Low": [100 + i * 0.5 - 0.2 for i in range(n)],
+    })
+    down = pd.DataFrame({
+        "Close": [200 - i * 0.5 for i in range(n)],
+        "High": [200 - i * 0.5 + 0.2 for i in range(n)],
+        "Low": [200 - i * 0.5 - 0.2 for i in range(n)],
+    })
+    assert ema_trend(up, n=20, k=3)["slope"].iloc[-1] > 0
+    assert ema_trend(down, n=20, k=3)["slope"].iloc[-1] < 0
+    # 前几根 ATR 不足 → NaN（不是 0）；调用方 fail-open 并计数 ema_gate_na
+    assert pd.isna(ema_trend(down, n=20, k=3)["slope"].iloc[0])
+
+
+def test_ema_fib_family_is_candidate_set_only():
+    """斐波那契族是**候选集**（界面下拉来源），不代表数学优势。"""
+    assert EMA_FIB == (5, 8, 13, 21, 34, 55, 89, 144)
+    assert EMA_TREND_N in EMA_FIB

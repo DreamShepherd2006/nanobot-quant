@@ -185,6 +185,12 @@
       <div class="ov-item"><label for="cd_exit_all">cd13全平</label><select id="cd_exit_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="gate_enabled">贝叶斯闸门</label><select id="gate_enabled"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="gate_red_min">闸门禁买阈值</label><input type="number" id="gate_red_min" min="0.05" max="0.9" step="0.05" placeholder="0.45"></div>
+      <div class="ov-item"><label for="ema_gate_enabled">EMA 趋势闸门</label><select id="ema_gate_enabled" onchange="syncEmaWarmup()"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">只拦 BUY（slope≤0）；默认关</span></div>
+      <div class="ov-item"><label for="ema_n">EMA 周期 n</label><select id="ema_n" onchange="syncEmaWarmup()"><option value="">（跟随场景/144）</option><option value="5">5</option><option value="8">8</option><option value="13">13</option><option value="21">21</option><option value="34">34</option><option value="55">55</option><option value="89">89</option><option value="144">144</option></select><span class="f-hint">斐波那契族（探索用，裁决值需冻结）</span></div>
+      <div class="ov-item"><label for="ema_k">斜率跨度 k</label><input type="number" id="ema_k" min="1" max="50" step="1" placeholder="3"><span class="f-hint">slope=(EMA_t−EMA_t−k)/(k·ATR20)</span></div>
+      <div class="ov-item"><label>EMA 预热(bar)</label><input type="text" id="ema_warmup" readonly value="自动：5τ（n=144 → 362）" style="background:#f1f5f9;"><span class="f-hint">只读：按 n 自动推算，不允许手填过小</span></div>
+      <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
+      <div class="ov-item"><label for="ema_compare">两臂对照</label><label style="display:flex;gap:4px;align-items:center;font-weight:400;"><input type="checkbox" id="ema_compare" checked> 同时跑无闸门基线</label><span class="f-hint">耗时 ×2；仅展示、禁配对推断</span></div>
     </div>
   </details>
   <div class="actions">
@@ -472,15 +478,23 @@ function collectOverrides() {
     "exit_setup","exit_countdown","min_hold_bars",
     "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
-    "gate_red_min"];
+    "gate_red_min","ema_n","ema_k"];
   numKeys.forEach(id => {
-    const v = $(id).value;
+    const el = $(id);
+    if (!el) return;
+    const v = el.value;
     if (v !== "") overrides[id] = parseFloat(v);
   });
-  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled"].forEach(id => {
-    const v = $(id).value;
+  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled","ema_gate_enabled"].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    const v = el.value;
     if (v !== "") overrides[id] = v === "on";
   });
+  const bm = $("bars_mode") ? $("bars_mode").value : "";
+  if (bm !== "") overrides.bars_mode = bm;
+  // 两臂对照：闸门开时默认同时跑无闸门基线（仅展示）
+  if ($("ema_compare")) overrides.ema_compare_baseline = !!$("ema_compare").checked;
   const eo = $("exit_order").value;
   if (eo !== "") overrides.exit_order = eo;
   const st = $("sleeptime").value;
@@ -616,6 +630,8 @@ const SKIP_LABELS = {
   batch_wait: "周期门控/波锁等待",
   gate_blocked: "贝叶斯闸门拦截",
   gate_na: "闸门数据不足(NA)",
+  ema_gate: "EMA 趋势闸门拦（候选买入）",
+  ema_gate_na: "EMA 预热不足(NA，fail-open)",
 };
 function skipBox(skips) {
   if (!skips || !Object.keys(skips).length) return "";
@@ -623,6 +639,148 @@ function skipBox(skips) {
     .map(([k, v]) => `<tr><td class="pk">${SKIP_LABELS[k] || k}</td><td class="pv">${v}</td></tr>`)
     .join("");
   return `<div class="bt-params"><div class="bt-params-title">🚦 SKIP 统计（回测期累计）</div><table class="bt-params-table">${rows}</table></div>`;
+}
+
+// ── 🌊 趋势闸门（EMA，2026-10-20）────────────────────────────────
+// 口径：slope_k = (EMA_t − EMA_{t−k}) / (k·ATR20)，仅 slope > 0 放行 BUY。
+// 回测侧研究变量（C73/C74），默认关，不接实盘交易路径。
+function emaBox(eg) {
+  if (!eg) return "";
+  const tot = (eg.pass || 0) + (eg.block || 0);
+  const rate = tot ? ((eg.pass / tot) * 100).toFixed(1) + "%" : "—";
+  const rows = [
+    ["闸门", eg.enabled ? "🟢 开" : "⚪ 关"],
+    ["EMA 周期 n", eg.n],
+    ["斜率跨度 k", eg.k],
+    ["预热(bar)", eg.warmup],
+    ["通过 / 拦截（候选买入）", `${eg.pass || 0} / ${eg.block || 0}`],
+    ["通过率（候选买入）", rate],
+    ["预热不足 NA（fail-open）", eg.na || 0],
+  ].map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`).join("");
+  return `<div class="bt-params"><div class="bt-params-title">🌊 趋势闸门（EMA · 只拦 BUY）</div>` +
+    `<table class="bt-params-table">${rows}</table>` +
+    `<div class="f-hint">通过/拦截按<b>候选买入</b>计数（有买信号且 score 过阈值），不含无信号 bar；` +
+    `「少做了多少笔」看两臂成交差。研究变量（docs §24 C73）：n=144 为预注册值，族内切换仅作探索、不作裁决依据</div></div>`;
+}
+
+// ── ⚖️ 两臂对照（EMA 闸门开 vs 关，2026-10-20）─────────────────
+// 两臂跑同一段行情、同一批信号：是两条路径而不是两个独立样本，
+// 所以只能看，不能做配对推断，也不能把差值当闸门效应量。
+function armsBox(arms) {
+  if (!arms) return "";
+  if (arms.error) {
+    return `<div class="bt-params"><div class="bt-params-title">⚖️ 两臂对照</div>` +
+      `<div class="empty" style="padding:8px;">基线臂失败：${escapeHtml(arms.error)}</div></div>`;
+  }
+  const g = arms.gated || {}, b = arms.baseline || {};
+  const row = (k, f) => `<tr><td class="pk">${k}</td><td class="pv">${f(g)}</td><td class="pv">${f(b)}</td></tr>`;
+  const pct = v => v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(3) + "%";
+  const num = v => v == null ? "—" : v;
+  const rows = [
+    row("ROI", a => pct(a.roi_pct)),
+    row("期末净值", a => num(a.final_net)),
+    row("成交笔数", a => num(a.fills)),
+    row("闸门通过 / 拦", a => `${num(a.ema_pass)} / ${num(a.ema_block)}`),
+    row("闸门 NA(fail-open)", a => num(a.ema_na)),
+    row("SKIP 合计", a => num(a.skip_total)),
+  ].join("");
+  return `<div class="bt-params"><div class="bt-params-title">⚖️ 两臂对照（闸门开 vs 关）</div>` +
+    `<table class="bt-params-table"><tr><td class="pk">项</td><td class="pv">🌊 闸门开</td><td class="pv">⚪ 基线</td></tr>${rows}</table>` +
+    `<div class="f-hint">ΔROI ${pct(arms.delta_roi_pct)} · Δ成交 ${arms.delta_fills >= 0 ? "+" : ""}${arms.delta_fills} —— ` +
+    `${escapeHtml(arms.note || "仅展示，禁配对推断")}</div></div>`;
+}
+
+// ── 📊 逐 bar 明细（TD + EMA，2026-10-20）──────────────────────
+// 动作列直接来自策略自己的决策流（单一实现），含被拦原因——用来回答
+// 「这根有信号为何没买」；精简模式下只存信号/成交/闸门翻转行。
+let _barsCache = { rows: [], meta: {}, page: 0, symbol: "", only: true, size: 200 };
+
+function _barsState() { return _barsCache; }
+function _barsPage(d) {
+  const pages = Math.max(1, Math.ceil(_filteredBars().length / _barsCache.size));
+  _barsCache.page = Math.min(pages - 1, Math.max(0, _barsCache.page + d));
+  _renderBars();
+}
+function _filteredBars() {
+  let rows = _barsCache.rows || [];
+  if (_barsCache.symbol) rows = rows.filter(r => r.symbol === _barsCache.symbol);
+  if (_barsCache.only) rows = rows.filter(r => (r.action && r.action !== "") || r.fill);
+  return rows;
+}
+function _utc(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toISOString().slice(0, 16).replace("T", " ");
+}
+function _renderBars() {
+  const body = $("bars-body");
+  if (!body) return;
+  const rows = _filteredBars();
+  const pages = Math.max(1, Math.ceil(rows.length / _barsCache.size));
+  if (_barsCache.page >= pages) _barsCache.page = pages - 1;
+  const start = _barsCache.page * _barsCache.size;
+  const slice = rows.slice(start, start + _barsCache.size);
+  const trs = slice.map(r => {
+    // 闸门列三态（候选买入口径，2026-10-20）：无候选买信号 → "—"，
+    // 不把「该 bar EMA 在向下走」伪装成「拦了一笔买入」。
+    const gate = r.gate === "block" ? "⛔ 拦"
+      : (r.gate === "pass" ? "✅ 放行" : (r.gate === "na" ? "— 预热不足" : "—"));
+    const sl = r.slope;
+    const slTxt = sl === null || sl === undefined ? "—"
+      : (sl >= 0 ? "+" : "") + Number(sl).toFixed(3);
+    return `<tr${r.fill ? ' style="background:#e8f5e9;"' : ""}>` +
+      `<td>${fmtTs(r.ts)}</td><td>${_utc(r.ts)}</td><td>${r.symbol || "—"}</td>` +
+      `<td>${fmtN(r.close, 4)}</td>` +
+      `<td class="${r.chg != null && r.chg < 0 ? "sl-neg" : ""}">${r.chg == null ? "—" : (r.chg >= 0 ? "+" : "") + (r.chg * 100).toFixed(2) + "%"}</td>` +
+      `<td>${r.setup_buy || ""}</td><td>${r.setup_sell || ""}</td><td>${fmtN(r.score, 2)}</td>` +
+      `<td>${r.ema == null ? "—" : fmtN(r.ema, 2)}</td>` +
+      `<td class="${sl != null && sl < 0 ? "sl-neg" : ""}">${slTxt}</td>` +
+      `<td>${gate}</td><td style="font-size:.9em;">${escapeHtml(r.action || "")}</td>` +
+      `<td>${escapeHtml(r.fill || "")}</td></tr>`;
+  }).join("");
+  body.innerHTML = rows.length
+    ? `<table><thead><tr><th>时间</th><th>UTC 时间</th><th>标的</th><th>收盘</th><th>涨跌%</th>` +
+      `<th>Buy Setup</th><th>Sell Setup</th><th>Score</th><th>EMA</th><th>slope${_barsCache.meta && _barsCache.meta.ema_k ? _barsCache.meta.ema_k : 3}</th>` +
+      `<th>闸门</th><th>动作/原因</th><th>成交</th></tr></thead><tbody>${trs}</tbody></table>`
+    : '<div class="empty">当前筛选下无行</div>';
+  const info = $("bars-pageinfo");
+  if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${rows.length} 行`;
+  // 表头两个数分开标（2026-10-20）：采集总数 vs 当前筛选——并排一个数
+  // 会和分页的「共 N 行」对不上账，看起来像 bug。
+  const fi = $("bars-filter-info");
+  if (fi) {
+    const collected = (_barsCache.rows || []).length;
+    fi.textContent = collected === rows.length
+      ? `采集 ${collected} 行`
+      : `采集 ${collected} 行 · 当前筛选 ${rows.length} 行`;
+  }
+}
+function barsBox(res) {
+  if (!Array.isArray(res.bars_rows)) {
+    return `<div class="bt-params"><div class="bt-params-title">📊 逐 bar 明细</div>` +
+      '<div class="empty" style="padding:8px;">该次未采集逐 bar 数据（重建前的旧记录）</div></div>';
+  }
+  const meta = res.bars_meta || {};
+  const rows = res.bars_rows;
+  _barsCache = { rows, meta, page: 0, symbol: "", only: true, size: 200 };
+  const syms = Array.from(new Set(rows.map(r => r.symbol).filter(Boolean)));
+  const modeTxt = meta.mode === "full" ? "全量" : "精简";
+  return `<div class="bt-params">` +
+    `<div class="bt-params-title">📊 逐 bar 明细（TD + EMA）` +
+    `<span class="f-hint" style="font-weight:400;"> ${modeTxt}` +
+    `${meta.capped ? "（已截断到上限）" : ""} · <span id="bars-filter-info"></span> · 拉取 ${meta.fetched_bars != null ? meta.fetched_bars : "—"} 根` +
+    ` / TD 预热 ${meta.td_warmup_bars != null ? meta.td_warmup_bars : "—"}` +
+    ` / EMA 预热 ${meta.ema_warmup_bars != null ? meta.ema_warmup_bars : "—"}</span></div>` +
+    `<div style="display:flex;gap:8px;align-items:center;margin:6px 0;font-size:.82em;flex-wrap:wrap;">` +
+    `<select id="bars-symbol" onchange="_barsState().symbol=this.value;_barsState().page=0;_renderBars()">` +
+    `<option value="">全部标的</option>${syms.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")}</select>` +
+    `<label style="display:flex;gap:4px;align-items:center;"><input type="checkbox" id="bars-only" checked ` +
+    `onchange="_barsState().only=this.checked;_barsState().page=0;_renderBars()"> 只看有动作/成交</label>` +
+    `<button class="btn-outline" style="padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="_barsPage(-1)">上一页</button>` +
+    `<span id="bars-pageinfo"></span>` +
+    `<button class="btn-outline" style="padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="_barsPage(1)">下一页</button>` +
+    `</div><div id="bars-body" style="overflow-x:auto;"></div></div>`;
 }
 
 // 📦 期末未平仓（open 槽位 = 回测结束时仍持有，按最后 bar 收盘价折算）
@@ -677,10 +835,14 @@ function renderResult(res, runId) {
     </div>
     ${capitalBox(res.capital_stats)}
     ${skipBox(res.skip_counts)}
+    ${emaBox(res.ema_gate)}
+    ${armsBox(res.arms)}
     ${opensBox(res.slots)}
+    ${barsBox(res)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
+  if (Array.isArray(res.bars_rows)) _renderBars();
 }
 
 function renderError(err, runId) {
@@ -706,7 +868,9 @@ function renderProgress(runId, prog) {
     <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
     ${prog.capital_stats ? capitalBox(prog.capital_stats) : ""}
     ${fillsBox(prog.fills_detail, `运行中已成交 ${prog.fills || 0} 笔，实时更新`)}
+    ${(prog.bars_rows && prog.bars_rows.length) ? barsBox({ bars_rows: prog.bars_rows, bars_meta: { mode: "lean", count: prog.bars_rows.length } }) : ""}
   `;
+  if (prog.bars_rows && prog.bars_rows.length) _renderBars();
 }
 
 // 资金效率指标（周转率/利用率，2026-08-29）
@@ -770,7 +934,18 @@ function fillPeriodOptions() {
 
 initForm();
 fillPeriodOptions();
+syncEmaWarmup();
 loadRuns();
+
+// EMA 预热 = 5τ 一次性推算（与后端 sensors.ema_warmup_bars 同公式、同取整）：
+// 界面只读展示，不允许手填过小——预热不足会让 slope 在窗口边缘静默失真。
+function emaWarmupOf(n) { return Math.max(50, Math.floor(5 * (n + 1) / 2)); }
+function syncEmaWarmup() {
+  const sel = $("ema_n"), box = $("ema_warmup");
+  if (!sel || !box) return;
+  const n = sel.value === "" ? 144 : parseInt(sel.value, 10);
+  box.value = `自动：5τ（n=${n} → ${emaWarmupOf(n)}）`;
+}
 
 // 成交明细行（实盘交易记录口径：时间/场景/标的/方向/数量/策略价/成交价/滑点/slot/状态/原因）
 function fillRow(f) {
@@ -783,6 +958,8 @@ function fillRow(f) {
     `<td>${sp ? fmtN(sp, 4) : "—"}</td><td>${f.avg_price ? fmtN(f.avg_price, 4) : "—"}</td>` +
     `<td class="${sl !== null && sl < 0 ? "sl-neg" : ""}">${slTxt}</td>` +
     `<td>${f.slot}</td><td>${f.state === "LONG" ? "✅ LONG" : "✅ EXIT"}</td>` +
+    `<td>${f.ema != null ? fmtN(f.ema, 2) : "—"}</td>` +
+    `<td class="${f.slope != null && f.slope < 0 ? "sl-neg" : ""}">${f.slope != null ? (f.slope >= 0 ? "+" : "") + Number(f.slope).toFixed(3) : "—"}</td>` +
     `<td>slot=${f.slot} ${reason}qty=${fmtN(f.quantity, 6)} price=${sp ? fmtN(sp, 4) : "—"}</td></tr>`;
 }
 
@@ -791,7 +968,7 @@ function fillsBox(fills, note) {
   const rows = (fills || []).map(fillRow).join("");
   if (!rows) return "";
   return `<h3 style="font-size:.95em;margin:8px 0 2px;">成交明细${note ? `（${note}）` : ""}</h3>` +
-    `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>EMA</th><th>slope3</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 // ══════════════════════════════════════════════════════
 // 分栏切换

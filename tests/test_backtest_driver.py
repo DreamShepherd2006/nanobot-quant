@@ -216,6 +216,88 @@ def test_backtest_config_fee_rate_follows_params(tmp_path):
     assert driver.run()["backtest_config"]["fee_rate"] == pytest.approx(0.0005)
 
 
+# ── 逐 bar 表 + EMA 趋势变量（2026-10-20，C73/C74 研究线）─────────────
+
+def test_bars_rows_captured_in_lean_mode(tmp_path):
+    """默认精简模式：逐 bar 表非空、字段齐全、**成交行必进表**。"""
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["bars_mode"] == "lean"
+    rows = out["bars_rows"]
+    assert rows, "逐 bar 表不能为空"
+    need = {
+        "ts", "symbol", "close", "chg", "setup_buy", "setup_sell",
+        "cd_buy", "cd_sell", "score", "ema", "slope", "gate", "action", "fill",
+    }
+    assert need <= set(rows[0]), need - set(rows[0])
+    assert out["fills"] >= 1
+    assert any(r["fill"] for r in rows), "有成交就必须有成交行"
+    # 精简模式应当小于全量（否则筛选失效）
+    assert len(rows) < out["bars_meta"]["evaluated_bars"]
+
+
+def test_bars_rows_full_mode_keeps_every_bar(tmp_path):
+    """全量模式：行数 = 评估 bar × 标的数。"""
+    p = _params(bars_mode="full")
+    out = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
+    ).run()
+    meta = out["bars_meta"]
+    assert meta["mode"] == "full"
+    assert meta["count"] == len(out["bars_rows"])
+    assert meta["count"] == meta["evaluated_bars"] * len(out["symbols"])
+
+
+def test_ema_gate_blocks_buy_in_downtrend(tmp_path):
+    """EMA 闸门开：下跌趋势下 slope ≤ 0 → 拦 BUY（只拦不买），并计数。"""
+    closes = _flat_then_falling(60, 40)
+    base = BacktestDriver(
+        scene="mid", params=_params(),
+        fetcher=_FakeFetcher(closes), ledger_dir=tmp_path,
+    ).run()
+    assert base["fills"] >= 1
+    assert base["ema_gate"]["enabled"] is False
+
+    p = _params()
+    p["ema_gate_enabled"] = True
+    p["ema_n"] = 20
+    gated = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(closes), ledger_dir=tmp_path,
+    ).run()
+    assert gated["ema_gate"]["enabled"] is True
+    assert gated["ema_gate"]["n"] == 20
+    assert gated["ema_gate"]["block"] >= 1, "下跌趋势必须被拦至少一次"
+    assert gated["skip_counts"].get("ema_gate", 0) >= 1
+    assert gated["fills"] <= base["fills"]
+    # 拦下来的那次不能落台账（无仓）
+    assert gated["ema_gate"]["pass"] + gated["ema_gate"]["na"] >= 0
+
+
+def test_progress_payload_carries_bars_rows(tmp_path):
+    """运行中进度也要带逐 bar 行（否则 26 分钟的回测只能跑完才看）。"""
+    import json as _json
+
+    drv = BacktestDriver(
+        scene="mid", params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
+    )
+    p = tmp_path / "progress.json"
+    drv.progress_path = p
+    drv._write_progress(
+        "replay", 5, 100, None, 0, bars_rows=[{"ts": "2026-10-20T00:00:00", "symbol": "SOL"}]
+    )
+    prog = _json.loads(p.read_text(encoding="utf-8"))["progress"]
+    assert prog["bars_rows"][0]["symbol"] == "SOL"
+    assert prog["stage"] == "replay"
+
+
 # ── hooks（回测注入，实盘零影响） ────────────────────────────────────
 
 def test_hooks_injected_backtest_broker():
@@ -830,3 +912,80 @@ def test_driver_min_hold_follows_exec_params(tmp_path):
         ledger_dir=tmp_path,
     )
     assert driver3._min_hold_bars_value() == 25
+
+
+# ── EMA 闸门计数口径（2026-10-20 修正：按候选买入，不按全 bar）───────
+
+def test_ema_gate_pass_counts_only_candidate_bars(tmp_path):
+    """单调上涨：无任何买信号 ⇒ 闸门从未被问到（pass 必须为 0）。
+
+    旧实现把「EMA 向上走了多少分钟」记成「放行了多少候选买入」——这条测试
+    就是那个缺陷的回归钩子：61 个评估 bar 全为 slope>0，旧口径会报 pass≈61。
+    """
+    p = _params(bars_mode="full")
+    p["ema_gate_enabled"] = True
+    p["ema_n"] = 20
+    out = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(_rising_closes(100)), ledger_dir=tmp_path,
+    ).run()
+
+    assert out["ema_gate"]["pass"] == 0
+    assert out["ema_gate"]["block"] == 0
+    assert out["skip_counts"].get("ema_gate", 0) == 0
+    assert all(r["gate"] == "" for r in out["bars_rows"])
+    # 斜率确实全为正（证明 0 是「无候选」而不是「没算 EMA」）
+    assert all((r["slope"] or 0) > 0 for r in out["bars_rows"])
+
+
+def test_ema_gate_block_counts_only_candidate_bars(tmp_path):
+    """下跌趋势：拦截只计候选买入 bar，且小于 slope≤0 的全 bar 数。"""
+    p = _params(bars_mode="full")
+    p["ema_gate_enabled"] = True
+    p["ema_n"] = 20
+    drv = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
+    )
+    out = drv.run()
+
+    # 阈值取驱动实际生效值（场景优先 / 全局回退），不自推断
+    entry = int(drv._merged_params.get("entry_setup") or 9)
+    entry_cd = int(drv._merged_params.get("entry_countdown") or 13)
+    rows = out["bars_rows"]
+    blocked = [r for r in rows if r["gate"] == "block"]
+    slope_le0 = [r for r in rows if r["slope"] is not None and r["slope"] <= 0]
+
+    assert out["ema_gate"]["block"] >= 1, "下跌趋势必被拦至少一次"
+    # 计数与逐 bar 行状态必须一致（两处同源，不得各算一套）
+    assert out["ema_gate"]["block"] == len(blocked)
+    assert out["ema_gate"]["pass"] == sum(1 for r in rows if r["gate"] == "pass")
+    # 被标「拦」的行必有候选买信号（旧口径会把无信号 bar 也标拦）
+    for r in blocked:
+        assert (r["setup_buy"] or 0) >= entry or (r["cd_buy"] or 0) >= entry_cd, r
+    # 旧口径 = 全 bar 中 slope≤0 的数量；新口径必须严格更小（除非全为候选）
+    assert out["ema_gate"]["block"] <= len(slope_le0)
+    if len(slope_le0) > len(blocked):
+        assert out["ema_gate"]["block"] < len(slope_le0)
+
+
+def test_ema_gate_no_signal_bars_not_marked(tmp_path):
+    """无候选信号的 bar：闸门列留空、不写 WAIT 事件（噪音根因回归）。"""
+    p = _params(bars_mode="full")
+    p["ema_gate_enabled"] = True
+    p["ema_n"] = 20
+    drv = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
+    )
+    out = drv.run()
+
+    entry = int(drv._merged_params.get("entry_setup") or 9)
+    entry_cd = int(drv._merged_params.get("entry_countdown") or 13)
+    no_cand = [r for r in out["bars_rows"] if r["gate"] == ""]
+    assert no_cand, "下跌序列中必有无候选 bar"
+    for r in no_cand:
+        assert (r["setup_buy"] or 0) < entry
+        assert (r["cd_buy"] or 0) < entry_cd
+        assert "EMA 趋势闸门" not in (r.get("action") or "")
+
