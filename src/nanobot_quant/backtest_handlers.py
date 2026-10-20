@@ -4,6 +4,7 @@ GET  /config/backtest        — page (form + run history + result viewer)
 POST /config/backtest/start  — start a driver-engine backtest (async run_id)
 GET  /config/backtest/result — poll a run outcome (run_id)
 GET  /config/backtest/runs   — recent runs from the persisted audit dir
+GET  /config/backtest/bars.csv — 逐 bar 明细（TD + EMA）全量导出（run_id）
 
 The page drives the Step 3 replay driver (``backtest.driver.BacktestDriver``)
 through the same async run_id + poll contract as the MCP tool
@@ -18,7 +19,7 @@ import os
 from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from nanobot_quant.data_sources.periods import PERIODS
 
@@ -317,6 +318,46 @@ def register_backtest_routes(app, gatekeeper) -> None:
 
         return JSONResponse(get_backtest_result(run_id))
 
+    async def _bars_csv(request: Request):
+        """逐 bar 明细 CSV 导出（全部行，不受页面筛选影响）。
+
+        导出的是回测结果里已落盘的 ``bars_rows``——不重算任何指标，
+        与页面表格同一份数据（单一来源）。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": err},
+                status_code=403 if "Commander" in err else 401,
+            )
+        run_id = request.query_params.get("run_id", "")
+        if not run_id:
+            return JSONResponse({"ok": False, "error": "缺少 run_id"}, status_code=400)
+        from nanobot_quant.tools.tools_backtest import get_backtest_result
+
+        payload = get_backtest_result(run_id)
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            status = payload.get("status") if isinstance(payload, dict) else payload
+            return JSONResponse(
+                {"ok": False, "error": f"run 不可用（{status}）"}, status_code=404
+            )
+        if not result.get("bars_rows"):
+            return JSONResponse(
+                {"ok": False, "error": "该 run 未采集逐 bar 数据（精简模式或旧记录）"},
+                status_code=404,
+            )
+        from nanobot_quant.backtest_csv import bars_to_csv
+
+        csv_text = bars_to_csv(result)
+        return Response(
+            csv_text.encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="backtest-bars-{run_id}.csv"'
+            },
+        )
+
     async def _runs(request: Request):
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -330,3 +371,4 @@ def register_backtest_routes(app, gatekeeper) -> None:
     app.add_route("/config/backtest/start", _start, methods=["POST"])
     app.add_route("/config/backtest/result", _result, methods=["GET"])
     app.add_route("/config/backtest/runs", _runs, methods=["GET"])
+    app.add_route("/config/backtest/bars.csv", _bars_csv, methods=["GET"])

@@ -756,7 +756,7 @@ function _renderBars() {
       : `采集 ${collected} 行 · 当前筛选 ${rows.length} 行`;
   }
 }
-function barsBox(res) {
+function barsBox(res, runId) {
   if (!Array.isArray(res.bars_rows)) {
     return `<div class="bt-params"><div class="bt-params-title">📊 逐 bar 明细</div>` +
       '<div class="empty" style="padding:8px;">该次未采集逐 bar 数据（重建前的旧记录）</div></div>';
@@ -766,6 +766,13 @@ function barsBox(res) {
   _barsCache = { rows, meta, page: 0, symbol: "", only: true, size: 200 };
   const syms = Array.from(new Set(rows.map(r => r.symbol).filter(Boolean)));
   const modeTxt = meta.mode === "full" ? "全量" : "精简";
+  // CSV 导出（2026-10-20）：后端渲染、与表格同一份 bars_rows；导出全部行，
+  // 不受「全部标的 / 只看有动作」筛选影响（筛选只是浏览辅助）。
+  const csvBtn = runId
+    ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;" ` +
+      `title="导出全部行（不受筛选影响）" ` +
+      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}">⬇ 导出 CSV（全部 ${rows.length} 行）</a>`
+    : "";
   return `<div class="bt-params">` +
     `<div class="bt-params-title">📊 逐 bar 明细（TD + EMA）` +
     `<span class="f-hint" style="font-weight:400;"> ${modeTxt}` +
@@ -777,6 +784,7 @@ function barsBox(res) {
     `<option value="">全部标的</option>${syms.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")}</select>` +
     `<label style="display:flex;gap:4px;align-items:center;"><input type="checkbox" id="bars-only" checked ` +
     `onchange="_barsState().only=this.checked;_barsState().page=0;_renderBars()"> 只看有动作/成交</label>` +
+    csvBtn +
     `<button class="btn-outline" style="padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="_barsPage(-1)">上一页</button>` +
     `<span id="bars-pageinfo"></span>` +
     `<button class="btn-outline" style="padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="_barsPage(1)">下一页</button>` +
@@ -838,7 +846,7 @@ function renderResult(res, runId) {
     ${emaBox(res.ema_gate)}
     ${armsBox(res.arms)}
     ${opensBox(res.slots)}
-    ${barsBox(res)}
+    ${barsBox(res, runId)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
