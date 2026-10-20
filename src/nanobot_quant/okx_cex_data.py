@@ -24,6 +24,8 @@ from typing import Optional
 import pandas as pd
 import requests
 
+from nanobot_quant.kline_paging import paginate_backwards
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -192,6 +194,8 @@ def fetch_kline(
     rows: list[dict] = []
     for entry in data:
         try:
+            if not _is_confirmed(entry):      # 丢弃进行中 bar（confirm="0"）
+                continue
             ts = datetime.fromtimestamp(int(entry[0]) / 1000, tz=timezone.utc)
             rows.append({
                 "ts": ts,
@@ -361,6 +365,18 @@ def fetch_order_book(
     }
 
 
+def _is_confirmed(entry: list) -> bool:
+    """OKX candle 第 9 个字段 confirm："1" 已收盘 / "0" 进行中。
+
+    字段缺失时视为已收盘（兼容旧 mock 与非 OKX 形状的响应）。TD 只用已收盘
+    bar（与 Gate 数据源的 closed 过滤同契约），否则最后一根半成品 bar 会让
+    setup/countdown 计数抖动。
+    """
+    if len(entry) >= 9:
+        return str(entry[8]) == "1"
+    return True
+
+
 def fetch_kline_range(
     ticker: str,
     start: str,
@@ -400,42 +416,53 @@ def fetch_kline_range(
     start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
     start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
 
     _sess = session or requests
     # 必须用 history-candles：`candles` 端点恒返回最近 300 根、游标无效。
     url = f"{_BASE_URL}{_HISTORY_PATH}"
+    # after 语义：返回「早于该 ts」的数据（不含端点）⇒ 首游标取 end+1ms
+    state = {"cursor": end_ms + 1}
 
-    frames: list[pd.DataFrame] = []
-    after: int | None = None  # None on first call → latest candles
-
-    while True:
+    def _fetch_page(cursor_ms: int) -> list:
         time.sleep(_RATE_DELAY)
         params: dict = {
             "instId": inst_id,
             "bar": bar_okx,
             "limit": 300,
+            "after": int(cursor_ms),
         }
-        if after is not None:
-            # OKX 语义：after = 返回早于该 ts 的数据（与多数交易所相反）
-            params["after"] = after
         resp = _sess.get(url, params=params, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
-
         if payload.get("code") != "0":
-            msg = payload.get("msg", "unknown error")
             raise requests.RequestException(
-                f"OKX API error (code={payload.get('code')}): {msg}"
+                f"OKX API error (code={payload.get('code')}): "
+                f"{payload.get('msg', 'unknown error')}"
             )
+        state["cursor"] = int(cursor_ms)
+        return payload.get("data") or []
 
-        batch = payload.get("data", [])
-        if not batch:
-            break
+    def _next_cursor(oldest_ms: int) -> Optional[int]:
+        # 游标回退到本页最早 ts；无法前进则停（防死循环）
+        return oldest_ms if oldest_ms < state["cursor"] else None
 
-        rows: list[dict] = []
-        earliest_ts: Optional[int] = None
+    pages = paginate_backwards(
+        _fetch_page,
+        initial_cursor=end_ms + 1,
+        start_ms=start_ms,
+        page_limit=300,
+        next_cursor=_next_cursor,
+        label=f"okx {inst_id} {bar}",
+        ts_of=lambda row: int(row[0]),
+    )
+
+    rows: list[dict] = []
+    for batch in pages:
         for entry in batch:
             try:
+                if not _is_confirmed(entry):
+                    continue
                 ts_ms = int(entry[0])
                 ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                 if ts < start_dt or ts > end_dt:
@@ -448,30 +475,15 @@ def fetch_kline_range(
                     "Close": float(entry[4]),
                     "Volume": float(entry[5]),
                 })
-                if earliest_ts is None or ts_ms < earliest_ts:
-                    earliest_ts = ts_ms
             except (IndexError, ValueError, TypeError) as exc:
                 logger.debug("Skipping malformed candle: %s — %s", entry, exc)
                 continue
 
-        if rows:
-            df = pd.DataFrame(rows).set_index("ts")
-            frames.append(df)
-
-        if batch and len(batch) < 300:
-            # Fewer than max — no more data available
-            break
-
-        if earliest_ts is None or earliest_ts <= start_ms:
-            break
-
-        after = earliest_ts
-
-    if not frames:
+    if not rows:
         logger.warning("fetch_kline_range(%s): no data %s→%s", inst_id, start, end)
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    result = pd.concat(frames)
+    result = pd.DataFrame(rows).set_index("ts")
     result.sort_index(inplace=True)
     result = result[~result.index.duplicated(keep="first")]
 
