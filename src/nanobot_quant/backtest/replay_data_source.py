@@ -101,8 +101,9 @@ class ReplayDataSource:
         timestep: 场景周期（"1m"/"5min"/"15min"/"hour"/...，映射 Gate bar）。
         start_ts / end_ts: 回测区间（unix 秒；默认自动取 Gate 可拉的最深范围）。
         length: 策略窗口长度（默认 120 = min_history，驱动跳过前 length−1 根）。
-        tokens_json: tokens.json 条目（gate_symbol 映射）。
+        tokens_json: 回测标的元数据（Gate: ``gate_symbol``；OKX: ``okx_symbol``）。
         fetcher: 注入用 callable(pair, start_ts, end_ts, bar) -> DataFrame。
+        resolver: symbol → 该源交易对/ticker；默认 Gate（``gate_pair``）。
     """
 
     SOURCE = "backtest"
@@ -120,6 +121,7 @@ class ReplayDataSource:
         length: int = 120,
         tokens_json: Optional[list[dict]] = None,
         fetcher: Optional[Callable[[str, int, int, str], pd.DataFrame]] = None,
+        resolver: Optional[Callable[[str], str]] = None,
     ):
         self._symbols = list(symbols)
         self._timestep = str(timestep)
@@ -136,6 +138,9 @@ class ReplayDataSource:
             self._prefetch_start_ts = self._user_start_ts - warmup_seconds
         self._tokens_json = tokens_json or []
         self._fetcher = fetcher or self._default_fetch
+        self._resolver = resolver or (
+            lambda sym: gate_pair(sym, self._tokens_json)
+        )
         self._frames: dict[str, pd.DataFrame] = {}   # symbol -> 小写列 + naive/UTC index
         self._current_ts: Optional[datetime] = None
         self._bar_times: list = []                   # 主标的完整时间轴
@@ -153,7 +158,7 @@ class ReplayDataSource:
         """
         end_ts = self._end_ts or int(time.time())
         for symbol in self._symbols:
-            pair = gate_pair(symbol, self._tokens_json)
+            pair = self._resolver(symbol)
             try:
                 df = self._fetcher(pair, self._prefetch_start_ts or 0, end_ts, self._bar)
             except Exception as exc:  # noqa: BLE001

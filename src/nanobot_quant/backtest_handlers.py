@@ -248,11 +248,17 @@ def register_backtest_routes(app, gatekeeper) -> None:
         scene = data.get("scene") or "mid"
         symbols = data.get("symbols") or []
         try:
+            from nanobot_quant.backtest.fetchers import normalize_source
+
+            source = normalize_source(data.get("source"))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        try:
             overrides = _coerce_overrides(data.get("overrides"))
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         gatekeeper._log(
-            f"[BACKTEST-PAGE] 启动请求 scene={scene} symbols={symbols} "
+            f"[BACKTEST-PAGE] 启动请求 source={source} scene={scene} symbols={symbols} "
             f"range={data.get('start') or '拉满'}→{data.get('end') or '现在'} "
             f"initial_quote={data.get('initial_quote')} batches={data.get('batches')} "
             f"slippage={data.get('slippage')} fixed_amount={data.get('fixed_amount')} "
@@ -276,6 +282,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 if data.get("fixed_amount")
                 else None,
                 overrides=overrides,
+                source=source,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")
@@ -286,7 +293,8 @@ def register_backtest_routes(app, gatekeeper) -> None:
             gatekeeper._log(f"[BACKTEST-PAGE] run_backtest 拒绝: {resp['error']}")
             return JSONResponse({"ok": False, "error": resp["error"]}, status_code=400)
         gatekeeper._log(
-            f"📈 回测启动 scene={scene} symbols={symbols} run_id={resp['run_id']}"
+            f"📈 回测启动 source={source} scene={scene} symbols={symbols} "
+            f"run_id={resp['run_id']}"
         )
         return JSONResponse({"ok": True, "run_id": resp["run_id"]})
 

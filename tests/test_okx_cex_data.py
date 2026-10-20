@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from nanobot_quant import okx_cex_data as m
+from nanobot_quant.kline_paging import KlineRangeTooLarge
 
 BASE = datetime(2026, 10, 20, 0, 0, tzinfo=timezone.utc)
 STEP_MS = 60_000  # 1m
@@ -86,11 +87,32 @@ def test_range_empty_window_in_future_returns_empty():
 def test_range_stops_when_no_more_data():
     """历史只到 floor：翻到底返回空页即停，不挂死、不报错。"""
     sess = _FakeSession(floor_ms=_ms(BASE - timedelta(hours=1)), top_ms=_ms(BASE))
-    start = (BASE - timedelta(days=10)).strftime("%Y-%m-%d")
+    start = (BASE - timedelta(days=5)).strftime("%Y-%m-%d")
     end = BASE.strftime("%Y-%m-%d")
     df = m.fetch_kline_range("SOL", start, end, bar="1m", session=sess)
     assert len(df) > 0
     assert len(sess.calls) < 10
+
+
+def test_range_over_cap_raises_not_truncates():
+    """单次上限（2026-10-20）：OKX 无服务端深度闸门，超限必须显式报错、
+    不静默截断也不挂到 177 秒后才失败。"""
+    sess = _FakeSession(floor_ms=_ms(BASE - timedelta(days=400)), top_ms=_ms(BASE))
+    start = (BASE - timedelta(days=90)).strftime("%Y-%m-%d")
+    end = BASE.strftime("%Y-%m-%d")
+    with pytest.raises(KlineRangeTooLarge) as ei:
+        m.fetch_kline_range("SOL", start, end, bar="1m", session=sess)
+    assert "10,000" in str(ei.value) and "1m" in str(ei.value)
+    assert not sess.calls          # 限幅先于取数：一个请求都没发
+
+
+def test_range_cap_can_be_raised_explicitly():
+    """显式传 max_bars 可临时放宽（仍不截断）。"""
+    sess = _FakeSession(floor_ms=_ms(BASE - timedelta(days=10)), top_ms=_ms(BASE))
+    start = (BASE - timedelta(days=2)).strftime("%Y-%m-%d")
+    end = BASE.strftime("%Y-%m-%d")
+    df = m.fetch_kline_range("SOL", start, end, bar="1m", session=sess, max_bars=20_000)
+    assert len(df) > 0
 
 
 def test_range_drops_unconfirmed_bar():

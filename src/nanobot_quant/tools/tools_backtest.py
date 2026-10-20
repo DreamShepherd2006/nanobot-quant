@@ -147,12 +147,16 @@ def _auto_backtest_driver(
     slippage: float | None,
     fixed_amount: float | None,
     overrides: dict | None = None,
+    source: str | None = None,
 ) -> None:
-    """New engine (backtest.driver): scene-based replay on Gate CEX history.
+    """New engine (backtest.driver): scene-based replay.
 
     Reuses the live strategy decision code (same StrategyExecutor scene
     construction, BacktestBroker for simulated fills).  Same run_id +
     poll contract as the legacy engine.
+
+    ``source``: ``gate_cex``（默认，与执行同所）/ ``okx_cex``（跨所参考，
+    仅作参数粗筛，不作裁决依据）。
     """
     from datetime import datetime
 
@@ -161,6 +165,7 @@ def _auto_backtest_driver(
 
     def _run():
         from nanobot_quant.backtest.driver import BacktestDriver
+        from nanobot_quant.backtest.fetchers import DEFAULT_SOURCE
         from nanobot_quant.onchainos_cli import backtests_dir
 
         # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
@@ -175,6 +180,7 @@ def _auto_backtest_driver(
             slippage=slippage,
             fixed_amount=fixed_amount,
             overrides=overrides,
+            source=source or DEFAULT_SOURCE,
             progress_path=backtests_dir() / f"{run_id}.json",
         )
         return d.run()
@@ -342,7 +348,7 @@ def run_backtest(
     start: str | None = None,
     end: str | None = None,
     quantity: int = 10,
-    source: str = "onchainos",
+    source: str | None = None,
     engine: str = "backtest_runner",
     scene: str = "mid",
     symbols: list[str] | None = None,
@@ -363,14 +369,16 @@ def run_backtest(
         start: Start date, e.g. "2026-01-01"
         end: End date, e.g. "2026-07-05"
         quantity: Trade quantity (legacy engine, default 10)
-        source: Data source registry name for the legacy engine:
-                "onchainos", "okx_cex", "yfinance" (alias "yahoo"), or
-                "gate_cex" (not implemented — returns a clear error).
+        source: 数据源（按 engine 语义不同）：
+                - legacy engine: registry name "onchainos"（默认）/
+                  "okx_cex" / "yfinance"(alias "yahoo")
+                - engine="driver": "gate_cex"（默认，与执行同所）或
+                  "okx_cex"（跨所参考 —— 仅作参数粗筛、不作裁决依据）
         engine: "backtest_runner" (legacy lumibot engine, default — zero
                 behaviour change), "driver" (Step 3 replay driver:
-                scene-based, Gate CEX history, same decision code as live),
-                or "options" (期权卖 put 归档重放：官方归档成交 → IV 曲面 →
-                与实盘期权线同一份策略函数).
+                scene-based replay on gate_cex/okx_cex history, same decision
+                code as live), or "options" (期权卖 put 归档重放：官方归档成交
+                → IV 曲面 → 与实盘期权线同一份策略函数).
         scene: Scene name (high/mid/low) — engine="driver" only.
         symbols: Override the scene symbol pool — engine="driver" only.
         initial_quote: Per-slot simulated starting USDT — engine="driver".
@@ -411,10 +419,17 @@ def run_backtest(
             daemon=True,
         ).start()
     elif engine == "driver":
+        try:
+            from nanobot_quant.backtest.fetchers import normalize_source
+
+            driver_source = normalize_source(source)
+        except ValueError as exc:
+            return {"error": str(exc)}
         syms = list(symbols) if symbols else ([symbol] if symbol else None)
         threading.Thread(
             target=_auto_backtest_driver,
-            args=(run_id, scene, syms, start, end, initial_quote, batches, slippage, fixed_amount, overrides),
+            args=(run_id, scene, syms, start, end, initial_quote, batches,
+                  slippage, fixed_amount, overrides, driver_source),
             daemon=True,
         ).start()
     else:
@@ -425,7 +440,7 @@ def run_backtest(
             }
         threading.Thread(
             target=_auto_backtest,
-            args=(run_id, symbol, start, end, quantity, source),
+            args=(run_id, symbol, start, end, quantity, source or "onchainos"),
             daemon=True,
         ).start()
     return {

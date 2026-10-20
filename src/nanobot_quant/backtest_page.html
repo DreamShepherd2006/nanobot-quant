@@ -39,6 +39,7 @@
   .banner.msg.show { display:block; }
   .banner.msg.err { background:#fce4ec; border-color:#ef9a9a; color:#c62828; }
   .banner.msg.ok { background:#e8f5e9; border-color:#a5d6a7; color:#2e7d32; }
+  .banner.warn { background:#fff8e1; border:1px solid #ffe082; color:#8d6e63; }
   .progress-wrap { background:#f0f2f5; border-radius:6px; overflow:hidden; height:14px; margin:10px 0 4px; }
   .progress-bar { height:100%; width:0%; background:linear-gradient(90deg,#4f8cff,#22c55e); transition:width .4s ease; }
   .progress-bar.indet { width:100%; background:linear-gradient(90deg,#e5e7eb,#4f8cff,#e5e7eb); background-size:200% 100%; animation:indet 1.2s linear infinite; }
@@ -111,10 +112,19 @@
 </div>
 
 <div id="pane-spot">
-<p class="subtitle">场景回放引擎（与实盘同一策略决策代码）：Gate CEX 历史 K 线 + 模拟撮合（手续费/滑点/分批）。结果持久化到 legion/backtests/，可回看。</p>
+<p class="subtitle">场景回放引擎（与实盘同一策略决策代码）：<b id="bt-source-desc">Gate CEX</b> 历史 K 线 + 模拟撮合（手续费/滑点/分批）。结果持久化到 legion/backtests/，可回看。</p>
 
 <div class="card">
   <h3>参数</h3>
+  <div class="field">
+    <span class="f-label">数据源</span>
+    <select id="source" onchange="onSourceChange()">
+      <option value="gate_cex" selected>Gate CEX（与执行同所）</option>
+      <option value="okx_cex">OKX CEX（跨所参考）</option>
+    </select>
+    <span class="f-hint" id="source-hint">与实盘执行同所（Gate 现货）——结果可直接用于参数裁决</span>
+  </div>
+  <div class="banner warn hide" id="cross-venue-banner">⚠️ 数据源 ≠ 执行所（Gate 现货）：跨所回测仅用于参数粗筛，<b>不作参数裁决依据</b>。1m TD 九连事件的跨所一致率仅 0.23–0.59（实测），事件级收益归属不成立；闸门通过率/暴露度这类状态量可参考。裁决请切回 Gate CEX。</div>
   <div class="field">
     <span class="f-label">场景</span>
     <select id="scene"></select>
@@ -128,7 +138,7 @@
   <div class="field">
     <span class="f-label">区间</span>
     <input type="datetime-local" id="start"> <span style="color:#aaa">→</span> <input type="datetime-local" id="end">
-    <span class="f-hint">留空 = 拉满可用历史（1m ≈ 6.9 天 / 15m ≈ 104 天 / 1D 从上线起）</span>
+    <span class="f-hint" id="range-hint">留空 = 拉满可用历史（Gate 1m ≈ 6.9 天 / 15m ≈ 104 天 / 1D 从上线起）</span>
   </div>
   <div class="field">
     <span class="f-label">初始资金（每 slot）</span>
@@ -324,7 +334,29 @@ function escapeHtml(s) {
 }
 
 // ── 场景/标的表单 ───────────────────────────────────────────────────────
+// 数据源切换（2026-10-20）：默认 Gate（与执行同所）；OKX = 跨所参考
+// 跨所必须显式提醒「不作参数裁决依据」——同一份策略在两家的 1m TD 九连
+// 事件一致率仅 0.23–0.59（实测），事件级收益归属不成立。
+function onSourceChange() {
+  const src = $("source") ? $("source").value : "gate_cex";
+  const isOkx = src === "okx_cex";
+  if ($("bt-source-desc")) $("bt-source-desc").textContent = isOkx ? "OKX CEX" : "Gate CEX";
+  if ($("source-hint")) {
+    $("source-hint").textContent = isOkx
+      ? "跨所参考源：1m 历史远长于 Gate（Gate 1m ≈6.9 天）——仅作参数粗筛、不作裁决依据；池内无 OKX 交易对的标的会先报错"
+      : "与实盘执行同所（Gate 现货）——结果可直接用于参数裁决";
+  }
+  if ($("range-hint")) {
+    $("range-hint").textContent = isOkx
+      ? "留空 = 按单次上限取最近窗口；显式区间最多 10,000 根（1m ≈ 7 天 / 15m ≈ 104 天 / 1H ≈ 416 天）"
+      : "留空 = 拉满可用历史（Gate 1m ≈ 6.9 天 / 15m ≈ 104 天 / 1D 从上线起）";
+  }
+  const banner = $("cross-venue-banner");
+  if (banner) banner.classList.toggle("hide", !isOkx);
+}
+
 function initForm() {
+  onSourceChange();
   const sel = $("scene");
   sel.innerHTML = "";
   for (const [name, cfg] of Object.entries(SCENES)) {
@@ -470,6 +502,7 @@ async function startBacktest() {
   const symbols = selectedSymbols();
   if (!symbols.length) { setMsg("至少选择一个标的", "err"); return; }
   const body = {
+    source: $("source").value || "gate_cex",
     scene: $("scene").value,
     symbols,
     start: toUtc($("start").value) || null,
@@ -530,7 +563,10 @@ function onOff(v) { return v ? "开" : "关"; }
 // 回测参数块：结果区顶部先展示本次实际生效参数（2026-08-29）
 function paramsRows(res) {
   const cfg = res.backtest_config || {};
+  const sourceName = cfg.source || res.source || "gate_cex";
+  const sourceText = sourceName === "okx_cex" ? "OKX CEX（跨所参考）" : "Gate CEX（与执行同所）";
   const rows = [
+    ["数据源", `<code>${sourceText}</code>${res.cross_venue ? ' <span style="color:#b45309;font-weight:600;">⚠ 跨所</span>' : ''}`],
     ["场景", `<code>${cfg.scene ?? res.scene ?? "—"}</code>`],
     ["标的", `<code>${(cfg.symbols || res.symbols || []).join(", ")}</code>`],
     ["周期", `<code>${cfg.timestep ?? res.timestep ?? "—"}</code>`],
@@ -628,6 +664,8 @@ function renderResult(res, runId) {
   const fills = res.fills_detail || [];
   const rows = fills.map(fillRow).join("");
   box.innerHTML = mdButton(res, runId) + `
+    ${res.cross_venue ? `<div class="banner warn show" style="margin-bottom:8px;">⚠️ 数据源 ≠ 执行所（Gate 现货）：跨所结果仅作参数粗筛，<b>不作参数裁决依据</b>。${escapeHtml(res.cross_venue_note || "")}</div>` : ""}
+    ${res.source_note ? `<div class="f-hint" style="margin-bottom:6px;">ℹ️ ${escapeHtml(res.source_note)}</div>` : ""}
     ${paramsBox(res)}
     <div class="kpis">
       <div class="kpi"><div class="v">${fmtN(res.initial_total, 2)} USDT</div><div class="k">初始资金（${res.batches} slot × ${fmtN(res.initial_quote, 2)}）</div></div>

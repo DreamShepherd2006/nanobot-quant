@@ -24,7 +24,7 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from nanobot_quant.kline_paging import paginate_backwards
+from nanobot_quant.kline_paging import KlineRangeTooLarge, max_bars_for, paginate_backwards
 
 logger = logging.getLogger(__name__)
 
@@ -384,6 +384,7 @@ def fetch_kline_range(
     bar: str = "1D",
     *,
     session: Optional[requests.Session] = None,
+    max_bars: Optional[int] = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV data for a date range via pagination.
 
@@ -402,6 +403,10 @@ def fetch_kline_range(
         Bar size.  Default ``"1D"``.
     session:
         Optional ``requests.Session``.
+    max_bars:
+        单次区间根数上限（默认 :data:`MAX_BARS_PER_REQUEST` = 10,000）。
+        超限抛 :class:`KlineRangeTooLarge` —— **显式报错，不静默截断**
+        （OKX 没有 Gate 那种 400 深度闸门，1m 90 天要 433 页/177 秒）。
 
     Returns
     -------
@@ -417,6 +422,24 @@ def fetch_kline_range(
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(end_dt.timestamp() * 1000)
+
+    # 限幅先于取数（fail fast）：按区间长度估算根数，超上限立即报错，
+    # 不让用户等到 177 秒后才发现失败。
+    cap = int(max_bars) if max_bars is not None else max_bars_for(bar)
+    # 周期秒数从周期注册表单一来源读取；延迟 import 避开包初始化环路
+    # （data_sources/__init__ 会反向 import 本模块做注册）。
+    from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+    bar_seconds = INTERVAL_SECONDS.get(bar)
+    if bar_seconds and cap > 0:
+        expected = (end_ms - start_ms) / (bar_seconds * 1000) + 2
+        if expected > cap:
+            span_days = (end_ms - start_ms) / 86_400_000
+            cap_days = cap * bar_seconds / 86_400
+            raise KlineRangeTooLarge(
+                f"OKX CEX 单次最多 {cap:,} 根 {bar}（约 {cap_days:.1f} 天），"
+                f"当前区间 {span_days:.1f} 天超过上限——请缩小区间或换更大周期"
+            )
 
     _sess = session or requests
     # 必须用 history-candles：`candles` 端点恒返回最近 300 根、游标无效。
@@ -455,6 +478,7 @@ def fetch_kline_range(
         next_cursor=_next_cursor,
         label=f"okx {inst_id} {bar}",
         ts_of=lambda row: int(row[0]),
+        max_bars=cap,
     )
 
     rows: list[dict] = []
