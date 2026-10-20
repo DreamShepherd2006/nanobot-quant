@@ -86,11 +86,11 @@ RUN ONCHAINOS_VERSION="v4.3.1" \
     && echo "✅ onchainos ${ONCHAINOS_VERSION}"
 
 # ── 6. nanobot-quant + Vibe-Trading (Research Agent) ──
-RUN echo "[bust=790]" && pip install --break-system-packages \
+RUN echo "[bust=800]" && pip install --break-system-packages \
         'mcp<2' \
-        git+https://github.com/DreamShepherd2006/nanobot-quant.git@2707930 \
+        git+https://github.com/DreamShepherd2006/nanobot-quant.git@c94cf0a \
         git+https://github.com/DreamShepherd2006/Vibe-Trading.git@v0.1.12 \
-    && echo "✅ nanobot-quant @2707930 (K 线反向分页器抽公用 + OKX CEX 历史区间取数修复; bust=790) + vibe-trading @v0.1.12"
+    && echo "✅ nanobot-quant @c94cf0a (回测覆盖数量模式 fixed/fixed_amount/value + 报告显示实际模式; bust=800) + vibe-trading @v0.1.12"
 
 # ── 6b. Patch Vibe-Trading: create artifact parent dirs ──
 # backtest engines/base.py writes validation.json without mkdir,
