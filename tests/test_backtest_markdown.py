@@ -200,6 +200,39 @@ def test_spot_markdown_renders_ema_rows_and_gate_line():
     assert "预热不足 NA 1" in md
 
 
+def test_spot_markdown_renders_two_arm_block():
+    """两臂对照进报告，且把「仅展示/禁配对推断」写在结论旁边。"""
+    r = _spot_result()
+    r["backtest_config"].update({"ema_gate_enabled": True, "ema_n": 144})
+    r["ema_gate"] = {"enabled": True, "n": 144, "k": 3, "warmup": 362,
+                     "pass": 5, "block": 3, "na": 0}
+    r["arms"] = {
+        "gated": {"roi_pct": 1.23, "final_net": 1012.3, "fills": 8,
+                  "ema_pass": 5, "ema_block": 3, "ema_na": 0, "skip_total": 11},
+        "baseline": {"roi_pct": -0.4, "final_net": 996.0, "fills": 12,
+                     "ema_pass": None, "ema_block": None, "ema_na": None,
+                     "skip_total": 8},
+        "delta_roi_pct": 1.63,
+        "delta_fills": -4,
+        "note": "仅展示：两臂为同一段行情的两条路径（非独立样本），禁止配对推断",
+    }
+    md = render_markdown(r)
+    assert "两臂对照（闸门开 vs 关·仅展示）" in md
+    assert "| ROI | 1.230% | -0.400% |" in md
+    assert "| 成交笔数 | 8 | 12 |" in md
+    assert "ΔROI 1.630% · Δ成交 -4" in md
+    assert "配对推断" in md
+
+
+def test_spot_markdown_reports_baseline_arm_failure():
+    """基线臂失败必须显式写出，不能静默省略。"""
+    r = _spot_result()
+    r["arms"] = {"error": "网络超时"}
+    md = render_markdown(r)
+    assert "两臂对照：基线臂失败" in md
+    assert "网络超时" in md
+
+
 def test_spot_markdown_says_gate_off_explicitly():
     """闸门关也要写明「关」——不能因为没效果就不报。"""
     r = _spot_result()

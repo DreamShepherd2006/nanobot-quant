@@ -56,6 +56,15 @@ def test_fills_table_has_ema_columns():
     assert "f.slope" in html
 
 
+def test_two_arm_compare_wired_on_page():
+    """两臂对照：复选框默认勾、结果区有 ⚖️ 块、且明写「禁配对推断」。"""
+    html = _html()
+    assert 'id="ema_compare"' in html
+    assert "ema_compare_baseline" in html
+    assert "function armsBox" in html
+    assert "禁配对推断" in html
+
+
 def test_running_state_renders_bars_incrementally():
     """运行中也要能看逐 bar 表（不等跑完 26 分钟）。"""
     html = _html()

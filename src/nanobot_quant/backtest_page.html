@@ -190,6 +190,7 @@
       <div class="ov-item"><label for="ema_k">斜率跨度 k</label><input type="number" id="ema_k" min="1" max="50" step="1" placeholder="3"><span class="f-hint">slope=(EMA_t−EMA_t−k)/(k·ATR20)</span></div>
       <div class="ov-item"><label>EMA 预热(bar)</label><input type="text" id="ema_warmup" readonly value="自动：5τ（n=144 → 362）" style="background:#f1f5f9;"><span class="f-hint">只读：按 n 自动推算，不允许手填过小</span></div>
       <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
+      <div class="ov-item"><label for="ema_compare">两臂对照</label><label style="display:flex;gap:4px;align-items:center;font-weight:400;"><input type="checkbox" id="ema_compare" checked> 同时跑无闸门基线</label><span class="f-hint">耗时 ×2；仅展示、禁配对推断</span></div>
     </div>
   </details>
   <div class="actions">
@@ -492,6 +493,8 @@ function collectOverrides() {
   });
   const bm = $("bars_mode") ? $("bars_mode").value : "";
   if (bm !== "") overrides.bars_mode = bm;
+  // 两臂对照：闸门开时默认同时跑无闸门基线（仅展示）
+  if ($("ema_compare")) overrides.ema_compare_baseline = !!$("ema_compare").checked;
   const eo = $("exit_order").value;
   if (eo !== "") overrides.exit_order = eo;
   const st = $("sleeptime").value;
@@ -659,6 +662,33 @@ function emaBox(eg) {
     `<div class="f-hint">研究变量（docs §24 C73）：n=144 为预注册值，族内切换仅作探索、不作裁决依据</div></div>`;
 }
 
+// ── ⚖️ 两臂对照（EMA 闸门开 vs 关，2026-10-20）─────────────────
+// 两臂跑同一段行情、同一批信号：是两条路径而不是两个独立样本，
+// 所以只能看，不能做配对推断，也不能把差值当闸门效应量。
+function armsBox(arms) {
+  if (!arms) return "";
+  if (arms.error) {
+    return `<div class="bt-params"><div class="bt-params-title">⚖️ 两臂对照</div>` +
+      `<div class="empty" style="padding:8px;">基线臂失败：${escapeHtml(arms.error)}</div></div>`;
+  }
+  const g = arms.gated || {}, b = arms.baseline || {};
+  const row = (k, f) => `<tr><td class="pk">${k}</td><td class="pv">${f(g)}</td><td class="pv">${f(b)}</td></tr>`;
+  const pct = v => v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(3) + "%";
+  const num = v => v == null ? "—" : v;
+  const rows = [
+    row("ROI", a => pct(a.roi_pct)),
+    row("期末净值", a => num(a.final_net)),
+    row("成交笔数", a => num(a.fills)),
+    row("闸门通过 / 拦", a => `${num(a.ema_pass)} / ${num(a.ema_block)}`),
+    row("闸门 NA(fail-open)", a => num(a.ema_na)),
+    row("SKIP 合计", a => num(a.skip_total)),
+  ].join("");
+  return `<div class="bt-params"><div class="bt-params-title">⚖️ 两臂对照（闸门开 vs 关）</div>` +
+    `<table class="bt-params-table"><tr><td class="pk">项</td><td class="pv">🌊 闸门开</td><td class="pv">⚪ 基线</td></tr>${rows}</table>` +
+    `<div class="f-hint">ΔROI ${pct(arms.delta_roi_pct)} · Δ成交 ${arms.delta_fills >= 0 ? "+" : ""}${arms.delta_fills} —— ` +
+    `${escapeHtml(arms.note || "仅展示，禁配对推断")}</div></div>`;
+}
+
 // ── 📊 逐 bar 明细（TD + EMA，2026-10-20）──────────────────────
 // 动作列直接来自策略自己的决策流（单一实现），含被拦原因——用来回答
 // 「这根有信号为何没买」；精简模式下只存信号/成交/闸门翻转行。
@@ -793,6 +823,7 @@ function renderResult(res, runId) {
     ${capitalBox(res.capital_stats)}
     ${skipBox(res.skip_counts)}
     ${emaBox(res.ema_gate)}
+    ${armsBox(res.arms)}
     ${opensBox(res.slots)}
     ${barsBox(res)}
     ${fillsBox(fills)}

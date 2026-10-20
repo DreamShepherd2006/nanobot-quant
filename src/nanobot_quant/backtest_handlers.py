@@ -192,7 +192,10 @@ _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
     "stop_loss_pct", "take_profit_pct", "min_account_value",
 }
-_OV_BOOL = {"momentum_exit", "td_sell_all", "cd_exit_all", "ema_gate_enabled"}
+_OV_BOOL = {
+    "momentum_exit", "td_sell_all", "cd_exit_all",
+    "ema_gate_enabled", "ema_compare_baseline",
+}
 
 
 def _coerce_overrides(raw) -> dict:

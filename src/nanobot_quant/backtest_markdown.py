@@ -477,6 +477,33 @@ def _spot_md(res: dict) -> str:
             f"通过 {_pass} / 拦截 {_block}（通过率 {_rate}）· "
             f"预热不足 NA {int(_eg.get('na') or 0)}（fail-open）\n"
         )
+
+    # 两臂对照（闸门开 vs 关）：仅展示，禁配对推断
+    _arms = res.get("arms") or {}
+    if _arms:
+        if _arms.get("error"):
+            md.append(f"\n> ⚖️ 两臂对照：基线臂失败（{_esc(_arms.get('error'))}）\n")
+        else:
+            _g = _arms.get("gated") or {}
+            _b = _arms.get("baseline") or {}
+            md.append("\n**⚖️ 两臂对照（闸门开 vs 关·仅展示）**\n")
+            md.append(_table(
+                ["项", "🌊 闸门开", "⚪ 基线"],
+                [
+                    ["ROI", _pct(_g.get("roi_pct"), 3), _pct(_b.get("roi_pct"), 3)],
+                    ["期末净值", _num(_g.get("final_net")), _num(_b.get("final_net"))],
+                    ["成交笔数", _num(_g.get("fills"), 0), _num(_b.get("fills"), 0)],
+                    ["闸门通过 / 拦",
+                     f"{_num(_g.get('ema_pass'), 0)} / {_num(_g.get('ema_block'), 0)}",
+                     f"{_num(_b.get('ema_pass'), 0)} / {_num(_b.get('ema_block'), 0)}"],
+                    ["SKIP 合计", _num(_g.get("skip_total"), 0),
+                     _num(_b.get("skip_total"), 0)],
+                ],
+            ))
+            md.append(
+                f"\n> ΔROI {_pct(_arms.get('delta_roi_pct'), 3)} · "
+                f"Δ成交 {_arms.get('delta_fills')} —— {_arms.get('note', '')}\n"
+            )
     if res.get("source_note"):
         md.append(f"\n> ℹ️ {res['source_note']}\n")
 
