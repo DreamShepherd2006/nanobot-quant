@@ -46,6 +46,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from nanobot_quant.backtest.fetchers import (
+    CROSS_VENUE_NOTE,
+    DEFAULT_SOURCE,
+    SOURCE_LABELS,
+    is_cross_venue,
+    make_fetcher,
+    normalize_source,
+    resolve_symbol,
+    source_label,
+    unavailable_symbols,
+)
 from nanobot_quant.backtest.replay_data_source import ReplayDataSource
 from nanobot_quant.batches import BatchManager
 from nanobot_quant.brokers.backtest_broker import BacktestBroker
@@ -107,6 +118,7 @@ class BacktestDriver:
         fixed_amount: Optional[float] = None,
         overrides: Optional[dict[str, Any]] = None,
         fetcher: Optional[Callable] = None,
+        source: object = DEFAULT_SOURCE,
         ledger_dir: Optional[Path | str] = None,
         progress_path: Optional[Path | str] = None,
     ) -> None:
@@ -171,8 +183,18 @@ class BacktestDriver:
         self.min_history = int(self.params.get("td_bars", 120) or 120)
 
         # 5. 数据源
+        #    默认 Gate CEX（与执行同所，零行为变化）；``okx_cex`` 为跨所参考源
+        #    （2026-10-20 拍板：放行 + 强制标注，不参与参数裁决）。
         tokens = load_tokens_json() or []
         self.tokens_json = tokens
+        self.source = normalize_source(source)
+        self.source_label = source_label(self.source)
+        self.cross_venue = is_cross_venue(self.source)
+        self.source_note: Optional[str] = None
+        if self.cross_venue and self.start_ts is None:
+            self.source_note = (
+                f"未指定起始时间 → 按 {self.source_label} 单次上限取最近窗口"
+            )
         self.data_source = ReplayDataSource(
             symbols=self.symbols,
             timestep=self.timestep,
@@ -180,7 +202,12 @@ class BacktestDriver:
             end_ts=self.end_ts,
             length=self.min_history,
             tokens_json=tokens,
-            fetcher=fetcher,
+            fetcher=fetcher if fetcher is not None else make_fetcher(self.source),
+            resolver=(
+                None
+                if fetcher is not None
+                else (lambda sym: resolve_symbol(sym, self.source, tokens))
+            ),
         )
 
         # 6. 撮合参数
@@ -449,7 +476,15 @@ class BacktestDriver:
     def run(self) -> dict[str, Any]:
         """预取全量历史 → 逐 bar 重放 → 返回净值曲线与决策摘要。"""
         self._write_progress("prefetch", 0, None, None, 0)
-        # 预取（网络只发生在此处：Gate 公开 K 线，免 key）
+        # 启动前探测：该源拿不到行情的标的 —— fail-closed，列出原因、不静默少标的
+        bad = unavailable_symbols(self.symbols, self.source, self.tokens_json)
+        if bad:
+            detail = "；".join(f"{sym}（{why}）" for sym, why in bad)
+            raise RuntimeError(
+                f"数据源 {self.source_label} 取不到以下标的的行情：{detail}。"
+                f"请从标的池剔除它们，或改用 Gate CEX 数据源"
+            )
+        # 预取（网络只发生在此处）
         self.data_source.prefetch()
         bar_times = self.data_source.bar_times
         start_idx = self.data_source.start_idx
@@ -599,6 +634,12 @@ class BacktestDriver:
             "scene": self.scene_name,
             "symbols": self.symbols,
             "timestep": self.timestep,
+            # 数据源（2026-10-20）：gate_cex = 与执行同所；okx_cex = 跨所参考
+            "source": self.source,
+            "source_label": self.source_label,
+            "cross_venue": self.cross_venue,
+            "cross_venue_note": CROSS_VENUE_NOTE if self.cross_venue else None,
+            "source_note": self.source_note,
             "bars": len(net_values),
             "fetched_bars": len(bar_times) if bar_times else 0,
             "start_ts": (
@@ -623,6 +664,9 @@ class BacktestDriver:
                 "scene": self.scene_name,
                 "symbols": self.symbols,
                 "timestep": self.timestep,
+                "source": self.source,
+                "source_label": self.source_label,
+                "cross_venue": self.cross_venue,
                 "start_ts": (
                     bar_times[start_idx].isoformat()
                     if len(bar_times) > start_idx
@@ -682,8 +726,10 @@ class BacktestDriver:
             },
         }
         print(
-            f"[BACKTEST] 完成 scene={self.scene_name} bars={len(net_values)} "
-            f"fills={fills} 期末净值={final_net:.4f} ROI={roi * 100:.2f}%",
+            f"[BACKTEST] 完成 source={self.source} scene={self.scene_name} "
+            f"bars={len(net_values)} fills={fills} 期末净值={final_net:.4f} "
+            f"ROI={roi * 100:.2f}%"
+            + (f" · {CROSS_VENUE_NOTE}" if self.cross_venue else ""),
             file=sys.stderr, flush=True,
         )
         return result
@@ -710,6 +756,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="接入贝叶斯闸门（回测 BUY 后验≥阈值禁买；默认跟随 exec_params/关闭）")
     ap.add_argument("--gate-red-min", type=float, default=None,
                     help="闸门禁买阈值（0.05-0.9，默认 0.45=red-only；0.20=yellow+red）")
+    ap.add_argument("--source", default=DEFAULT_SOURCE,
+                    help=f"回测数据源（{', '.join(SOURCE_LABELS)}；默认 {DEFAULT_SOURCE}）")
     ap.add_argument("--output", default=None, help="结果 JSON 落盘路径（可选）")
     args = ap.parse_args(argv)
 
@@ -734,6 +782,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         end_ts=_parse_ts(args.end),
         initial_quote=args.initial_quote,
         overrides=overrides or None,
+        source=args.source,
     )
     result = driver.run()
     print(json.dumps(result, ensure_ascii=False, indent=2))

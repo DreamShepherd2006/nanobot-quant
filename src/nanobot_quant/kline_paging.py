@@ -26,6 +26,21 @@ logger = logging.getLogger(__name__)
 # 每行第 0 个元素必须是毫秒时间戳（跨所统一约定）
 Row = list
 
+# 单次请求的区间上限（根）。超过即显式报错——**绝不静默截断**
+# （用户原则：采样/截断/覆盖率缺口必须如实标注）。
+# Gate 不传 max_bars（它自己有 HTTP 400 深度闸门，行为不变）；
+# OKX 没有深度闸门，1m 90 天要 433 页 / 177 秒，必须设闸。
+MAX_BARS_PER_REQUEST = 10_000
+
+
+class KlineRangeTooLarge(RuntimeError):
+    """请求区间超过单次上限（fail-closed：报错，不截断、不静默降级）。"""
+
+
+def max_bars_for(period: str) -> int:
+    """某周期单次可请求的最大根数（当前所有周期统一 10,000 根）。"""
+    return MAX_BARS_PER_REQUEST
+
 
 def paginate_backwards(
     fetch_page: Callable[[int], list],
@@ -35,6 +50,7 @@ def paginate_backwards(
     page_limit: int,
     next_cursor: Callable[[int], Optional[int]],
     max_pages: int = 500,
+    max_bars: Optional[int] = None,
     label: str = "",
     ts_of: Optional[Callable[[list], int]] = None,
 ) -> list:
@@ -62,6 +78,9 @@ def paginate_backwards(
         从一行中取毫秒时间戳；默认取 ``row[0]``。Gate 的行 ts 是秒，
         需传 ``lambda r: int(r[0]) * 1000``——分页器内部一律用毫秒，
         避免秒/毫秒混用导致「已覆盖起点」误判（2026-10-20 重构实测踩过）。
+    max_bars:
+        累计返回行数上限；超过抛 :class:`KlineRangeTooLarge`（不截断）。
+        默认 ``None`` = 不设闸（Gate 保持既有行为）。
     """
     if ts_of is None:
         ts_of = lambda row: int(row[0])  # noqa: E731
@@ -69,6 +88,7 @@ def paginate_backwards(
         return []
 
     pages: list = []
+    total = 0
     cursor = int(initial_cursor)
     guard = 0
     while guard < int(max_pages):
@@ -77,6 +97,13 @@ def paginate_backwards(
         if not rows:
             break
         pages.append(rows)
+        if max_bars is not None:
+            total += len(rows)
+            if total > int(max_bars):
+                raise KlineRangeTooLarge(
+                    f"{label or 'kline'}: 区间超过单次上限 {int(max_bars)} 根"
+                    f"（已取 {total} 根），请缩小时间范围"
+                )
         try:
             oldest = min(int(ts_of(r)) for r in rows)
         except (IndexError, TypeError, ValueError) as exc:

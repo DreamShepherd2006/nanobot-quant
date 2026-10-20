@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import logging
 
-from nanobot_quant.kline_paging import paginate_backwards
+import pytest
+
+from nanobot_quant.kline_paging import (
+    KlineRangeTooLarge,
+    max_bars_for,
+    paginate_backwards,
+)
 
 MIN = 60_000
 
@@ -141,3 +147,33 @@ def test_malformed_batch_stops(caplog):
         )
     assert len(pages) == 1                      # 坏页被收下但停止翻页
     assert any("malformed" in r.message for r in caplog.records)
+
+
+def test_max_bars_raises_instead_of_truncating():
+    """单次上限：超限必须显式报错（用户原则：不静默截断）。"""
+    def fetch(cursor_ms):
+        return [[cursor_ms - i * MIN] for i in range(1000)]
+
+    with pytest.raises(KlineRangeTooLarge) as ei:
+        paginate_backwards(
+            fetch, initial_cursor=5000 * MIN, start_ms=0, page_limit=1000,
+            next_cursor=lambda o: o - MIN, label="cap", max_bars=1500,
+        )
+    assert "1500" in str(ei.value)
+
+
+def test_max_bars_none_keeps_behaviour():
+    """不传 max_bars（Gate 路径）→ 行为完全不变（与显式大上限结果一致）。"""
+    def fetch(cursor_ms):
+        return [[cursor_ms - i * MIN] for i in range(1000)]
+
+    kw = dict(initial_cursor=3000 * MIN, start_ms=0, page_limit=1000,
+              next_cursor=lambda o: o - MIN, label="nocap")
+    pages_default = paginate_backwards(fetch, **kw)
+    pages_explicit = paginate_backwards(fetch, max_bars=10 ** 9, **kw)
+    assert len(pages_default) == len(pages_explicit) > 0
+
+
+def test_max_bars_for_period():
+    assert max_bars_for("1m") == 10_000
+    assert max_bars_for("1D") == 10_000

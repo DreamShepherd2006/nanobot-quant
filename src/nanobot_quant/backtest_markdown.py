@@ -379,6 +379,16 @@ def _options_md(res: dict) -> str:
 _SIDE_SPOT = {"buy": "🟢 买入", "sell": "🔴 卖出"}
 
 
+def _source_txt(res: dict) -> str:
+    """数据源说明：跨所必须把「不作裁决依据」写进报告（2026-10-20 拍板）。"""
+    src = res.get("source") or "gate_cex"
+    label = res.get("source_label") or ("OKX CEX" if src == "okx_cex" else "Gate CEX")
+    if res.get("cross_venue"):
+        note = res.get("cross_venue_note") or "数据源 ≠ 执行所（Gate 现货）"
+        return f"{label}（⚠ 跨所参考 — {note}）"
+    return f"{label}（与执行同所）"
+
+
 def _spot_md(res: dict) -> str:
     cfg = res.get("backtest_config") or {}
     cap = res.get("capital_stats") or {}
@@ -392,6 +402,7 @@ def _spot_md(res: dict) -> str:
 
     md.append("**📋 回测参数（实际生效）**\n")
     md.append(_kv_table([
+        ("数据源", _source_txt(res)),
         ("场景", res.get("scene")),
         ("标的", ", ".join(res.get("symbols") or [])),
         ("周期", res.get("timestep")),
@@ -411,6 +422,8 @@ def _spot_md(res: dict) -> str:
         ("滑点", _pct(cfg.get("slippage"))),
         ("手续费率", _pct((cfg.get("fee_rate") or 0) * 100)),
     ]))
+    if res.get("source_note"):
+        md.append(f"\n> ℹ️ {res['source_note']}\n")
 
     md.append("\n**📊 结果**\n")
     md.append(_kv_table([
