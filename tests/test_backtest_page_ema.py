@@ -56,6 +56,17 @@ def test_fills_table_has_ema_columns():
     assert "f.slope" in html
 
 
+def test_bars_csv_export_present():
+    """逐 bar 表 CSV 导出（2026-10-20）：按钮、路由、导出全部行。"""
+    html = _html()
+    assert "/config/backtest/bars.csv?run_id=" in html
+    assert "导出 CSV" in html
+    # 导出全部行，不受「只看有动作/成交」筛选影响
+    assert "title=\"导出全部行（不受筛选影响）\"" in html
+    # runId 必须从 renderResult 传进 barsBox，否则链接无从拼 run_id
+    assert "barsBox(res, runId)" in html
+
+
 def test_two_arm_compare_wired_on_page():
     """两臂对照：复选框默认勾、结果区有 ⚖️ 块、且明写「禁配对推断」。"""
     html = _html()
