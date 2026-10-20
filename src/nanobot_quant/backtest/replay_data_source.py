@@ -122,6 +122,7 @@ class ReplayDataSource:
         tokens_json: Optional[list[dict]] = None,
         fetcher: Optional[Callable[[str, int, int, str], pd.DataFrame]] = None,
         resolver: Optional[Callable[[str], str]] = None,
+        extra_warmup_bars: int = 0,
     ):
         self._symbols = list(symbols)
         self._timestep = str(timestep)
@@ -132,9 +133,14 @@ class ReplayDataSource:
         self._user_start_ts = _to_ts(start_ts)
         self._end_ts = _to_ts(end_ts)
         self._length = max(1, int(length))
+        # EMA 等长记忆变量需额外向前预热（2026-10-20）：只拉长取数窗口，
+        # **不影响评估起点**（start_idx 仍以用户 start 为准）。
+        self._extra_warmup = max(0, int(extra_warmup_bars))
         self._prefetch_start_ts = self._user_start_ts
         if self._user_start_ts is not None:
-            warmup_seconds = (self._length - 1) * _bar_seconds(self._bar)
+            warmup_seconds = (
+                (self._length - 1) + self._extra_warmup
+            ) * _bar_seconds(self._bar)
             self._prefetch_start_ts = self._user_start_ts - warmup_seconds
         self._tokens_json = tokens_json or []
         self._fetcher = fetcher or self._default_fetch
@@ -250,6 +256,15 @@ class ReplayDataSource:
         return self._timestep
 
     # ── 回测驱动辅助 ─────────────────────────────────────────
+
+    @property
+    def frames(self) -> dict[str, Any]:
+        """symbol → 已载入的完整重放帧（小写列 + 时间索引）。
+
+        只读访问器（2026-10-20）：EMA 等长记忆变量需在**预热过的全序列**上
+        预计算（n=144 的 5τ ≈ 362 根 ≫ 策略 TD 窗口），逐 bar 只做查表。
+        """
+        return self._frames
 
     def price_of(self, symbol: str) -> float:
         """当前重放时间该 symbol 的收盘价（BacktestBroker 撮合用）。

@@ -701,6 +701,14 @@ class TdSequentialStrategy(Strategy):
             from nanobot_quant import td_live_state
             sig = getattr(self, "_last_signal", {})
             sym = symbol or self.symbol
+            # 回测事件采集（2026-10-20）：driver 安装 _event_sink 后，逐 bar 表
+            # 直接复用策略自己的决策流（不另写一套判定），实盘不安装 → 零开销。
+            sink = getattr(self, "_event_sink", None)
+            if sink is not None:
+                try:
+                    sink({"event": event, "note": note, "symbol": sym})
+                except Exception:  # noqa: BLE001
+                    pass
             if self.parameters.get("live_mode"):
                 # 仅实盘写 LIVE_STATE（2026-08-28：回测/纸交易不再污染实时监控——
                 # 回测标的曾覆盖实盘监控的标的/信号/持仓显示）
@@ -1140,6 +1148,32 @@ class TdSequentialStrategy(Strategy):
                     file=sys.stderr, flush=True,
                 )
 
+        # ── EMA 趋势闸门（2026-10-20，回测侧，默认关）──
+        # C73 研究线的趋势变量：slope_k = (EMA_t − EMA_{t−k}) / (k·ATR20)，
+        # 仅 slope > 0 放行 BUY（只收缩不扩张）。driver 每 bar 注入当前值
+        # （``self._ema_gate_value = (ema, slope)``）；EMA 必须在**预热过的
+        # 全序列**上算——n=144 ≈ 5τ 远超策略 TD 窗口（120~200 根），用窗口
+        # 算会静默失真。td_live 不注入 → 实盘恒 False；预热不足/ATR≤0 →
+        # fail-open 并计数 ema_gate_na（数据不足不作惩罚，与 IV/F1 闸门同规）。
+        ema_gate_blocked = False
+        if self.parameters.get("ema_gate_enabled", False):
+            ev = getattr(self, "_ema_gate_value", None)
+            if ev is None or ev[1] is None:
+                self._bump_skip("ema_gate_na")
+            elif ev[1] <= 0:
+                ema_gate_blocked = True
+                self._bump_skip("ema_gate")
+                print(
+                    f"[TD] EMA GATE BLOCK | symbol={self.symbol} "
+                    f"slope={ev[1]:+.3f} ≤ 0（趋势向下禁买）",
+                    file=sys.stderr, flush=True,
+                )
+                self._record(
+                    "WAIT", "EMA 趋势闸门拦截（slope≤0）", symbol=self.symbol
+                )
+            else:
+                self._ema_gate_pass = int(getattr(self, "_ema_gate_pass", 0)) + 1
+
         # ── BUY signal: setup_buy >= entry_setup, score above threshold, slot available ──
         batch_manager = getattr(self, "batch_manager", None)
         batch_mode = batch_manager is not None
@@ -1204,6 +1238,8 @@ class TdSequentialStrategy(Strategy):
             # driver 注入 parameters（WebUI 开关）；td_live 不注入 → 实盘恒 False。
             # 负反馈只拦不买；SELL/止损/止盈不碰。
             and not (gate_blocked)
+            # EMA 趋势闸门（2026-10-20，回测侧，默认关）：同上只拦 BUY。
+            and not (ema_gate_blocked)
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.

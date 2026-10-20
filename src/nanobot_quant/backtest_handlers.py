@@ -185,12 +185,14 @@ _OV_INT = {
     "entry_setup", "entry_countdown", "cd_entry_setup_gap",
     "exit_setup", "exit_countdown", "min_hold_bars",
     "cd_stall_n", "td_start_slot",
+    # EMA 趋势变量（2026-10-20，C73/C74 研究线，回测侧）
+    "ema_n", "ema_k",
 }
 _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
     "stop_loss_pct", "take_profit_pct", "min_account_value",
 }
-_OV_BOOL = {"momentum_exit", "td_sell_all", "cd_exit_all"}
+_OV_BOOL = {"momentum_exit", "td_sell_all", "cd_exit_all", "ema_gate_enabled"}
 
 
 def _coerce_overrides(raw) -> dict:

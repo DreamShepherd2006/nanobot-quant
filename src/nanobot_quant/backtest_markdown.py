@@ -458,7 +458,25 @@ def _spot_md(res: dict) -> str:
             f"{_num(cfg.get('min_account_value'), 2)} USD"
             if cfg.get("min_account_value") is not None else "—"
         )),
+        # EMA 趋势闸门（2026-10-20，C73/C74 研究线）：只拦 BUY、默认关
+        ("EMA 趋势闸门", _on_off(cfg.get("ema_gate_enabled"))),
+        ("EMA 周期 n", cfg.get("ema_n")),
+        ("斜率跨度 k", cfg.get("ema_k")),
+        ("EMA 预热(bar)", cfg.get("ema_warmup")),
+        ("逐 bar 表", "全量" if cfg.get("bars_mode") == "full" else "精简"),
     ]))
+    # 闸门效果（仅闸门开时输出；关时也不能静默——写一行说明）
+    _eg = res.get("ema_gate") or {}
+    if _eg:
+        _pass = int(_eg.get("pass") or 0)
+        _block = int(_eg.get("block") or 0)
+        _tot = _pass + _block
+        _rate = f"{_pass / _tot * 100:.1f}%" if _tot else "—"
+        md.append(
+            f"\n> 🌊 EMA 闸门：{'开' if _eg.get('enabled') else '关'} · "
+            f"通过 {_pass} / 拦截 {_block}（通过率 {_rate}）· "
+            f"预热不足 NA {int(_eg.get('na') or 0)}（fail-open）\n"
+        )
     if res.get("source_note"):
         md.append(f"\n> ℹ️ {res['source_note']}\n")
 
@@ -475,11 +493,14 @@ def _spot_md(res: dict) -> str:
 
     md.append(f"\n**📒 成交明细（{len(detail)}）**\n")
     md.append(_table(
-        ["时间", "标的", "方向", "数量", "策略价", "成交价", "slot", "状态", "原因"],
+        ["时间", "标的", "方向", "数量", "策略价", "成交价", "EMA", "slope3", "slot", "状态", "原因"],
         [[_ts_local(f.get("ts")), f.get("symbol", ""),
           _SIDE_SPOT.get(str(f.get("side") or ""), f.get("side", "")),
           _num(f.get("quantity"), 6), _num(f.get("strategy_price"), 6),
-          _num(f.get("avg_price"), 6), f.get("slot", ""),
+          _num(f.get("avg_price"), 6),
+          _num(f.get("ema"), 2),
+          (f"{float(f.get('slope')):+.3f}" if f.get("slope") is not None else "—"),
+          f.get("slot", ""),
           f.get("state", ""), f.get("reason", "")] for f in detail],
     ))
 

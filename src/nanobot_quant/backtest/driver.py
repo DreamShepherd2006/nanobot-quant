@@ -58,6 +58,11 @@ from nanobot_quant.backtest.fetchers import (
     unavailable_symbols,
 )
 from nanobot_quant.backtest.replay_data_source import ReplayDataSource
+from nanobot_quant.environment.sensors import (
+    EMA_TREND_N,
+    ema_trend,
+    ema_warmup_bars,
+)
 from nanobot_quant.batches import BatchManager
 from nanobot_quant.brokers.backtest_broker import BacktestBroker
 from nanobot_quant.exec_params import load_exec_params
@@ -182,6 +187,33 @@ class BacktestDriver:
         #    与实盘一致（2026-08-23 拍板）
         self.min_history = int(self.params.get("td_bars", 120) or 120)
 
+        # 4b. EMA 趋势变量（2026-10-20，C73/C74 研究线）
+        #     **回测侧、默认关**：driver 注入 parameters，td_live 不注入 → 实盘恒 False。
+        #     EMA 必须在前置预热过的全序列上算（n=144 的 5τ ≈ 362 根 ≫ TD 窗口），
+        #     因此只拉长取数窗口、不改评估起点（C72）。
+        _ema_on = self._merged_params.get("ema_gate_enabled")
+        if _ema_on is None:
+            _ema_on = self.params.get("ema_gate_enabled")
+        self.ema_gate_enabled = bool(_ema_on) if _ema_on is not None else False
+        self.ema_n = int(
+            self._merged_params.get("ema_n")
+            or self.params.get("ema_n")
+            or EMA_TREND_N
+        )
+        self.ema_k = int(
+            self._merged_params.get("ema_k") or self.params.get("ema_k") or 3
+        )
+        # 预热始终按 n 推算（界面只读）——即使闸门关也用于展示表头
+        self.ema_warmup = ema_warmup_bars(self.ema_n)
+        # 逐 bar 表模式：lean（默认，只存信号/成交/闸门翻转行）/ full（全量）
+        self.bars_mode = str(
+            self._merged_params.get("bars_mode")
+            or self.params.get("bars_mode")
+            or "lean"
+        ).lower()
+        if self.bars_mode not in ("lean", "full"):
+            self.bars_mode = "lean"
+
         # 5. 数据源
         #    默认 Gate CEX（与执行同所，零行为变化）；``okx_cex`` 为跨所参考源
         #    （2026-10-20 拍板：放行 + 强制标注，不参与参数裁决）。
@@ -208,6 +240,8 @@ class BacktestDriver:
                 if fetcher is not None
                 else (lambda sym: resolve_symbol(sym, self.source, tokens))
             ),
+            # EMA 长记忆变量需额外向前预热（C72：只拉长取数、不改评估起点）
+            extra_warmup_bars=self.ema_warmup,
         )
 
         # 6. 撮合参数
@@ -309,6 +343,10 @@ class BacktestDriver:
                 "tokens_json": self.tokens_json,
                 "live_mode": False,  # 回测不写信号事件文件
                 "strategy_variant": strategy_name,
+                # EMA 趋势闸门（2026-10-20，回测侧，默认关）
+                "ema_gate_enabled": self.ema_gate_enabled,
+                "ema_n": self.ema_n,
+                "ema_k": self.ema_k,
                 "channel_family": "cex",  # Step 3 回测撮合对齐 CexBroker（USDT）
                 # 与 td_live 同一桥接模式：数据源契约从 broker.data_source 读
                 "drops_in_progress_bars": bool(
@@ -473,6 +511,49 @@ class BacktestDriver:
         except OSError:
             pass  # 进度是 UX 信息，写失败不影响回测本身
 
+    # ── EMA 趋势变量与逐 bar 表（2026-10-20，C73/C74 研究线，只读）─────
+
+    def _build_ema_frames(self) -> dict[str, dict[str, Any]]:
+        """每标的预计算 ``ema`` / ``slope`` / ``close`` / ``chg``（全序列）。
+
+        为什么不在策略里算：策略每次只看 ``min_history`` 根窗口（120~200），
+        而 n=144 的 5τ ≈ 362 根——用窗口算 EMA 会静默失真。这里在数据源
+        **预热过的全序列**上一次性算好，逐 bar 只做查表（向量化，几乎零成本）。
+        """
+        out: dict[str, dict[str, Any]] = {}
+        frames = getattr(self.data_source, "frames", {}) or {}
+        for sym in self.symbols:
+            df = frames.get(sym)
+            if df is None or getattr(df, "empty", True):
+                out[sym] = {"ema": None, "slope": None, "close": None, "chg": None}
+                continue
+            trend = ema_trend(df, n=self.ema_n, k=self.ema_k)
+            close = df["close"].astype(float)
+            out[sym] = {
+                "ema": trend["ema"],
+                "slope": trend["slope"],
+                "close": close,
+                "chg": close.pct_change(),
+            }
+        return out
+
+    @staticmethod
+    def _pick(series: Any, ts: Any) -> Optional[float]:
+        """按时间戳从 Series 取值；缺值/NaN → None（不用 pandas 也能判 NaN）。"""
+        if series is None:
+            return None
+        try:
+            v = series.get(ts)
+        except (TypeError, KeyError):
+            return None
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f != f else f  # NaN 自不等
+
     def run(self) -> dict[str, Any]:
         """预取全量历史 → 逐 bar 重放 → 返回净值曲线与决策摘要。"""
         self._write_progress("prefetch", 0, None, None, 0)
@@ -538,6 +619,19 @@ class BacktestDriver:
         self._write_progress("replay", 0, total_bars, None, 0)
         net_values: list[dict[str, Any]] = []
         fills_detail: list[dict[str, Any]] = []
+        # 逐 bar 表采集（2026-10-20）：动作列直接复用策略自己的决策流
+        # （``_event_sink``），不另写一套判定——单一实现、不会与实盘漂移。
+        ema_frames = self._build_ema_frames()
+        bar_rows: list[dict[str, Any]] = []
+        rows_capped = False
+        _bar_events: list[dict[str, Any]] = []
+        strategy._event_sink = lambda ev: _bar_events.append(ev)  # noqa: B023
+        _entry_setup = int(strategy.parameters.get("entry_setup", 9) or 9)
+        _exit_setup = int(strategy.parameters.get("exit_setup", 9) or 9)
+        _entry_cd = int(strategy.parameters.get("entry_countdown", 13) or 13)
+        _exit_cd = int(strategy.parameters.get("exit_countdown", 13) or 13)
+        _row_cap = 30000 if self.bars_mode == "full" else 20000
+        prev_gate: dict[str, str] = {}
         for i, ts in enumerate(bar_times):
             if i < start_idx:
                 continue
@@ -552,14 +646,79 @@ class BacktestDriver:
                 for slot_no, b in slot_brokers.items()
                 for oid in b._tracked
             }
+            _bar_rows: dict[str, dict[str, Any]] = {}
             for sym in self.symbols:
                 strategy.symbol = sym
                 strategy.batch_manager = batch_managers.get(sym)
+                em = ema_frames.get(sym) or {}
+                ema_v = self._pick(em.get("ema"), ts)
+                slope_v = self._pick(em.get("slope"), ts)
+                strategy._ema_gate_value = (ema_v, slope_v)
+                _bar_events.clear()
                 strategy._evaluate_symbol()
+                sig = getattr(strategy, "_last_signal", {}) or {}
+                gate = "" if slope_v is None else ("pass" if slope_v > 0 else "block")
+                # HOLD 是每根 bar 都有的心跳事件，不算「有意思」——否则精简
+                # 模式退化成全量（2026-10-20 测试实测 61/61 全被保留）
+                _evs = [
+                    e for e in _bar_events
+                    if str(e.get("event", "")).upper() != "HOLD"
+                ]
+                row = {
+                    "ts": ts.isoformat(),
+                    "symbol": sym,
+                    "close": self._pick(em.get("close"), ts),
+                    "chg": self._pick(em.get("chg"), ts),
+                    "setup_buy": sig.get("setup_buy"),
+                    "setup_sell": sig.get("setup_sell"),
+                    "cd_buy": sig.get("cd_buy"),
+                    "cd_sell": sig.get("cd_sell"),
+                    "score": sig.get("score"),
+                    "ema": ema_v,
+                    "slope": slope_v,
+                    "gate": gate,
+                    "action": " / ".join(
+                        f"{e.get('event')}:{e.get('note')}" for e in _evs
+                    ),
+                    "fill": "",
+                }
+                _bar_rows[sym] = row
+                # 精简模式只存「有意思」的行：有动作 / 闸门拦 / 接近阈值 / 翻转
+                if self.bars_mode == "full":
+                    keep = True
+                else:
+                    keep = (
+                        bool(row["action"])
+                        or (row["setup_buy"] or 0) >= _entry_setup - 1
+                        or (row["setup_sell"] or 0) >= _exit_setup - 1
+                        or (row["cd_buy"] or 0) >= _entry_cd - 1
+                        or (row["cd_sell"] or 0) >= _exit_cd - 1
+                        or gate != (prev_gate.get(sym) or "")
+                    )
+                if keep:
+                    if len(bar_rows) >= _row_cap:
+                        rows_capped = True
+                    else:
+                        bar_rows.append(row)
+                prev_gate[sym] = gate
             for slot_no, b in sorted(slot_brokers.items()):
                 for oid, meta in b._tracked.items():
                     if (slot_no, oid) in tracked_before:
                         continue
+                    _fill_sym = meta.get("symbol")
+                    _row = _bar_rows.get(_fill_sym)
+                    if _row is not None:
+                        # 成交行必须进表（否则「有成交却没逐 bar 记录」）
+                        _row["fill"] = (
+                            f"{meta.get('side')} {meta.get('quantity')}"
+                            f"@{meta.get('avg_price')}"
+                            f" · slot{slot_no}"
+                        )
+                        if self.bars_mode != "full" and _row not in bar_rows:
+                            if len(bar_rows) < _row_cap:
+                                bar_rows.append(_row)
+                            else:
+                                rows_capped = True
                     fills_detail.append(
                         {
                             "ts": ts.isoformat(),
@@ -573,6 +732,9 @@ class BacktestDriver:
                             "avg_price": meta.get("avg_price"),
                             "reason": meta.get("reason"),
                             "state": "LONG" if meta.get("side") == "buy" else "EXIT",
+                            # EMA 趋势变量（2026-10-20）：逐笔可核对闸门当时状态
+                            "ema": (_row or {}).get("ema"),
+                            "slope": (_row or {}).get("slope"),
                         }
                     )
             # 净值快照（mark-to-market，各 slot 独立账本）
@@ -654,6 +816,36 @@ class BacktestDriver:
             "fills": fills,
             "fills_detail": fills_detail,
             "skip_counts": dict(getattr(strategy, "_skip_counts", {}) or {}),
+            # 逐 bar 表（2026-10-20）：lean = 只存信号/成交/闸门翻转行；
+            # full = 每根 bar 全存（体积≈2–3 MB/次，靠 cap 封顶）
+            "bars_mode": self.bars_mode,
+            "bars_rows": bar_rows,
+            "bars_meta": {
+                "mode": self.bars_mode,
+                "count": len(bar_rows),
+                "capped": rows_capped,
+                "cap": _row_cap,
+                "td_warmup_bars": self.min_history - 1,
+                "ema_warmup_bars": self.ema_warmup,
+                "fetched_bars": len(bar_times) if bar_times else 0,
+                "evaluated_bars": len(net_values),
+            },
+            # EMA 趋势闸门统计（只拦 BUY；na = 预热不足/ATR≤0 → fail-open）
+            "ema_gate": {
+                "enabled": self.ema_gate_enabled,
+                "n": self.ema_n,
+                "k": self.ema_k,
+                "warmup": self.ema_warmup,
+                "pass": int(getattr(strategy, "_ema_gate_pass", 0) or 0),
+                "block": int(
+                    (getattr(strategy, "_skip_counts", {}) or {}).get("ema_gate", 0)
+                ),
+                "na": int(
+                    (getattr(strategy, "_skip_counts", {}) or {}).get(
+                        "ema_gate_na", 0
+                    )
+                ),
+            },
             "capital_stats": self._capital_stats(
                 fills_detail, initial_total, bar_times[-1].isoformat() if bar_times else None
             ),
@@ -688,6 +880,13 @@ class BacktestDriver:
                 # 手续费率实际生效值（2026-10-20）：此前快照缺该键，报告回退 0
                 # → 误显示「手续费率 0.00%」，而撮合其实按 0.1% 扣（成交价可反推）
                 "fee_rate": self.fee_rate,
+                # EMA 趋势变量（2026-10-20，C73/C74 研究线，默认关；
+                # 预热根数自动按 n 推算，界面只读）
+                "ema_gate_enabled": self.ema_gate_enabled,
+                "ema_n": self.ema_n,
+                "ema_k": self.ema_k,
+                "ema_warmup": self.ema_warmup,
+                "bars_mode": self.bars_mode,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）
                 "entry_setup": (strategy._td_params or {}).get("entry_setup"),

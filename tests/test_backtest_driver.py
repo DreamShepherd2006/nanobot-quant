@@ -216,6 +216,70 @@ def test_backtest_config_fee_rate_follows_params(tmp_path):
     assert driver.run()["backtest_config"]["fee_rate"] == pytest.approx(0.0005)
 
 
+# ── 逐 bar 表 + EMA 趋势变量（2026-10-20，C73/C74 研究线）─────────────
+
+def test_bars_rows_captured_in_lean_mode(tmp_path):
+    """默认精简模式：逐 bar 表非空、字段齐全、**成交行必进表**。"""
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["bars_mode"] == "lean"
+    rows = out["bars_rows"]
+    assert rows, "逐 bar 表不能为空"
+    need = {
+        "ts", "symbol", "close", "chg", "setup_buy", "setup_sell",
+        "cd_buy", "cd_sell", "score", "ema", "slope", "gate", "action", "fill",
+    }
+    assert need <= set(rows[0]), need - set(rows[0])
+    assert out["fills"] >= 1
+    assert any(r["fill"] for r in rows), "有成交就必须有成交行"
+    # 精简模式应当小于全量（否则筛选失效）
+    assert len(rows) < out["bars_meta"]["evaluated_bars"]
+
+
+def test_bars_rows_full_mode_keeps_every_bar(tmp_path):
+    """全量模式：行数 = 评估 bar × 标的数。"""
+    p = _params(bars_mode="full")
+    out = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
+    ).run()
+    meta = out["bars_meta"]
+    assert meta["mode"] == "full"
+    assert meta["count"] == len(out["bars_rows"])
+    assert meta["count"] == meta["evaluated_bars"] * len(out["symbols"])
+
+
+def test_ema_gate_blocks_buy_in_downtrend(tmp_path):
+    """EMA 闸门开：下跌趋势下 slope ≤ 0 → 拦 BUY（只拦不买），并计数。"""
+    closes = _flat_then_falling(60, 40)
+    base = BacktestDriver(
+        scene="mid", params=_params(),
+        fetcher=_FakeFetcher(closes), ledger_dir=tmp_path,
+    ).run()
+    assert base["fills"] >= 1
+    assert base["ema_gate"]["enabled"] is False
+
+    p = _params()
+    p["ema_gate_enabled"] = True
+    p["ema_n"] = 20
+    gated = BacktestDriver(
+        scene="mid", params=p,
+        fetcher=_FakeFetcher(closes), ledger_dir=tmp_path,
+    ).run()
+    assert gated["ema_gate"]["enabled"] is True
+    assert gated["ema_gate"]["n"] == 20
+    assert gated["ema_gate"]["block"] >= 1, "下跌趋势必须被拦至少一次"
+    assert gated["skip_counts"].get("ema_gate", 0) >= 1
+    assert gated["fills"] <= base["fills"]
+    # 拦下来的那次不能落台账（无仓）
+    assert gated["ema_gate"]["pass"] + gated["ema_gate"]["na"] >= 0
+
+
 # ── hooks（回测注入，实盘零影响） ────────────────────────────────────
 
 def test_hooks_injected_backtest_broker():

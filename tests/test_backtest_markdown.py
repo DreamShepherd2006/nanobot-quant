@@ -176,6 +176,41 @@ def test_spot_params_gates_degrade_but_zero_is_valid():
     assert "| 高9动能判断 | 关 |" in md2
 
 
+# ── EMA 趋势变量（2026-10-20，C73/C74 研究线）─────────────────────
+
+def test_spot_markdown_renders_ema_rows_and_gate_line():
+    """EMA 参数 + 闸门效果必须进报告——闸门关时也要写一行（不能静默）。"""
+    r = _spot_result()
+    r["backtest_config"].update({
+        "ema_gate_enabled": True, "ema_n": 144, "ema_k": 3,
+        "ema_warmup": 362, "bars_mode": "lean",
+    })
+    r["ema_gate"] = {
+        "enabled": True, "n": 144, "k": 3, "warmup": 362,
+        "pass": 7, "block": 3, "na": 1,
+    }
+    md = render_markdown(r)
+    assert "| EMA 趋势闸门 | 开 |" in md
+    assert "| EMA 周期 n | 144 |" in md
+    assert "| 斜率跨度 k | 3 |" in md
+    assert "| EMA 预热(bar) | 362 |" in md
+    assert "| 逐 bar 表 | 精简 |" in md
+    assert "通过 7 / 拦截 3" in md
+    assert "70.0%" in md
+    assert "预热不足 NA 1" in md
+
+
+def test_spot_markdown_says_gate_off_explicitly():
+    """闸门关也要写明「关」——不能因为没效果就不报。"""
+    r = _spot_result()
+    r["backtest_config"].update({"ema_gate_enabled": False, "ema_n": 144})
+    r["ema_gate"] = {"enabled": False, "n": 144, "k": 3, "warmup": 362,
+                     "pass": 0, "block": 0, "na": 0}
+    md = render_markdown(r)
+    assert "| EMA 趋势闸门 | 关 |" in md
+    assert "🌊 EMA 闸门：关" in md
+
+
 # ── 不可渲染载荷 ──────────────────────────────────────────────────────
 
 def test_running_and_error_payloads_render_empty():
