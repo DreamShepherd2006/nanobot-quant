@@ -136,6 +136,56 @@ def test_driver_trend_down_triggers_buy(tmp_path):
     assert out["net_values"][-1]["net"] < 2000.0
 
 
+# ── 数量模式覆盖（2026-10-20） ────────────────────────────────────
+
+def _fixed_qty_params(quantity_mode: str = "fixed") -> dict:
+    """场景数量模式 = fixed 且每笔 10 个 SOL：$100/slot 下必被 position_limit 拦。"""
+    p = _params()
+    p["scenes"]["mid"].update(
+        {"quantity_mode": quantity_mode, "td_quantity": 10, "td_fixed_amount": 4.0}
+    )
+    return p
+
+
+def test_quantity_mode_fixed_blocks_small_slot(tmp_path):
+    """跟随场景（fixed × 10 SOL ≈ $1000）> 20% × $100/slot → 零成交（陷阱本身）。
+
+    这就是 2026-10-20 线上那轮「0 成交 + position_limit BLOCK」的口径根因。
+    """
+    driver = BacktestDriver(
+        scene="mid",
+        params=_fixed_qty_params(),
+        initial_quote=100.0,
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+
+    assert out["backtest_config"]["quantity_mode"] == "fixed"
+    assert out["fills"] == 0
+
+
+def test_quantity_mode_override_reaches_strategy(tmp_path):
+    """覆盖 quantity_mode=fixed_amount（+ 10U）→ 策略真按金额下单、可成交。
+
+    回测覆盖只作用于本次进程（不回写实盘），策略侧读 merged params。
+    """
+    driver = BacktestDriver(
+        scene="mid",
+        params=_fixed_qty_params(),
+        initial_quote=100.0,
+        fixed_amount=10.0,
+        overrides={"quantity_mode": "fixed_amount"},
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+
+    assert out["backtest_config"]["quantity_mode"] == "fixed_amount"
+    assert out["backtest_config"]["td_fixed_amount"] == pytest.approx(10.0)
+    assert out["fills"] >= 1, out
+
+
 # ── hooks（回测注入，实盘零影响） ────────────────────────────────────
 
 def test_hooks_injected_backtest_broker():

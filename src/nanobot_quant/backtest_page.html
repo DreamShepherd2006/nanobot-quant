@@ -140,10 +140,10 @@
     <input type="number" id="batches" value="" min="1" max="50" step="1">
     <span class="f-hint">留空 = 该场景配置的批次数量</span>
   </div>
-  <div class="field">
+  <div class="field" id="fixed_amount_field">
     <span class="f-label">TD 固定金额（U）</span>
     <input type="number" id="fixed_amount" value="" min="1" max="5000" step="0.1">
-    <span class="f-hint">留空 = 场景配置的固定金额；回测专用、不回写实盘（CEX 需 ≥3U）</span>
+    <span class="f-hint" id="fixed_amount_hint">留空 = 场景配置的固定金额；回测专用、不回写实盘（CEX 需 ≥3U）</span>
   </div>
   <div class="field">
     <span class="f-label">滑点</span>
@@ -154,6 +154,7 @@
     <summary>⚙️ 参数覆盖（留空 = 跟随场景配置 · 仅本次回测生效，不回写实盘）</summary>
     <div class="ov-grid">
       <div class="ov-item"><label for="sleeptime">周期</label><select id="sleeptime"><option value="">（跟随场景）</option></select><span class="f-hint">回测专用周期，不影响实盘</span></div>
+      <div class="ov-item"><label for="quantity_mode">数量模式</label><select id="quantity_mode"><option value="">（跟随场景）</option><option value="fixed">固定数量（fixed）</option><option value="fixed_amount">固定金额 U（fixed_amount）</option><option value="value">按比例（value）</option></select><span class="f-hint">选「固定金额」后填上方 TD 固定金额</span></div>
       <div class="ov-item"><label for="entry_setup">入场 Setup 阈值</label><input type="number" id="entry_setup" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="entry_countdown">入场 Countdown 阈值</label><input type="number" id="entry_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="cd_entry_setup_gap">CD 入场时效门槛(bar)</label><input type="number" id="cd_entry_setup_gap" min="0" max="300" step="1" placeholder="场景值"></div>
@@ -361,11 +362,12 @@ function initForm() {
     if (cfg.batches) $("batches").value = cfg.batches;
     updateOverridesPlaceholders();
   });
+  if ($("quantity_mode")) $("quantity_mode").addEventListener("change", syncFixedAmountField);
   updateOverridesPlaceholders();
 }
 
 // 覆盖字段 → 场景配置键（与 collectOverrides 的字段一一对应）
-const OV_KEYS = ["sleeptime","entry_setup","entry_countdown","cd_entry_setup_gap",
+const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd_entry_setup_gap",
   "exit_setup","exit_countdown","min_hold_bars",
   "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
   "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
@@ -401,6 +403,29 @@ function updateOverridesPlaceholders() {
       el.placeholder = r.src === "场景" ? ovDisplay(r.v) : `回退全局 · ${ovDisplay(r.v)}`;
     }
   });
+  syncFixedAmountField();
+}
+
+// TD 固定金额输入框仅在「数量模式 = fixed_amount」时生效（2026-10-20）。
+// 之前只覆盖金额、不覆盖模式 ⇒ 场景是 fixed 时金额被策略忽略、单子仍按
+// 固定数量下 → 撞 position_limit 全部 BLOCK、0 成交且无从自查。
+function syncFixedAmountField() {
+  const qm = $("quantity_mode") ? $("quantity_mode").value : "";
+  const scene = $("scene") ? $("scene").value : "";
+  const effMode = qm || sceneValue(scene, "quantity_mode").v || "fixed";
+  const active = effMode === "fixed_amount";
+  const field = $("fixed_amount_field");
+  const input = $("fixed_amount");
+  const hint = $("fixed_amount_hint");
+  if (!input) return;
+  if (field) field.style.opacity = active ? "1" : "0.5";
+  input.disabled = !active;
+  if (!active) input.value = "";
+  if (hint) {
+    hint.textContent = active
+      ? "每笔建仓固定 USDT；回测专用、不回写实盘（CEX 需 ≥3U）"
+      : `数量模式=${effMode} → 固定金额不生效，先把「数量模式」改成固定金额`;
+  }
 }
 
 function selectedSymbols() {
@@ -428,6 +453,8 @@ function collectOverrides() {
   if (eo !== "") overrides.exit_order = eo;
   const st = $("sleeptime").value;
   if (st !== "") overrides.sleeptime = st;
+  const qm = $("quantity_mode") ? $("quantity_mode").value : "";
+  if (qm !== "") overrides.quantity_mode = qm;
   return overrides;
 }
 
@@ -510,6 +537,7 @@ function paramsRows(res) {
     ["评估区间", `${fmtTs(cfg.start_ts ?? res.start_ts)} → ${fmtTs(cfg.end_ts ?? res.end_ts)}`],
     ["初始资金", `${fmtN(cfg.initial_total ?? res.initial_total, 2)} USDT（${cfg.batches ?? res.batches ?? "—"} slot × ${fmtN(cfg.initial_quote ?? res.initial_quote, 2)}）`],
     ["批次数量", `${cfg.batches ?? res.batches ?? "—"} slot`],
+    ["数量模式", `<code>${cfg.quantity_mode ?? "—"}</code>${cfg.quantity_mode === "fixed_amount" && cfg.td_fixed_amount != null ? `（每笔 ${cfg.td_fixed_amount} U）` : ""}`],
     ["固定金额", cfg.td_fixed_amount != null ? `${cfg.td_fixed_amount} U` : "—"],
     ["滑点", cfg.slippage != null ? `${cfg.slippage}%` : "—"],
     ["入场 Setup 阈值", cfg.entry_setup ?? "—"],

@@ -633,6 +633,13 @@ class BacktestDriver:
                 "initial_quote": self.initial_quote,
                 "initial_total": round(initial_total, 6),
                 "td_fixed_amount": self._merged_params.get("td_fixed_amount"),
+                # 数量模式实际生效值（2026-10-20）：fixed/fixed_amount/value
+                # —— 报告里必须可见，否则 0 成交（position_limit 拦截）无从自查
+                "quantity_mode": (
+                    getattr(strategy, "quantity_mode", None)
+                    or self._merged_params.get("quantity_mode")
+                    or "fixed"
+                ),
                 "slippage": self.slippage,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）

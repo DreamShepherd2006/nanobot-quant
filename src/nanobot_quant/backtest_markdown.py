@@ -399,6 +399,8 @@ def _spot_md(res: dict) -> str:
         ("评估 bar", f"{res.get('bars', 0)} / 拉取 {res.get('fetched_bars', 0)}"),
         ("初始资金", f"{_num(res.get('initial_total'), 2)}（每 slot {_num(res.get('initial_quote'), 2)} × {res.get('batches', '—')}）"),
         ("批次", res.get("batches")),
+        ("数量模式", cfg.get("quantity_mode") or "—"),
+        ("固定金额", f"{cfg.get('td_fixed_amount')} U" if cfg.get("td_fixed_amount") is not None else "—"),
         ("入场 setup", cfg.get("entry_setup")),
         ("入场 countdown", cfg.get("entry_countdown")),
         ("出场 setup", cfg.get("exit_setup")),
