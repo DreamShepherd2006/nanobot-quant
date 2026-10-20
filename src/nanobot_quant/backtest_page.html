@@ -185,8 +185,8 @@
       <div class="ov-item"><label for="cd_exit_all">cd13全平</label><select id="cd_exit_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="gate_enabled">贝叶斯闸门</label><select id="gate_enabled"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="gate_red_min">闸门禁买阈值</label><input type="number" id="gate_red_min" min="0.05" max="0.9" step="0.05" placeholder="0.45"></div>
-      <div class="ov-item"><label for="ema_gate_enabled">EMA 趋势闸门</label><select id="ema_gate_enabled"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">只拦 BUY（slope≤0）；默认关</span></div>
-      <div class="ov-item"><label for="ema_n">EMA 周期 n</label><select id="ema_n"><option value="">（跟随场景/144）</option><option value="5">5</option><option value="8">8</option><option value="13">13</option><option value="21">21</option><option value="34">34</option><option value="55">55</option><option value="89">89</option><option value="144">144</option></select><span class="f-hint">斐波那契族（探索用，裁决值需冻结）</span></div>
+      <div class="ov-item"><label for="ema_gate_enabled">EMA 趋势闸门</label><select id="ema_gate_enabled" onchange="syncEmaWarmup()"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">只拦 BUY（slope≤0）；默认关</span></div>
+      <div class="ov-item"><label for="ema_n">EMA 周期 n</label><select id="ema_n" onchange="syncEmaWarmup()"><option value="">（跟随场景/144）</option><option value="5">5</option><option value="8">8</option><option value="13">13</option><option value="21">21</option><option value="34">34</option><option value="55">55</option><option value="89">89</option><option value="144">144</option></select><span class="f-hint">斐波那契族（探索用，裁决值需冻结）</span></div>
       <div class="ov-item"><label for="ema_k">斜率跨度 k</label><input type="number" id="ema_k" min="1" max="50" step="1" placeholder="3"><span class="f-hint">slope=(EMA_t−EMA_t−k)/(k·ATR20)</span></div>
       <div class="ov-item"><label>EMA 预热(bar)</label><input type="text" id="ema_warmup" readonly value="自动：5τ（n=144 → 362）" style="background:#f1f5f9;"><span class="f-hint">只读：按 n 自动推算，不允许手填过小</span></div>
       <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
@@ -707,7 +707,7 @@ function _renderBars() {
   }).join("");
   body.innerHTML = rows.length
     ? `<table><thead><tr><th>时间</th><th>UTC 时间</th><th>标的</th><th>收盘</th><th>涨跌%</th>` +
-      `<th>Buy Setup</th><th>Sell Setup</th><th>Score</th><th>EMA</th><th>slope3</th>` +
+      `<th>Buy Setup</th><th>Sell Setup</th><th>Score</th><th>EMA</th><th>slope${_barsCache.meta && _barsCache.meta.ema_k ? _barsCache.meta.ema_k : 3}</th>` +
       `<th>闸门</th><th>动作/原因</th><th>成交</th></tr></thead><tbody>${trs}</tbody></table>`
     : '<div class="empty">当前筛选下无行</div>';
   const info = $("bars-pageinfo");
@@ -824,7 +824,9 @@ function renderProgress(runId, prog) {
     <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
     ${prog.capital_stats ? capitalBox(prog.capital_stats) : ""}
     ${fillsBox(prog.fills_detail, `运行中已成交 ${prog.fills || 0} 笔，实时更新`)}
+    ${(prog.bars_rows && prog.bars_rows.length) ? barsBox({ bars_rows: prog.bars_rows, bars_meta: { mode: "lean", count: prog.bars_rows.length } }) : ""}
   `;
+  if (prog.bars_rows && prog.bars_rows.length) _renderBars();
 }
 
 // 资金效率指标（周转率/利用率，2026-08-29）
@@ -888,7 +890,18 @@ function fillPeriodOptions() {
 
 initForm();
 fillPeriodOptions();
+syncEmaWarmup();
 loadRuns();
+
+// EMA 预热 = 5τ 一次性推算（与后端 sensors.ema_warmup_bars 同公式、同取整）：
+// 界面只读展示，不允许手填过小——预热不足会让 slope 在窗口边缘静默失真。
+function emaWarmupOf(n) { return Math.max(50, Math.floor(5 * (n + 1) / 2)); }
+function syncEmaWarmup() {
+  const sel = $("ema_n"), box = $("ema_warmup");
+  if (!sel || !box) return;
+  const n = sel.value === "" ? 144 : parseInt(sel.value, 10);
+  box.value = `自动：5τ（n=${n} → ${emaWarmupOf(n)}）`;
+}
 
 // 成交明细行（实盘交易记录口径：时间/场景/标的/方向/数量/策略价/成交价/滑点/slot/状态/原因）
 function fillRow(f) {

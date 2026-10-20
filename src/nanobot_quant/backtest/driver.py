@@ -477,6 +477,7 @@ class BacktestDriver:
         fills: int,
         fills_detail: list[dict] | None = None,
         capital_stats: dict | None = None,
+        bars_rows: list[dict] | None = None,
     ) -> None:
         """运行中进度写入（WebUI/MCP 轮询展示用，失败静默不阻塞回测）。
 
@@ -502,6 +503,9 @@ class BacktestDriver:
                 "fills": fills,
                 "fills_detail": fills_detail or [],  # 已成交明细（运行中实时可见）
                 "capital_stats": capital_stats,  # 资金周转率/利用率（运行中实时）
+                # 逐 bar 行（运行中实时可见；只带最近部分，避免几百次
+                # 写盘把 2万行×上百字节 重复序列化爆大）
+                "bars_rows": bars_rows or [],
             },
         }
         try:
@@ -757,6 +761,7 @@ class BacktestDriver:
                 capital_stats=self._capital_stats(
                     fills_detail, self.initial_quote * self.batches, ts.isoformat()
                 ),
+                bars_rows=bar_rows[-5000:],
             )
 
         # 成交记录（_tracked 是累计列表，结束时统计一次）

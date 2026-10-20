@@ -280,6 +280,24 @@ def test_ema_gate_blocks_buy_in_downtrend(tmp_path):
     assert gated["ema_gate"]["pass"] + gated["ema_gate"]["na"] >= 0
 
 
+def test_progress_payload_carries_bars_rows(tmp_path):
+    """运行中进度也要带逐 bar 行（否则 26 分钟的回测只能跑完才看）。"""
+    import json as _json
+
+    drv = BacktestDriver(
+        scene="mid", params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
+    )
+    p = tmp_path / "progress.json"
+    drv.progress_path = p
+    drv._write_progress(
+        "replay", 5, 100, None, 0, bars_rows=[{"ts": "2026-10-20T00:00:00", "symbol": "SOL"}]
+    )
+    prog = _json.loads(p.read_text(encoding="utf-8"))["progress"]
+    assert prog["bars_rows"][0]["symbol"] == "SOL"
+    assert prog["stage"] == "replay"
+
+
 # ── hooks（回测注入，实盘零影响） ────────────────────────────────────
 
 def test_hooks_injected_backtest_broker():
