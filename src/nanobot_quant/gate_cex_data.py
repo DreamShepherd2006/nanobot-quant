@@ -23,6 +23,8 @@ from typing import Optional
 
 import pandas as pd
 
+from nanobot_quant.kline_paging import paginate_backwards
+
 _API = "https://api.gateio.ws/api/v4/spot/candlesticks"
 
 # 黑名单：symbol -> 原因。Gate 无此交易对/已下架的币（如 MU、VSC）首次查询失败后
@@ -178,26 +180,28 @@ def fetch_gate_kline_range_paged(pair: str, start_ts: int, end_ts: int,
     # 之前本地表缺新周期会静默落到 86400 导致翻页大缺口）
     from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
 
-    step = INTERVAL_SECONDS[str(bar)]
-    page_to = int(end_ts)
-    batches: list = []
-    guard = 0
-    while page_to > int(start_ts) and guard < 500:
-        guard += 1
+    step_ms = int(INTERVAL_SECONDS[str(bar)]) * 1000
+    start_ms = int(start_ts) * 1000
+    end_ms = int(end_ts) * 1000
+
+    def _fetch_page(cursor_ms: int) -> list:
         try:
-            rows = _request(pair, interval, 1000, to_ts=page_to)
+            return _request(pair, interval, 1000, to_ts=cursor_ms // 1000)
         except urllib.error.HTTPError as e:
             # 深度上限 400（已由 _request 判别为非黑名单原因）——截断停止
             if e.code == 400:
-                break
+                return []
             raise
-        if not rows:
-            break
-        batches.append(rows)
-        oldest = int(rows[0][0])
-        if oldest <= int(start_ts):
-            break
-        page_to = oldest - step
+
+    batches = paginate_backwards(
+        _fetch_page,
+        initial_cursor=end_ms,
+        start_ms=start_ms,
+        page_limit=1000,
+        next_cursor=lambda oldest_ms: oldest_ms - step_ms,
+        label=f"gate {pair} {bar}",
+        ts_of=lambda row: int(row[0]) * 1000,   # Gate 行 ts 是秒
+    )
     if not batches:
         return pd.DataFrame(columns=_COLUMNS)
     frames = [rows_to_df(b) for b in batches]
