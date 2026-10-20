@@ -576,6 +576,7 @@ function paramsRows(res) {
     ["数量模式", `<code>${cfg.quantity_mode ?? "—"}</code>${cfg.quantity_mode === "fixed_amount" && cfg.td_fixed_amount != null ? `（每笔 ${cfg.td_fixed_amount} U）` : ""}`],
     ["固定金额", cfg.td_fixed_amount != null ? `${cfg.td_fixed_amount} U` : "—"],
     ["滑点", cfg.slippage != null ? `${cfg.slippage}%` : "—"],
+    ["手续费率", pctFmt(cfg.fee_rate)],
     ["入场 Setup 阈值", cfg.entry_setup ?? "—"],
     ["入场 Countdown 阈值", cfg.entry_countdown ?? "—"],
     ["CD 入场时效门槛(bar)", cfg.cd_entry_setup_gap != null ? cfg.cd_entry_setup_gap : "—"],

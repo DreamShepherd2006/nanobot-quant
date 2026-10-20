@@ -56,6 +56,27 @@ def _pct(v: Any, nd: int = 2) -> str:
         return _esc(v)
 
 
+def _pctv(v: Any, nd: int = 2) -> str:
+    """比值 → 百分比（0.003 → ``0.30%``）；缺值返回 ``—``。
+
+    与页面 ``pctFmt`` 同口径：调用方传原始比值、这里统一 ×100，
+    避免「有的键已乘过 100、有的没有」这类静默错位。
+    """
+    if v is None or v == "":
+        return "—"
+    try:
+        return f"{float(v) * 100:.{nd}f}%"
+    except (TypeError, ValueError):
+        return _esc(v)
+
+
+def _on_off(v: Any) -> str:
+    """布尔开关 → 开/关；缺值返回 ``—``（不能用 falsy 判空，0/False 是有效值）。"""
+    if v is None or v == "":
+        return "—"
+    return "开" if v else "关"
+
+
 def _iv(v: Any) -> str:
     """IV 内部是小数（0.794 = 79.4%），与页面显示口径对齐。"""
     if v is None or v == "":
@@ -412,15 +433,31 @@ def _spot_md(res: dict) -> str:
         ("批次", res.get("batches")),
         ("数量模式", cfg.get("quantity_mode") or "—"),
         ("固定金额", f"{cfg.get('td_fixed_amount')} U" if cfg.get("td_fixed_amount") is not None else "—"),
+        ("滑点", _pct(cfg.get("slippage"))),
+        ("手续费率", _pctv(cfg.get("fee_rate"))),
         ("入场 setup", cfg.get("entry_setup")),
         ("入场 countdown", cfg.get("entry_countdown")),
+        ("CD 入场时效门槛(bar)", cfg.get("cd_entry_setup_gap")),
         ("出场 setup", cfg.get("exit_setup")),
         ("出场 countdown", cfg.get("exit_countdown")),
         ("最短持有期", cfg.get("min_hold_bars")),
-        ("止损", _pct((cfg.get("stop_loss_pct") or 0) * 100)),
-        ("止盈", _pct((cfg.get("take_profit_pct") or 0) * 100)),
-        ("滑点", _pct(cfg.get("slippage"))),
-        ("手续费率", _pct((cfg.get("fee_rate") or 0) * 100)),
+        ("止损", _pctv(cfg.get("stop_loss_pct"))),
+        ("止盈", _pctv(cfg.get("take_profit_pct"))),
+        # 高9 / cd13 出场门（2026-10-20）：这些值此前只写进结果 JSON、未渲染
+        # → 报告里看不到「为什么这笔亏损还平仓」，只能靠猜场景配置
+        ("高9盈利门(毛·上)", _pctv(cfg.get("sell_only_profit_high"))),
+        ("高9盈利门(毛·下)", _pctv(cfg.get("sell_only_profit_low"))),
+        ("高9动能判断", _on_off(cfg.get("momentum_exit"))),
+        ("动能停滞阈值(bar)", cfg.get("cd_stall_n")),
+        ("高9全平", _on_off(cfg.get("td_sell_all"))),
+        ("cd13保本门(毛)", _pctv(cfg.get("cd_exit_min_profit"))),
+        ("cd13全平", _on_off(cfg.get("cd_exit_all"))),
+        ("平仓顺序", cfg.get("exit_order")),
+        ("建仓起始批次", cfg.get("td_start_slot")),
+        ("子账户最小资金", (
+            f"{_num(cfg.get('min_account_value'), 2)} USD"
+            if cfg.get("min_account_value") is not None else "—"
+        )),
     ]))
     if res.get("source_note"):
         md.append(f"\n> ℹ️ {res['source_note']}\n")

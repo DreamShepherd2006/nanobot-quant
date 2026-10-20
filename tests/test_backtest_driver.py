@@ -186,6 +186,36 @@ def test_quantity_mode_override_reaches_strategy(tmp_path):
     assert out["fills"] >= 1, out
 
 
+def test_backtest_config_snapshots_fee_rate(tmp_path):
+    """fee_rate 必须进快照（2026-10-20）。
+
+    此前快照缺该键 → markdown/页面回退 0，把「手续费率」误显示为 0.00%，
+    而撑合实际按 0.1% 扣（买入成交价 103.77 → 103.884261 反推 1.0011 可验）。
+    """
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["backtest_config"]["fee_rate"] == pytest.approx(driver.fee_rate)
+    assert out["backtest_config"]["fee_rate"] > 0, "默认费率不能是 0"
+
+
+def test_backtest_config_fee_rate_follows_params(tmp_path):
+    """exec_params 里的 fee_rate 应原样进快照（不写死默认值）。"""
+    p = _params()
+    p["fee_rate"] = 0.0005
+    driver = BacktestDriver(
+        scene="mid",
+        params=p,
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    assert driver.run()["backtest_config"]["fee_rate"] == pytest.approx(0.0005)
+
+
 # ── hooks（回测注入，实盘零影响） ────────────────────────────────────
 
 def test_hooks_injected_backtest_broker():

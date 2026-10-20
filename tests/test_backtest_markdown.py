@@ -130,6 +130,52 @@ def test_spot_result_renders_core_sections():
     assert "| 最短持有期 | 10 |" in md
 
 
+# ── 出场门口径（2026-10-20） ───────────────────────────────────────
+
+def test_spot_params_render_exit_gates():
+    """高9 / cd13 出场门必须进报告：否则「亏损为何还平仓」只能靠猜配置。"""
+    r = _spot_result()
+    r["backtest_config"].update({
+        "cd_entry_setup_gap": 5,
+        "sell_only_profit_high": 0.003, "sell_only_profit_low": 0.002,
+        "momentum_exit": True, "cd_stall_n": 3, "td_sell_all": True,
+        "cd_exit_min_profit": 0.002, "cd_exit_all": False,
+        "exit_order": "fifo", "td_start_slot": 1, "min_account_value": 3.0,
+    })
+    md = render_markdown(r)
+    assert "| 手续费率 | 0.10% |" in md
+    assert "| CD 入场时效门槛(bar) | 5 |" in md
+    assert "| 高9盈利门(毛·上) | 0.30% |" in md
+    assert "| 高9盈利门(毛·下) | 0.20% |" in md
+    assert "| 高9动能判断 | 开 |" in md
+    assert "| 动能停滞阈值(bar) | 3 |" in md
+    assert "| 高9全平 | 开 |" in md
+    assert "| cd13保本门(毛) | 0.20% |" in md
+    assert "| cd13全平 | 关 |" in md
+    assert "| 平仓顺序 | fifo |" in md
+    assert "| 建仓起始批次 | 1 |" in md
+    assert "| 子账户最小资金 | 3.00 USD |" in md
+
+
+def test_spot_params_gates_degrade_but_zero_is_valid():
+    """缺键→—；但 0 / False 是有效值（盈利门=0 就是关），不能显示成 —。"""
+    r = _spot_result()
+    cfg = r["backtest_config"]
+    for k in ("fee_rate", "sell_only_profit_high", "sell_only_profit_low",
+              "momentum_exit", "cd_exit_all"):
+        cfg.pop(k, None)
+    md = render_markdown(r)
+    assert "| 手续费率 | — |" in md
+    assert "| 高9盈利门(毛·上) | — |" in md
+    assert "| 高9动能判断 | — |" in md
+
+    cfg["sell_only_profit_high"] = 0.0
+    cfg["momentum_exit"] = False
+    md2 = render_markdown(r)
+    assert "| 高9盈利门(毛·上) | 0.00% |" in md2
+    assert "| 高9动能判断 | 关 |" in md2
+
+
 # ── 不可渲染载荷 ──────────────────────────────────────────────────────
 
 def test_running_and_error_payloads_render_empty():
