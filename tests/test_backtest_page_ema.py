@@ -63,8 +63,20 @@ def test_bars_csv_export_present():
     assert "导出 CSV" in html
     # 导出全部行，不受「只看有动作/成交」筛选影响
     assert "title=\"导出全部行（不受筛选影响）\"" in html
-    # runId 必须从 renderResult 传进 barsBox，否则链接无从拼 run_id
-    assert "barsBox(res, runId)" in html
+    # runId + 当前周期必须从 renderResult 传进 barsBox，否则链接无从拼 run_id/period
+    assert "barsBox(res, runId, period)" in html
+
+
+def test_multi_period_ui_present():
+    """多周期对比（2026-10-21）：多选框、对比表、切换、口径警告。"""
+    html = _html()
+    assert 'id="periods"' in html and "multiple" in html
+    assert "selectedPeriods()" in html          # 提交时带上 periods
+    assert "function compareBox" in html        # 周期对比表
+    assert "function switchPeriod" in html      # 点行切换详情
+    assert "不得求平均或加总" in html            # 口径警告写死在页面
+    assert "&period=" in html                   # CSV 按当前档导出
+    assert "周期 ${prog.period}" in html         # 运行中显示第 i/n 档
 
 
 def test_two_arm_compare_wired_on_page():

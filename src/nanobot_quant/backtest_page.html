@@ -164,6 +164,7 @@
     <summary>⚙️ 参数覆盖（留空 = 跟随场景配置 · 仅本次回测生效，不回写实盘）</summary>
     <div class="ov-grid">
       <div class="ov-item"><label for="sleeptime">周期</label><select id="sleeptime"><option value="">（跟随场景）</option></select><span class="f-hint">回测专用周期，不影响实盘</span></div>
+      <div class="ov-item"><label for="periods">多周期对比</label><select id="periods" multiple size="5" style="min-width:96px"></select><span class="f-hint">勾选 ≥2 档 → 各档<b>独立回放</b>并出对比表（同参数=同根数、非同时间）；全不勾 = 用左侧「周期」</span></div>
       <div class="ov-item"><label for="quantity_mode">数量模式</label><select id="quantity_mode"><option value="">（跟随场景）</option><option value="fixed">固定数量（fixed）</option><option value="fixed_amount">固定金额 U（fixed_amount）</option><option value="value">按比例（value）</option></select><span class="f-hint">选「固定金额」后填上方 TD 固定金额</span></div>
       <div class="ov-item"><label for="entry_setup">入场 Setup 阈值</label><input type="number" id="entry_setup" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="entry_countdown">入场 Countdown 阈值</label><input type="number" id="entry_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
@@ -504,6 +505,13 @@ function collectOverrides() {
   return overrides;
 }
 
+// 多周期选择（2026-10-21）：≥2 档 → 各档独立回放 + 对比表
+function selectedPeriods() {
+  const el = $("periods");
+  if (!el) return [];
+  return Array.from(el.selectedOptions || []).map(o => o.value).filter(Boolean);
+}
+
 // ── 启动 + 轮询 ─────────────────────────────────────────────────────────
 function setMsg(text, kind) {
   const m = $("msg");
@@ -526,6 +534,7 @@ async function startBacktest() {
     slippage: $("slippage").value ? parseFloat($("slippage").value) : null,
     fixed_amount: $("fixed_amount").value ? parseFloat($("fixed_amount").value) : null,
     overrides: collectOverrides(),
+    periods: selectedPeriods(),
   };
   const btn = $("run-btn");
   btn.disabled = true;
@@ -756,7 +765,7 @@ function _renderBars() {
       : `采集 ${collected} 行 · 当前筛选 ${rows.length} 行`;
   }
 }
-function barsBox(res, runId) {
+function barsBox(res, runId, period) {
   if (!Array.isArray(res.bars_rows)) {
     return `<div class="bt-params"><div class="bt-params-title">📊 逐 bar 明细</div>` +
       '<div class="empty" style="padding:8px;">该次未采集逐 bar 数据（重建前的旧记录）</div></div>';
@@ -771,7 +780,7 @@ function barsBox(res, runId) {
   const csvBtn = runId
     ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;" ` +
       `title="导出全部行（不受筛选影响）" ` +
-      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}">⬇ 导出 CSV（全部 ${rows.length} 行）</a>`
+      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}${period ? "&period=" + encodeURIComponent(period) : ""}">⬇ 导出 CSV（全部 ${rows.length} 行）</a>`
     : "";
   return `<div class="bt-params">` +
     `<div class="bt-params-title">📊 逐 bar 明细（TD + EMA）` +
@@ -820,17 +829,75 @@ function renderResult(res, runId) {
   const box = $("result");
   if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
   // 旧引擎（backtest_runner metrics 格式）结果缺 driver 字段 → 原始 JSON 展示
-  if (res.final_net === undefined && res.net_values === undefined) {
+  if (res.final_net === undefined && res.net_values === undefined && !res.period_results) {
     box.innerHTML =
       '<div style="font-size:.86em;color:#888;margin-bottom:6px;">旧引擎结果（backtest_runner 格式，仅展示）</div>' +
       `<pre style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px;font-size:.8em;overflow:auto;max-height:360px;">${escapeHtml(JSON.stringify(res, null, 2))}</pre>`;
     return;
   }
+  // 多周期（2026-10-21）：对比表 + 单档渲染体，点行切换
+  if (res.period_results && res.periods && res.periods.length > 1) {
+    window._btMulti = { res, runId };
+    box.innerHTML = compareBox(res, runId) + `<div id="btp-body"></div>`;
+    switchPeriod(res.periods[0]);
+    return;
+  }
+  box.innerHTML = _periodView(res, runId, "");
+  if (Array.isArray(res.bars_rows)) _renderBars();
+}
+
+// 多周期：对比表（每档独立实验，禁求平均）
+function compareBox(res, runId) {
+  const rows = (res.compare || []).map(c => {
+    const p = escapeHtml(c.period);
+    if (c.status !== "ok") {
+      return `<tr data-btp="${p}" style="cursor:pointer;" onclick="switchPeriod('${c.period}')">` +
+        `<td><b>${p}</b></td><td colspan="8" style="color:#c0392b;">⚠️ ${escapeHtml(c.error || "该周期数据不足")}</td></tr>`;
+    }
+    const roi = c.roi_pct;
+    const cls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
+    return `<tr data-btp="${p}" style="cursor:pointer;" onclick="switchPeriod('${c.period}')">` +
+      `<td><b>${p}</b></td>` +
+      `<td class="${cls}">${roi == null ? "—" : roi.toFixed(2) + "%"}</td>` +
+      `<td>${fmtN(c.final_net, 2)}</td>` +
+      `<td>${c.fills == null ? 0 : c.fills}</td>` +
+      `<td>${c.ema_pass == null ? "—" : c.ema_pass} / ${c.ema_block == null ? "—" : c.ema_block}` +
+      `${c.ema_na ? ` <span style="color:#e67e22">NA ${c.ema_na}</span>` : ""}</td>` +
+      `<td>${c.skip_total == null ? 0 : c.skip_total}</td>` +
+      `<td>${fmtN(c.turnover_two_side, 2)}</td>` +
+      `<td>${c.utilization == null ? "—" : (c.utilization * 100).toFixed(1) + "%"}</td>` +
+      `<td>${c.fetched_bars == null ? (c.bars == null ? "—" : c.bars) : c.fetched_bars + " / " + (c.bars == null ? 0 : c.bars)}</td></tr>`;
+  }).join("");
+  return `<div class="block"><div class="bt">🕒 周期对比（各档独立回放 · 同一区间 · 同一份参数）</div>
+    <table class="tbl"><thead><tr><th>周期</th><th>ROI</th><th>期末净值</th><th>成交</th><th>闸门通过/拦</th><th>SKIP</th><th>周转率(双边)</th><th>资金利用率</th><th>拉取/评估(bar)</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="f-hint" style="margin-top:4px;">点任意行切换下方详情（CSV 也按当前档导出）。⚠️ 每档是独立实验（各自独立资金/台账）：<b>ROI 不得求平均或加总</b>；也不构成跨周期迁移证据。</div></div>`;
+}
+
+function switchPeriod(p) {
+  const m = window._btMulti;
+  if (!m) return;
+  m.cur = p;
+  document.querySelectorAll("[data-btp]").forEach(el => el.classList.toggle("on", el.dataset.btp === p));
+  const body = $("btp-body");
+  if (!body) return;
+  const r = (m.res.period_results || {})[p] || {};
+  if (r.error) {
+    body.innerHTML = `<div class="banner msg err show">❌ ${escapeHtml(p)}：${escapeHtml(r.error)}</div>`;
+    return;
+  }
+  body.innerHTML = `<div style="font-size:.86em;color:#888;margin:6px 0;">当前查看：<b>${escapeHtml(p)}</b> 档</div>` +
+    _periodView(r, m.runId, p);
+  if (Array.isArray(r.bars_rows)) _renderBars();
+}
+
+// 单周期渲染体（多周期时每档复用同一模板，避免两套渲染）
+function _periodView(res, runId, period) {
   const roi = res.roi;
   const roiCls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
   const fills = res.fills_detail || [];
   const rows = fills.map(fillRow).join("");
-  box.innerHTML = mdButton(res, runId) + `
+  return mdButton(res, runId) + `
     ${res.cross_venue ? `<div class="banner warn show" style="margin-bottom:8px;">⚠️ 数据源 ≠ 执行所（Gate 现货）：跨所结果仅作参数粗筛，<b>不作参数裁决依据</b>。${escapeHtml(res.cross_venue_note || "")}</div>` : ""}
     ${res.source_note ? `<div class="f-hint" style="margin-bottom:6px;">ℹ️ ${escapeHtml(res.source_note)}</div>` : ""}
     ${paramsBox(res)}
@@ -846,11 +913,10 @@ function renderResult(res, runId) {
     ${emaBox(res.ema_gate)}
     ${armsBox(res.arms)}
     ${opensBox(res.slots)}
-    ${barsBox(res, runId)}
+    ${barsBox(res, runId, period)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
-  if (Array.isArray(res.bars_rows)) _renderBars();
 }
 
 function renderError(err, runId) {
@@ -871,7 +937,7 @@ function renderProgress(runId, prog) {
       (prog.fills ? ` · 成交 ${prog.fills} 笔` : "")
     : `📡 正在预取历史数据…`;
   box.innerHTML = `
-    <div class="banner msg show">⏳ run_id=${runId} 回测运行中</div>
+    <div class="banner msg show">⏳ run_id=${runId} 回测运行中${prog.period ? ` · 周期 ${prog.period}（${prog.period_index || "?"}/${prog.period_total || "?"}）` : ""}</div>
     ${bar}
     <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
     ${prog.capital_stats ? capitalBox(prog.capital_stats) : ""}
@@ -931,13 +997,26 @@ async function loadRun(runId) {
 // 周期下拉选项（权威来源 = data_sources.periods.PERIODS，随 __PERIODS__ 注入）
 function fillPeriodOptions() {
   const sel = $("sleeptime");
-  if (!sel || sel.dataset.filled) return;
-  PERIODS.forEach(p => {
-    const o = document.createElement("option");
-    o.value = p; o.textContent = p;
-    sel.appendChild(o);
-  });
-  sel.dataset.filled = "1";
+  if (sel && !sel.dataset.filled) {
+    PERIODS.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p; o.textContent = p;
+      sel.appendChild(o);
+    });
+    sel.dataset.filled = "1";
+  }
+  // 多周期多选框：同一份 PERIODS；默认勾 1m/3m/5m（2026-10-21 拍板）
+  const ms = $("periods");
+  if (ms && !ms.dataset.filled) {
+    const def = ["1m", "3m", "5m"];
+    PERIODS.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p; o.textContent = p;
+      if (def.includes(p)) o.selected = true;
+      ms.appendChild(o);
+    });
+    ms.dataset.filled = "1";
+  }
 }
 
 initForm();

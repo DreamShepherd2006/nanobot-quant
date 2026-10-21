@@ -555,6 +555,49 @@ def _spot_md(res: dict) -> str:
 
 # ── 入口 ──────────────────────────────────────────────────────────────
 
+def _multi_md(res: dict) -> str:
+    """多周期回测 markdown（2026-10-21）。
+
+    对比表 + 每档完整报告（复用 ``_spot_md``）。每档是**独立实验**：
+    ROI 不得求平均/加总、不构成跨周期迁移证据。
+    """
+    periods = res.get("periods") or []
+    compare = res.get("compare") or []
+    md: list[str] = [f"## 🕒 多周期回测 {res.get('run_id', '')}\n"]
+    rows = []
+    for c in compare:
+        if c.get("status") != "ok":
+            rows.append([c.get("period"), "—", "—", "—", "—", "—",
+                         f"⚠️ {c.get('error', '该周期数据不足')}"])
+            continue
+        rows.append([
+            c.get("period"),
+            _pct(c.get("roi_pct")),
+            _num(c.get("final_net"), 2),
+            c.get("fills", 0),
+            f"{c.get('ema_pass')}/{c.get('ema_block')}",
+            c.get("skip_total", 0),
+            "ok",
+        ])
+    md.append(_table(
+        ["周期", "ROI", "期末净值", "成交", "闸门通过/拦", "SKIP", "状态"], rows))
+    md.append(
+        "\n> 每档**独立回放**（各自独立资金/台账、同一区间、同一份参数）："
+        "ROI 不得求平均或加总；同参数 = **同根数，非同时间**；"
+        "不构成跨周期迁移证据。\n"
+    )
+    for p in periods:
+        sub = (res.get("period_results") or {}).get(p) or {}
+        if sub.get("error"):
+            md.append(f"\n### 周期 {p}\n\n⚠️ {sub['error']}\n")
+            continue
+        sub = dict(sub)
+        sub.setdefault("run_id", res.get("run_id", ""))
+        md.append(f"\n### 周期 {p}\n")
+        md.append(_spot_md(sub))
+    return "\n".join(md)
+
+
 def render_markdown(result: Any) -> str:
     """回测结果 → markdown。不可渲染时返回空串，绝不抛异常。"""
     try:
@@ -562,6 +605,8 @@ def render_markdown(result: Any) -> str:
             return ""
         if result.get("error") or result.get("status") == "running":
             return ""
+        if result.get("period_results"):
+            return _multi_md(result)
         if "family" in result:
             return _options_md(result)
         if "scene" in result:
