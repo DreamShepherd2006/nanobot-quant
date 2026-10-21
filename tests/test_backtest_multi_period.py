@@ -113,6 +113,9 @@ def test_period_summary_uses_arm_summary_shape():
     assert s["skip_total"] == 5
     assert s["turnover_two_side"] == 1.0
     assert s["fetched_bars"] == 219 and s["bars"] == 100
+    # TD / EMA 分段（2026-10-21）：候选 = 通过 + 拦，通过率单独给
+    assert s["candidates"] == 18
+    assert round(s["ema_pass_rate"], 2) == round(7 / 18 * 100, 2)
 
 
 def test_markdown_has_compare_table_and_period_sections():
@@ -124,7 +127,9 @@ def test_markdown_has_compare_table_and_period_sections():
     md = render_markdown(out)
 
     assert "多周期回测 bt-test-1" in md
-    assert "| 周期 | ROI | 期末净值 | 成交 |" in md.replace(" | ", " | ")
+    # 对比表已按 TD / EMA 分段（2026-10-21）：不再把两套指标合成一格
+    for col in ("TD 候选", "成交", "EMA 通过", "EMA 拦", "通过率", "SKIP"):
+        assert col in md, col
     assert "不得求平均或加总" in md          # 口径警告必须在
     assert "同根数，非同时间" in md
     assert md.count("### 周期 ") == 2       # 每档一节

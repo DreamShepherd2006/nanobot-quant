@@ -71,6 +71,10 @@ def test_multi_period_ui_present():
     """多周期对比（2026-10-21）：多选框、对比表、切换、口径警告。"""
     html = _html()
     assert 'id="periods"' in html and "multiple" in html
+    # 表头分组（2026-10-21）：对比表与逐 bar 表的 TD / EMA 段都要分组表头
+    assert html.count('class="grp td"') >= 2
+    assert html.count('class="grp ema"') >= 2
+    assert "候选买入" in html and "通过率" in html
     assert "selectedPeriods()" in html          # 提交时带上 periods
     assert "function compareBox" in html        # 周期对比表
     assert "function switchPeriod" in html      # 点行切换详情

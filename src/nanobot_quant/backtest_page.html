@@ -47,6 +47,10 @@
   table { width:100%; border-collapse:collapse; font-size:.86em; margin-top:8px; }
   th, td { padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; }
   th { background:#fafafa; color:#555; font-weight:600; }
+  /* 表头分组（2026-10-21）：TD 指标与 EMA 指标分段，避免逐 bar 表 / 对比表混排 */
+  th.grp { text-align:center; font-size:.9em; letter-spacing:.5px; }
+  th.grp.td { background:#eef3ff; color:#33508f; border-bottom:1px solid #d6e0f5; }
+  th.grp.ema { background:#fff5e6; color:#8a5a12; border-bottom:1px solid #f0dfc2; }
   th:first-child, td:first-child { text-align:left; }
   .roi-pos { color:#2e7d32; font-weight:700; }
   .roi-neg { color:#c62828; font-weight:700; }
@@ -749,9 +753,17 @@ function _renderBars() {
       `<td>${escapeHtml(r.fill || "")}</td></tr>`;
   }).join("");
   body.innerHTML = rows.length
-    ? `<table><thead><tr><th>时间</th><th>UTC 时间</th><th>标的</th><th>收盘</th><th>涨跌%</th>` +
-      `<th>Buy Setup</th><th>Sell Setup</th><th>Score</th><th>EMA</th><th>slope${_barsCache.meta && _barsCache.meta.ema_k ? _barsCache.meta.ema_k : 3}</th>` +
-      `<th>闸门</th><th>动作/原因</th><th>成交</th></tr></thead><tbody>${trs}</tbody></table>`
+    ? `<table><thead>` +
+      // 两行表头（2026-10-21）：TD 段（Setup/Score）与 EMA 段（EMA/slope/闸门）分组，
+      // 不再混排——逐 bar 表一眼能分清哪几列属于哪套指标。
+      `<tr><th rowspan="2">时间</th><th rowspan="2">UTC 时间</th><th rowspan="2">标的</th>` +
+      `<th rowspan="2">收盘</th><th rowspan="2">涨跌%</th>` +
+      `<th colspan="3" class="grp td">TD</th>` +
+      `<th colspan="3" class="grp ema">EMA</th>` +
+      `<th rowspan="2">动作/原因</th><th rowspan="2">成交</th></tr>` +
+      `<tr><th>Buy Setup</th><th>Sell Setup</th><th>Score</th>` +
+      `<th>EMA</th><th>slope${_barsCache.meta && _barsCache.meta.ema_k ? _barsCache.meta.ema_k : 3}</th><th>闸门</th></tr>` +
+      `</thead><tbody>${trs}</tbody></table>`
     : '<div class="empty">当前筛选下无行</div>';
   const info = $("bars-pageinfo");
   if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${rows.length} 行`;
@@ -854,16 +866,21 @@ function compareBox(res, runId) {
     const p = escapeHtml(c.period);
     if (c.status !== "ok") {
       return `<tr data-btp="${p}" style="cursor:pointer;" onclick="switchPeriod('${c.period}')">` +
-        `<td><b>${p}</b></td><td colspan="8" style="color:#c0392b;">⚠️ ${escapeHtml(c.error || "该周期数据不足")}</td></tr>`;
+        `<td><b>${p}</b></td><td colspan="11" style="color:#c0392b;">⚠️ ${escapeHtml(c.error || "该周期数据不足")}</td></tr>`;
     }
     const roi = c.roi_pct;
     const cls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
+    const cand = c.ema_pass == null && c.ema_block == null
+      ? null : (c.ema_pass || 0) + (c.ema_block || 0);
     return `<tr data-btp="${p}" style="cursor:pointer;" onclick="switchPeriod('${c.period}')">` +
       `<td><b>${p}</b></td>` +
       `<td class="${cls}">${roi == null ? "—" : roi.toFixed(2) + "%"}</td>` +
       `<td>${fmtN(c.final_net, 2)}</td>` +
+      `<td>${cand == null ? "—" : cand}</td>` +
       `<td>${c.fills == null ? 0 : c.fills}</td>` +
-      `<td>${c.ema_pass == null ? "—" : c.ema_pass} / ${c.ema_block == null ? "—" : c.ema_block}` +
+      `<td>${c.ema_pass == null ? "—" : c.ema_pass}</td>` +
+      `<td>${c.ema_block == null ? "—" : c.ema_block}</td>` +
+      `<td>${c.ema_pass_rate == null ? "—" : c.ema_pass_rate.toFixed(1) + "%"}` +
       `${c.ema_na ? ` <span style="color:#e67e22">NA ${c.ema_na}</span>` : ""}</td>` +
       `<td>${c.skip_total == null ? 0 : c.skip_total}</td>` +
       `<td>${fmtN(c.turnover_two_side, 2)}</td>` +
@@ -871,7 +888,12 @@ function compareBox(res, runId) {
       `<td>${c.fetched_bars == null ? (c.bars == null ? "—" : c.bars) : c.fetched_bars + " / " + (c.bars == null ? 0 : c.bars)}</td></tr>`;
   }).join("");
   return `<div class="block"><div class="bt">🕒 周期对比（各档独立回放 · 同一区间 · 同一份参数）</div>
-    <table class="tbl"><thead><tr><th>周期</th><th>ROI</th><th>期末净值</th><th>成交</th><th>闸门通过/拦</th><th>SKIP</th><th>周转率(双边)</th><th>资金利用率</th><th>拉取/评估(bar)</th></tr></thead>
+    <table class="tbl"><thead><tr>
+      <th rowspan="2">周期</th><th rowspan="2">ROI</th><th rowspan="2">期末净值</th>
+      <th colspan="2" class="grp td">TD</th><th colspan="3" class="grp ema">EMA</th>
+      <th rowspan="2">SKIP</th><th rowspan="2">周转率(双边)</th><th rowspan="2">资金利用率</th>
+      <th rowspan="2">拉取/评估(bar)</th></tr>
+      <tr><th>候选买入</th><th>成交</th><th>通过</th><th>拦</th><th>通过率</th></tr></thead>
     <tbody>${rows}</tbody></table>
     <div class="f-hint" style="margin-top:4px;">点任意行切换下方详情（CSV 也按当前档导出）。⚠️ 每档是独立实验（各自独立资金/台账）：<b>ROI 不得求平均或加总</b>；也不构成跨周期迁移证据。</div></div>`;
 }

@@ -177,6 +177,10 @@ def _period_summary(period: str, res: dict) -> dict:
     """单周期摘要（与两臂摘要同口径，只取可比项）。"""
     s = _arm_summary(res)
     cs = res.get("capital_stats") or {}
+    # TD / EMA 分段（2026-10-21）：对比表把两套指标的量分开列，不再合成一格。
+    # 候选买入 = 通过 + 拦（候选买入口径，与页面逐 bar 闸门列同口径）。
+    _p, _b = s.get("ema_pass"), s.get("ema_block")
+    _cand = None if (_p is None and _b is None) else int((_p or 0) + (_b or 0))
     return {
         "period": period,
         "status": "ok",
@@ -187,6 +191,10 @@ def _period_summary(period: str, res: dict) -> dict:
         "turnover": cs.get("turnover"),
         "turnover_two_side": cs.get("turnover_two_side"),
         "utilization": cs.get("utilization"),
+        "candidates": _cand,
+        "ema_pass_rate": (
+            round((_p or 0) / _cand * 100, 2) if _cand else None
+        ),
         **s,
     }
 

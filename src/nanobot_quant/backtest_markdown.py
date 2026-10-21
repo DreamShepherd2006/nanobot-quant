@@ -590,20 +590,31 @@ def _multi_md(res: dict) -> str:
     rows = []
     for c in compare:
         if c.get("status") != "ok":
-            rows.append([c.get("period"), "—", "—", "—", "—", "—",
+            rows.append([c.get("period"), "—", "—", "—", "—", "—", "—", "—", "—",
                          f"⚠️ {c.get('error', '该周期数据不足')}"])
             continue
         rows.append([
             c.get("period"),
             _pct(c.get("roi_pct")),
             _num(c.get("final_net"), 2),
+            # TD 段
+            _num(c.get("candidates"), 0),
             c.get("fills", 0),
-            f"{c.get('ema_pass')}/{c.get('ema_block')}",
+            # EMA 段
+            _num(c.get("ema_pass"), 0),
+            _num(c.get("ema_block"), 0),
+            _pct(c.get("ema_pass_rate")),
             c.get("skip_total", 0),
+            _num(c.get("turnover_two_side"), 2),
+            _pct((c.get("utilization") or 0) * 100) if c.get("utilization") is not None else "—",
+            (f"{c.get('fetched_bars')} / {c.get('bars')}"
+             if c.get("fetched_bars") is not None else _num(c.get("bars"), 0)),
             "ok",
         ])
     md.append(_table(
-        ["周期", "ROI", "期末净值", "成交", "闸门通过/拦", "SKIP", "状态"], rows))
+        ["周期", "ROI", "期末净值", "TD 候选", "成交",
+         "EMA 通过", "EMA 拦", "通过率", "SKIP",
+         "周转率(双边)", "资金利用率", "拉取/评估", "状态"], rows))
     md.append(
         "\n> 每档**独立回放**（各自独立资金/台账、同一区间、同一份参数）："
         "ROI 不得求平均或加总；同参数 = **同根数，非同时间**；"
