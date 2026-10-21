@@ -469,3 +469,56 @@ def test_max_contracts_tolerates_partial_values():
     res["max_contracts"] = {"effective": 5, "per_family": None, "total": 3}
     md = render_markdown(res)
     assert "5 张（单家族 — / 全局 3，取小值）" in md
+
+
+def test_spot_md_open_slots_nested_per_symbol():
+    """期末未平仓（2026-10-21 修复）：slots 是 per-symbol 嵌套，不能读 slots["open"]。
+
+    回归场景：多周期 3m 档真持有 2 个 open 批次，旧实现给 markdown 报「未平仓（0）」
+    （页面 opensBox 显示正常），两边不一致。
+    """
+    from nanobot_quant.backtest_markdown import render_markdown
+
+    md = render_markdown(
+        {
+            "scene": "high",
+            "symbols": ["SOL"],
+            "run_id": "bt-open-1",
+            "final_net": 399.593,
+            "roi": -0.001017,
+            "fills": 4,
+            "slots": {
+                "SOL": {
+                    "slots": 4,
+                    "open": [
+                        {"slot": 1, "qty": 0.0959508731529, "entry_price": 104.22,
+                         "account_id": "bt-high-s1"},
+                        {"slot": 2, "qty": 0.0962741888899, "entry_price": 103.87,
+                         "account_id": "bt-high-s2"},
+                    ],
+                    "final_price": 102.07,
+                    "ledger": "/tmp/x/batches.backtest.high.SOL.json",
+                }
+            },
+            "fills_detail": [],
+        }
+    )
+
+    assert "期末未平仓（2）" in md
+    assert "102.0700" in md or "102.07" in md
+    # 浮盈% = (102.07 - 104.22) / 104.22 * 100 ≈ -2.06
+    assert "-2.06" in md
+
+    # 旧格式（数字列表）仍兼容
+    md_old = render_markdown(
+        {
+            "scene": "high",
+            "symbols": ["SOL"],
+            "run_id": "bt-old",
+            "final_net": 100.0,
+            "roi": 0.0,
+            "fills": 1,
+            "slots": {"SOL": {"open": [3], "final_price": 100.0}},
+        }
+    )
+    assert "期末未平仓（1）" in md_old

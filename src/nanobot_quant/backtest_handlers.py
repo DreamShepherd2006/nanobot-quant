@@ -272,6 +272,12 @@ def register_backtest_routes(app, gatekeeper) -> None:
         )
         if not symbols:
             return JSONResponse({"ok": False, "error": "至少选择一个标的"}, status_code=400)
+        _raw_periods = data.get("periods") or []
+        if isinstance(_raw_periods, str):
+            _raw_periods = [_raw_periods]
+        periods = [str(p) for p in _raw_periods if p]
+        if periods:
+            gatekeeper._log(f"[BACKTEST-PAGE] 多周期请求 periods={periods}")
         try:
             from nanobot_quant.tools.tools_backtest import run_backtest
 
@@ -289,6 +295,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 else None,
                 overrides=overrides,
                 source=source,
+                periods=periods,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")
@@ -342,6 +349,40 @@ def register_backtest_routes(app, gatekeeper) -> None:
             return JSONResponse(
                 {"ok": False, "error": f"run 不可用（{status}）"}, status_code=404
             )
+        period = request.query_params.get("period", "")
+        merge = request.query_params.get("merge", "") in ("1", "true", "yes")
+        per_results = result.get("period_results")
+        if merge and isinstance(per_results, dict) and per_results:
+            # 多周期对齐导出（2026-10-21）：行基准 = 最细周期，列按周期分组
+            from nanobot_quant.backtest_csv import bars_merge_to_csv
+
+            csv_text = bars_merge_to_csv(result)
+            return Response(
+                csv_text.encode("utf-8"),
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="bars_merge_{run_id}.csv"'
+                },
+            )
+        if isinstance(per_results, dict) and per_results:
+            # 多周期 run：没有 period 参数 ⇒ 取第一档（与页面默认视图一致）
+            period = period or next(iter(per_results))
+            sub = per_results.get(period)
+            if not isinstance(sub, dict):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"该周期不可用（{period}）；可选: "
+                        + ", ".join(per_results),
+                    },
+                    status_code=404,
+                )
+            if sub.get("error"):
+                return JSONResponse(
+                    {"ok": False, "error": f"{period} 档失败: {sub['error']}"},
+                    status_code=404,
+                )
+            result = sub
         if not result.get("bars_rows"):
             return JSONResponse(
                 {"ok": False, "error": "该 run 未采集逐 bar 数据（精简模式或旧记录）"},
@@ -350,11 +391,12 @@ def register_backtest_routes(app, gatekeeper) -> None:
         from nanobot_quant.backtest_csv import bars_to_csv
 
         csv_text = bars_to_csv(result)
+        _suffix = f"-{period}" if period else ""
         return Response(
             csv_text.encode("utf-8"),
             media_type="text/csv; charset=utf-8",
             headers={
-                "Content-Disposition": f'attachment; filename="backtest-bars-{run_id}.csv"'
+                "Content-Disposition": f'attachment; filename="backtest-bars-{run_id}{_suffix}.csv"'
             },
         )
 

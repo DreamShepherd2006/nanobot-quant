@@ -173,6 +173,105 @@ def _parse_ts(value: str | None):
     return dt
 
 
+def _period_summary(period: str, res: dict) -> dict:
+    """单周期摘要（与两臂摘要同口径，只取可比项）。"""
+    s = _arm_summary(res)
+    cs = res.get("capital_stats") or {}
+    # TD / EMA 分段（2026-10-21）：对比表把两套指标的量分开列，不再合成一格。
+    # 候选买入 = 通过 + 拦（候选买入口径，与页面逐 bar 闸门列同口径）。
+    _p, _b = s.get("ema_pass"), s.get("ema_block")
+    _cand = None if (_p is None and _b is None) else int((_p or 0) + (_b or 0))
+    return {
+        "period": period,
+        "status": "ok",
+        "timestep": res.get("timestep"),
+        "bars": res.get("bars"),
+        "fetched_bars": res.get("fetched_bars"),
+        "initial_total": res.get("initial_total"),
+        "turnover": cs.get("turnover"),
+        "turnover_two_side": cs.get("turnover_two_side"),
+        "utilization": cs.get("utilization"),
+        "candidates": _cand,
+        "ema_pass_rate": (
+            round((_p or 0) / _cand * 100, 2) if _cand else None
+        ),
+        **s,
+    }
+
+
+def _run_multi_period(periods, overrides, build, progress_path) -> dict:
+    """多周期独立回放（2026-10-21 拍板：并列独立，不做组合）。
+
+    每档一个独立 driver（各自 broker / 台账 / 资金），**共享同一区间与同一份
+    参数**：参数是 bar 计数语义 ⇒ “同参数 = 同根数，不是同时间”
+    （min_hold_bars=10 在 1m 是 10 分钟、在 5m 是 50 分钟）。
+
+    单档失败（如该周期数据深度不够）不拖垮其它档：记 insufficient 并继续，
+    显式可见（fail-closed 不静默截断）。
+
+    两臂对照在多周期下不跑（否则 2N 次回放），结果里显式注明。
+    """
+    per: dict = {}
+    compare: list[dict] = []
+    for i, p in enumerate(periods):
+        ov = dict(overrides or {})
+        ov["sleeptime"] = p
+        try:
+            r = build(
+                ov,
+                progress_path,
+                {
+                    "period": p,
+                    "period_index": i + 1,
+                    "period_total": len(periods),
+                },
+            ).run()
+        except Exception as exc:  # noqa: BLE001
+            per[p] = {"error": str(exc)}
+            compare.append(
+                {"period": p, "status": "insufficient", "error": str(exc)}
+            )
+            continue
+        per[p] = r
+        compare.append(_period_summary(p, r))
+
+    ok = [p for p in periods if "error" not in per[p]]
+    if not ok:
+        raise RuntimeError(
+            "所有周期均失败：" + "；".join(f"{p}: {per[p]['error']}" for p in periods)
+        )
+    base = per[ok[0]]
+    res = {
+        k: base.get(k)
+        for k in (
+            "scene",
+            "symbols",
+            "source",
+            "source_label",
+            "cross_venue",
+            "cross_venue_note",
+            "source_note",
+            "initial_quote",
+            "initial_total",
+            "batches",
+        )
+    }
+    res.update(
+        {
+            "multi_period": True,
+            "periods": list(periods),
+            "compare": compare,
+            "period_results": per,
+            "timestep": base.get("timestep"),
+            "arms": {
+                "skipped": "多周期回测默认不跑两臂对照（否则 2N 次回放）；"
+                "如需闸门对照请按单周期单独跑"
+            },
+        }
+    )
+    return res
+
+
 def _auto_backtest_driver(
     run_id: str,
     scene: str,
@@ -185,6 +284,7 @@ def _auto_backtest_driver(
     fixed_amount: float | None,
     overrides: dict | None = None,
     source: str | None = None,
+    periods: list[str] | None = None,
 ) -> None:
     """New engine (backtest.driver): scene-based replay.
 
@@ -205,7 +305,7 @@ def _auto_backtest_driver(
         from nanobot_quant.backtest.fetchers import DEFAULT_SOURCE
         from nanobot_quant.onchainos_cli import backtests_dir
 
-        def _build(ov: dict | None, progress_path=None):
+        def _build(ov: dict | None, progress_path=None, extra: dict | None = None):
             return BacktestDriver(
                 scene=scene,
                 symbols=symbols,
@@ -218,16 +318,26 @@ def _auto_backtest_driver(
                 overrides=ov,
                 source=source or DEFAULT_SOURCE,
                 progress_path=progress_path,
+                progress_extra=extra,
             )
 
         # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
         # {status: running, progress}，返回后 _backtest_log 覆写 done/error
-        res = _build(overrides, backtests_dir() / f"{run_id}.json").run()
+        progress_file = backtests_dir() / f"{run_id}.json"
+        _periods = [str(p) for p in (periods or []) if p]
+        if len(_periods) >= 2:
+            # 多周期：各档独立回放（不跑两臂，见 _run_multi_period）
+            return _run_multi_period(_periods, overrides, _build, progress_file)
+
+        _ov0 = dict(overrides or {})
+        if _periods:  # 单周期覆盖（等价于 overrides.sleeptime）
+            _ov0["sleeptime"] = _periods[0]
+        res = _build(_ov0, progress_file).run()
 
         # 两臂对照（2026-10-20 拍板）：闸门开时顺带跑一遍无闸门基线。
         # 仅作**展示**——两臂是同一段行情的两条路径，不是独立样本，
         # 禁止配对推断（与 C73 预注册纪律一致）。
-        _ov = overrides or {}
+        _ov = _ov0
         _gate_on = _ov.get("ema_gate_enabled")
         _want = _ov.get("ema_compare_baseline")
         if _gate_on and (_want is None or bool(_want)):
@@ -419,6 +529,7 @@ def run_backtest(
     timestep: str | None = None,
     initial_cash: float | None = None,
     td_bars: int | None = None,
+    periods: list[str] | None = None,
 ) -> dict:
     """Start a full backtest in the background (run_id + poll contract).
 
@@ -454,6 +565,13 @@ def run_backtest(
         initial_cash: Simulated starting USDC for engine="options"
                 (default 10000).
         td_bars: TD window size for engine="options" (default 120).
+        periods: 多周期对比（2026-10-21）——engine="driver" 专用。
+                传 ≥2 个周期（如 ["1m","3m","5m"]）→ 各档**独立回放**一次
+                （同一区间、同一份参数、各自独立资金/台账），结果里返回
+                ``compare`` 对比表 + ``period_results`` 每档完整结果。
+                传 1 个 = 单周期覆盖（等价于 overrides.sleeptime）。
+                同参数 = **同根数**，不是同时间（min_hold_bars=10 在 1m 是 10 分钟、
+                在 5m 是 50 分钟）。跨周期结论不可互推，对比表只作并列展示。
 
     Returns:
         dict with status=started and run_id. The backtest runs in a
@@ -484,10 +602,20 @@ def run_backtest(
         except ValueError as exc:
             return {"error": str(exc)}
         syms = list(symbols) if symbols else ([symbol] if symbol else None)
+        _periods = [str(p) for p in (periods or []) if p]
+        if _periods:
+            from nanobot_quant.data_sources.periods import PERIODS as _PERIODS
+
+            _bad = [p for p in _periods if p not in _PERIODS]
+            if _bad:
+                return {
+                    "error": f"不支持的周期: {_bad}",
+                    "hint": "可用周期: " + ", ".join(_PERIODS),
+                }
         threading.Thread(
             target=_auto_backtest_driver,
             args=(run_id, scene, syms, start, end, initial_quote, batches,
-                  slippage, fixed_amount, overrides, driver_source),
+                  slippage, fixed_amount, overrides, driver_source, _periods),
             daemon=True,
         ).start()
     else:

@@ -47,6 +47,11 @@
   table { width:100%; border-collapse:collapse; font-size:.86em; margin-top:8px; }
   th, td { padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; }
   th { background:#fafafa; color:#555; font-weight:600; }
+  /* 表头分组（2026-10-21）：TD 指标与 EMA 指标分段，避免逐 bar 表 / 对比表混排 */
+  th.grp { text-align:center; font-size:.9em; letter-spacing:.5px; }
+  th.grp.td { background:#eef3ff; color:#33508f; border-bottom:1px solid #d6e0f5; }
+  th.grp.ema { background:#fff5e6; color:#8a5a12; border-bottom:1px solid #f0dfc2; }
+  td.mg-empty { color:#cfcfcf; text-align:center; }
   th:first-child, td:first-child { text-align:left; }
   .roi-pos { color:#2e7d32; font-weight:700; }
   .roi-neg { color:#c62828; font-weight:700; }
@@ -164,6 +169,7 @@
     <summary>⚙️ 参数覆盖（留空 = 跟随场景配置 · 仅本次回测生效，不回写实盘）</summary>
     <div class="ov-grid">
       <div class="ov-item"><label for="sleeptime">周期</label><select id="sleeptime"><option value="">（跟随场景）</option></select><span class="f-hint">回测专用周期，不影响实盘</span></div>
+      <div class="ov-item"><label for="periods">多周期对比</label><select id="periods" multiple size="5" style="min-width:96px"></select><span class="f-hint">勾选 ≥2 档 → 各档<b>独立回放</b>并出对比表（同参数=同根数、非同时间）；全不勾 = 用左侧「周期」</span></div>
       <div class="ov-item"><label for="quantity_mode">数量模式</label><select id="quantity_mode"><option value="">（跟随场景）</option><option value="fixed">固定数量（fixed）</option><option value="fixed_amount">固定金额 U（fixed_amount）</option><option value="value">按比例（value）</option></select><span class="f-hint">选「固定金额」后填上方 TD 固定金额</span></div>
       <div class="ov-item"><label for="entry_setup">入场 Setup 阈值</label><input type="number" id="entry_setup" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="entry_countdown">入场 Countdown 阈值</label><input type="number" id="entry_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
@@ -504,6 +510,13 @@ function collectOverrides() {
   return overrides;
 }
 
+// 多周期选择（2026-10-21）：≥2 档 → 各档独立回放 + 对比表
+function selectedPeriods() {
+  const el = $("periods");
+  if (!el) return [];
+  return Array.from(el.selectedOptions || []).map(o => o.value).filter(Boolean);
+}
+
 // ── 启动 + 轮询 ─────────────────────────────────────────────────────────
 function setMsg(text, kind) {
   const m = $("msg");
@@ -526,6 +539,7 @@ async function startBacktest() {
     slippage: $("slippage").value ? parseFloat($("slippage").value) : null,
     fixed_amount: $("fixed_amount").value ? parseFloat($("fixed_amount").value) : null,
     overrides: collectOverrides(),
+    periods: selectedPeriods(),
   };
   const btn = $("run-btn");
   btn.disabled = true;
@@ -693,7 +707,39 @@ function armsBox(arms) {
 // ── 📊 逐 bar 明细（TD + EMA，2026-10-20）──────────────────────
 // 动作列直接来自策略自己的决策流（单一实现），含被拦原因——用来回答
 // 「这根有信号为何没买」；精简模式下只存信号/成交/闸门翻转行。
-let _barsCache = { rows: [], meta: {}, page: 0, symbol: "", only: true, size: 200 };
+let _barsCache = { rows: [], meta: {}, page: 0, symbol: "", only: true, size: 200, merge: false };
+
+// 多周期对齐视图（2026-10-21 方案 A）：以**最细周期**为行基准，其余周期只在
+// 自己 bar 收盘的那一行填值，其余行显 `·`——宁可行稀硫也不把 1m 的计数聚合掉。
+window._btBars = window._btBars || {};
+function _cacheBars(p, r) {
+  if (!p || !Array.isArray(r && r.bars_rows)) return;
+  window._btBars[p] = { rows: r.bars_rows, meta: r.bars_meta || {} };
+}
+const _PERIOD_SEC = {"1m":60,"3m":180,"5m":300,"15m":900,"30m":1800,"1H":3600,"4H":14400};
+function _setBarsMerge(v) {
+  _barsCache.merge = !!v;
+  _barsCache.page = 0;
+  _renderBars();
+}
+function _mergedRows() {
+  const m = window._btMulti;
+  if (!m) return [];
+  const periods = ((m.res && m.res.periods) || []).slice()
+    .sort((a, b) => (_PERIOD_SEC[a] || 1e9) - (_PERIOD_SEC[b] || 1e9));
+  if (periods.length < 2) return [];
+  const base = ((window._btBars[periods[0]] || {}).rows) || [];
+  const maps = {}, metas = {};
+  for (const p of periods) {
+    const info = window._btBars[p] || {};
+    maps[p] = new Map((info.rows || []).map(r => [new Date(r.ts).getTime(), r]));
+    metas[p] = info.meta || {};
+  }
+  return base.map(b => {
+    const t = new Date(b.ts).getTime();
+    return { base: b, t, periods, metas, cells: periods.map(p => maps[p].get(t) || null) };
+  });
+}
 
 function _barsState() { return _barsCache; }
 function _barsPage(d) {
@@ -716,6 +762,10 @@ function _utc(iso) {
 function _renderBars() {
   const body = $("bars-body");
   if (!body) return;
+  if (_barsCache.merge && window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1)) {
+    _renderMergedBars(body);
+    return;
+  }
   const rows = _filteredBars();
   const pages = Math.max(1, Math.ceil(rows.length / _barsCache.size));
   if (_barsCache.page >= pages) _barsCache.page = pages - 1;
@@ -740,9 +790,17 @@ function _renderBars() {
       `<td>${escapeHtml(r.fill || "")}</td></tr>`;
   }).join("");
   body.innerHTML = rows.length
-    ? `<table><thead><tr><th>时间</th><th>UTC 时间</th><th>标的</th><th>收盘</th><th>涨跌%</th>` +
-      `<th>Buy Setup</th><th>Sell Setup</th><th>Score</th><th>EMA</th><th>slope${_barsCache.meta && _barsCache.meta.ema_k ? _barsCache.meta.ema_k : 3}</th>` +
-      `<th>闸门</th><th>动作/原因</th><th>成交</th></tr></thead><tbody>${trs}</tbody></table>`
+    ? `<table><thead>` +
+      // 两行表头（2026-10-21）：TD 段（Setup/Score）与 EMA 段（EMA/slope/闸门）分组，
+      // 不再混排——逐 bar 表一眼能分清哪几列属于哪套指标。
+      `<tr><th rowspan="2">时间</th><th rowspan="2">UTC 时间</th><th rowspan="2">标的</th>` +
+      `<th rowspan="2">收盘</th><th rowspan="2">涨跌%</th>` +
+      `<th colspan="3" class="grp td">TD</th>` +
+      `<th colspan="3" class="grp ema">EMA</th>` +
+      `<th rowspan="2">动作/原因</th><th rowspan="2">成交</th></tr>` +
+      `<tr><th>Buy Setup</th><th>Sell Setup</th><th>Score</th>` +
+      `<th>EMA</th><th>slope${_barsCache.meta && _barsCache.meta.ema_k ? _barsCache.meta.ema_k : 3}</th><th>闸门</th></tr>` +
+      `</thead><tbody>${trs}</tbody></table>`
     : '<div class="empty">当前筛选下无行</div>';
   const info = $("bars-pageinfo");
   if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${rows.length} 行`;
@@ -756,22 +814,126 @@ function _renderBars() {
       : `采集 ${collected} 行 · 当前筛选 ${rows.length} 行`;
   }
 }
-function barsBox(res, runId) {
+function _gateCell(g) {
+  return g === "block" ? "⛔" : (g === "pass" ? "✅" : (g === "na" ? "⊘" : ""));
+}
+// 趋势列（2026-10-21 用户拍板）：**每根 bar 都填**，由 slope_k 符号判定，
+// 与闸门规则同源（slope_k > 0 才放行）。实际闸门判定结果仍留在「动作/原因」列。
+function _trendCell(sl) {
+  if (sl === null || sl === undefined) return '<span style="color:#bbb">⊘</span>';
+  return sl > 0 ? "✅" : "⛔";
+}
+// CSV 导出：**动态拼接 URL**（2026-10-21 修）——旧的静态 href 在
+// 「🔀 多周期对齐」切换时不会重建，导致页面是对齐视图、导出却是单周期。
+window._btCsvCtx = window._btCsvCtx || {};
+function _exportBarsCsv() {
+  const ctx = window._btCsvCtx || {};
+  if (!ctx.runId) return;
+  const multi = window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1);
+  const q = (_barsCache.merge && multi)
+    ? "&merge=1"
+    : (ctx.period ? "&period=" + encodeURIComponent(ctx.period) : "");
+  location.href = `/config/backtest/bars.csv?run_id=${encodeURIComponent(ctx.runId)}${q}`;
+}
+function _syncCsvLabel() {
+  const el = $("bars-csv-label");
+  if (!el) return;
+  el.textContent = _barsCache.merge
+    ? "多周期对齐"
+    : `全部 ${(_barsCache.rows || []).length} 行`;
+}
+function _slopeTxt(sl) {
+  return sl === null || sl === undefined ? "" : (sl >= 0 ? "+" : "") + Number(sl).toFixed(3);
+}
+// 多周期对齐（2026-10-21 方案 A）：行基准 = 最细周期；其余周期只在自
+// 己 bar 收盘那一行填值，其余行显 `·`。三档仍是独立回放，同行的动作
+// 分属三个不同实验——不可相加、不是组合持仓。
+function _renderMergedBars(body) {
+  let ents = _mergedRows();
+  const periods = ents.length ? ents[0].periods
+    : (((window._btMulti || {}).res || {}).periods || []);
+  if (_barsCache.symbol) ents = ents.filter(e => e.base.symbol === _barsCache.symbol);
+  if (_barsCache.only) {
+    ents = ents.filter(e => e.cells.some(c => c && ((c.action && c.action !== "") || c.fill)));
+  }
+  const pages = Math.max(1, Math.ceil(ents.length / _barsCache.size));
+  if (_barsCache.page >= pages) _barsCache.page = pages - 1;
+  const start = _barsCache.page * _barsCache.size;
+  const slice = ents.slice(start, start + _barsCache.size);
+  const syms = Array.from(new Set(ents.map(e => e.base.symbol).filter(Boolean)));
+  const showSym = syms.length > 1;
+  const per = 7;  // 每周期 7 列：Buy Setup / Sell Setup / EMA / slope / 闸门 / 动作 / 成交
+  const trs = slice.map(e => {
+    const b = e.base;
+    const anyFill = e.cells.some(c => c && c.fill);
+    let tds = `<td>${fmtTs(b.ts)}</td><td>${_utc(b.ts)}</td>` +
+      (showSym ? `<td>${escapeHtml(b.symbol || "")}</td>` : "") +
+      `<td>${fmtN(b.close, 4)}</td>` +
+      `<td class="${b.chg != null && b.chg < 0 ? "sl-neg" : ""}">` +
+      `${b.chg == null ? "" : (b.chg >= 0 ? "+" : "") + (b.chg * 100).toFixed(2) + "%"}</td>`;
+    e.periods.forEach((p, i) => {
+      const c = e.cells[i];
+      if (!c) {
+        tds += `<td class="mg-empty">·</td>` + `<td class="mg-empty"></td>`.repeat(per - 1);
+        return;
+      }
+      tds += `<td>${c.setup_buy || ""}</td><td>${c.setup_sell || ""}</td>` +
+        `<td>${c.ema == null ? "" : fmtN(c.ema, 2)}</td>` +
+        `<td class="${c.slope != null && c.slope < 0 ? "sl-neg" : ""}">${_slopeTxt(c.slope)}</td>` +
+        `<td>${_trendCell(c.slope)}</td>` +
+        `<td style="font-size:.9em;">${escapeHtml(c.action || "")}</td>` +
+        `<td style="font-size:.9em;">${escapeHtml(c.fill || "")}</td>`;
+    });
+    return `<tr${anyFill ? ' style="background:#e8f5e9;"' : ""}>${tds}</tr>`;
+  }).join("");
+  const head1 = `<tr><th rowspan="2">时间</th><th rowspan="2">UTC 时间</th>` +
+    (showSym ? `<th rowspan="2">标的</th>` : "") +
+    `<th rowspan="2">收盘</th><th rowspan="2">涨跌%</th>` +
+    periods.map(p => `<th colspan="${per}" class="grp td">${escapeHtml(p)}</th>`).join("") +
+    `</tr>`;
+  const head2 = `<tr>` + periods.map(() =>
+    `<th>Buy Setup</th><th>Sell Setup</th><th>EMA</th><th>slope</th><th>趋势</th><th>动作/原因</th><th>成交</th>`
+  ).join("") + `</tr>`;
+  body.innerHTML = ents.length
+    ? `<table><thead>${head1}${head2}</thead><tbody>${trs}</tbody></table>`
+    : '<div class="empty">当前筛选下无行</div>';
+  const info = $("bars-pageinfo");
+  if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${ents.length} 行`;
+  _syncCsvLabel();
+  const fi = $("bars-filter-info");
+  if (fi) {
+    const total = _mergedRows().length;
+    fi.textContent = (total === ents.length
+      ? `对齐 ${total} 行`
+      : `对齐 ${total} 行 · 当前筛选 ${ents.length} 行`) + `（行基准 ${periods[0]}）`;
+  }
+}
+function barsBox(res, runId, period) {
   if (!Array.isArray(res.bars_rows)) {
     return `<div class="bt-params"><div class="bt-params-title">📊 逐 bar 明细</div>` +
       '<div class="empty" style="padding:8px;">该次未采集逐 bar 数据（重建前的旧记录）</div></div>';
   }
   const meta = res.bars_meta || {};
   const rows = res.bars_rows;
-  _barsCache = { rows, meta, page: 0, symbol: "", only: true, size: 200 };
+  if (period) _cacheBars(period, res);
+  // 切档重建缓存时保留「多周期对齐」开关状态（否则每次切档都退回单周期）
+  _barsCache = { rows, meta, page: 0, symbol: "", only: true, size: 200, merge: !!_barsCache.merge };
   const syms = Array.from(new Set(rows.map(r => r.symbol).filter(Boolean)));
   const modeTxt = meta.mode === "full" ? "全量" : "精简";
   // CSV 导出（2026-10-20）：后端渲染、与表格同一份 bars_rows；导出全部行，
   // 不受「全部标的 / 只看有动作」筛选影响（筛选只是浏览辅助）。
   const csvBtn = runId
-    ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;" ` +
-      `title="导出全部行（不受筛选影响）" ` +
-      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}">⬇ 导出 CSV（全部 ${rows.length} 行）</a>`
+    ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;cursor:pointer;" ` +
+      `title="导出全部行（不受筛选影响）；多周期对齐时导出对齐视图（行基准=最细周期）" ` +
+      `href="javascript:void(0)" onclick="_exportBarsCsv()">⬇ 导出 CSV（<span id="bars-csv-label">${_barsCache.merge ? "多周期对齐" : "全部 " + rows.length + " 行"}</span>）</a>`
+    : "";
+  window._btCsvCtx = { runId, period };
+  const multi = window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1);
+  const _mbStyle = v => `padding:2px 8px;border-radius:4px;cursor:pointer;` +
+    (!!_barsCache.merge === v ? "background:#eef3ff;border-color:#9bb4e8;color:#33508f;font-weight:600;" : "");
+  const mergeBtn = multi
+    ? `<button class="btn-outline" style="${_mbStyle(false)}" onclick="_setBarsMerge(false)" title="只看当前档的逐 bar">📄 单周期</button>` +
+      `<button class="btn-outline" style="${_mbStyle(true)}" onclick="_setBarsMerge(true)" title="以最细周期为行基准，三档并排对齐">🔀 多周期对齐</button>`
     : "";
   return `<div class="bt-params">` +
     `<div class="bt-params-title">📊 逐 bar 明细（TD + EMA）` +
@@ -784,6 +946,7 @@ function barsBox(res, runId) {
     `<option value="">全部标的</option>${syms.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")}</select>` +
     `<label style="display:flex;gap:4px;align-items:center;"><input type="checkbox" id="bars-only" checked ` +
     `onchange="_barsState().only=this.checked;_barsState().page=0;_renderBars()"> 只看有动作/成交</label>` +
+    mergeBtn +
     csvBtn +
     `<button class="btn-outline" style="padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="_barsPage(-1)">上一页</button>` +
     `<span id="bars-pageinfo"></span>` +
@@ -820,17 +983,89 @@ function renderResult(res, runId) {
   const box = $("result");
   if (!res) { box.innerHTML = '<div class="empty">空结果</div>'; return; }
   // 旧引擎（backtest_runner metrics 格式）结果缺 driver 字段 → 原始 JSON 展示
-  if (res.final_net === undefined && res.net_values === undefined) {
+  if (res.final_net === undefined && res.net_values === undefined && !res.period_results) {
     box.innerHTML =
       '<div style="font-size:.86em;color:#888;margin-bottom:6px;">旧引擎结果（backtest_runner 格式，仅展示）</div>' +
       `<pre style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px;font-size:.8em;overflow:auto;max-height:360px;">${escapeHtml(JSON.stringify(res, null, 2))}</pre>`;
     return;
   }
+  // 多周期（2026-10-21）：对比表 + 单档渲染体，点行切换
+  if (res.period_results && res.periods && res.periods.length > 1) {
+    window._btMulti = { res, runId };
+    // Markdown 按钮挂在**顶层**：markdown 全文（对比表 + 每档一节）只挂在顶层结果上，
+    // 各档子结果没有 markdown 字段 → 放 _periodView 里会被 mdButton 的空守卫吞掉（按钮消失）
+    box.innerHTML = mdButton(res, runId) + compareBox(res, runId) + `<div id="btp-body"></div>`;
+    switchPeriod(res.periods[0]);
+    return;
+  }
+  box.innerHTML = _periodView(res, runId, "");
+  if (Array.isArray(res.bars_rows)) _renderBars();
+}
+
+// 多周期：对比表（每档独立实验，禁求平均）
+function compareBox(res, runId) {
+  const rows = (res.compare || []).map(c => {
+    const p = escapeHtml(c.period);
+    if (c.status !== "ok") {
+      return `<tr data-btp="${p}" style="cursor:pointer;" onclick="switchPeriod('${c.period}')">` +
+        `<td><b>${p}</b></td><td colspan="11" style="color:#c0392b;">⚠️ ${escapeHtml(c.error || "该周期数据不足")}</td></tr>`;
+    }
+    const roi = c.roi_pct;
+    const cls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
+    const cand = c.ema_pass == null && c.ema_block == null
+      ? null : (c.ema_pass || 0) + (c.ema_block || 0);
+    return `<tr data-btp="${p}" style="cursor:pointer;" onclick="switchPeriod('${c.period}')">` +
+      `<td><b>${p}</b></td>` +
+      `<td class="${cls}">${roi == null ? "—" : roi.toFixed(2) + "%"}</td>` +
+      `<td>${fmtN(c.final_net, 2)}</td>` +
+      `<td>${cand == null ? "—" : cand}</td>` +
+      `<td>${c.fills == null ? 0 : c.fills}</td>` +
+      `<td>${c.ema_pass == null ? "—" : c.ema_pass}</td>` +
+      `<td>${c.ema_block == null ? "—" : c.ema_block}</td>` +
+      `<td>${c.ema_pass_rate == null ? "—" : c.ema_pass_rate.toFixed(1) + "%"}` +
+      `${c.ema_na ? ` <span style="color:#e67e22">NA ${c.ema_na}</span>` : ""}</td>` +
+      `<td>${c.skip_total == null ? 0 : c.skip_total}</td>` +
+      `<td>${fmtN(c.turnover_two_side, 2)}</td>` +
+      `<td>${c.utilization == null ? "—" : (c.utilization * 100).toFixed(1) + "%"}</td>` +
+      `<td>${c.fetched_bars == null ? (c.bars == null ? "—" : c.bars) : c.fetched_bars + " / " + (c.bars == null ? 0 : c.bars)}</td></tr>`;
+  }).join("");
+  return `<div class="block"><div class="bt">🕒 周期对比（各档独立回放 · 同一区间 · 同一份参数）</div>
+    <table class="tbl"><thead><tr>
+      <th rowspan="2">周期</th><th rowspan="2">ROI</th><th rowspan="2">期末净值</th>
+      <th colspan="2" class="grp td">TD</th><th colspan="3" class="grp ema">EMA</th>
+      <th rowspan="2">SKIP</th><th rowspan="2">周转率(双边)</th><th rowspan="2">资金利用率</th>
+      <th rowspan="2">拉取/评估(bar)</th></tr>
+      <tr><th>候选买入</th><th>成交</th><th>通过</th><th>拦</th><th>通过率</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="f-hint" style="margin-top:4px;">点任意行切换下方详情（CSV 也按当前档导出）。⚠️ 每档是独立实验（各自独立资金/台账）：<b>ROI 不得求平均或加总</b>；也不构成跨周期迁移证据。</div></div>`;
+}
+
+function switchPeriod(p) {
+  const m = window._btMulti;
+  if (!m) return;
+  m.cur = p;
+  document.querySelectorAll("[data-btp]").forEach(el => el.classList.toggle("on", el.dataset.btp === p));
+  const body = $("btp-body");
+  if (!body) return;
+  // 进入多周期视图时预缓存三档的逐 bar 行（对齐视图需要全部档）
+  for (const [p, rr] of Object.entries(m.res.period_results || {})) _cacheBars(p, rr);
+  const r = (m.res.period_results || {})[p] || {};
+  if (r.error) {
+    body.innerHTML = `<div class="banner msg err show">❌ ${escapeHtml(p)}：${escapeHtml(r.error)}</div>`;
+    return;
+  }
+  body.innerHTML = `<div style="font-size:.86em;color:#888;margin:6px 0;">当前查看：<b>${escapeHtml(p)}</b> 档</div>` +
+    _periodView(r, m.runId, p);
+  if (Array.isArray(r.bars_rows)) _renderBars();
+}
+
+// 单周期渲染体（多周期时每档复用同一模板，避免两套渲染）
+function _periodView(res, runId, period) {
   const roi = res.roi;
   const roiCls = roi > 0 ? "roi-pos" : (roi < 0 ? "roi-neg" : "");
   const fills = res.fills_detail || [];
   const rows = fills.map(fillRow).join("");
-  box.innerHTML = mdButton(res, runId) + `
+  return mdButton(res, runId) + `
     ${res.cross_venue ? `<div class="banner warn show" style="margin-bottom:8px;">⚠️ 数据源 ≠ 执行所（Gate 现货）：跨所结果仅作参数粗筛，<b>不作参数裁决依据</b>。${escapeHtml(res.cross_venue_note || "")}</div>` : ""}
     ${res.source_note ? `<div class="f-hint" style="margin-bottom:6px;">ℹ️ ${escapeHtml(res.source_note)}</div>` : ""}
     ${paramsBox(res)}
@@ -846,11 +1081,10 @@ function renderResult(res, runId) {
     ${emaBox(res.ema_gate)}
     ${armsBox(res.arms)}
     ${opensBox(res.slots)}
-    ${barsBox(res, runId)}
+    ${barsBox(res, runId, period)}
     ${fillsBox(fills)}
     ${!fills.length ? '<div class="empty">区间内无成交（信号未触发 / 资金不足 / 数据不足）</div>' : ""}
   `;
-  if (Array.isArray(res.bars_rows)) _renderBars();
 }
 
 function renderError(err, runId) {
@@ -871,7 +1105,7 @@ function renderProgress(runId, prog) {
       (prog.fills ? ` · 成交 ${prog.fills} 笔` : "")
     : `📡 正在预取历史数据…`;
   box.innerHTML = `
-    <div class="banner msg show">⏳ run_id=${runId} 回测运行中</div>
+    <div class="banner msg show">⏳ run_id=${runId} 回测运行中${prog.period ? ` · 周期 ${prog.period}（${prog.period_index || "?"}/${prog.period_total || "?"}）` : ""}</div>
     ${bar}
     <div style="font-size:.86em;color:#666;margin-top:2px;">${line}</div>
     ${prog.capital_stats ? capitalBox(prog.capital_stats) : ""}
@@ -931,13 +1165,26 @@ async function loadRun(runId) {
 // 周期下拉选项（权威来源 = data_sources.periods.PERIODS，随 __PERIODS__ 注入）
 function fillPeriodOptions() {
   const sel = $("sleeptime");
-  if (!sel || sel.dataset.filled) return;
-  PERIODS.forEach(p => {
-    const o = document.createElement("option");
-    o.value = p; o.textContent = p;
-    sel.appendChild(o);
-  });
-  sel.dataset.filled = "1";
+  if (sel && !sel.dataset.filled) {
+    PERIODS.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p; o.textContent = p;
+      sel.appendChild(o);
+    });
+    sel.dataset.filled = "1";
+  }
+  // 多周期多选框：同一份 PERIODS；默认勾 1m/3m/5m（2026-10-21 拍板）
+  const ms = $("periods");
+  if (ms && !ms.dataset.filled) {
+    const def = ["1m", "3m", "5m"];
+    PERIODS.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p; o.textContent = p;
+      if (def.includes(p)) o.selected = true;
+      ms.appendChild(o);
+    });
+    ms.dataset.filled = "1";
+  }
 }
 
 initForm();

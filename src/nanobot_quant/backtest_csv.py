@@ -99,6 +99,105 @@ def bars_header(meta: dict | None = None) -> list[str]:
     ]
 
 
+def bars_merge_header(result: dict) -> list[str]:
+    """多周期对齐 CSV 表头（2026-10-21 方案 A）。"""
+    result = result or {}
+    periods = _merged_period_order(result)
+    head = ["时间(CST)", "UTC 时间", "标的", "收盘", "涨跌%"]
+    for p in periods:
+        meta = ((result.get("period_results") or {}).get(p) or {}).get("bars_meta") or {}
+        k = meta.get("ema_k") or 3
+        head += [
+            f"{p} Buy Setup",
+            f"{p} Sell Setup",
+            f"{p} EMA",
+            f"{p} slope{k}",
+            f"{p} 趋势",
+            f"{p} 动作/原因",
+            f"{p} 成交",
+        ]
+    return head
+
+
+def _merged_period_order(result: dict) -> list[str]:
+    """按周期长短排序（最细在前）——与页面「行基准 = 最细周期」一致。"""
+    per = result.get("period_results") or {}
+    try:
+        from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+    except Exception:  # pragma: no cover - 理论上不会发生
+        INTERVAL_SECONDS = {}
+    order = list((result.get("periods") or per.keys()))
+    return sorted(order, key=lambda p: INTERVAL_SECONDS.get(p, 10**9))
+
+
+def bars_merge_to_csv(result: dict) -> str:
+    """多周期对齐 CSV：**以最细周期为行基准**，其余周期只在自己 bar 收盘行填值。
+
+    - 口径与页面「🔀 多周期对齐」视图一致（同一份 bars_rows，不重算）；
+    - 缺失单元格留空（不写 0，避免被当成"指标值 0"）；
+    - 三档是独立实验：同一时间行的动作分属不同回测，**不可相加**。
+    """
+    result = result or {}
+    per_results = result.get("period_results") or {}
+    periods = _merged_period_order(result)
+    rows_by_p = {}
+    for p in periods:
+        sub = per_results.get(p) or {}
+        rows_by_p[p] = {
+            str(r.get("ts")): r for r in (sub.get("bars_rows") or []) if isinstance(r, dict)
+        }
+    base_p = next((p for p in periods if rows_by_p[p]), None)
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(bars_merge_header(result))
+    if base_p is None:
+        return BOM + buf.getvalue()
+    base_rows = [
+        r for r in (per_results.get(base_p) or {}).get("bars_rows") or []
+        if isinstance(r, dict)
+    ]
+    for b in base_rows:
+        ts = str(b.get("ts"))
+        row = [
+            _fmt_cst(b.get("ts")),
+            _fmt_utc(b.get("ts")),
+            b.get("symbol") or "",
+            _num(b.get("close")),
+            _percent(b.get("chg")),
+        ]
+        for p in periods:
+            r = rows_by_p[p].get(ts)
+            if not r:
+                row += [""] * 7
+                continue
+            row += [
+                _count(r.get("setup_buy")),
+                _count(r.get("setup_sell")),
+                _num(r.get("ema")),
+                _num(r.get("slope")),
+                _trend_text(r.get("slope")),
+                r.get("action") or "",
+                r.get("fill") or "",
+            ]
+        w.writerow(row)
+    return BOM + buf.getvalue()
+
+
+def _trend_text(slope) -> str:
+    """趋势列（2026-10-21 用户拍板）：由 slope_k 符号判定、**每根 bar 都有值**。
+
+    与闸门规则同源（slope_k > 0 才放行），但不含「候选买入计数」口径——
+    实际闸门判定结果仍只在「动作/原因」列（如 `WAIT:EMA 趋势闸门拦截`）。
+    """
+    if slope is None:
+        return "⊘"
+    try:
+        v = float(slope)
+    except (TypeError, ValueError):
+        return ""
+    return "✅" if v > 0 else "⛔"
+
+
 def bars_to_csv(result: dict) -> str:
     """把一次回测结果渲染成 CSV 文本（带 UTF-8 BOM，Excel 直接识别中文）。"""
     result = result or {}

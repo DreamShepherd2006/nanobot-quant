@@ -62,9 +62,27 @@ def test_bars_csv_export_present():
     assert "/config/backtest/bars.csv?run_id=" in html
     assert "导出 CSV" in html
     # 导出全部行，不受「只看有动作/成交」筛选影响
-    assert "title=\"导出全部行（不受筛选影响）\"" in html
-    # runId 必须从 renderResult 传进 barsBox，否则链接无从拼 run_id
-    assert "barsBox(res, runId)" in html
+    assert "title=\"导出全部行（不受筛选影响）；多周期对齐时导出对齐视图" in html
+    # runId + 当前周期必须从 renderResult 传进 barsBox，否则链接无从拼 run_id/period
+    assert "barsBox(res, runId, period)" in html
+
+
+def test_multi_period_ui_present():
+    """多周期对比（2026-10-21）：多选框、对比表、切换、口径警告。"""
+    html = _html()
+    assert 'id="periods"' in html and "multiple" in html
+    # 表头分组（2026-10-21）：对比表与逐 bar 表的 TD / EMA 段都要分组表头
+    assert html.count('class="grp td"') >= 2
+    assert html.count('class="grp ema"') >= 2
+    assert "候选买入" in html and "通过率" in html
+    assert "selectedPeriods()" in html          # 提交时带上 periods
+    assert "function compareBox" in html        # 周期对比表
+    assert "function switchPeriod" in html      # 点行切换详情
+    assert "不得求平均或加总" in html            # 口径警告写死在页面
+    assert "&period=" in html                   # CSV 按当前档导出
+    assert "周期 ${prog.period}" in html         # 运行中显示第 i/n 档
+    # Markdown 按钮必须挂在顶层（各档子结果没有 markdown 字段，放 _periodView 会被空守卫吞掉）
+    assert "mdButton(res, runId) + compareBox(res, runId)" in html
 
 
 def test_two_arm_compare_wired_on_page():
@@ -83,3 +101,17 @@ def test_running_state_renders_bars_incrementally():
     tail = html[idx : idx + 2500]
     assert "bars_rows" in tail
     assert "_renderBars()" in tail
+
+
+def test_multi_period_merged_bars_view_markers():
+    """多周期对齐视图（2026-10-21 方案 A）：以最细周期为行基准并排三档。
+
+    页面必须包含：合并渲染函数、行基准挑选、切换按钮、合并 CSV 导出参数。
+    """
+    html = _html()
+    assert "_renderMergedBars" in html
+    assert "_mergedRows" in html
+    assert "_cacheBars" in html
+    assert "多周期对齐" in html and "单周期" in html
+    assert "&merge=1" in html              # 合并视图的 CSV 导出走 merge=1
+    assert "行基准" in html                 # 页面显式标注行基准口径

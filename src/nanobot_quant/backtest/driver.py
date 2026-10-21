@@ -126,6 +126,7 @@ class BacktestDriver:
         source: object = DEFAULT_SOURCE,
         ledger_dir: Optional[Path | str] = None,
         progress_path: Optional[Path | str] = None,
+        progress_extra: Optional[dict[str, Any]] = None,
     ) -> None:
         # 1. 参数：默认复用 exec_params 当前配置（场景参数默认复用、可临时覆盖，
         #    覆盖不影响实盘——2026-08-23 拍板）
@@ -173,6 +174,8 @@ class BacktestDriver:
         if self.fixed_amount is not None:
             self._merged_params["td_fixed_amount"] = self.fixed_amount
         self.initial_quote = float(initial_quote)
+        # 多周期回测（2026-10-21）：额外进度字段（period / period_index / period_total）
+        self.progress_extra = dict(progress_extra or {})
         self.start_ts = start_ts
         self.end_ts = end_ts
 
@@ -506,6 +509,8 @@ class BacktestDriver:
                 # 逐 bar 行（运行中实时可见；只带最近部分，避免几百次
                 # 写盘把 2万行×上百字节 重复序列化爆大）
                 "bars_rows": bars_rows or [],
+                # 多周期回测（2026-10-21）：当前正在跑第几档、共几档
+                **(self.progress_extra or {}),
             },
         }
         try:
