@@ -817,6 +817,31 @@ function _renderBars() {
 function _gateCell(g) {
   return g === "block" ? "⛔" : (g === "pass" ? "✅" : (g === "na" ? "⊘" : ""));
 }
+// 趋势列（2026-10-21 用户拍板）：**每根 bar 都填**，由 slope_k 符号判定，
+// 与闸门规则同源（slope_k > 0 才放行）。实际闸门判定结果仍留在「动作/原因」列。
+function _trendCell(sl) {
+  if (sl === null || sl === undefined) return '<span style="color:#bbb">⊘</span>';
+  return sl > 0 ? "✅" : "⛔";
+}
+// CSV 导出：**动态拼接 URL**（2026-10-21 修）——旧的静态 href 在
+// 「🔀 多周期对齐」切换时不会重建，导致页面是对齐视图、导出却是单周期。
+window._btCsvCtx = window._btCsvCtx || {};
+function _exportBarsCsv() {
+  const ctx = window._btCsvCtx || {};
+  if (!ctx.runId) return;
+  const multi = window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1);
+  const q = (_barsCache.merge && multi)
+    ? "&merge=1"
+    : (ctx.period ? "&period=" + encodeURIComponent(ctx.period) : "");
+  location.href = `/config/backtest/bars.csv?run_id=${encodeURIComponent(ctx.runId)}${q}`;
+}
+function _syncCsvLabel() {
+  const el = $("bars-csv-label");
+  if (!el) return;
+  el.textContent = _barsCache.merge
+    ? "多周期对齐"
+    : `全部 ${(_barsCache.rows || []).length} 行`;
+}
 function _slopeTxt(sl) {
   return sl === null || sl === undefined ? "" : (sl >= 0 ? "+" : "") + Number(sl).toFixed(3);
 }
@@ -855,7 +880,7 @@ function _renderMergedBars(body) {
       tds += `<td>${c.setup_buy || ""}</td><td>${c.setup_sell || ""}</td>` +
         `<td>${c.ema == null ? "" : fmtN(c.ema, 2)}</td>` +
         `<td class="${c.slope != null && c.slope < 0 ? "sl-neg" : ""}">${_slopeTxt(c.slope)}</td>` +
-        `<td>${_gateCell(c.gate)}</td>` +
+        `<td>${_trendCell(c.slope)}</td>` +
         `<td style="font-size:.9em;">${escapeHtml(c.action || "")}</td>` +
         `<td style="font-size:.9em;">${escapeHtml(c.fill || "")}</td>`;
     });
@@ -867,13 +892,14 @@ function _renderMergedBars(body) {
     periods.map(p => `<th colspan="${per}" class="grp td">${escapeHtml(p)}</th>`).join("") +
     `</tr>`;
   const head2 = `<tr>` + periods.map(() =>
-    `<th>Buy Setup</th><th>Sell Setup</th><th>EMA</th><th>slope</th><th>闸门</th><th>动作/原因</th><th>成交</th>`
+    `<th>Buy Setup</th><th>Sell Setup</th><th>EMA</th><th>slope</th><th>趋势</th><th>动作/原因</th><th>成交</th>`
   ).join("") + `</tr>`;
   body.innerHTML = ents.length
     ? `<table><thead>${head1}${head2}</thead><tbody>${trs}</tbody></table>`
     : '<div class="empty">当前筛选下无行</div>';
   const info = $("bars-pageinfo");
   if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${ents.length} 行`;
+  _syncCsvLabel();
   const fi = $("bars-filter-info");
   if (fi) {
     const total = _mergedRows().length;
@@ -897,10 +923,11 @@ function barsBox(res, runId, period) {
   // CSV 导出（2026-10-20）：后端渲染、与表格同一份 bars_rows；导出全部行，
   // 不受「全部标的 / 只看有动作」筛选影响（筛选只是浏览辅助）。
   const csvBtn = runId
-    ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;" ` +
-      `title="导出全部行（不受筛选影响）" ` +
-      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}${_barsCache.merge ? "&merge=1" : (period ? "&period=" + encodeURIComponent(period) : "")}">⬇ 导出 CSV（${_barsCache.merge ? "多周期对齐" : "全部 " + rows.length + " 行"}）</a>`
+    ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;cursor:pointer;" ` +
+      `title="导出全部行（不受筛选影响）；多周期对齐时导出对齐视图（行基准=最细周期）" ` +
+      `href="javascript:void(0)" onclick="_exportBarsCsv()">⬇ 导出 CSV（<span id="bars-csv-label">${_barsCache.merge ? "多周期对齐" : "全部 " + rows.length + " 行"}</span>）</a>`
     : "";
+  window._btCsvCtx = { runId, period };
   const multi = window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1);
   const _mbStyle = v => `padding:2px 8px;border-radius:4px;cursor:pointer;` +
     (!!_barsCache.merge === v ? "background:#eef3ff;border-color:#9bb4e8;color:#33508f;font-weight:600;" : "");

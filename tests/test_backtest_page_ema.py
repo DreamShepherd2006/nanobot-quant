@@ -62,7 +62,7 @@ def test_bars_csv_export_present():
     assert "/config/backtest/bars.csv?run_id=" in html
     assert "导出 CSV" in html
     # 导出全部行，不受「只看有动作/成交」筛选影响
-    assert "title=\"导出全部行（不受筛选影响）\"" in html
+    assert "title=\"导出全部行（不受筛选影响）；多周期对齐时导出对齐视图" in html
     # runId + 当前周期必须从 renderResult 传进 barsBox，否则链接无从拼 run_id/period
     assert "barsBox(res, runId, period)" in html
 

@@ -112,7 +112,7 @@ def bars_merge_header(result: dict) -> list[str]:
             f"{p} Sell Setup",
             f"{p} EMA",
             f"{p} slope{k}",
-            f"{p} 闸门",
+            f"{p} 趋势",
             f"{p} 动作/原因",
             f"{p} 成交",
         ]
@@ -175,12 +175,27 @@ def bars_merge_to_csv(result: dict) -> str:
                 _count(r.get("setup_sell")),
                 _num(r.get("ema")),
                 _num(r.get("slope")),
-                _GATE_TEXT.get(str(r.get("gate") or ""), ""),
+                _trend_text(r.get("slope")),
                 r.get("action") or "",
                 r.get("fill") or "",
             ]
         w.writerow(row)
     return BOM + buf.getvalue()
+
+
+def _trend_text(slope) -> str:
+    """趋势列（2026-10-21 用户拍板）：由 slope_k 符号判定、**每根 bar 都有值**。
+
+    与闸门规则同源（slope_k > 0 才放行），但不含「候选买入计数」口径——
+    实际闸门判定结果仍只在「动作/原因」列（如 `WAIT:EMA 趋势闸门拦截`）。
+    """
+    if slope is None:
+        return "⊘"
+    try:
+        v = float(slope)
+    except (TypeError, ValueError):
+        return ""
+    return "✅" if v > 0 else "⛔"
 
 
 def bars_to_csv(result: dict) -> str:
