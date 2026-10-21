@@ -51,6 +51,7 @@
   th.grp { text-align:center; font-size:.9em; letter-spacing:.5px; }
   th.grp.td { background:#eef3ff; color:#33508f; border-bottom:1px solid #d6e0f5; }
   th.grp.ema { background:#fff5e6; color:#8a5a12; border-bottom:1px solid #f0dfc2; }
+  td.mg-empty { color:#cfcfcf; text-align:center; }
   th:first-child, td:first-child { text-align:left; }
   .roi-pos { color:#2e7d32; font-weight:700; }
   .roi-neg { color:#c62828; font-weight:700; }
@@ -706,7 +707,39 @@ function armsBox(arms) {
 // ── 📊 逐 bar 明细（TD + EMA，2026-10-20）──────────────────────
 // 动作列直接来自策略自己的决策流（单一实现），含被拦原因——用来回答
 // 「这根有信号为何没买」；精简模式下只存信号/成交/闸门翻转行。
-let _barsCache = { rows: [], meta: {}, page: 0, symbol: "", only: true, size: 200 };
+let _barsCache = { rows: [], meta: {}, page: 0, symbol: "", only: true, size: 200, merge: false };
+
+// 多周期对齐视图（2026-10-21 方案 A）：以**最细周期**为行基准，其余周期只在
+// 自己 bar 收盘的那一行填值，其余行显 `·`——宁可行稀硫也不把 1m 的计数聚合掉。
+window._btBars = window._btBars || {};
+function _cacheBars(p, r) {
+  if (!p || !Array.isArray(r && r.bars_rows)) return;
+  window._btBars[p] = { rows: r.bars_rows, meta: r.bars_meta || {} };
+}
+const _PERIOD_SEC = {"1m":60,"3m":180,"5m":300,"15m":900,"30m":1800,"1H":3600,"4H":14400};
+function _setBarsMerge(v) {
+  _barsCache.merge = !!v;
+  _barsCache.page = 0;
+  _renderBars();
+}
+function _mergedRows() {
+  const m = window._btMulti;
+  if (!m) return [];
+  const periods = ((m.res && m.res.periods) || []).slice()
+    .sort((a, b) => (_PERIOD_SEC[a] || 1e9) - (_PERIOD_SEC[b] || 1e9));
+  if (periods.length < 2) return [];
+  const base = ((window._btBars[periods[0]] || {}).rows) || [];
+  const maps = {}, metas = {};
+  for (const p of periods) {
+    const info = window._btBars[p] || {};
+    maps[p] = new Map((info.rows || []).map(r => [new Date(r.ts).getTime(), r]));
+    metas[p] = info.meta || {};
+  }
+  return base.map(b => {
+    const t = new Date(b.ts).getTime();
+    return { base: b, t, periods, metas, cells: periods.map(p => maps[p].get(t) || null) };
+  });
+}
 
 function _barsState() { return _barsCache; }
 function _barsPage(d) {
@@ -729,6 +762,10 @@ function _utc(iso) {
 function _renderBars() {
   const body = $("bars-body");
   if (!body) return;
+  if (_barsCache.merge && window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1)) {
+    _renderMergedBars(body);
+    return;
+  }
   const rows = _filteredBars();
   const pages = Math.max(1, Math.ceil(rows.length / _barsCache.size));
   if (_barsCache.page >= pages) _barsCache.page = pages - 1;
@@ -777,6 +814,74 @@ function _renderBars() {
       : `采集 ${collected} 行 · 当前筛选 ${rows.length} 行`;
   }
 }
+function _gateCell(g) {
+  return g === "block" ? "⛔" : (g === "pass" ? "✅" : (g === "na" ? "⊘" : ""));
+}
+function _slopeTxt(sl) {
+  return sl === null || sl === undefined ? "" : (sl >= 0 ? "+" : "") + Number(sl).toFixed(3);
+}
+// 多周期对齐（2026-10-21 方案 A）：行基准 = 最细周期；其余周期只在自
+// 己 bar 收盘那一行填值，其余行显 `·`。三档仍是独立回放，同行的动作
+// 分属三个不同实验——不可相加、不是组合持仓。
+function _renderMergedBars(body) {
+  let ents = _mergedRows();
+  const periods = ents.length ? ents[0].periods
+    : (((window._btMulti || {}).res || {}).periods || []);
+  if (_barsCache.symbol) ents = ents.filter(e => e.base.symbol === _barsCache.symbol);
+  if (_barsCache.only) {
+    ents = ents.filter(e => e.cells.some(c => c && ((c.action && c.action !== "") || c.fill)));
+  }
+  const pages = Math.max(1, Math.ceil(ents.length / _barsCache.size));
+  if (_barsCache.page >= pages) _barsCache.page = pages - 1;
+  const start = _barsCache.page * _barsCache.size;
+  const slice = ents.slice(start, start + _barsCache.size);
+  const syms = Array.from(new Set(ents.map(e => e.base.symbol).filter(Boolean)));
+  const showSym = syms.length > 1;
+  const per = 7;  // 每周期 7 列：Buy Setup / Sell Setup / EMA / slope / 闸门 / 动作 / 成交
+  const trs = slice.map(e => {
+    const b = e.base;
+    const anyFill = e.cells.some(c => c && c.fill);
+    let tds = `<td>${fmtTs(b.ts)}</td><td>${_utc(b.ts)}</td>` +
+      (showSym ? `<td>${escapeHtml(b.symbol || "")}</td>` : "") +
+      `<td>${fmtN(b.close, 4)}</td>` +
+      `<td class="${b.chg != null && b.chg < 0 ? "sl-neg" : ""}">` +
+      `${b.chg == null ? "" : (b.chg >= 0 ? "+" : "") + (b.chg * 100).toFixed(2) + "%"}</td>`;
+    e.periods.forEach((p, i) => {
+      const c = e.cells[i];
+      if (!c) {
+        tds += `<td class="mg-empty">·</td>` + `<td class="mg-empty"></td>`.repeat(per - 1);
+        return;
+      }
+      tds += `<td>${c.setup_buy || ""}</td><td>${c.setup_sell || ""}</td>` +
+        `<td>${c.ema == null ? "" : fmtN(c.ema, 2)}</td>` +
+        `<td class="${c.slope != null && c.slope < 0 ? "sl-neg" : ""}">${_slopeTxt(c.slope)}</td>` +
+        `<td>${_gateCell(c.gate)}</td>` +
+        `<td style="font-size:.9em;">${escapeHtml(c.action || "")}</td>` +
+        `<td style="font-size:.9em;">${escapeHtml(c.fill || "")}</td>`;
+    });
+    return `<tr${anyFill ? ' style="background:#e8f5e9;"' : ""}>${tds}</tr>`;
+  }).join("");
+  const head1 = `<tr><th rowspan="2">时间</th><th rowspan="2">UTC 时间</th>` +
+    (showSym ? `<th rowspan="2">标的</th>` : "") +
+    `<th rowspan="2">收盘</th><th rowspan="2">涨跌%</th>` +
+    periods.map(p => `<th colspan="${per}" class="grp td">${escapeHtml(p)}</th>`).join("") +
+    `</tr>`;
+  const head2 = `<tr>` + periods.map(() =>
+    `<th>Buy Setup</th><th>Sell Setup</th><th>EMA</th><th>slope</th><th>闸门</th><th>动作/原因</th><th>成交</th>`
+  ).join("") + `</tr>`;
+  body.innerHTML = ents.length
+    ? `<table><thead>${head1}${head2}</thead><tbody>${trs}</tbody></table>`
+    : '<div class="empty">当前筛选下无行</div>';
+  const info = $("bars-pageinfo");
+  if (info) info.textContent = `第 ${_barsCache.page + 1}/${pages} 页 · 共 ${ents.length} 行`;
+  const fi = $("bars-filter-info");
+  if (fi) {
+    const total = _mergedRows().length;
+    fi.textContent = (total === ents.length
+      ? `对齐 ${total} 行`
+      : `对齐 ${total} 行 · 当前筛选 ${ents.length} 行`) + `（行基准 ${periods[0]}）`;
+  }
+}
 function barsBox(res, runId, period) {
   if (!Array.isArray(res.bars_rows)) {
     return `<div class="bt-params"><div class="bt-params-title">📊 逐 bar 明细</div>` +
@@ -784,7 +889,9 @@ function barsBox(res, runId, period) {
   }
   const meta = res.bars_meta || {};
   const rows = res.bars_rows;
-  _barsCache = { rows, meta, page: 0, symbol: "", only: true, size: 200 };
+  if (period) _cacheBars(period, res);
+  // 切档重建缓存时保留「多周期对齐」开关状态（否则每次切档都退回单周期）
+  _barsCache = { rows, meta, page: 0, symbol: "", only: true, size: 200, merge: !!_barsCache.merge };
   const syms = Array.from(new Set(rows.map(r => r.symbol).filter(Boolean)));
   const modeTxt = meta.mode === "full" ? "全量" : "精简";
   // CSV 导出（2026-10-20）：后端渲染、与表格同一份 bars_rows；导出全部行，
@@ -792,7 +899,14 @@ function barsBox(res, runId, period) {
   const csvBtn = runId
     ? `<a class="btn-outline" style="padding:2px 8px;border-radius:4px;text-decoration:none;" ` +
       `title="导出全部行（不受筛选影响）" ` +
-      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}${period ? "&period=" + encodeURIComponent(period) : ""}">⬇ 导出 CSV（全部 ${rows.length} 行）</a>`
+      `href="/config/backtest/bars.csv?run_id=${encodeURIComponent(runId)}${_barsCache.merge ? "&merge=1" : (period ? "&period=" + encodeURIComponent(period) : "")}">⬇ 导出 CSV（${_barsCache.merge ? "多周期对齐" : "全部 " + rows.length + " 行"}）</a>`
+    : "";
+  const multi = window._btMulti && ((((window._btMulti.res || {}).periods) || []).length > 1);
+  const _mbStyle = v => `padding:2px 8px;border-radius:4px;cursor:pointer;` +
+    (!!_barsCache.merge === v ? "background:#eef3ff;border-color:#9bb4e8;color:#33508f;font-weight:600;" : "");
+  const mergeBtn = multi
+    ? `<button class="btn-outline" style="${_mbStyle(false)}" onclick="_setBarsMerge(false)" title="只看当前档的逐 bar">📄 单周期</button>` +
+      `<button class="btn-outline" style="${_mbStyle(true)}" onclick="_setBarsMerge(true)" title="以最细周期为行基准，三档并排对齐">🔀 多周期对齐</button>`
     : "";
   return `<div class="bt-params">` +
     `<div class="bt-params-title">📊 逐 bar 明细（TD + EMA）` +
@@ -805,6 +919,7 @@ function barsBox(res, runId, period) {
     `<option value="">全部标的</option>${syms.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")}</select>` +
     `<label style="display:flex;gap:4px;align-items:center;"><input type="checkbox" id="bars-only" checked ` +
     `onchange="_barsState().only=this.checked;_barsState().page=0;_renderBars()"> 只看有动作/成交</label>` +
+    mergeBtn +
     csvBtn +
     `<button class="btn-outline" style="padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="_barsPage(-1)">上一页</button>` +
     `<span id="bars-pageinfo"></span>` +
@@ -905,6 +1020,8 @@ function switchPeriod(p) {
   document.querySelectorAll("[data-btp]").forEach(el => el.classList.toggle("on", el.dataset.btp === p));
   const body = $("btp-body");
   if (!body) return;
+  // 进入多周期视图时预缓存三档的逐 bar 行（对齐视图需要全部档）
+  for (const [p, rr] of Object.entries(m.res.period_results || {})) _cacheBars(p, rr);
   const r = (m.res.period_results || {})[p] || {};
   if (r.error) {
     body.innerHTML = `<div class="banner msg err show">❌ ${escapeHtml(p)}：${escapeHtml(r.error)}</div>`;

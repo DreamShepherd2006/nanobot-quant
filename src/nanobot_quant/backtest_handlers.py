@@ -350,7 +350,20 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 {"ok": False, "error": f"run 不可用（{status}）"}, status_code=404
             )
         period = request.query_params.get("period", "")
+        merge = request.query_params.get("merge", "") in ("1", "true", "yes")
         per_results = result.get("period_results")
+        if merge and isinstance(per_results, dict) and per_results:
+            # 多周期对齐导出（2026-10-21）：行基准 = 最细周期，列按周期分组
+            from nanobot_quant.backtest_csv import bars_merge_to_csv
+
+            csv_text = bars_merge_to_csv(result)
+            return Response(
+                csv_text.encode("utf-8"),
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="bars_merge_{run_id}.csv"'
+                },
+            )
         if isinstance(per_results, dict) and per_results:
             # 多周期 run：没有 period 参数 ⇒ 取第一档（与页面默认视图一致）
             period = period or next(iter(per_results))

@@ -101,3 +101,17 @@ def test_running_state_renders_bars_incrementally():
     tail = html[idx : idx + 2500]
     assert "bars_rows" in tail
     assert "_renderBars()" in tail
+
+
+def test_multi_period_merged_bars_view_markers():
+    """多周期对齐视图（2026-10-21 方案 A）：以最细周期为行基准并排三档。
+
+    页面必须包含：合并渲染函数、行基准挑选、切换按钮、合并 CSV 导出参数。
+    """
+    html = _html()
+    assert "_renderMergedBars" in html
+    assert "_mergedRows" in html
+    assert "_cacheBars" in html
+    assert "多周期对齐" in html and "单周期" in html
+    assert "&merge=1" in html              # 合并视图的 CSV 导出走 merge=1
+    assert "行基准" in html                 # 页面显式标注行基准口径

@@ -99,3 +99,52 @@ def test_all_rows_exported_regardless_of_page_filters():
     rows = [dict(ROW, setup_buy=i + 1) for i in range(25)]
     out = _parse(bars_to_csv({"bars_rows": rows}))
     assert len(out) - 1 == 25
+
+
+def test_merge_csv_aligned_on_finest_period():
+    """多周期对齐 CSV（2026-10-21 方案 A）：行基准 = 最细周期，缺 bar 的格子留空。"""
+    from nanobot_quant.backtest_csv import bars_merge_to_csv
+
+    def row(ts, setup_buy=0, gate="", action="", fill="", close=100.0):
+        return {
+            "ts": ts, "symbol": "SOL", "close": close, "chg": 0.001,
+            "setup_buy": setup_buy, "setup_sell": 0, "score": 0.0,
+            "ema": 101.5, "slope": 0.0123, "gate": gate,
+            "action": action, "fill": fill,
+        }
+
+    result = {
+        "periods": ["1m", "3m"],
+        "period_results": {
+            "1m": {
+                "bars_meta": {"ema_k": 3},
+                "bars_rows": [
+                    row("2026-10-17T00:00:00", 12, "block", "WAIT:EMA", ""),
+                    row("2026-10-17T00:01:00", 13, "block", "WAIT:EMA", ""),
+                    row("2026-10-17T00:02:00", 14, "block", "WAIT:EMA", ""),
+                    row("2026-10-17T00:03:00", 0, "", "", "", 100.5),
+                ],
+            },
+            "3m": {
+                "bars_meta": {"ema_k": 3},
+                "bars_rows": [row("2026-10-17T00:00:00", 4, "pass", "", "BUY 0.0952")],
+            },
+        },
+    }
+    text = bars_merge_to_csv(result)
+    assert text.startswith("\ufeff")
+    lines = [ln for ln in text.replace("\ufeff", "").split("\r\n") if ln]
+    head = lines[0].split(",")
+    # 5 固定列 + 2 周期 × 7 列
+    assert len(head) == 5 + 14
+    assert head[5:12] == ["1m Buy Setup", "1m Sell Setup", "1m EMA", "1m slope3",
+                          "1m 闸门", "1m 动作/原因", "1m 成交"]
+    assert head[12] == "3m Buy Setup"
+    # 行数 = 最细周期 4 行
+    assert len(lines) == 1 + 4
+    # 00:00 行：两档都有值
+    r0 = lines[1].split(",")
+    assert r0[5] == "12" and r0[9] == "拦" and r0[12] == "4" and r0[16] == "放行"
+    # 00:01 行：3m 档无 bar → 7 列全空（不能写 0）
+    r1 = lines[2].split(",")
+    assert r1[12:] == [""] * 7
