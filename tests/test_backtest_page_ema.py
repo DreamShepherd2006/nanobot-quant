@@ -77,6 +77,8 @@ def test_multi_period_ui_present():
     assert "不得求平均或加总" in html            # 口径警告写死在页面
     assert "&period=" in html                   # CSV 按当前档导出
     assert "周期 ${prog.period}" in html         # 运行中显示第 i/n 档
+    # Markdown 按钮必须挂在顶层（各档子结果没有 markdown 字段，放 _periodView 会被空守卫吞掉）
+    assert "mdButton(res, runId) + compareBox(res, runId)" in html
 
 
 def test_two_arm_compare_wired_on_page():

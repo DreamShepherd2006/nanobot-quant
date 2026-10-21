@@ -838,7 +838,9 @@ function renderResult(res, runId) {
   // 多周期（2026-10-21）：对比表 + 单档渲染体，点行切换
   if (res.period_results && res.periods && res.periods.length > 1) {
     window._btMulti = { res, runId };
-    box.innerHTML = compareBox(res, runId) + `<div id="btp-body"></div>`;
+    // Markdown 按钮挂在**顶层**：markdown 全文（对比表 + 每档一节）只挂在顶层结果上，
+    // 各档子结果没有 markdown 字段 → 放 _periodView 里会被 mdButton 的空守卫吞掉（按钮消失）
+    box.innerHTML = mdButton(res, runId) + compareBox(res, runId) + `<div id="btp-body"></div>`;
     switchPeriod(res.periods[0]);
     return;
   }
