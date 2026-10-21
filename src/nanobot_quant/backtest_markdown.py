@@ -412,13 +412,36 @@ def _source_txt(res: dict) -> str:
     return f"{label}（与执行同所）"
 
 
+def _open_slots(slots: dict) -> list[dict]:
+    """期末未平仓（2026-10-21 修复）。
+
+    ``res["slots"]`` 是 **per-symbol 嵌套**：``{sym: {open: [...], final_price, ledger}}``。
+    旧实现读 ``slots.get("open")``（恒为 None）⇒ markdown 永远报「未平仓（0）」，
+    与页面 ``opensBox`` 不一致。由多周期 3m 档暴露（真 2 个 open 却报 0）。
+    口径对齐页面：浮盈 = (期末价 − 成本价) / 成本价（按最后 bar 收盘价折算）。
+    """
+    out: list[dict] = []
+    for sym, info in (slots or {}).items():
+        if not isinstance(info, dict):
+            continue
+        final_px = info.get("final_price")
+        for o in info.get("open") or []:
+            s = {"slot": o} if isinstance(o, (int, float)) else dict(o)
+            s.setdefault("symbol", sym)
+            s["final_price"] = final_px
+            entry = s.get("entry_price")
+            if entry and final_px:
+                s["pnl_pct"] = (final_px - entry) / entry * 100
+            out.append(s)
+    return out
+
+
 def _spot_md(res: dict) -> str:
     cfg = res.get("backtest_config") or {}
     cap = res.get("capital_stats") or {}
     detail = res.get("fills_detail") or []
     slots = res.get("slots") or {}
-    open_slots = slots.get("open") if isinstance(slots, dict) else None
-    open_slots = open_slots or []
+    open_slots = _open_slots(slots)
     skips = res.get("skip_counts") or {}
 
     md: list[str] = [f"## 📈 现货回测 {res.get('run_id', '')}\n"]
