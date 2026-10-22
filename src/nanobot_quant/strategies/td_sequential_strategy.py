@@ -90,15 +90,30 @@ class TdSequentialStrategy(Strategy):
     #   mid=5m/15m 必须传 5min/15min 而非笼统 minute，否则数据源
     #   _BAR_MAP 把粒度丢失成 1m——K 线窗口与场景周期不匹配）。
     #   旧 8 周期保持 lumibot 风格（minute/5min/…，回测兼容）；新周期
-    #   （3m/2H/6H/8H/12H/3D/7D/30D）lumibot 无对应解析器，直通统一
-    #   周期名，live 走 ``bar:`` 前缀直拉、回测 replay 动态映射（方案 C）。
+    #   （3m/2H/6H/8H/12H/3D/7D/30D）与**合成档**（2m/4m/6m/10m/20m/45m）
+    #   lumibot 无对应解析器，直通统一周期名，live 走 ``bar:`` 前缀直拉、
+    #   回测 replay 按自身粒度取数（方案 C）。
+    #
+    #   2026-10-22：本表是周期表的「第五层」（前四层=页面下拉 / 入参校验 /
+    #   场景周期 / 数据源 bar 解析）。此前缺合成档且未知值静默回退
+    #   ``"day"``——回测数字不受影响（ReplayDataSource 忽略 timestep），但
+    #   日志会打成「120 bars, day」误导排查；实盘若把场景周期设成合成档
+    #   则会拼出 ``bar:day`` 取错粒度。现改为查表失败**直通自身周期名**
+    #   （与数据源 ``_resolve_bar`` 的 fail-closed 同哲学，不再静默降级日线）。
     _TIMESTEP_BY_SLEEPTIME = {
         "1m": "minute", "5m": "5min", "15m": "15min", "30m": "30min",
         "1H": "hour", "4H": "4hour", "1D": "day", "1W": "week",
         # 新周期：统一周期名直通（lumibot 风格无对应解析）
         "3m": "3m", "2H": "2H", "6H": "6H", "8H": "8H",
         "12H": "12H", "3D": "3D", "7D": "7D", "30D": "30D",
+        # 合成档（回测专用，由更粗原生周期整除聚合）：直通
+        "2m": "2m", "4m": "4m", "6m": "6m", "10m": "10m",
+        "20m": "20m", "45m": "45m",
     }
+
+    def _timestep_for(self, sleeptime: str) -> str:
+        """周期名 → lumibot timestep；查不到直通自身名（不静默降级日线）。"""
+        return self._TIMESTEP_BY_SLEEPTIME.get(sleeptime, sleeptime or "1D")
 
     # ── lifecycle hooks ───────────────────────────────────────────
 
@@ -134,9 +149,7 @@ class TdSequentialStrategy(Strategy):
         # fixed_amount 模式的每笔固定金额（U；CEX=USDT / DEX=USDC，2026-08-19）
         self.fixed_amount = float(self.parameters.get("td_fixed_amount", 10.0) or 10.0)
         self.sleeptime = sleeptime or self.parameters.get("sleeptime", "1D")
-        self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
-            self.sleeptime, "day"
-        )
+        self._timestep = self._timestep_for(str(self.sleeptime))
         self._min_hold_bars = int(self.parameters.get("min_hold_bars", 10) or 0)
         self._min_hold_until: dict[tuple, pd.Timestamp] = {}
         self._current_bar_time: pd.Timestamp | None = None
@@ -608,16 +621,22 @@ class TdSequentialStrategy(Strategy):
         if not hasattr(self, "_wave_tried"):
             self._wave_tried: dict[tuple, bool] = {}
         p = rt.get("params") or {}
-        self.symbols = list(p.get("symbols") or [])
+        # 2026-10-22：标的池优先取**运行时** symbols（回测 driver 注入真实
+        # 标的池 / 实盘 rt 注入场景池），场景配置 params.symbols 仅作兜底。
+        # 此前直接用 p["symbols"]，回测时被实盘场景池（如只有 SOL）覆盖——
+        # 本次成交不受影响（driver 用外层 self.symbols 驱动），但 DIAG 日志
+        # 打「symbols=['SOL']」而实际跑三标的；一旦 driver 改走
+        # on_trading_iteration / _prefetch_all_bars 就会静默退化成单标的。
+        self.symbols = list(
+            rt.get("symbols") or p.get("symbols") or self.symbols or []
+        )
         self.quantity_mode = str(p.get("quantity_mode") or "fixed")
         self.fixed_amount = float(p.get("td_fixed_amount") or 10.0)
         qty = p.get("td_quantity")
         if qty is not None:
             self.quantity = qty
         self.sleeptime = str(p.get("sleeptime") or "1m")
-        self._timestep = self._TIMESTEP_BY_SLEEPTIME.get(
-            self.sleeptime, "day"
-        )
+        self._timestep = self._timestep_for(self.sleeptime)
         self._exit_order = str(p.get("exit_order") or "fifo")
         sl = p.get("stop_loss_pct")
         if sl is not None and getattr(self, "_risk", None) is not None:

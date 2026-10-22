@@ -98,10 +98,17 @@ def test_initialize_sleeptime_mapping():
         assert s._timestep == timestep, f"{sleeptime} → {s._timestep}"
 
 
-def test_initialize_unknown_sleeptime_falls_back_to_day():
-    """未知 sleeptime 回退 day（fail-safe，不抛错）。"""
+def test_initialize_composite_sleeptime_not_degraded_to_day():
+    """合成档 sleeptime 直通自身名，不静默降级 day（2026-10-22 修正）。
+
+    旧行为是「未知 sleeptime → day」，对合成档属静默错粒度：回测日志打
+    「120 bars, day」误导排查、实盘会拼 ``bar:day``。现统一为直通自身名，
+    与数据源 ``_resolve_bar`` fail-closed 同哲学（错周期由取数层显式报错）。
+    """
     s = _make_strategy(sleeptime="2m")
-    assert s._timestep == "day"
+    assert s._timestep == "2m"
+    # 未知周期同样直通（不被当日线）
+    assert _make_strategy(sleeptime="17m")._timestep == "17m"
 
 
 def test_initialize_kwargs_override_parameters():
@@ -289,6 +296,71 @@ def test_activate_scene_injects_entry_countdown():
            "params": {"entry_setup": 9, "entry_countdown": None}}
     s._activate_scene("high", rt2)
     assert s._td_params["entry_countdown"] == 9
+
+
+def test_activate_scene_symbols_runtime_priority():
+    """运行时 symbols 优先于场景配置（2026-10-22 修复）。
+
+    回测 driver 在 rt["symbols"] 注入真实标的池（BTC/ETH/SOL），而
+    rt["params"] 来自实盘场景配置（池里只有 SOL）。旧实现直接读
+    params["symbols"] → 策略内标的池被悄悄改成 SOL-only（日志误导 +
+    一旦 driver 改走 on_trading_iteration 就退化为单标的）。
+    """
+    s = _make_strategy()
+    rt = {
+        "broker": object(),
+        "batch_managers": getattr(s, "batch_managers", None),
+        "symbols": ["BTC", "ETH", "SOL"],
+        "params": {"symbols": ["SOL"], "entry_setup": 9},
+    }
+    s._activate_scene("high", rt)
+    assert s.symbols == ["BTC", "ETH", "SOL"]
+
+    # 运行时未提供 symbols → 回退场景配置
+    rt2 = {
+        "broker": object(),
+        "batch_managers": getattr(s, "batch_managers", None),
+        "params": {"symbols": ["SOL"], "entry_setup": 9},
+    }
+    s._activate_scene("high", rt2)
+    assert s.symbols == ["SOL"]
+
+
+def test_activate_scene_composite_period_timestep():
+    """合成档 sleeptime 不静默降级为 day（2026-10-22 修复）。
+
+    旧实现 _TIMESTEP_BY_SLEEPTIME 缺 2m/4m/… → 回退 "day"，日志打
+    「120 bars, day」，实盘拼 ``bar:day`` 取错粒度。
+    """
+    s = _make_strategy()
+    rt = {
+        "broker": object(),
+        "batch_managers": getattr(s, "batch_managers", None),
+        "symbols": ["SOL"],
+        "params": {"sleeptime": "2m"},
+    }
+    s._activate_scene("high", rt)
+    assert s.sleeptime == "2m"
+    assert s._timestep == "2m"  # 不是 "day"
+
+
+def test_timestep_mapping_all_periods():
+    """周期表第五层：原生 16 档 + 合成 6 档均不得落到 day。"""
+    from nanobot_quant.data_sources.periods import PERIODS, COMPOSITE_PERIODS
+
+    s = _make_strategy()
+    for p in list(PERIODS) + sorted(COMPOSITE_PERIODS):
+        assert s._timestep_for(p) != "day" or p in ("1D",), (
+            f"周期 {p} 静默回退 day"
+        )
+    # 合成档直通自身名
+    assert s._timestep_for("2m") == "2m"
+    assert s._timestep_for("45m") == "45m"
+    # 旧 8 周期保持 lumibot 风格（回测兼容）
+    assert s._timestep_for("1m") == "minute"
+    assert s._timestep_for("4H") == "4hour"
+    # 未知周期直通自身名（不再静默降级）
+    assert s._timestep_for("17m") == "17m"
 
 
 def test_buy_value_sizing_floor_one_blocked_by_risk():
