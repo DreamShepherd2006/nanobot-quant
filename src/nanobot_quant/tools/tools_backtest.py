@@ -199,6 +199,27 @@ def _period_summary(period: str, res: dict) -> dict:
     }
 
 
+def _validate_periods(periods: list[str]) -> dict | None:
+    """回测周期入参校验：非法返回错误 dict，合法返回 None。
+
+    2026-10-22：可接受集合 = 原生 ∪ 合成（``backtest_periods()``），与页面
+    下拉、``driver._timestep_for`` 共用同一份来源。此前这里用的是仅含原生
+    档的 ``PERIODS``——页面能选 2m/4m、提交却报“不支持的周期”（已修）。
+    """
+    if not periods:
+        return None
+    from nanobot_quant.data_sources.periods import backtest_periods
+
+    allowed = backtest_periods()
+    bad = [p for p in periods if p not in allowed]
+    if bad:
+        return {
+            "error": f"不支持的周期: {bad}",
+            "hint": "可用周期: " + ", ".join(allowed),
+        }
+    return None
+
+
 def _run_multi_period(periods, overrides, build, progress_path) -> dict:
     """多周期独立回放（2026-10-21 拍板：并列独立，不做组合）。
 
@@ -603,15 +624,9 @@ def run_backtest(
             return {"error": str(exc)}
         syms = list(symbols) if symbols else ([symbol] if symbol else None)
         _periods = [str(p) for p in (periods or []) if p]
-        if _periods:
-            from nanobot_quant.data_sources.periods import PERIODS as _PERIODS
-
-            _bad = [p for p in _periods if p not in _PERIODS]
-            if _bad:
-                return {
-                    "error": f"不支持的周期: {_bad}",
-                    "hint": "可用周期: " + ", ".join(_PERIODS),
-                }
+        _bad_req = _validate_periods(_periods)
+        if _bad_req:
+            return _bad_req
         threading.Thread(
             target=_auto_backtest_driver,
             args=(run_id, scene, syms, start, end, initial_quote, batches,

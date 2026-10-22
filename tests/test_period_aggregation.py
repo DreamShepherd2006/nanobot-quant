@@ -208,6 +208,26 @@ def test_driver_rejects_unknown_period():
     assert "合成" in str(exc.value)  # 报错里明确列出合成档，便于自查
 
 
+# ── MCP / Handler 入参校验（回归：页面能选但提交 400，2026-10-22）──────
+
+def test_validate_periods_accepts_composite():
+    from nanobot_quant.tools.tools_backtest import _validate_periods
+
+    assert _validate_periods([]) is None
+    assert _validate_periods(["1m", "3m"]) is None
+    assert _validate_periods(["1m", "3m", "2m", "4m"]) is None
+    assert _validate_periods(list(COMPOSITE_PERIODS)) is None
+
+
+def test_validate_periods_rejects_unknown_with_hint():
+    from nanobot_quant.tools.tools_backtest import _validate_periods
+
+    err = _validate_periods(["1m", "7m"])
+    assert err is not None and "7m" in err["error"]
+    # 提示里必须同时列出合成档，否则用户无从知道 2m/4m 可用了
+    assert "4m" in err["hint"] and "45m" in err["hint"]
+
+
 # ── 页面注入 ────────────────────────────────────────────────────────────
 def test_page_injects_composite_periods():
     from nanobot_quant import backtest_handlers as bh
