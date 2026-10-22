@@ -318,6 +318,9 @@
 const SCENES = __SCENES__;
 const SYMBOLS = __SYMBOLS__;
 const PERIODS = __PERIODS__;
+// 合成周期（2026-10-22）：[[周期, 源周期, 因子], ...]——官方不提供、由原生聚合。
+// **仅回测可选**，默认不勾选；td-table / 实盘调度不受影响。
+const COMPOSITE_PERIODS = __COMPOSITE_PERIODS__;
 
 // datetime-local（浏览器本地时区）→ UTC ISO。回测区间按 UTC 语义，
 // 避免服务器时区与用户本地时区不一致导致区间错位（2026-08-28 实测）。
@@ -1162,27 +1165,37 @@ async function loadRun(runId) {
   }
 }
 
-// 周期下拉选项（权威来源 = data_sources.periods.PERIODS，随 __PERIODS__ 注入）
+// 周期下拉选项（权威来源 = data_sources.periods：原生 PERIODS + 合成 COMPOSITE_PERIODS）
+// 合成档排在一行分隔提示之后，文本自带来源与因子（如“4m（1m×4）”），默认全不选。
+function appendPeriodOptions(sel, defaults) {
+  PERIODS.forEach(p => {
+    const o = document.createElement("option");
+    o.value = p; o.textContent = p;
+    if (defaults && defaults.includes(p)) o.selected = true;
+    sel.appendChild(o);
+  });
+  if (!COMPOSITE_PERIODS.length) return;
+  const sep = document.createElement("option");
+  sep.disabled = true; sep.textContent = "── 合成周期（原生聚合）──";
+  sel.appendChild(sep);
+  COMPOSITE_PERIODS.forEach(([p, src, f]) => {
+    const o = document.createElement("option");
+    o.value = p; o.textContent = `${p}（${src}×${f}）`;
+    if (defaults && defaults.includes(p)) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
 function fillPeriodOptions() {
   const sel = $("sleeptime");
   if (sel && !sel.dataset.filled) {
-    PERIODS.forEach(p => {
-      const o = document.createElement("option");
-      o.value = p; o.textContent = p;
-      sel.appendChild(o);
-    });
+    appendPeriodOptions(sel, null);
     sel.dataset.filled = "1";
   }
-  // 多周期多选框：同一份 PERIODS；默认勾 1m/3m/5m（2026-10-21 拍板）
+  // 多周期多选框：同一份周期表；默认勾 1m/3m/5m（2026-10-21 拍板）
   const ms = $("periods");
   if (ms && !ms.dataset.filled) {
-    const def = ["1m", "3m", "5m"];
-    PERIODS.forEach(p => {
-      const o = document.createElement("option");
-      o.value = p; o.textContent = p;
-      if (def.includes(p)) o.selected = true;
-      ms.appendChild(o);
-    });
+    appendPeriodOptions(ms, ["1m", "3m", "5m"]);
     ms.dataset.filled = "1";
   }
 }

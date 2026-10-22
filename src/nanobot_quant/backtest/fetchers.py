@@ -29,7 +29,12 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+from nanobot_quant.data_sources.aggregate import aggregate_bars
+from nanobot_quant.data_sources.periods import (
+    INTERVAL_SECONDS,
+    composite_factor,
+    composite_source,
+)
 from nanobot_quant.gate_cex_data import fetch_gate_kline_range_paged
 from nanobot_quant.gate_credentials import gate_pair, okx_ticker
 from nanobot_quant.kline_paging import max_bars_for
@@ -95,12 +100,48 @@ def _okx_fetch(ticker: str, start_ts: int, end_ts: int, bar: str) -> pd.DataFram
     return fetch_kline_range(ticker, start_iso, end_iso, bar=bar)
 
 
+def _composite_fetch(
+    fetch: Callable[[str, int, int, str], pd.DataFrame],
+) -> Callable[[str, int, int, str], pd.DataFrame]:
+    """包一层合成周期支持（2026-10-22）：目标周期不在原生档时取源周期再聚合。
+
+    源周期与前缀对齐很关键：
+    - ``start_ts`` 先**向下对齐到目标格**，否则首个分组会从半根开始（会被
+      聚合层当作边界截断丢掉，静默少一根）；
+    - ``start_ts <= 0``（“拉满”）按**源周期**的深度预算截窗口（10000 × 源
+      秒）——与 ``_okx_fetch`` 同口径，不静默超限。
+    """
+
+    def wrapper(pair: str, start_ts: int, end_ts: int,
+                bar: str = "1D") -> pd.DataFrame:
+        src = composite_source(bar)
+        if src is None:
+            return fetch(pair, start_ts, end_ts, bar)
+        factor = int(composite_factor(bar) or 1)
+        tgt_sec = int(INTERVAL_SECONDS[bar])
+        src_sec = int(INTERVAL_SECONDS[src])
+        start = int(start_ts)
+        end = int(end_ts)
+        if start > 0:
+            start = (start // tgt_sec) * tgt_sec
+        else:
+            start = end - max_bars_for(src) * src_sec
+        df_src = fetch(pair, start, end, src)
+        return aggregate_bars(df_src, period=bar, source=src, factor=factor)
+
+    # 供测试与诊断核对“底层究竟是哪条取数路径”（不参与业务逻辑）
+    wrapper.__wrapped_fetch__ = fetch
+    return wrapper
+
+
 def make_fetcher(source: object) -> Callable[[str, int, int, str], pd.DataFrame]:
-    """按源返回 ``fetcher(pair, start_ts, end_ts, bar) -> DataFrame``。"""
+    """按源返回 ``fetcher(pair, start_ts, end_ts, bar) -> DataFrame``。
+
+    合成周期（2m/4m/6m/10m/20m/45m）对调用方透明：取源周期 → 整除聚合。
+    """
     src = normalize_source(source)
-    if src == "okx_cex":
-        return _okx_fetch
-    return fetch_gate_kline_range_paged
+    base = _okx_fetch if src == "okx_cex" else fetch_gate_kline_range_paged
+    return _composite_fetch(base)
 
 
 def unavailable_symbols(

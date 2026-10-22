@@ -93,16 +93,22 @@ def _parse_ts(value: Optional[str]) -> Optional[datetime]:
 def _timestep_for(sleeptime: str) -> str:
     """场景 sleeptime（统一周期名）→ 回测 K 线粒度。
 
-    2026-08-24 方案 C：粒度由 gate_cex spec 声明（16 个周期），不再各自
-    硬编码映射表。不支持的周期抛 ValueError（fail-closed，不静默回退）。
+    2026-08-24 方案 C：粒度由 gate_cex spec 声明（16 个原生周期），不再各自
+    硬编码映射表。2026-10-22 起额外接受**合成周期**（2m/4m/6m/10m/20m/45m，
+    由更粗原生周期整除聚合，见 ``data_sources.periods.COMPOSITE_PERIODS``）——
+    仅回测可用，td-table / 实盘调度仍只认原生档。
+    不支持的周期抛 ValueError（fail-closed，不静默回退）。
     """
     s = str(sleeptime)
     from nanobot_quant.data_sources import get_data_source
+    from nanobot_quant.data_sources.periods import COMPOSITE_PERIODS
 
     spec = get_data_source("gate_cex")
-    if s not in spec.bars:
+    if s not in spec.bars and s not in COMPOSITE_PERIODS:
+        native = ", ".join(spec.bars)
+        comp = ", ".join(f"{p}(合成)" for p in COMPOSITE_PERIODS)
         raise ValueError(
-            f"不支持的场景周期: {sleeptime!r}（支持: {', '.join(spec.bars)}）"
+            f"不支持的场景周期: {sleeptime!r}（原生: {native}；合成: {comp}）"
         )
     return s
 

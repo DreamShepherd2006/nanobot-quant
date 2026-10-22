@@ -20,6 +20,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from nanobot_quant.data_sources.periods import period_label
+
 __all__ = ["render_markdown"]
 
 _TZ_LOCAL = "Asia/Shanghai"
@@ -314,7 +316,7 @@ def _options_md(res: dict) -> str:
     md.append("**📋 回测参数（实际生效）**\n")
     md.append(_kv_table([
         ("标的家族", res.get("family")),
-        ("周期", f"{res.get('timestep')}（bar={res.get('bar')}）"),
+        ("周期", f"{period_label(res.get('timestep'))}（bar={res.get('bar')}）"),
         ("参考现货", _spot_ref(res)),
         ("现货区间", _spot_extremes(res)),
         ("区间", f"{_ts_local(res.get('start_ts'))} → {_ts_local(res.get('end_ts'))}"),
@@ -451,7 +453,7 @@ def _spot_md(res: dict) -> str:
         ("数据源", _source_txt(res)),
         ("场景", res.get("scene")),
         ("标的", ", ".join(res.get("symbols") or [])),
-        ("周期", res.get("timestep")),
+        ("周期", period_label(res.get("timestep"))),
         ("区间", f"{_ts_local(res.get('start_ts'))} → {_ts_local(res.get('end_ts'))}"),
         ("评估 bar", f"{res.get('bars', 0)} / 拉取 {res.get('fetched_bars', 0)}"),
         ("初始资金", f"{_num(res.get('initial_total'), 2)}（每 slot {_num(res.get('initial_quote'), 2)} × {res.get('batches', '—')}）"),
@@ -620,6 +622,13 @@ def _multi_md(res: dict) -> str:
         "ROI 不得求平均或加总；同参数 = **同根数，非同时间**；"
         "不构成跨周期迁移证据。\n"
     )
+    if any(period_label(p) != p for p in periods):
+        md.append(
+            "> 🔧 含**合成周期**（标有「×N 合成」的档）：官方 API 不提供，"
+            "由更粗原生周期按 UTC 整除精确聚合（OHLC 首/最大/最小/末、"
+            "量求和，内部缺口 fail-closed）。与原生档只能并列看，"
+            "不可当作交易所原生 K 线或与之混比。\n"
+        )
     for p in periods:
         sub = (res.get("period_results") or {}).get(p) or {}
         if sub.get("error"):
