@@ -683,9 +683,12 @@ def test_driver_timestep_for_new_periods():
     assert _timestep_for("7D") == "7D"
     assert _timestep_for("30D") == "30D"
     assert _timestep_for("1W") == "1W"
-    # fail-closed
-    with pytest.raises(ValueError, match="2m"):
-        _timestep_for("2m")
+    # fail-closed（2026-10-22：2m 改为**支持**——合成周期，由 1m×2 聚合）
+    assert _timestep_for("2m") == "2m"
+    assert _timestep_for("4m") == "4m"
+    assert _timestep_for("45m") == "45m"
+    with pytest.raises(ValueError, match="7m"):
+        _timestep_for("7m")
     with pytest.raises(ValueError, match="1s"):
         _timestep_for("1s")
 
@@ -709,8 +712,9 @@ def test_bar_map_new_periods():
     # bar: 前缀直拉
     assert _resolve_bar("bar:2H") == "2H"
     # fail-closed：未知周期抛 ValueError，不静默回退日线
-    with pytest.raises(ValueError, match="2m"):
-        _resolve_bar("2m")
+    # 2026-10-22：2m/4m 已是合成周期（合法），故用真正未知的 9m 验 fail-closed
+    with pytest.raises(ValueError, match="9m"):
+        _resolve_bar("9m")
     with pytest.raises(ValueError, match="bogus"):
         _resolve_bar("bogus")
     # 空 timestep = 未指定，用默认 1D

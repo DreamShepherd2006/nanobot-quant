@@ -78,8 +78,9 @@ def test_resolve_symbol_per_source():
 def test_make_fetcher_selects_per_source():
     from nanobot_quant.gate_cex_data import fetch_gate_kline_range_paged
 
-    assert make_fetcher("gate_cex") is fetch_gate_kline_range_paged
-    assert make_fetcher("okx_cex") is F._okx_fetch
+    # 2026-10-22：fetcher 多包了一层合成周期支持，改断言“底层取数路径”而非函数身份
+    assert make_fetcher("gate_cex").__wrapped_fetch__ is fetch_gate_kline_range_paged
+    assert make_fetcher("okx_cex").__wrapped_fetch__ is F._okx_fetch
 
 
 # ── OKX 适配层 ───────────────────────────────────────────────────────

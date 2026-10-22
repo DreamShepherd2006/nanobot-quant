@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -77,20 +78,30 @@ def _bar_map() -> dict:
 
 
 def _resolve_bar(timestep: str) -> str:
-    """timestep（lumibot 名 / 统一周期名 / bar: 前缀）→ 回测 bar 名。
+    """timestep（lumibot 名 / 统一周期名 / 合成周期 / bar: 前缀）→ 回测 bar 名。
 
     Fail-closed：传了但查不到映射的周期抛 ValueError，不静默回退日线
     （空 timestep 用默认 1D，语义=未指定）。
+
+    2026-10-22：合成周期（2m/4m/6m/10m/20m/45m）直接以自身名作为 bar 名返回
+    ——聚合对调用方透明，由 ``fetchers._composite_fetch`` 取源周期再聚合。
+    此前只认原生映射，导致多周期回测里 2m/4m 报“不支持的回测周期”。
     """
     key = str(timestep or "").lower().removeprefix("bar:")
     if not key:
         return _DEFAULT_BAR
     m = _bar_map()
-    if key not in m:
-        raise ValueError(
-            f"不支持的回测周期: {timestep!r}（支持: {sorted(set(m))}）"
-        )
-    return m[key]
+    if key in m:
+        return m[key]
+    from nanobot_quant.data_sources.periods import COMPOSITE_PERIODS
+
+    composite = {p.lower(): p for p in COMPOSITE_PERIODS}
+    if key in composite:
+        return composite[key]
+    raise ValueError(
+        f"不支持的回测周期: {timestep!r}（支持: "
+        f"{sorted(set(m) | set(composite))}）"
+    )
 
 
 class ReplayDataSource:
@@ -177,6 +188,16 @@ class ReplayDataSource:
             self._frames[symbol] = df
         main = self._symbols[0] if self._symbols else None
         self._bar_times = list(self._frames[main].index) if main else []
+        # 诊断（2026-10-22）：周期解析结果 + 实际根数。合成档被吞掉、
+        # 或评估窗口因为“聚合后根数不足”而全程 SKIP 时，这一行就能定位。
+        print(
+            f"[BACKTEST] prefetch timestep={self._timestep} bar={self._bar} "
+            f"symbols={self._symbols} bars={len(self._bar_times)}"
+            + (f" {self._bar_times[0]} → {self._bar_times[-1]}"
+               if self._bar_times else " （无数据）"),
+            file=sys.stderr,
+            flush=True,
+        )
 
     @property
     def bar_times(self) -> list:

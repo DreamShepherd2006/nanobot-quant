@@ -21,7 +21,7 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from nanobot_quant.data_sources.periods import PERIODS
+from nanobot_quant.data_sources.periods import COMPOSITE_PERIODS, PERIODS
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -179,6 +179,13 @@ def _render_page(scenes: dict, symbols: list[str]) -> str:
         _PAGE_HTML.replace("__SCENES__", json.dumps(scenes, ensure_ascii=False))
         .replace("__SYMBOLS__", json.dumps(symbols, ensure_ascii=False))
         .replace("__PERIODS__", json.dumps(list(PERIODS), ensure_ascii=False))
+        .replace(
+            "__COMPOSITE_PERIODS__",
+            json.dumps(
+                [[p, s, f] for p, (s, f) in COMPOSITE_PERIODS.items()],
+                ensure_ascii=False,
+            ),
+        )
     )
 
 

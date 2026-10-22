@@ -15,6 +15,7 @@ from nanobot_quant.data_sources import (
     research_sources,
 )
 from nanobot_quant.data_sources.periods import (
+    COMPOSITE_PERIODS,
     DISPLAY_NAMES,
     INTERVAL_SECONDS,
     PERIODS,
@@ -125,19 +126,22 @@ def test_interval_for_fail_closed():
 
 
 def test_interval_seconds_covers_all_periods():
-    """调度秒数表覆盖全部统一周期。"""
-    assert set(INTERVAL_SECONDS) == set(PERIODS)
+    """调度秒数表覆盖全部统一周期 + 全部合成周期（2026-10-22 扩充）。"""
+    assert set(INTERVAL_SECONDS) == set(PERIODS) | set(COMPOSITE_PERIODS)
     assert INTERVAL_SECONDS["1m"] == 60
     assert INTERVAL_SECONDS["1H"] == 3600
     assert INTERVAL_SECONDS["1D"] == 86400
     assert INTERVAL_SECONDS["30D"] == 2592000  # 日历月近似 30 天
+    assert INTERVAL_SECONDS["2m"] == 120
+    assert INTERVAL_SECONDS["45m"] == 2700
 
 
 def test_display_names_covers_all_periods():
-    """UI 显示名覆盖全部统一周期。"""
-    assert set(DISPLAY_NAMES) == set(PERIODS)
+    """UI 显示名覆盖全部统一周期 + 全部合成周期（2026-10-22 扩充）。"""
+    assert set(DISPLAY_NAMES) == set(PERIODS) | set(COMPOSITE_PERIODS)
     assert DISPLAY_NAMES["1W"] == "1周"
     assert DISPLAY_NAMES["7D"] == "7天"
+    assert DISPLAY_NAMES["4m"] == "4分（1m×4）"
 
 
 # ── 统一契约 ──────────────────────────────────────────────────────────

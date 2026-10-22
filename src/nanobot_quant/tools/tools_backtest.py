@@ -199,6 +199,27 @@ def _period_summary(period: str, res: dict) -> dict:
     }
 
 
+def _validate_periods(periods: list[str]) -> dict | None:
+    """回测周期入参校验：非法返回错误 dict，合法返回 None。
+
+    2026-10-22：可接受集合 = 原生 ∪ 合成（``backtest_periods()``），与页面
+    下拉、``driver._timestep_for`` 共用同一份来源。此前这里用的是仅含原生
+    档的 ``PERIODS``——页面能选 2m/4m、提交却报“不支持的周期”（已修）。
+    """
+    if not periods:
+        return None
+    from nanobot_quant.data_sources.periods import backtest_periods
+
+    allowed = backtest_periods()
+    bad = [p for p in periods if p not in allowed]
+    if bad:
+        return {
+            "error": f"不支持的周期: {bad}",
+            "hint": "可用周期: " + ", ".join(allowed),
+        }
+    return None
+
+
 def _run_multi_period(periods, overrides, build, progress_path) -> dict:
     """多周期独立回放（2026-10-21 拍板：并列独立，不做组合）。
 
@@ -216,6 +237,14 @@ def _run_multi_period(periods, overrides, build, progress_path) -> dict:
     for i, p in enumerate(periods):
         ov = dict(overrides or {})
         ov["sleeptime"] = p
+        # 诊断（2026-10-22）：多周期时“哪一档卡住/失败”必须从 Runtime logs
+        # 直接看到（此前 2m/4m 报错只体现在报告里，需要靠用户回贴）。stderr
+        # 对齐 [OPT-BT] 一类后台日志风格，静态静默不可接受。
+        print(
+            f"[BACKTEST-PAGE] 多周期 {i + 1}/{len(periods)} 周期 {p} 开始",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             r = build(
                 ov,
@@ -231,7 +260,19 @@ def _run_multi_period(periods, overrides, build, progress_path) -> dict:
             compare.append(
                 {"period": p, "status": "insufficient", "error": str(exc)}
             )
+            print(
+                f"[BACKTEST-PAGE] 周期 {p} 失败: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
             continue
+        print(
+            f"[BACKTEST-PAGE] 周期 {p} 完成 ROI={(r.get('roi') or 0.0) * 100:.4f}% "
+            f"成交={len(r.get('fills_detail') or [])} "
+            f"bars={r.get('bars')} 拉取={r.get('fetched_bars')}",
+            file=sys.stderr,
+            flush=True,
+        )
         per[p] = r
         compare.append(_period_summary(p, r))
 
@@ -603,15 +644,9 @@ def run_backtest(
             return {"error": str(exc)}
         syms = list(symbols) if symbols else ([symbol] if symbol else None)
         _periods = [str(p) for p in (periods or []) if p]
-        if _periods:
-            from nanobot_quant.data_sources.periods import PERIODS as _PERIODS
-
-            _bad = [p for p in _periods if p not in _PERIODS]
-            if _bad:
-                return {
-                    "error": f"不支持的周期: {_bad}",
-                    "hint": "可用周期: " + ", ".join(_PERIODS),
-                }
+        _bad_req = _validate_periods(_periods)
+        if _bad_req:
+            return _bad_req
         threading.Thread(
             target=_auto_backtest_driver,
             args=(run_id, scene, syms, start, end, initial_quote, batches,
