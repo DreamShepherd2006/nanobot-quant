@@ -237,6 +237,14 @@ def _run_multi_period(periods, overrides, build, progress_path) -> dict:
     for i, p in enumerate(periods):
         ov = dict(overrides or {})
         ov["sleeptime"] = p
+        # 诊断（2026-10-22）：多周期时“哪一档卡住/失败”必须从 Runtime logs
+        # 直接看到（此前 2m/4m 报错只体现在报告里，需要靠用户回贴）。stderr
+        # 对齐 [OPT-BT] 一类后台日志风格，静态静默不可接受。
+        print(
+            f"[BACKTEST-PAGE] 多周期 {i + 1}/{len(periods)} 周期 {p} 开始",
+            file=sys.stderr,
+            flush=True,
+        )
         try:
             r = build(
                 ov,
@@ -252,7 +260,19 @@ def _run_multi_period(periods, overrides, build, progress_path) -> dict:
             compare.append(
                 {"period": p, "status": "insufficient", "error": str(exc)}
             )
+            print(
+                f"[BACKTEST-PAGE] 周期 {p} 失败: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
             continue
+        print(
+            f"[BACKTEST-PAGE] 周期 {p} 完成 ROI={(r.get('roi') or 0.0) * 100:.4f}% "
+            f"成交={len(r.get('fills_detail') or [])} "
+            f"bars={r.get('bars')} 拉取={r.get('fetched_bars')}",
+            file=sys.stderr,
+            flush=True,
+        )
         per[p] = r
         compare.append(_period_summary(p, r))
 

@@ -712,8 +712,9 @@ def test_bar_map_new_periods():
     # bar: 前缀直拉
     assert _resolve_bar("bar:2H") == "2H"
     # fail-closed：未知周期抛 ValueError，不静默回退日线
-    with pytest.raises(ValueError, match="2m"):
-        _resolve_bar("2m")
+    # 2026-10-22：2m/4m 已是合成周期（合法），故用真正未知的 9m 验 fail-closed
+    with pytest.raises(ValueError, match="9m"):
+        _resolve_bar("9m")
     with pytest.raises(ValueError, match="bogus"):
         _resolve_bar("bogus")
     # 空 timestep = 未指定，用默认 1D

@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -127,7 +128,17 @@ def _composite_fetch(
         else:
             start = end - max_bars_for(src) * src_sec
         df_src = fetch(pair, start, end, src)
-        return aggregate_bars(df_src, period=bar, source=src, factor=factor)
+        out = aggregate_bars(df_src, period=bar, source=src, factor=factor)
+        # 诊断（2026-10-22）：合成档取数全链路在 Runtime logs 里可见——
+        # 否则“聚合后根数为 0 / 覆盖不足”只能从报告倒推。走 stderr，
+        # 避免污染 MCP stdio JSON-RPC（回测工具也跑在 stdio server 里）。
+        print(
+            f"[BACKTEST] 合成周期 {bar} ← {src}×{factor} pair={pair} "
+            f"src_bars={len(df_src)} out_bars={len(out)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return out
 
     # 供测试与诊断核对“底层究竟是哪条取数路径”（不参与业务逻辑）
     wrapper.__wrapped_fetch__ = fetch

@@ -128,8 +128,6 @@ def aggregate_bars(
         Close=("Close", "last"),
         Volume=("Volume", "sum"),
     )
-    out.index = pd.to_datetime(out.index * tgt_sec, unit="s", utc=True).tz_localize(
-        None
-    )
+    out.index = pd.to_datetime(out.index * tgt_sec, unit="s", utc=True)
     out.index.name = df.index.name
     return out[OUTPUT_COLUMNS]

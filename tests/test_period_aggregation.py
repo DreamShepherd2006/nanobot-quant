@@ -97,8 +97,8 @@ def test_aggregate_ohlcv_first_max_min_last_sum():
     assert out["Low"].iloc[0] == pytest.approx(-0.5)      # min(-0.5, 0.5)
     assert out["Close"].iloc[0] == pytest.approx(1.25)    # 末根 close
     assert out["Volume"].iloc[0] == pytest.approx(2.0)
-    # 索引对齐到 UTC 整除的目标格
-    assert out.index[0] == df.index[0]
+    # 索引对齐到 UTC 整除的目标格（输出统一 tz-aware UTC，与原生档同形）
+    assert out.index[0] == pd.Timestamp(df.index[0], tz="UTC")
     assert (out.index[1] - out.index[0]) == pd.Timedelta(minutes=2)
 
 
@@ -153,7 +153,8 @@ def test_aggregate_handles_lowercase_columns_and_tz_aware_index():
     df.index = df.index.tz_localize("UTC")
     out = aggregate_bars(df, period="2m", source="1m", factor=2)
     assert len(out) == 2
-    assert out.index.tz is None  # 统一输出 naive UTC
+    # 统一输出 tz-aware UTC（对齐原生 fetcher：Gate/OKX 返回的都是 UTC 感知索引）
+    assert str(out.index.tz) == "UTC"
     assert out["Volume"].iloc[0] == pytest.approx(2.0)
 
 
@@ -208,24 +209,54 @@ def test_driver_rejects_unknown_period():
     assert "合成" in str(exc.value)  # 报错里明确列出合成档，便于自查
 
 
-# ── MCP / Handler 入参校验（回归：页面能选但提交 400，2026-10-22）──────
+# ── 数据源层：合成档可被 ReplayDataSource 解析并落成聚合后的 bar ────────
+def test_resolve_bar_accepts_composite():
+    """回归（2026-10-22 quant-demo 实测）：多周期回测 2m/4m 报“不支持的回测周期”。
 
-def test_validate_periods_accepts_composite():
-    from nanobot_quant.tools.tools_backtest import _validate_periods
+    入参校验放行后还有一层：``ReplayDataSource._resolve_bar`` 只认原生映射，
+    合成档直接 fail-closed —— 于是“能选、能提交、回放阶段才错”。
+    """
+    from nanobot_quant.backtest.replay_data_source import _resolve_bar
 
-    assert _validate_periods([]) is None
-    assert _validate_periods(["1m", "3m"]) is None
-    assert _validate_periods(["1m", "3m", "2m", "4m"]) is None
-    assert _validate_periods(list(COMPOSITE_PERIODS)) is None
+    assert _resolve_bar("1m") == "1m"
+    assert _resolve_bar("4H") == "4H"
+    assert _resolve_bar("bar:4m") == "4m"
+    for p in COMPOSITE_PERIODS:
+        assert _resolve_bar(p) == p
+        assert _resolve_bar(p.lower()) == p
+    with pytest.raises(ValueError) as exc:
+        _resolve_bar("7m")
+    # 错误提示必须列出合成档，否则用户看不出 2m/4m 可用
+    assert "4m" in str(exc.value) and "45m" in str(exc.value)
 
 
-def test_validate_periods_rejects_unknown_with_hint():
-    from nanobot_quant.tools.tools_backtest import _validate_periods
+def test_replay_data_source_aggregates_composite_bars():
+    """4m 回测：数据源按 1m 取数、按 4m 回放（索引步长 240s、根数减为 1/4）。"""
+    from nanobot_quant.backtest.fetchers import _composite_fetch
+    from nanobot_quant.backtest.replay_data_source import ReplayDataSource
 
-    err = _validate_periods(["1m", "7m"])
-    assert err is not None and "7m" in err["error"]
-    # 提示里必须同时列出合成档，否则用户无从知道 2m/4m 可用了
-    assert "4m" in err["hint"] and "45m" in err["hint"]
+    calls: list[str] = []
+
+    def fake_fetch(pair, start_ts, end_ts, bar="1D"):
+        calls.append(bar)
+        return _bars(240)  # 240 根 1m = 60 根 4m
+
+    ds = ReplayDataSource(
+        symbols=["SOL"],
+        timestep="4m",
+        start_ts=BASE + 120 * 60,
+        end_ts=BASE + 240 * 60,
+        length=2,
+        fetcher=_composite_fetch(fake_fetch),
+        resolver=lambda sym: "SOL_USDT",
+    )
+    ds.prefetch()
+    assert calls == ["1m"], "合成档必须按源周期取数"
+    idx = pd.DatetimeIndex(ds.bar_times)
+    assert len(idx) == 60
+    assert (idx.to_series().diff().dropna() == pd.Timedelta(minutes=4)).all()
+    # 聚合后仍是 tz-aware UTC（与原生档同形，下游 Bars 构造不变）
+    assert str(idx.tz) == "UTC"
 
 
 # ── 页面注入 ────────────────────────────────────────────────────────────
