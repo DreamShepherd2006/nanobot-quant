@@ -107,7 +107,11 @@ class _TdLiveRunner:
 
         # 通道大类（family）：从 broker spec 解析（gate→cex、okx_dex→dex），
         # 不可直接用 execution_channel 实例名判断（2026-08-17 修复）。
-        family = spec_for_channel(channel).family
+        # slot_model：批次账号模型（per_account=每批绑子账号；shared_pool=
+        # 所有 slot 共用同一账号余额池，§33.52），供策略层余额/账号分派。
+        _spec = spec_for_channel(channel)
+        family = _spec.family
+        slot_model = _spec.slot_model
         strategy_name = load_selected()
         td_params = load_td_params(strategy_name)
 
@@ -199,6 +203,9 @@ class _TdLiveRunner:
                 # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据；
                 # 取 broker spec.family（gate→cex、okx_dex→dex）。
                 "channel_family": family,
+                # P3（2026-10-28）：批次账号模型——策略层据此分派余额查询
+                # （shared_pool 不走 Gate 专用子账号快照，改用 broker._balances）。
+                "slot_model": slot_model,
                 # 2026-08-17 A 修复第二部分：数据源契约（是否已过滤进行中 bar）。
                 # CexDataSource（gate_cex，rows_to_df 已过滤 closed=false）=True；
                 # OnchainOSDataSource（DEX，含进行中 bar）无该属性=False。
@@ -679,18 +686,28 @@ class _TdLiveRunner:
         """
         import sys
 
-        from nanobot_quant.batches import BatchManager, _load_or_migrate
+        from nanobot_quant.batches import (
+            BatchManager,
+            _load_or_migrate,
+            shared_pool_account_ids,
+        )
         from nanobot_quant.exec_params import normalize_execution_channel
         from nanobot_quant.brokers.registry import spec_for_channel
 
         channel = normalize_execution_channel(channel)
-        family = spec_for_channel(channel).family  # gate→cex、okx_dex→dex
+        spec = spec_for_channel(channel)
+        family = spec.family  # gate→cex、okx_dex→dex
+        slot_model = spec.slot_model  # per_account（gate）/ shared_pool（okx_cex）
 
         bm = _load_or_migrate(symbol, channel, scene=scene, account_ids=account_ids)
         if bm is not None and bm.symbol == symbol and bm.slots:
-            if family == "cex" and not all(
-                re.match(r"^gate_bot\d+$", str(s.get("account_id") or ""))
-                for s in bm.slots
+            if (
+                family == "cex"
+                and slot_model == "per_account"
+                and not all(
+                    re.match(r"^gate_bot\d+$", str(s.get("account_id") or ""))
+                    for s in bm.slots
+                )
             ):
                 # 自愈：CEX 通道台账混入 DEX 子钱包 UUID（历史迁移残留，
                 # 2026-08-18 实证 batches.gate.CRCLX.json 为 UUID）——
@@ -730,6 +747,9 @@ class _TdLiveRunner:
                     [str(a) for a in account_ids][:td_batches]
                     if account_ids else None
                 )
+                if want_ids and slot_model == "shared_pool":
+                    # shared_pool：所有 slot 共用首项账号（§33.52）
+                    want_ids = [want_ids[0]] * td_batches
                 if want_ids is not None and cur_ids != want_ids:
                     opens = [
                         s["slot"]
@@ -766,7 +786,16 @@ class _TdLiveRunner:
         if family == "cex":
             from nanobot_quant.gate_credentials import load_slot_map
 
-            if account_ids:
+            if slot_model == "shared_pool":
+                # okx_cex：所有 slot 共用同一账号，批次数不受账号数限制
+                ids, pool_err = shared_pool_account_ids(td_batches, account_ids)
+                if pool_err:
+                    print(
+                        f"[DIAG] td_live: {channel} 批次初始化失败：{pool_err}",
+                        file=sys.stderr, flush=True,
+                    )
+                    return None
+            elif account_ids:
                 ids = [str(a) for a in account_ids][:td_batches]
             else:
                 slot_map = load_slot_map() or {}
@@ -947,6 +976,16 @@ class _TdLiveRunner:
                 managers = getattr(strategy, "batch_managers", None) or {}
             tokens_json = getattr(strategy, "tokens_json", None)
             if (strategy.parameters or {}).get("channel_family") == "cex":
+                if (strategy.parameters or {}).get("slot_model") == "shared_pool":
+                    # shared_pool（okx_cex）天然持仓导入尚未实现（P3-2）：
+                    # 现有实现依赖 slot→gate_botN→UID 映射链，shared_pool 下
+                    # 语义不同。显式跳过（不静默）——切通道前须人工核对台账。
+                    print(
+                        "[DIAG] td_live 对账: shared_pool 通道天然持仓自动导入"
+                        "未实现（P3-2）——本次跳过，请人工核对台账与余额",
+                        file=sys.stderr, flush=True,
+                    )
+                    return
                 importer = self._reconcile_import_cex
             else:
                 importer = self._reconcile_import

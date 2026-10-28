@@ -451,6 +451,39 @@ class BatchManager:
         return out
 
 
+def shared_pool_account_ids(
+    count: int, preferred: Optional[list[str]] = None
+) -> tuple[list[str], str]:
+    """shared_pool 通道（如 okx_cex）的 slot 账号标识：所有 slot 共用同一账号。
+
+    shared_pool 语义（§33.52）= 批次是**逻辑槽位**、共享同一账号的余额池，
+    批次数不受账号数限制（与 per_account「每批绑一个子账号」相反）。
+
+    账号来源优先级：场景 ``sub_accounts`` 首项 → 该通道第一个已配置子账号。
+    返回 ``([acct] * count, "")``；无可用账号时返回 ``([], 原因)``，由调用方
+    fail-closed（绝不静默生成不存在的账号名）。
+
+    新增 shared_pool 通道时在此加分派（当前仅 okx_cex）。
+    """
+    acct = str((preferred or [""])[0] or "")
+    if not acct:
+        try:
+            from .okx_cex_credentials import list_sub_accounts
+
+            for s in list_sub_accounts():
+                if s.get("configured") and s.get("name"):
+                    acct = str(s["name"])
+                    break
+        except Exception as exc:  # noqa: BLE001
+            return [], f"读取子账号配置失败：{type(exc).__name__}: {exc}"
+    if not acct:
+        return [], (
+            "shared_pool 通道无可用于下单的子账号（请在凭证页配置至少一个"
+            "已填全 API Key / Secret / Passphrase 的子账号）"
+        )
+    return [acct] * max(int(count), 1), ""
+
+
 def ensure_batches(
     td_batches: int,
     symbol: str,
@@ -499,10 +532,18 @@ def ensure_batches(
                     f" {len(slot_map)}（per_account 通道每批绑定一个子账号；"
                     f"可用：{', '.join(sorted(slot_map.values()))}）"
                 )
-        ids = [
-            str(slot_map.get(str(i)) or f"gate_bot{i}")
-            for i in range(1, td_batches + 1)
-        ]
+        ids: list[str]
+        if spec.slot_model == "shared_pool":
+            # shared_pool（okx_cex）：所有 slot 共用同一账号，批次数不受
+            # 账号数限制；拿不到账号就 fail-closed（不生成 gate_botN 式假名）。
+            ids, err = shared_pool_account_ids(td_batches)
+            if err:
+                return None, f"批次初始化失败：{err}"
+        else:
+            ids = [
+                str(slot_map.get(str(i)) or f"gate_bot{i}")
+                for i in range(1, td_batches + 1)
+            ]
         bm = BatchManager(
             symbol=symbol, account_ids=ids, channel=ch, scene=scene
         )
