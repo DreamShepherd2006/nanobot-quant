@@ -2573,16 +2573,28 @@ class TdSequentialStrategy(Strategy):
         key = f"{slot_no}:{account}" if account else str(slot_no)
         broker = self._cex_brokers.get(key)
         if broker is None:
-            from nanobot_quant.brokers.cex_broker import CexBroker
-            from nanobot_quant.gate_credentials import load_slot_map
-            name = account or (
-                load_slot_map().get(str(slot_no)) or f"gate_bot{slot_no}"
-            )
-            broker = CexBroker(
-                tokens_json=self.parameters.get("tokens_json") or [],
-                slippage=str(self.parameters.get("slippage", "0.01")),
-                sub_account=name,
-            )
+            if self._shared_pool_channel:
+                # shared_pool（okx_cex）：Account 由台账 slot.account_id 指定，
+                # 无 gate_botN 映射（§33.52）。
+                from nanobot_quant.brokers.okx_cex_broker import OkxCexBroker
+
+                broker = OkxCexBroker(
+                    tokens_json=self.parameters.get("tokens_json") or [],
+                    slippage=str(self.parameters.get("slippage", "0.01")),
+                    sub_account=account or None,
+                )
+            else:
+                from nanobot_quant.brokers.cex_broker import CexBroker
+                from nanobot_quant.gate_credentials import load_slot_map
+
+                name = account or (
+                    load_slot_map().get(str(slot_no)) or f"gate_bot{slot_no}"
+                )
+                broker = CexBroker(
+                    tokens_json=self.parameters.get("tokens_json") or [],
+                    slippage=str(self.parameters.get("slippage", "0.01")),
+                    sub_account=name,
+                )
             self._cex_brokers[key] = broker
         return broker
 
@@ -2595,7 +2607,7 @@ class TdSequentialStrategy(Strategy):
         （保持旧行为，直调路径不受影响）。默认逐查（SELL/估值——安全
         关键路径不赌快照实时性，余额误判会误触发幽灵批次清理）。
         """
-        if use_snapshot:
+        if use_snapshot and not self._shared_pool_channel:
             try:
                 name = str(slot.get("account_id") or "")
                 if not name:
@@ -2627,6 +2639,16 @@ class TdSequentialStrategy(Strategy):
         ).get(quote) or {}
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 
+    # ── P3（2026-10-28）：通道批次账号模型分派 ─────────────────────
+    @property
+    def _slot_model(self) -> str:
+        """批次账号模型：per_account（gate 每批绑子账号）/ shared_pool（okx_cex）。"""
+        return str((self.parameters or {}).get("slot_model") or "per_account")
+
+    @property
+    def _shared_pool_channel(self) -> bool:
+        return self._slot_model == "shared_pool"
+
     def _cex_slot_token_balance(self, slot: dict, symbol: str) -> float:
         """子账号该标的持仓量（Gate 余额键=基础币，gate_symbol 可能是完整 pair）。
 
@@ -2635,9 +2657,31 @@ class TdSequentialStrategy(Strategy):
         直接用 gate_symbol 作键会查不到而误判无持仓（曾致 CRCLX 真实持仓被释放台账）。
         与对账导入同源：经 gate_pair 剥离 quote 得基础币键（td_live._reconcile_import_cex 同款）。
         """
+        tokens_json = self.parameters.get("tokens_json") or []
+        if self._shared_pool_channel:
+            # OKX：余额键 = 账户内币种（如 "XCRCL"），与 tokens.json 的 symbol
+            # （"CRCLX"）可能不同 → 先按 ``okx_ticker``（tokens.json 的
+            # okx_symbol 映射，单一事实源）基础币查，再回退 symbol。
+            from nanobot_quant.gate_credentials import okx_ticker
+
+            keys: list[str] = []
+            try:
+                base = okx_ticker(symbol, tokens_json).split("-")[0].split("_")[0]
+                if base:
+                    keys.append(base.upper())
+            except Exception:  # noqa: BLE001 - 映射缺失不阻断，退化到 symbol
+                pass
+            keys.append(symbol.upper())
+            balances = self._cex_slot_balances(slot)
+            for key in keys:
+                bal = balances.get(key) or {}
+                qty = float(bal.get("available") or 0) + float(bal.get("locked") or 0)
+                if qty > 0:
+                    return qty
+            return 0.0
+
         from nanobot_quant.gate_credentials import gate_pair
 
-        tokens_json = self.parameters.get("tokens_json") or []
         key = gate_pair(symbol, tokens_json).split("_")[0]
         bal = self._cex_slot_balances(slot).get(key) or {}
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
@@ -2692,12 +2736,22 @@ class TdSequentialStrategy(Strategy):
             return cached[1]
         try:
             from nanobot_quant.data_sources import get_data_source
-            px = get_data_source("gate_cex").get_price(currency)
-            if px and px > 0:
-                px = float(px)
-            else:
-                px = get_data_source("okx_cex").get_price(currency)
-                px = float(px) if px and px > 0 else 0.0
+
+            # 取价与执行同所（§33.52）：shared_pool（okx_cex）先 OKX，否则先 Gate
+            order = (
+                ("okx_cex", "gate_cex")
+                if self._shared_pool_channel
+                else ("gate_cex", "okx_cex")
+            )
+            px = 0.0
+            for source in order:
+                try:
+                    got = get_data_source(source).get_price(currency)
+                except Exception:  # noqa: BLE001
+                    continue
+                if got and float(got) > 0:
+                    px = float(got)
+                    break
         except Exception:  # noqa: BLE001
             return 0.0
         if px > 0:
@@ -2736,6 +2790,10 @@ class TdSequentialStrategy(Strategy):
         self._balances_error = None
         self._slot_balances = {}
         self._name_to_uid = {}
+        if self._shared_pool_channel:
+            # shared_pool（okx_cex）：无 Gate 子账号快照（余额归 broker 单账号
+            # 查询），BUY 路径回退逐查（_cex_slot_balances use_snapshot=False）。
+            return
         self._balances_prefetched = False
         if self.parameters.get("channel_family") != "cex":
             return
