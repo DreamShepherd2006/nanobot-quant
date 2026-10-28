@@ -22,6 +22,13 @@ from typing import Any, Callable, Optional
 from nanobot_quant.exec_params import normalize_execution_channel
 
 
+#: 资金模型（2026-10-28，docs/quant-system.md §33.52）：
+#: ``per_account``（默认）—— 每批绑定一个子账号/子钱包，批次数量受账号数限制；
+#: ``shared_pool`` —— 批次是逻辑槽位，同场景多个 slot 共享同一账号余额池，
+#: 槽位数不受账号数限制（OKX CEX 4 子账号装 100+ 仓位即此模型）。
+SLOT_MODELS = ("per_account", "shared_pool")
+
+
 class BrokerSpec:
     """An execution broker (dex / cex family).
 
@@ -39,14 +46,20 @@ class BrokerSpec:
         exchange: Optional[str] = None,
         quote: str = "USDC",
         data_source: Optional[str] = None,
+        slot_model: str = "per_account",
         create_broker: Optional[Callable[..., Any]] = None,
     ) -> None:
+        if slot_model not in SLOT_MODELS:
+            raise ValueError(
+                f"{name}: slot_model 必须是 {'/'.join(SLOT_MODELS)}，得到 {slot_model!r}"
+            )
         self.name = name
         self.display = display
         self.family = family          # "dex" | "cex"
         self.exchange = exchange      # "okx" | "gate" | None
         self.quote = quote            # broker 计价货币（USDC / USDT）
         self.data_source = data_source  # 数据源注册名（onchainos / gate_cex）
+        self.slot_model = slot_model  # "per_account" | "shared_pool"
         self._create_broker = create_broker
 
     def create_broker(self, **kw: Any) -> Any:

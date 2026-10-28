@@ -333,7 +333,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     # ── ④ 仓位与分批 ──────────────────────────────────────────────────
     "td_batches": {
-        "group": "scene", "min": 1, "max": 50, "step": 1, "std": 1, "integer": True,
+        "group": "scene", "min": 1, "max": 200, "step": 1, "std": 1, "integer": True,
         "label": "批次数量（子钱包）",
         "label_cex": "批次数量（子账号）",
         "hint": "1=单仓模式（现状）；>1 时每批绑定一个 Agentic Wallet 子钱包，保存后自动创建不足的子钱包并建立映射",
@@ -667,6 +667,45 @@ def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
     return None
 
 
+def _validate_batch_capacity(merged: dict[str, Any]) -> str | None:
+    """per_account 通道：启用场景的批次数不得超过实际子账号数。
+
+    2026-10-28（docs/quant-system.md §33.52 拍板 b）：``td_batches`` 上限从
+    50 放宽到 200 后必须前置 fail-closed——此前 ``batches.ensure_batches``
+    静默生成 ``gate_botN``（不存在）到运行时才失败。
+
+    读取凭证失败（IO 抖动）时**跳过校验**：不因无关故障阻塞参数保存；
+    ``batches.ensure_batches`` 在运行时还有一道同样的 fail-closed。
+    ``shared_pool`` 通道（OKX CEX）不校验——逻辑槽位数不受账号数限制。
+    """
+    try:
+        from .brokers.registry import spec_for_channel
+        from .gate_credentials import load_slot_map
+
+        spec = spec_for_channel(str(merged.get("execution_channel") or "okx_dex"))
+        if spec.family != "cex" or spec.slot_model != "per_account":
+            return None
+        n = len(load_slot_map() or {})
+    except Exception:  # noqa: BLE001 - 凭证不可读时不阻塞保存
+        return None
+    if n <= 0:
+        return None  # 未配置子账号：交给运行时提示
+    for name, sc in (merged.get("scenes") or {}).items():
+        if not isinstance(sc, dict) or not sc.get("enabled"):
+            continue
+        try:
+            batches = int(sc.get("batches", 1) or 1)
+        except (TypeError, ValueError):
+            continue
+        if batches > n:
+            label = (SCENES.get(name) or {}).get("label", name)
+            return (
+                f"场景{label}：批次数量 {batches} 超过实际子账号数 {n}"
+                f"（per_account 通道每批绑定一个子账号）"
+            )
+    return None
+
+
 def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
     """Validate + persist the full parameter set.
 
@@ -721,6 +760,11 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
         merged["scenes"]["high"][fk] = v
     _sync_flat_from_high(merged)
+
+    # 2026-10-28（§33.52 拍板 b）：per_account 通道批次数不得超过实际子账号数
+    capacity_err = _validate_batch_capacity(merged)
+    if capacity_err is not None:
+        return {"ok": False, "error": capacity_err}
 
     path = exec_params_path()
     try:
