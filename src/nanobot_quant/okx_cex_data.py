@@ -68,21 +68,25 @@ _BAR_MAP: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _to_inst_id(ticker: str) -> str:
+def to_inst_id(ticker: str, quote: str = "USDT") -> str:
     """Convert a ticker to OKX instrument ID format.
 
-    Stock tickers: prefix with X if not already prefixed, suffix -USDT.
-    Crypto tickers: suffix -USDT.
+    Stock tickers: prefix with X if not already prefixed.
+    Crypto tickers: suffix with the quote currency.
 
-    >>> _to_inst_id("AAPL")
+    ``quote`` 默认 USDT（与历史行为一致，研究源与执行源同源）；CEX 执行
+    broker 可传 USDC（取决于子账号资金，P3 实盘时确认）。
+
+    >>> to_inst_id("AAPL")
     'XAAPL-USDT'
-    >>> _to_inst_id("XSPCX")
+    >>> to_inst_id("XSPCX")
     'XSPCX-USDT'
-    >>> _to_inst_id("BTC")
+    >>> to_inst_id("BTC")
     'BTC-USDT'
-    >>> _to_inst_id("XAUT-USDT")   # 完整 instId 原样返回
+    >>> to_inst_id("XAUT-USDT")   # 完整 instId 原样返回
     'XAUT-USDT'
     """
+    q = (quote or "USDT").upper().strip()
     ticker = ticker.upper().strip()
     # 已是完整 instId（含分隔符）→ 原样返回。否则 X 前缀的现货对会被二次加
     # 后缀：XAUT-USDT → XAUT-USDT-USDT，OKX 报 code=51001 Instrument doesn't exist
@@ -91,7 +95,7 @@ def _to_inst_id(ticker: str) -> str:
         return ticker
     if ticker.startswith("X"):
         # Already an X-prefixed tokenized stock
-        return f"{ticker}-USDT"
+        return f"{ticker}-{q}"
 
     # If it looks like a stock ticker (1-5 letters, not a common crypto)
     # we prefix with X. Common crypto tickers are left as-is.
@@ -102,10 +106,14 @@ def _to_inst_id(ticker: str) -> str:
         "BONK", "JUP", "TIA", "SEI", "STRK", "ZK", "NOT",
     })
     if ticker in _COMMON_CRYPTO or ticker.endswith("USDT"):
-        return ticker if "-" in ticker else f"{ticker}-USDT"
+        return ticker if "-" in ticker else f"{ticker}-{q}"
 
-    # Treat as stock: prefix X, suffix -USDT
-    return f"X{ticker}-USDT"
+    # Treat as stock: prefix X, suffix quote
+    return f"X{ticker}-{q}"
+
+
+#: 向后兼容别名（`tests/test_okx_cex_api.py` 引用旧名；P2 起对外用 `to_inst_id`）
+_to_inst_id = to_inst_id
 
 
 # ---------------------------------------------------------------------------

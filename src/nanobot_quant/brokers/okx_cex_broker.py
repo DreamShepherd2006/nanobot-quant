@@ -1,0 +1,434 @@
+"""OKX CEX 现货执行通道 broker（§33.52 P2）。
+
+与 :class:`~nanobot_quant.brokers.cex_broker.CexBroker`（Gate）同构：策略层零改动，
+只换 broker 实现。**P2 只落结构**——``EXECUTION_CHANNELS`` 不含 ``okx_cex``、
+数据源 ``kind`` 仍为 ``research``，UI 不可选（拍板 A，见 docs/quant-system.md
+§33.52.10）。
+
+与 Gate 通道的语义差异（勿按 Gate 直觉改）：
+
+- **单账号承载多逻辑 slot**（``slot_model="shared_pool"``）：账户由 ``sub_account``
+  指定（子账号 name 或 uid），slot 只是台账概念。消费端（``ensure_batches`` /
+  余额快照 / 资金池检查）在 P3 实现，本文件不假设。
+- **``sz`` = 基础币数量**（``tgtCcy="base_ccy"``，按 ``lotSz`` 向下取整），台账与
+  成交天然一致；不用 Gate 的「quote 金额」语义（服务端按精度截断 base，实测偏差
+  0.1–4.7%，曾致 BNB 精度死锁与 ETH slot2 卡仓）。
+- **instId** 经 :func:`nanobot_quant.okx_cex_data.to_inst_id`（与数据源同源），
+  计价币默认 USDT，可由构造参数覆盖。
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+import time
+from typing import Any, Optional
+
+from lumibot.brokers import Broker
+
+from .. import okx_sdk, okx_spot
+from ..okx_cex_data import to_inst_id
+from ..okx_options_trade import account_balance, account_creds
+
+logger = logging.getLogger(__name__)
+
+#: 现货计价/现金币种（估值时归入 cash，不算持仓）
+_CASH_CURRENCIES = frozenset({"USDT", "USDC", "USD", "USDG"})
+
+
+def _num(value) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _base_of(inst_id: str) -> str:
+    """instId → 基础币（``SOL-USDT`` → ``SOL``）。"""
+    return (inst_id.split("-")[0] if inst_id else "").upper()
+
+
+class _DummyDataSource:
+    """占位数据源：让 ``Broker.__init__`` 不强制要求真实 data source。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def get_chains(self, asset=None, quote=None):
+        return {}
+
+
+class OkxCexBroker(Broker):
+    """Lumibot Broker，路由到 OKX CEX 现货市价单。
+
+    Parameters:
+        credentials: 未用（保留与 CexBroker 同签名；实际由 ``account_creds`` 读盘）。
+        tokens_json: tokens.json 条目（symbol / gate_symbol / okx_symbol）。
+        sub_account: OKX 子账号 name 或 uid；空 → 第一个已录入完整凭证的子账号。
+        quote: 计价币（默认 USDT，与数据源一致；可传 USDC）。
+        slippage: 价格保护容忍度（百分比，1 = 1%）——市价单不参与定价，
+            保留参数只为与 CexBroker 同签名（预检与记录用）。
+    """
+
+    SOURCE = "okx_cex"
+
+    #: 合约规格缓存（lotSz / minSz / tickSz），按 instId
+    _limits_cache: dict[str, tuple[float, dict]] = {}
+    _LIMITS_TTL = 300.0
+
+    #: 取价缓存（同 CexBroker：类级共享、跨实例复用、15s ≈ 一轮生命周期）
+    _price_cache: dict[str, tuple[float, float]] = {}
+    _PRICE_TTL = 15.0
+
+    def __init__(
+        self,
+        credentials: Optional[dict] = None,
+        tokens_json: Optional[list[dict]] = None,
+        sub_account: Optional[str] = None,
+        quote: str = "USDT",
+        slippage: str = "0.01",
+        **kwargs,
+    ):
+        if "data_source" not in kwargs:
+            kwargs["data_source"] = _DummyDataSource()
+        super().__init__(**kwargs)
+        # 加密 24/7：让 StrategyExecutor 循环持续运转
+        self.market = "24/7"
+        self._tokens_json = tokens_json or []
+        self._sub_account = sub_account or ""
+        self._quote = (quote or "USDT").upper().strip()
+        self._slippage = float(slippage)
+
+        self._creds = account_creds(self._sub_account)
+        if not (self._creds.get("api_key") and self._creds.get("secret_key")):
+            raise ValueError(
+                "OKX CEX credentials missing api_key/secret_key"
+                f" (okx_cex.json sub_account={sub_account!r})"
+            )
+        self._tracked: dict[str, dict] = {}  # ord_id → meta
+
+    # ═══════════════════════════════════════════════════════════
+    #  Helpers
+    # ═══════════════════════════════════════════════════════════
+
+    def inst_id_of(self, symbol: str) -> str:
+        """symbol → OKX 现货 instId（先经 tokens.json 的 ``okx_symbol`` 映射，
+        再走与数据源相同的 ``to_inst_id`` 规则）。
+
+        ``okx_symbol`` 必须登记正确（CRCLX → XCRCL）：否则 ``to_inst_id`` 会按
+        「股票加 X」规则得到 ``XCRCLX-USDT``，下单报 51001（fail-closed）。
+        """
+        base = symbol
+        try:
+            from ..gate_credentials import okx_ticker
+
+            base = okx_ticker(symbol, self._tokens_json) or symbol
+        except Exception as e:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX okx_ticker {symbol} error: {e}",
+                  file=sys.stderr, flush=True)
+        return to_inst_id(base, self._quote)
+
+    def limits_of(self, symbol: str) -> dict:
+        """合约规格 ``{lot_sz, min_sz, tick_sz}``（300s 缓存；失败抛异常）。"""
+        inst = self.inst_id_of(symbol)
+        now = time.time()
+        cached = self._limits_cache.get(inst)
+        if cached and now - cached[0] < self._LIMITS_TTL:
+            return cached[1]
+        lim = okx_spot.instrument_limits(inst)
+        self._limits_cache[inst] = (now, lim)
+        return lim
+
+    def _price_of(self, symbol: str) -> float:
+        """当前价（15s 缓存；0 = 取价失败 → 调用方 fail-closed）。
+
+        直接用 OKX ``/market/ticker``（不经数据源模块，避开 pandas 依赖），
+        instId 与本 broker 的 quote 一致（``-USDT`` 或 ``-USDC``）。
+        """
+        now = time.time()
+        cached = self._price_cache.get(symbol)
+        if cached and now - cached[0] < self._PRICE_TTL:
+            return cached[1]
+        px = 0.0
+        try:
+            rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=self.inst_id_of(symbol)))
+            row = rows[0] if isinstance(rows, list) and rows else {}
+            px = _num(row.get("last"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX price {symbol} error: {e}", file=sys.stderr, flush=True)
+        if px > 0:
+            self._price_cache[symbol] = (now, px)
+        return px
+
+    def _balances(self) -> dict:
+        """子账号资产 → ``{ccy: {available, locked, eq_usd}}``；失败返回 {}（fail-closed）。"""
+        try:
+            bal = account_balance(self._sub_account)
+        except Exception as e:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX balance error: {e}", file=sys.stderr, flush=True)
+            return {}
+        out: dict[str, dict] = {}
+        for row in bal.get("details") or []:
+            ccy = (row.get("ccy") or "").upper()
+            if not ccy:
+                continue
+            out[ccy] = {
+                "available": _num(row.get("avail_bal")),
+                "locked": _num(row.get("frozen_bal")),
+                "eq_usd": _num(row.get("eq_usd")),
+            }
+        return out
+
+    # ═══════════════════════════════════════════════════════════
+    #  Balances & Positions
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_balances_at_broker(self, quote_asset, strategy) -> tuple[float, float, float]:
+        """返回 ``(cash, positions_value, total)``（计价币单位）。
+
+        ``cash`` = 计价币可用额（``availBal``，不含挂单冻结——冻结中的资金下不了
+        新单，与 CexBroker 同口径）；``positions_value`` = 非现金币按 USD 估值。
+        """
+        balances = self._balances()
+        if not balances:
+            return (0.0, 0.0, 0.0)
+        quote = (getattr(quote_asset, "symbol", None) or self._quote).upper()
+        cash = _num((balances.get(quote) or {}).get("available"))
+        positions_value = sum(
+            _num(b.get("eq_usd"))
+            for ccy, b in balances.items()
+            if ccy not in _CASH_CURRENCIES
+        )
+        return (cash, positions_value, cash + positions_value)
+
+    def _pull_positions(self, strategy) -> list:
+        """非现金币种余额即持仓；现价经数据源取（失败 0，调用方 fail-closed）。"""
+        balances = self._balances()
+        if not balances:
+            return []
+        from lumibot.entities import Asset, Position
+
+        positions = []
+        for ccy, b in balances.items():
+            qty = _num(b.get("available")) + _num(b.get("locked"))
+            if qty <= 0 or ccy in _CASH_CURRENCIES:
+                continue
+            pos = Position(
+                strategy=strategy,
+                asset=Asset(symbol=ccy, asset_type="crypto"),
+                quantity=qty,
+            )
+            pos.current_price = self._price_of(ccy)
+            positions.append(pos)
+        return positions
+
+    def _pull_position(self, strategy, asset):
+        for p in self._pull_positions(strategy):
+            if p.asset.symbol == getattr(asset, "symbol", None):
+                return p
+        return None
+
+    # ═══════════════════════════════════════════════════════════
+    #  Orders
+    # ═══════════════════════════════════════════════════════════
+
+    def _submit_order(self, order) -> Any:
+        """现货市价单：``sz`` 取基础币数量、按 ``lotSz`` 向下取整后提交。"""
+        side = str(getattr(order, "side", "") or "").lower()
+        asset = getattr(order, "asset", None)
+        symbol = str(getattr(asset, "symbol", "") or "")
+        quantity = _num(getattr(order, "quantity", 0))
+        if side not in ("buy", "sell"):
+            order.set_error(f"OKX invalid side: {side!r}")
+            return order
+        if not symbol or quantity <= 0:
+            order.set_error(f"OKX invalid order: symbol={symbol!r} qty={quantity}")
+            return order
+
+        try:
+            inst = self.inst_id_of(symbol)
+            lim = self.limits_of(symbol)
+        except Exception as e:  # noqa: BLE001
+            order.set_error(f"OKX 合约规格不可用 {symbol}: {e}")
+            return order
+
+        lot = _num(lim.get("lot_sz"))
+        min_sz = _num(lim.get("min_sz"))
+        sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
+        if sz <= 0:
+            order.set_error(f"OKX {inst} 下单量取整后为 0（qty={quantity} lotSz={lot}）")
+            return order
+        if min_sz > 0 and sz < min_sz:
+            order.set_error(
+                f"OKX {inst} 下单量 {sz} < minSz {min_sz}（fail-closed，不凑单）"
+            )
+            return order
+
+        balances = self._balances()
+        if side == "sell":
+            avail = _num((balances.get(_base_of(inst)) or {}).get("available"))
+            if avail <= 0:
+                order.set_error(f"OKX {_base_of(inst)} 可用余额为 0（或查询失败）")
+                return order
+            if sz > avail:
+                shrunk = okx_spot.floor_step(avail, lot) if lot > 0 else avail
+                if shrunk <= 0:
+                    order.set_error(
+                        f"OKX {_base_of(inst)} 可用 {avail} 按 lotSz {lot} 取整后为 0"
+                    )
+                    return order
+                print(
+                    f"[DIAG] OKX-CEX SHRINK {symbol}: 计划 {sz} → 可用 {shrunk}",
+                    file=sys.stderr, flush=True,
+                )
+                sz = shrunk
+        else:
+            px = self._price_of(symbol)
+            cash = _num((balances.get(self._quote) or {}).get("available"))
+            if px <= 0:
+                order.set_error(f"OKX {symbol} 取价失败（fail-closed，不盲下单）")
+                return order
+            need = sz * px
+            if need > cash * 1.001:  # 0.1% 容差（价格瞬时波动）
+                order.set_error(
+                    f"OKX {self._quote} 不足：需 {need:.4f}，可用 {cash:.4f}"
+                )
+                return order
+
+        try:
+            req = okx_spot.strict_order(
+                self._creds,
+                inst_id=inst,
+                side=side,
+                sz=sz,
+                tgt_ccy="base_ccy",
+                tag="td-live",
+            )
+        except Exception as e:  # noqa: BLE001
+            order.set_error(f"OKX 下单失败: {e}")
+            return order
+
+        oid = req["ord_id"]
+        res = okx_spot.poll_fill(self._creds, inst, oid)
+        status = str(res.get("status") or "unknown")
+        print(
+            f"OKX-CEX BROKER DIAG | submit {side} {sz} {symbol}@{inst} "
+            f"oid={oid[:12]} status={status} filled={res.get('acc_fill_sz')} "
+            f"avg={res.get('avg_px')} timed_out={res.get('timed_out')}",
+            file=sys.stderr, flush=True,
+        )
+
+        meta = {
+            "symbol": symbol, "inst": inst, "side": side,
+            "quantity": sz, "ts": time.time(),
+        }
+        if status == "filled":
+            order.set_filled()
+            # lumibot v4.5.78 的 set_filled 不更新 status，手动同步
+            order.status = "fill"
+            cex = order.custom_params.get("cex") or {}
+            cex["avg_price"] = _num(res.get("avg_px"))
+            cex["filled"] = _num(res.get("acc_fill_sz"))
+            cex["ord_id"] = oid
+            order.custom_params["cex"] = cex
+            meta.update({"avg_price": _num(res.get("avg_px")),
+                         "filled": _num(res.get("acc_fill_sz"))})
+            self._tracked[oid] = meta
+        elif status == "cancelled":
+            order.set_error(f"OKX order {oid} cancelled（零成交或部分成交后撤销）")
+            meta.update({"filled": _num(res.get("acc_fill_sz"))})
+            self._tracked[oid] = meta
+        else:
+            # pending / 超时：保持已提交状态，由 _pull_broker_order 复检
+            self._tracked[oid] = meta
+        return order
+
+    def cancel_order(self, order) -> None:
+        """撤销未成交剩余（OKX 支持撤单）。"""
+        oid = str(getattr(order, "identifier", "") or "")
+        info = self._tracked.get(oid, {})
+        inst = info.get("inst", "")
+        if not oid or not inst:
+            return
+        try:
+            from .. import okx_sdk
+
+            okx_sdk.check(okx_sdk.trade_for(self._creds).cancel_order(
+                instId=inst, ordId=oid))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("cancel_order %s error: %s", oid, e)
+
+    def _modify_order(self, order, limit_price=None, stop_price=None, quantity=None):
+        """市价单不可改单（no-op）。"""
+        return
+
+    # ═══════════════════════════════════════════════════════════
+    #  Order Reconciliation
+    # ═══════════════════════════════════════════════════════════
+
+    def _pull_broker_order(self, identifier: str) -> Any:
+        info = self._tracked.get(identifier, {})
+        inst = info.get("inst", "")
+        if not inst:
+            return None
+        try:
+            res = okx_spot.query_order(self._creds, inst, identifier)
+        except Exception as e:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX query order error {identifier}: {e}",
+                  file=sys.stderr, flush=True)
+            res = {"status": "submitted"}
+        return self._parse_broker_order(
+            {
+                "id": identifier,
+                "status": res.get("status") or "submitted",
+                "filled": _num(res.get("acc_fill_sz")),
+                "avg_price": _num(res.get("avg_px")),
+                "symbol": info.get("symbol", ""),
+                "side": info.get("side", "buy"),
+                "quantity": info.get("quantity", 0),
+            },
+            strategy_name=None,
+            strategy_object=None,
+        )
+
+    def _parse_broker_order(self, response: dict, strategy_name, strategy_object) -> Any:
+        from lumibot.entities import Asset, Order
+
+        oid = str(response.get("id") or "")
+        status = str(response.get("status") or "submitted")
+        symbol = str(response.get("symbol") or "")
+        side = str(response.get("side") or "buy")
+        quantity = _num(response.get("quantity"))
+        order = Order(
+            strategy=strategy_name or "okx_cex",
+            identifier=oid,
+            asset=Asset(symbol=symbol, asset_type="crypto") if symbol else None,
+            quantity=quantity,
+            side=side,
+            status=status,
+        )
+        if status == "filled":
+            order.set_filled()
+            order.status = "fill"
+        elif status == "cancelled":
+            order.set_canceled()
+        return order
+
+    def _pull_broker_all_orders(self) -> list:
+        return []
+
+    # ═══════════════════════════════════════════════════════════
+    #  Streaming（轮询式，与 CexBroker / OnchainOSBroker 同构）
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_stream_object(self):
+        return None
+
+    def _register_stream_events(self):
+        pass
+
+    def _run_stream(self):
+        pass
+
+    def get_historical_account_value(self):
+        return {}

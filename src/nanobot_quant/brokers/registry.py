@@ -124,6 +124,27 @@ def _create_okx_dex(*, tokens_json: Optional[list[dict]] = None,
     )
 
 
+def _create_okx_cex(*, tokens_json: Optional[list[dict]] = None,
+                    slippage: str = "0.01",
+                    sub_account: Optional[str] = None,
+                    quote: str = "USDT",
+                    data_source: Any = None, **kw: Any) -> Any:
+    """OKX CEX 现货 broker（§33.52 P2）。
+
+    不传 ``data_source`` 时 broker 内部用占位源——K 线取数在 P3 接入
+    （``bar:{timestep}`` 路径与 ``gate`` 同构）。
+    """
+    from nanobot_quant.brokers.okx_cex_broker import OkxCexBroker
+
+    return OkxCexBroker(
+        tokens_json=tokens_json or [],
+        sub_account=sub_account,
+        quote=quote,
+        slippage=str(slippage),
+        **({"data_source": data_source} if data_source is not None else {}),
+    )
+
+
 register(BrokerSpec(
     name="gate",
     display="Gate CEX",
@@ -141,6 +162,19 @@ register(BrokerSpec(
     quote="USDC",
     data_source="onchainos",
     create_broker=_create_okx_dex,
+))
+# OKX CEX（§33.52 P2，2026-10-28）：slot_model=shared_pool——批次是逻辑槽位，
+# 同场景多个 slot 共享同一子账号余额池。**P2 只注册 spec、不开放 UI**：
+# EXECUTION_CHANNELS 不含本项、数据源 kind 仍为 research（拍板 A，§33.52.10）。
+register(BrokerSpec(
+    name="okx_cex",
+    display="OKX CEX（现货）",
+    family="cex",
+    exchange="okx",
+    quote="USDT",
+    data_source="okx_cex",
+    slot_model="shared_pool",
+    create_broker=_create_okx_cex,
 ))
 
 

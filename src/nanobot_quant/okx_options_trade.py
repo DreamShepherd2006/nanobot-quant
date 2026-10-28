@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import okx_sdk
+from . import okx_sdk, okx_spot
 from .okx_sdk import OkxSdkError
 
 #: OKX 期权保证金模式（2026-09-04 实测网页 + 官方 agent-skills 确认）：
@@ -968,23 +968,12 @@ def _place(creds: dict, *, inst_id: str, side: str, sz: int,
 
 
 def poll_order(creds: dict, inst_id: str, ord_id: str) -> dict:
-    """查询订单状态 → {state, avg_px, acc_fill_sz, fee, status}。"""
-    rows = okx_sdk.check(okx_sdk.trade_for(creds).get_order(
-        instId=inst_id, ordId=ord_id))
-    r = rows[0] if isinstance(rows, list) and rows else {}
-    st = r.get("state", "")
-    status = {"live": "pending", "partially_filled": "pending",
-              "filled": "filled", "canceled": "cancelled",
-              "mmp_canceled": "cancelled"}.get(st, st or "unknown")
-    return {
-        "state": st,
-        "status": status,
-        "ord_id": ord_id,
-        "avg_px": _f(r.get("avgPx")),
-        "acc_fill_sz": _f(r.get("accFillSz")),
-        "fee": _f(r.get("fee")),
-        "fee_ccy": (r.get("feeCcy") or ""),
-    }
+    """查询订单状态 → {state, avg_px, acc_fill_sz, fee, status}。
+
+    实现在 ``okx_spot.query_order``（§33.52 P2：与 CEX broker 共用一份），
+    本函数仅保留旧名作为薄封装，调用方无需改动。
+    """
+    return okx_spot.query_order(creds, inst_id, ord_id)
 
 
 def fee_usd_fields(fee, side: str, base: str = "", px: float = 0.0,
@@ -1494,38 +1483,19 @@ def spot_cover(account: str, *, spot_inst: str,
         sz=sz, tgt_ccy=tgt, status="pending",
         **({"ref_id": ref_id} if ref_id else {}),
     )
-    params = {
-        "instId": spot_inst, "tdMode": "cash", "side": "buy",
-        "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
-    }
-    is_usd_pair = spot_inst.endswith("-USD")
-    params = {
-        "instId": spot_inst, "side": "buy",
-        "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_COVER,
-        # 期权子账号为 acctLv=3（Multi-currency margin）模式：OKX 官方 Jupyter
-        # 教程第 8 节——multi-currency/portfolio margin 模式下现货订单须
-        # tdMode='cross'（cash 仅限 Spot / Spot-and-futures 模式，传 cash 报 51000）
-        "tdMode": "cross",
-    }
-    api = okx_sdk.trade_for(a["creds"])
     try:
-        if is_usd_pair:
-            # Crypto-USD（官网 币种/USDⓢ，统一 USD 订单簿）：用 USDC 交易须
-            # tradeQuoteCcy=USDC（changelog 迁移场景；FAQ：多稳定币自动内部换算）。
-            # python-okx set_order 未封装 tradeQuoteCcy → 经 send_request 透传。
-            # 9/30 后 instId 须切 Crypto-USDC（届时默认 USDC 结算、可不传 tradeQuoteCcy）。
-            params["tradeQuoteCcy"] = "USDC"
-            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
-        else:
-            data = okx_sdk.check(api.set_order(**params))
+        req = okx_spot.market_order(
+            a["creds"], inst_id=spot_inst, side="buy", sz=sz,
+            tgt_ccy=tgt, tag=TAG_COVER,
+        )
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
         raise
-    row = data[0] if isinstance(data, list) and data else {}
-    if row.get("sCode") not in (None, "", "0"):
-        raise OkxSdkError(f"OKX {row.get('sCode')} {row.get('sMsg', '')}".strip())
-    ord_id = row.get("ordId") or ""
+    if req.get("rejected"):
+        # 与原实现一致：拒单（sCode 非 0）不落台账 failed，异常直接抛给上层
+        raise OkxSdkError(f"OKX {req.get('s_code')} {req.get('s_msg', '')}".strip())
+    ord_id = req.get("ord_id") or ""
     update_ledger(lambda x: x["id"] == entry["id"], ord_id=ord_id)
     entry["ord_id"] = ord_id
     return _settle_cover_entry(a["creds"], entry)
@@ -1614,26 +1584,18 @@ def spot_exit(account: str, *, spot_inst: str,
         spot_inst=spot_inst, side="sell", ord_type="market",
         sz=sz, tgt_ccy=tgt, ref_inst=ref_inst or "", status="pending",
     )
-    params = {
-        "instId": spot_inst, "side": "sell",
-        "ordType": "market", "sz": sz, "tgtCcy": tgt, "tag": TAG_EXIT,
-        "tdMode": "cross",   # 见 spot_cover：acctLv=3 现货单须 cross（cash 报 51000）
-    }
-    api = okx_sdk.trade_for(a["creds"])
     try:
-        if spot_inst.endswith("-USD"):
-            params["tradeQuoteCcy"] = "USDC"
-            data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
-        else:
-            data = okx_sdk.check(api.set_order(**params))
+        req = okx_spot.market_order(
+            a["creds"], inst_id=spot_inst, side="sell", sz=sz,
+            tgt_ccy=tgt, tag=TAG_EXIT,
+        )
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
                       note=f"下单失败: {e}")
         raise
-    row = data[0] if isinstance(data, list) and data else {}
-    if row.get("sCode") not in (None, "", "0"):
-        raise OkxSdkError(f"OKX {row.get('sCode')} {row.get('sMsg', '')}".strip())
-    ord_id = row.get("ordId") or ""
+    if req.get("rejected"):
+        raise OkxSdkError(f"OKX {req.get('s_code')} {req.get('s_msg', '')}".strip())
+    ord_id = req.get("ord_id") or ""
     update_ledger(lambda x: x["id"] == entry["id"], ord_id=ord_id)
     entry["ord_id"] = ord_id
     return _settle_exit_entry(a["creds"], entry)
