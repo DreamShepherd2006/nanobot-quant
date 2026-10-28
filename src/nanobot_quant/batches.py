@@ -330,8 +330,16 @@ class BatchManager:
         self, qty: float, entry_price: float,
         entry_time: Optional[str] = None,
         slot: Optional[int] = None,
+        ord_id: Optional[str] = None,
+        fill_px: Optional[float] = None,
     ) -> Optional[dict[str, Any]]:
-        """BUY：占用一个 available slot 并记录 lot。返回该 slot。"""
+        """BUY：占用一个 available slot 并记录 lot。返回该 slot。
+
+        ``ord_id`` / ``fill_px``（2026-10-28，docs/quant-system.md §33.52）：
+        共享资金池通道（``slot_model="shared_pool"``）多批共用同一账号余额，
+        重启时无法靠余额反推批次数，故记录交易所订单号供逐批对账。
+        仅在传入时写入字段——Gate/DEX 台账字节级不变。
+        """
         target = None
         if slot is not None:
             target = next((s for s in self.slots if s["slot"] == slot), None)
@@ -342,11 +350,16 @@ class BatchManager:
         if target is None:
             return None
         target["status"] = OPEN
-        target["lot"] = {
+        lot = {
             "qty": float(qty),
             "entry_price": float(entry_price),
             "entry_time": entry_time or time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
+        if ord_id:
+            lot["ord_id"] = str(ord_id)
+        if fill_px is not None:
+            lot["fill_px"] = float(fill_px)
+        target["lot"] = lot
         return target
 
     def close_lot(self, slot: int) -> Optional[dict[str, Any]]:
@@ -469,7 +482,23 @@ def ensure_batches(
     if spec_for_channel(ch).family == "cex":
         from .gate_credentials import load_slot_map
 
+        spec = spec_for_channel(ch)
         slot_map = load_slot_map() or {}
+        if spec.slot_model == "per_account":
+            # 2026-10-28（§33.52 拍板 b）：批次数不得超过实际子账号数。
+            # 此前静默生成 gate_botN（不存在）到运行时才失败；td_batches
+            # 上限 50→200 后必须前置 fail-closed，且报错要能直接看懂。
+            if len(slot_map) <= 0:
+                return None, (
+                    f"批次初始化失败：{spec.display} 未配置子账号"
+                    f"（per_account 通道每批绑定一个子账号）"
+                )
+            if td_batches > len(slot_map):
+                return None, (
+                    f"批次初始化失败：批次数量 {td_batches} 超过实际子账号数"
+                    f" {len(slot_map)}（per_account 通道每批绑定一个子账号；"
+                    f"可用：{', '.join(sorted(slot_map.values()))}）"
+                )
         ids = [
             str(slot_map.get(str(i)) or f"gate_bot{i}")
             for i in range(1, td_batches + 1)
