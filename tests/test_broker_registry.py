@@ -43,9 +43,14 @@ def test_registry_contains_executables():
 
 
 def test_channel_map_aligns_with_enum():
-    """方案 C：通道=broker 实例名，EXECUTION_CHANNELS 与注册表 spec 一一对应。"""
+    """方案 C：通道=broker 实例名；注册表 = 可选通道 ∪ 已注册待开放。
+
+    ``okx_cex`` 在 §33.52 P2 已注册 spec，但按拍板 A 不开放 UI
+    （``EXECUTION_CHANNELS`` 不含它）。P3 开放时从下面的白名单移除。
+    """
     from nanobot_quant.exec_params import EXECUTION_CHANNELS
-    assert set(EXECUTION_CHANNELS) == set(REGISTRY)
+    assert set(EXECUTION_CHANNELS) <= set(REGISTRY)          # 可选通道必有 spec
+    assert set(REGISTRY) - set(EXECUTION_CHANNELS) == {"okx_cex"}
     assert "okx_dex" in EXECUTION_CHANNELS
     assert "gate" in EXECUTION_CHANNELS
 
@@ -108,8 +113,10 @@ def test_unknown_broker_fail_closed():
 
 
 def test_registry_matches_execution_channels():
-    # 执行通道（实例名）与注册表一一对应，且 family 与分组语义一致
+    # 执行通道（实例名）与注册表对齐：可选通道 ⊆ 注册表，差额只能是未开放项
     from nanobot_quant.exec_params import EXECUTION_CHANNELS
-    assert set(EXECUTION_CHANNELS) == set(REGISTRY)
+    assert set(EXECUTION_CHANNELS) <= set(REGISTRY)
+    assert set(REGISTRY) - set(EXECUTION_CHANNELS) == {"okx_cex"}
     assert REGISTRY["gate"].family == "cex"
     assert REGISTRY["okx_dex"].family == "dex"
+    assert REGISTRY["okx_cex"].family == "cex"
