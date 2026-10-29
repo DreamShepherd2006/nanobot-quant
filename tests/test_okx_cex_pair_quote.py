@@ -101,3 +101,53 @@ def test_broker_explicit_quote_wins(monkeypatch):
     monkeypatch.setattr(broker_mod, "_default_quote_ccy", lambda: "USDC")
     b = OkxCexBroker(quote="USDT")
     assert b._quote == "USDT", "显式传参优先于 WebUI 参数（测试/回测可覆盖）"
+
+
+# ── 下划线（Gate 口径）okx_symbol 必须自愈（2026-10-29 实盘 SOL 失效）──
+
+
+def test_inst_id_for_normalizes_underscore(catalog):
+    catalog({"SOL-USDT"})
+    assert data.inst_id_for("SOL_USDT") == "SOL-USDT", "Gate 口径 SOL_USDT 应归一化"
+    assert data.inst_id_for("SOL_usdt") == "SOL-USDT"
+
+
+def test_inst_id_for_strips_quote_suffix(catalog):
+    catalog({"SOL-USDT", "SOL-USDC"})
+    assert data.inst_id_for("SOL-USDC", strict=True) == "SOL-USDC"
+    catalog({"SOL-USDT"})
+    # 计价币拼错/该档不存在：回退同 base 的其它计价对（韧性），但绝不凭空造对
+    assert data.inst_id_for("SOL-XXX", strict=True) == "SOL-USDT"
+    catalog({"SOL-USDT"})
+    assert data.inst_id_for("NOTACOIN", strict=True) == "", "清单里没有该 base → 空（不猜）"
+
+
+def test_data_source_path_uses_normalized_instid(catalog, monkeypatch):
+    """数据源链路：okx_ticker 返回下划线格式时，底层 fetch 仍能解析出 instId。"""
+    catalog({"SOL-USDT"})
+    seen = {}
+
+    def _fake_candles(inst_id, **kw):
+        seen["inst"] = inst_id
+        return {"code": "0", "data": []}
+
+    monkeypatch.setattr(data, "spot_inst_ids", lambda session=None: frozenset({"SOL-USDT"}))
+    assert data.inst_id_for("SOL_USDT") == "SOL-USDT"
+
+
+def test_cash_diag_prints_even_when_empty(monkeypatch, capsys):
+    """交易账户现金为 0 时必须留下痕迹（不能静默无输出）。"""
+    b = _bare_broker()
+    monkeypatch.setattr(OkxCexBroker, "_spot_names", lambda self: [])
+    b._log_cash_once({"SOL": {"available": 0.0, "total": 1.5}})
+    err = capsys.readouterr().err
+    assert "现货池现金" in err and "无可交易现金" in err
+    assert "资金账户" in err
+
+
+def test_cash_diag_reports_available(monkeypatch, capsys):
+    b = _bare_broker()
+    monkeypatch.setattr(OkxCexBroker, "_spot_names", lambda self: [])
+    b._log_cash_once({"USDC": {"available": 12.5, "total": 12.5}})
+    err = capsys.readouterr().err
+    assert "现货池现金 | {'USDC': 12.5}" in err

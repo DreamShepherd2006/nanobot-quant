@@ -16,6 +16,7 @@ import types
 
 from okx._client import ResponseStatusError
 from okx.account import Account
+from okx.funding import Funding
 from okx.market import Market
 from okx.public import Public
 from okx.trade import Trade
@@ -100,6 +101,23 @@ def trade_for(creds: dict) -> Trade:
                     passphrase=creds.get("passphrase", ""), flag="0")
         _trades[key] = tr
     return tr
+
+
+def funding_for(creds: dict) -> Funding:
+    """资金账户（funding）客户端 — 诊断用。
+
+    OKX 的**资金账户与交易账户分离**：下单只能用交易账户余额，
+    ``account/balance`` 读不到资金账户里的币，表现为「余额 0、买不了」
+    （2026-09-04 xCRCL 案例同源）。
+    """
+    return Funding(
+        api_key=creds.get("api_key"),
+        api_secret_key=creds.get("secret_key"),
+        passphrase=creds.get("passphrase"),
+        flag="0",
+        debug=False,
+        domain=BASE_URL,
+    )
 
 
 def check(payload: dict):

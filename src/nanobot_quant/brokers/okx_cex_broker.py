@@ -27,7 +27,7 @@ from typing import Any, Optional
 from lumibot.brokers import Broker
 
 from .. import okx_sdk, okx_spot
-from ..okx_cex_data import resolve_inst_id, spot_inst_ids, to_inst_id
+from ..okx_cex_data import inst_id_for, spot_inst_ids, to_inst_id
 from ..okx_options_trade import account_balance, account_creds
 
 logger = logging.getLogger(__name__)
@@ -146,11 +146,11 @@ class OkxCexBroker(Broker):
         首次解析会打一条诊断（选中对 + 该 base 在 OKX 的全部可选对）。
         """
         base = self._base_ticker(symbol)
-        inst = resolve_inst_id(base, self._quote, strict=True)
+        inst = inst_id_for(base, self._quote, strict=True)
         if not inst and base.upper() != symbol.upper():
             # tokens.json 的 okx_symbol 登记错误（如把 SOL 写成 XSOL）：回退原始
             # symbol 再按交易所清单解析一次，别让一条脏映射打死整个标的。
-            inst = resolve_inst_id(symbol, self._quote, strict=True)
+            inst = inst_id_for(symbol, self._quote, strict=True)
             if inst:
                 print(
                     f"[DIAG] OKX-CEX pair | {symbol}: tokens.json okx_symbol={base!r} "
@@ -231,19 +231,60 @@ class OkxCexBroker(Broker):
         return self._fetch_account_balances(self._sub_account)
 
     def _log_cash_once(self, bal: dict) -> None:
-        """首次（且现金分布变化时）打印现货池现金快照。
+        """打印现货池现金快照（进程内一次）。
 
         2026-10-29：OKX 现货同一币并存 ``XXX-USDT`` / ``XXX-USDC`` 两组对，
         资金到底在哪一侧决定能否下单——必须可见，不能等「USDT 不足」才猜。
+        交易账户现金为 0 时**也要打印**（否则「什么都没打」会被误当没执行），
+        并顺带查资金账户（OKX 资金账户 ≠ 交易账户，钱常躺在那边）。
         """
+        if self.__dict__.get("_cash_logged"):
+            return
+        self.__dict__["_cash_logged"] = True
         snap = {
             c: round(_num((bal.get(c) or {}).get("available")), 6)
             for c in sorted(_CASH_CURRENCIES)
             if _num((bal.get(c) or {}).get("available")) > 0
         }
-        if snap and snap != self.__dict__.get("_cash_logged"):
-            self.__dict__["_cash_logged"] = snap
+        if snap:
             print(f"[DIAG] OKX-CEX 现货池现金 | {snap}", file=sys.stderr, flush=True)
+            return
+        held = {
+            c: round(_num(v.get("total") or v.get("available")), 8)
+            for c, v in bal.items()
+            if _num(v.get("total")) + _num(v.get("available")) > 0
+        }
+        print(
+            f"[DIAG] OKX-CEX 现货池现金 | ⚠️ 交易账户无可交易现金"
+            f"（其它余额: {held or '无'}）",
+            file=sys.stderr, flush=True,
+        )
+        self._log_funding_hint()
+
+    def _log_funding_hint(self) -> None:
+        """交易账户现金为 0 时查资金账户（买不了货最常见的原因）。"""
+        try:
+            from ..okx_sdk import funding_for
+
+            found: dict[str, float] = {}
+            for name in self._spot_names():
+                creds = account_creds(name)
+                if not creds:
+                    continue
+                payload = funding_for(creds).get_balances()
+                for row in (payload.get("data") or []):
+                    ccy = str(row.get("ccy") or "").upper()
+                    val = _num(row.get("bal"))
+                    if ccy and val > 0:
+                        found[f"{name}:{ccy}"] = round(val, 8)
+            print(
+                f"[DIAG] OKX-CEX 资金账户 | {found or '无'}"
+                f"（资金账户≠交易账户：资金账户里的币不能直接下单，需划转到交易账户）",
+                file=sys.stderr, flush=True,
+            )
+        except Exception as e:  # noqa: BLE001 — 诊断失败不阻断
+            print(f"[DIAG] OKX-CEX 资金账户查询失败 | {e}",
+                  file=sys.stderr, flush=True)
 
     def _spot_names(self) -> list[str]:
         """现货池账号名（带 5s 进程内缓存，避免每轮反复读盘）。（""）"""

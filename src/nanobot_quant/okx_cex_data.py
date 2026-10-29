@@ -28,6 +28,17 @@ from nanobot_quant.kline_paging import KlineRangeTooLarge, max_bars_for, paginat
 
 logger = logging.getLogger(__name__)
 
+#: 同一 ticker 的解析告警只打一次（每轮 SKIP 的标的会反复触发，刷屏无信息量）
+_WARNED: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    if msg in _WARNED:
+        return
+    _WARNED.add(msg)
+    logger.warning("%s", msg)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -183,7 +194,7 @@ def resolve_inst_id(ticker: str, quote: str = "USDT",
         for cand in cands:
             if cand in ids:
                 return cand
-        logger.warning("resolve_inst_id(%s): none of %s on OKX SPOT", t, cands)
+        _warn_once(f"resolve_inst_id({t}): none of {cands} on OKX SPOT")
         if strict:
             return ""
     return to_inst_id(t, quote=q)
@@ -192,6 +203,47 @@ def resolve_inst_id(ticker: str, quote: str = "USDT",
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _normalize_ticker(t: str) -> str:
+    """ticker 归一化：``SOL_USDT`` → ``SOL-USDT``。
+
+    tokens.json 是用 Gate 口径登记的（下划线），OKX 用连字符。此前
+    ``okx_ticker()`` 原样返回下划线格式 → instId 拼成 ``SOL_USDT-USDT`` →
+    51001（2026-10-29 实盘 SOL 单标的失效根因）。
+    """
+    x = (t or "").upper().strip().replace(" ", "")
+    if "-" not in x and "_" in x:
+        x = x.replace("_", "-")
+    return x
+
+
+def inst_id_for(ticker: str, quote: str = "USDT",
+                session: Optional[requests.Session] = None,
+                strict: bool = False) -> str:
+    """ticker → OKX instId 的**唯一入口**（数据源与 broker 共用，杜绝两处漂移）。
+
+    顺序：归一化 → 清单判定（含 -USDC / X 前缀兜底）→ 失败时退回原始持仓代码
+    （去掉 quote 后缀）→ 最后才用启发式 ``to_inst_id``（fail-soft，会 51001）。
+    """
+    raw = (ticker or "").upper().strip()
+    t = _normalize_ticker(ticker)
+    if raw != t:
+        _warn_once(
+            f"instId 归一化: {raw!r} → {t!r}"
+            f"（tokens.json 的 okx_symbol 建议改成 OKX 口径，如 SOL 或 SOL-USDT）"
+        )
+    inst = resolve_inst_id(t, quote, session=session, strict=True)
+    if inst:
+        return inst
+    base = t.split("-")[0]
+    if base != t:
+        inst = resolve_inst_id(base, quote, session=session, strict=True)
+        if inst:
+            return inst
+    if strict:
+        return ""
+    return to_inst_id(t, quote=quote)
 
 
 def fetch_kline(
@@ -243,7 +295,7 @@ def fetch_kline(
     # 过滤后若只请求 limit 根就会少 1（实测 got=179 < min_history=180 →
     # 每轮 SKIP）。与 gate_cex_data「请求 limit+1、再丢进行中」同构。
     limit = max(1, min(limit, 299))
-    inst_id = resolve_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
 
     # ── rate-limit ──
     time.sleep(_RATE_DELAY)
@@ -324,7 +376,7 @@ def fetch_ticker(ticker: str, *, session: Optional[requests.Session] = None) -> 
     dict
         Keys: ``last``, ``open24h``, ``high24h``, ``low24h``, ``vol24h``.
     """
-    inst_id = resolve_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
     time.sleep(_RATE_DELAY)
 
     _sess = session or requests
@@ -374,7 +426,7 @@ def fetch_order_book(
     session:
         Optional ``requests.Session``.
     """
-    inst_id = resolve_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
     _sess = session or requests
     url = f"{_BASE_URL}{_ORDER_BOOK_PATH}"
     url_lite = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
@@ -500,7 +552,7 @@ def fetch_kline_range(
     if bar_okx is None:
         raise ValueError(f"Unsupported bar size: {bar!r}")
 
-    inst_id = resolve_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
     start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
     start_ms = int(start_dt.timestamp() * 1000)
