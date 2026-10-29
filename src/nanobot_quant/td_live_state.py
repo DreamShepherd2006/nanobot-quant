@@ -78,6 +78,35 @@ def update_symbol(symbol: str, data: dict, scene: str = "") -> None:
         LIVE_STATE["updated_at"] = syms[symbol]["updated_at"]
 
 
+def prune_symbols(scene: str, keep) -> list[str]:
+    """按当前场景标的池裁剪 LIVE_STATE，删除已出池标的的 stale 条目。
+
+    2026-10-29（展示层修复，方案 A）：``LIVE_STATE["symbols"]`` 是累积字典，
+    策略每轮只写当前池里的标的、从不删除已移出池的 key。改池/缩池后旧条目
+    数据停更但保留，页面继续渲染它们、标题「N 标的」也随之虚高（实测把池从
+    9 缩到 4 后页面仍显示 9 行、时间戳停在切池前那一轮）。
+
+    这里让**状态源自己保持整洁**（一个事实一个家），展示层零改动。
+
+    ``keep`` 为空时不做任何删除——池解析失败不能把状态清空。
+    返回被移除的标的列表（调用方按需打一行日志）。
+    """
+    keep_set = {str(x) for x in (keep or []) if str(x or "").strip()}
+    removed: list[str] = []
+    if not keep_set:
+        return removed
+    with _lock:
+        by_scene = LIVE_STATE.get("symbols") or {}
+        bucket = by_scene.get(str(scene or "default"))
+        if not isinstance(bucket, dict):
+            return removed
+        for sym in list(bucket):
+            if str(sym) not in keep_set:
+                bucket.pop(sym, None)
+                removed.append(str(sym))
+    return removed
+
+
 def set_loop(running: bool, next_iteration: str | None = None) -> None:
     """更新循环运行状态（TD live 线程启动/退出时调用）。"""
     with _lock:

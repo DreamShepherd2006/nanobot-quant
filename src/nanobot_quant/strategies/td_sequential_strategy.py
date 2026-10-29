@@ -780,6 +780,22 @@ class TdSequentialStrategy(Strategy):
             except Exception:  # noqa: BLE001
                 broker_name = "?"
             sl_diag = getattr(getattr(self, "_risk", None), "stop_loss_pct", "?")
+            # 2026-10-29（展示层，方案 A）：按当前场景标的池裁剪 LIVE_STATE
+            # ——改池/缩池后旧标的条目停更但保留，页面会继续渲染（标题虚高）。
+            # 仅实盘写 LIVE_STATE，回测不得污染实盘状态（PR #254 守卫）。
+            if self.parameters.get("live_mode"):
+                try:
+                    from nanobot_quant.td_live_state import prune_symbols
+
+                    _removed = prune_symbols(name, self.symbols)
+                    if _removed:
+                        print(
+                            f"[DIAG] td_live LIVE_STATE 清理: scene={name} "
+                            f"移除已出池标的 {_removed}",
+                            file=sys.stderr, flush=True,
+                        )
+                except Exception:  # noqa: BLE001 — 纯展示状态，绝不打断交易
+                    pass
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
                 f"channel={self.parameters.get('execution_channel', '?')} "
