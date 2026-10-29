@@ -1510,9 +1510,10 @@ class TdSequentialStrategy(Strategy):
                     break
                 if not executed:
                     self.logger.info(
-                        f"TD BATCH | symbol={self.symbol} 无可用资金 slot，跳过 BUY（见 TD SLOT SKIP 日志）"
+                        f"TD BATCH | symbol={self.symbol} 无可用 slot，跳过 BUY"
+                        f"（资金不足见 TD SLOT SKIP、下单失败见 TD BATCH BUY FAIL）"
                     )
-                    self._record("SKIP", "无可用资金 slot，跳过 BUY")
+                    self._record("SKIP", "无可用 slot，跳过 BUY（资金不足或下单失败）")
                 return
             else:
                 req = self._portfolio.build_buy_order(

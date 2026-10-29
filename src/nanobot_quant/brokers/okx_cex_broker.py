@@ -32,6 +32,9 @@ from ..okx_options_trade import account_balance, account_creds
 
 logger = logging.getLogger(__name__)
 
+#: 现货单标签：OKX 仅接受 1–16 位字母数字（不能带 `-`/`_`）
+ORDER_TAG = "tdlive"
+
 #: 现货计价/现金币种（估值时归入 cash，不算持仓）
 _CASH_CURRENCIES = frozenset({"USDT", "USDC", "USD", "USDG"})
 
@@ -474,7 +477,10 @@ class OkxCexBroker(Broker):
                 side=side,
                 sz=sz,
                 tgt_ccy="base_ccy",
-                tag="td-live",
+                # OKX tag 只允许 1–16 位**字母数字**：`td-live` 的连字符会让下单
+                # 直接 51000 Parameter tag error（2026-10-29 首笔真实现货 BUY 暴露，
+                # 三个 slot 全失败；期权线用 nbputo1/nbputc1 纯字母数字故一直正常）。
+                tag=ORDER_TAG,
             )
         except Exception as e:  # noqa: BLE001
             order.set_error(f"OKX 下单失败: {e}")
