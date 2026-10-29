@@ -207,6 +207,10 @@ class _TdLiveRunner:
                 # 2026-08-17 Step 0：通道大类（dex/cex）——批次逻辑分叉依据；
                 # 取 broker spec.family（gate→cex、okx_dex→dex）。
                 "channel_family": family,
+                # 2026-10-29 P3：执行通道实例名（gate/okx_cex/okx_dex）——诊断行
+                # 直接读它；之前审计日志读 parameters["execution_channel"]
+                # 但该键从未注入 → 场景激活行恒为 channel=?（已修）。
+                "execution_channel": channel,
                 # P3（2026-10-28）：批次账号模型——策略层据此分派余额查询
                 # （shared_pool 不走 Gate 专用子账号快照，改用 broker._balances）。
                 "slot_model": slot_model,
