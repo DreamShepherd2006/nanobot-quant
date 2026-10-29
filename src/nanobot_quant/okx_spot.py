@@ -97,8 +97,11 @@ def market_order(
         "ordType": "market",
         "sz": str(sz),
         "tgtCcy": tgt_ccy,
-        "tag": tag,
     }
+    # OKX 的 tag 只接受 1–16 位字母数字：空串 / 含 `-`、`_` 都会 51000
+    # Parameter tag error。不传该字段 = 不设标签，才是"没标签"的正确表达。
+    if tag:
+        params["tag"] = tag
     api = okx_sdk.trade_for(creds)
     if inst_id.upper().endswith("-USD"):
         # Crypto-USD（统一 USD 订单簿）：用 USDC 成交须显式声明
