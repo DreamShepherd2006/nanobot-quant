@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 #: 现货计价/现金币种（估值时归入 cash，不算持仓）
 _CASH_CURRENCIES = frozenset({"USDT", "USDC", "USD", "USDG"})
 
+#: 「symbol → instId」诊断只打一次/进程（每轮重打 30 行，噪音盖过信号）
+_PAIR_LOGGED: set[str] = set()
+
 
 def _num(value) -> float:
     try:
@@ -159,7 +162,8 @@ class OkxCexBroker(Broker):
                 )
         if not inst:
             inst = to_inst_id(base, quote=self._quote)
-        logged = self.__dict__.setdefault("_pair_logged", set())
+        # 进程级节流：broker 在部分路径会被重建，实例级 set 会每轮重打一遍
+        logged = _PAIR_LOGGED
         if symbol not in logged:
             logged.add(symbol)
             ids = spot_inst_ids() or frozenset()

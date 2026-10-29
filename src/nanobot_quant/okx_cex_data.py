@@ -129,7 +129,10 @@ _to_inst_id = to_inst_id
 
 # ── instId 解析（以交易所清单为准，不靠启发式猜）─────────────────────────
 _spot_ids_cache: tuple[float, frozenset[str]] | None = None
-_SPOT_IDS_TTL = 600.0  # 秒
+#: 失败退避截止时刻（避免每轮首个标的都白拉一次、并把「未取到清单」刷进日志）
+_spot_ids_fail_until: float = 0.0
+_SPOT_IDS_TTL = 600
+_SPOT_IDS_FAIL_BACKOFF = 5.0  # 秒（失败退避）
 
 
 def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozenset[str]]:
@@ -140,10 +143,14 @@ def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozen
     TD 逐轮 DATA ERROR。启发式注定漏，故改为**查交易所清单判定**（SPOT 一次
     全量、免签名、免费），清单拉不到才退回旧启发（fail-soft 但有痕迹）。
     """
-    global _spot_ids_cache
+    global _spot_ids_cache, _spot_ids_fail_until
     now = time.time()
     if _spot_ids_cache and now - _spot_ids_cache[0] < _SPOT_IDS_TTL:
         return _spot_ids_cache[1]
+    if now < _spot_ids_fail_until:
+        # 刚失败过：用旧清单顶着（stale-while-error），比返回 None 好——
+        # None 会让 instId 解析退回启发式、日志再刷一条「未取到清单」。
+        return _spot_ids_cache[1] if _spot_ids_cache else None
     try:
         _sess = session or requests
         resp = _sess.get(f"{_BASE_URL}/api/v5/public/instruments",
@@ -153,7 +160,8 @@ def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozen
         if payload.get("code") != "0":
             logger.warning("spot instruments: code=%s msg=%s",
                            payload.get("code"), payload.get("msg"))
-            return None
+            _spot_ids_fail_until = now + _SPOT_IDS_FAIL_BACKOFF
+            return _spot_ids_cache[1] if _spot_ids_cache else None
         ids = frozenset(str(d.get("instId") or "") for d in payload.get("data") or [])
         if not ids:
             return None
@@ -161,7 +169,8 @@ def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozen
         return ids
     except Exception as exc:  # noqa: BLE001 — 清单是优化，失败不应打死取数
         logger.warning("spot instruments fetch failed — %s", exc)
-        return None
+        _spot_ids_fail_until = now + _SPOT_IDS_FAIL_BACKOFF
+        return _spot_ids_cache[1] if _spot_ids_cache else None
 
 
 def resolve_inst_id(ticker: str, quote: str = "USDT",

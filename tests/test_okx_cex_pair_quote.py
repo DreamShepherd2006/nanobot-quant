@@ -177,3 +177,27 @@ def test_cex_quote_ccy_follows_broker():
 
     s._cex_brokers = {}
     assert s._cex_quote_ccy() == "USDT"                  # 回退执行参数
+
+
+def test_spot_ids_stale_while_error(monkeypatch):
+    """清单拉取失败时用旧清单顶着，并在退避期内不再重试。"""
+    class _BoomMod:
+        def __init__(self):
+            self.n = 0
+
+        def get(self, *a, **k):
+            self.n += 1
+            raise RuntimeError("network down")
+
+    boom = _BoomMod()
+    monkeypatch.setattr(data, "requests", boom)
+    monkeypatch.setattr(data, "_spot_ids_cache", (0.0, frozenset({"SOL-USDT"})))
+    monkeypatch.setattr(data, "_spot_ids_fail_until", 0.0)
+
+    out = data.spot_inst_ids()
+    assert out == frozenset({"SOL-USDT"}), "失败时应返回旧清单（stale-while-error）"
+    assert boom.n == 1
+
+    out2 = data.spot_inst_ids()
+    assert out2 == frozenset({"SOL-USDT"})
+    assert boom.n == 1, "退避期内不应再次发起请求"
