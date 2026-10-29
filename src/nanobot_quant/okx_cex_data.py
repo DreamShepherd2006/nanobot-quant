@@ -116,6 +116,65 @@ def to_inst_id(ticker: str, quote: str = "USDT") -> str:
 _to_inst_id = to_inst_id
 
 
+# ── instId 解析（以交易所清单为准，不靠启发式猜）─────────────────────────
+_spot_ids_cache: tuple[float, frozenset[str]] | None = None
+_SPOT_IDS_TTL = 600.0  # 秒
+
+
+def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozenset[str]]:
+    """全部 SPOT instId 集合（600s 进程级缓存；失败返回 None）。
+
+    2026-10-29 根因：`to_inst_id` 靠「常见币白名单 + X 前缀股票」启发猜 instId，
+    白名单外的币（SOL/BNB/AAVE）被当股票 → `XSOL-USDT` → OKX code=51001，
+    TD 逐轮 DATA ERROR。启发式注定漏，故改为**查交易所清单判定**（SPOT 一次
+    全量、免签名、免费），清单拉不到才退回旧启发（fail-soft 但有痕迹）。
+    """
+    global _spot_ids_cache
+    now = time.time()
+    if _spot_ids_cache and now - _spot_ids_cache[0] < _SPOT_IDS_TTL:
+        return _spot_ids_cache[1]
+    try:
+        _sess = session or requests
+        resp = _sess.get(f"{_BASE_URL}/api/v5/public/instruments",
+                         params={"instType": "SPOT"}, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != "0":
+            logger.warning("spot instruments: code=%s msg=%s",
+                           payload.get("code"), payload.get("msg"))
+            return None
+        ids = frozenset(str(d.get("instId") or "") for d in payload.get("data") or [])
+        if not ids:
+            return None
+        _spot_ids_cache = (now, ids)
+        return ids
+    except Exception as exc:  # noqa: BLE001 — 清单是优化，失败不应打死取数
+        logger.warning("spot instruments fetch failed — %s", exc)
+        return None
+
+
+def resolve_inst_id(ticker: str, quote: str = "USDT",
+                    session: Optional[requests.Session] = None) -> str:
+    """ticker → 真实存在的 OKX SPOT instId（清单优先，启发式兜底）。
+
+    >>> resolve_inst_id("BTC")      # 'BTC-USDT'
+    >>> resolve_inst_id("SOL")      # 'SOL-USDT'（白名单漏洞修正）
+    >>> resolve_inst_id("SPCX")     # 'XSPCX-USDT'（代币化股票）
+    """
+    t = (ticker or "").upper().strip()
+    if "-" in t:                     # 已是完整 instId
+        return t
+    q = (quote or "USDT").upper().strip()
+    ids = spot_inst_ids(session=session)
+    if ids:
+        for cand in (f"{t}-{q}", f"X{t}-{q}"):
+            if cand in ids:
+                return cand
+        logger.warning("resolve_inst_id(%s): neither %s-%s nor X%s-%s on OKX SPOT",
+                       t, t, q, t, q)
+    return to_inst_id(t, quote=q)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -166,9 +225,11 @@ def fetch_kline(
             f"Unsupported bar size '{bar}'. "
             f"Supported: {', '.join(sorted(_BAR_MAP))}"
         )
-    limit = max(1, min(limit, 300))
-
-    inst_id = _to_inst_id(ticker)
+    # 留 1 根给进行中 bar：OKX candles 最后一根常为 confirm=0（进行中），
+    # 过滤后若只请求 limit 根就会少 1（实测 got=179 < min_history=180 →
+    # 每轮 SKIP）。与 gate_cex_data「请求 limit+1、再丢进行中」同构。
+    limit = max(1, min(limit, 299))
+    inst_id = resolve_inst_id(ticker)
 
     # ── rate-limit ──
     time.sleep(_RATE_DELAY)
@@ -179,7 +240,7 @@ def fetch_kline(
     params: dict = {
         "instId": inst_id,
         "bar": bar_okx,
-        "limit": limit,
+        "limit": limit + 1,
     }
 
     resp = _sess.get(url, params=params, timeout=15)
@@ -249,7 +310,7 @@ def fetch_ticker(ticker: str, *, session: Optional[requests.Session] = None) -> 
     dict
         Keys: ``last``, ``open24h``, ``high24h``, ``low24h``, ``vol24h``.
     """
-    inst_id = _to_inst_id(ticker)
+    inst_id = resolve_inst_id(ticker)
     time.sleep(_RATE_DELAY)
 
     _sess = session or requests
@@ -299,7 +360,7 @@ def fetch_order_book(
     session:
         Optional ``requests.Session``.
     """
-    inst_id = _to_inst_id(ticker)
+    inst_id = resolve_inst_id(ticker)
     _sess = session or requests
     url = f"{_BASE_URL}{_ORDER_BOOK_PATH}"
     url_lite = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
@@ -425,7 +486,7 @@ def fetch_kline_range(
     if bar_okx is None:
         raise ValueError(f"Unsupported bar size: {bar!r}")
 
-    inst_id = _to_inst_id(ticker)
+    inst_id = resolve_inst_id(ticker)
     start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
     start_ms = int(start_dt.timestamp() * 1000)

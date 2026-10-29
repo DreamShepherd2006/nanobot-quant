@@ -1977,15 +1977,26 @@ class TdSequentialStrategy(Strategy):
         - BUY pending：SUCCESS → open_lot 补建仓 + LONG 记录；
           ERROR/CANCELLED → BUY_FAIL（不建仓）。
         PENDING/UNKNOWN → 继续等待。
+
+        2026-10-29（okx_cex 通道实测）：空转也要落地——无 pending 时立即返回；
+        ``home`` 改惰性获取：``_home_account_id()`` 走 onchainos CLI（DEX 概念），
+        每轮无条件调用会在 CEX 通道白跑一次 DEX 命令——日志里每轮一条
+        ``[DIAG] ensure_onchainos_dir`` 即由此而来。
         """
+        if not getattr(self, "_pending_sells", None) and not getattr(
+            self, "_pending_buys", None
+        ):
+            return
         from nanobot_quant.onchainos_cli import swap_status
-        home = self._home_account_id()
+        home = None
         for slot_id in list(self._pending_sells):
             info = self._pending_sells[slot_id]
             if info.get("cex"):
                 self._confirm_cex_sell(slot_id, info)
                 continue
             aid = info.get("account_id", "")
+            if aid and home is None:
+                home = self._home_account_id()
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
                     f"TD PENDING CHECK SKIP | slot={slot_id} switch 到账户失败"
@@ -2089,6 +2100,8 @@ class TdSequentialStrategy(Strategy):
                 self._confirm_cex_buy(slot_id, info)
                 continue
             aid = info.get("account_id", "")
+            if aid and home is None:
+                home = self._home_account_id()
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
                     f"TD PENDING CHECK SKIP | slot={slot_id} switch 到账户失败"

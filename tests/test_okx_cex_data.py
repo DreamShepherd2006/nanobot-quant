@@ -138,3 +138,57 @@ def test_fetch_kline_drops_unconfirmed():
     df = m.fetch_kline("SOL", bar="1m", limit=2, session=_SnapSession())
     assert len(df) == 1
     assert df.index[0] == pd.Timestamp(BASE - timedelta(minutes=1))
+
+
+# ── instId 解析与「进行中 bar 多拉 1 根」（2026-10-29 实盘回归）─────────────
+
+
+def test_resolve_inst_id_prefers_exchange_catalog(monkeypatch):
+    """instId 以交易所清单为准：白名单外的币（SOL/BNB/AAVE）不得被当股票。
+
+    现场（bust=870 实盘）：SOL/BNB/AAVE 逐轮
+    `[TD] DATA ERROR … code=51001 Instrument ID doesn't exist`——启发式把
+    它们当成本地股票 → `XSOL-USDT`；BTC/ETH/LINK/UNI/ARB/AVAX 恰好命中白名单
+    所以正常，属「白名单打地鼠」型缺陷。
+    """
+    monkeypatch.setattr(
+        m, "spot_inst_ids",
+        lambda session=None: frozenset({"SOL-USDT", "BTC-USDT", "XSPCX-USDT", "XAAVE-USDT"}),
+    )
+    assert m.resolve_inst_id("SOL") == "SOL-USDT"
+    assert m.resolve_inst_id("AAVE") == "XAAVE-USDT"   # 清单为准，不猜
+    assert m.resolve_inst_id("SPCX") == "XSPCX-USDT"
+    assert m.resolve_inst_id("SOL-USDT") == "SOL-USDT"  # 完整 instId 原样
+
+
+def test_resolve_inst_id_falls_back_when_catalog_unavailable(monkeypatch):
+    """清单拉不到 → 退回旧启发式（fail-soft，但 fetch 层会打 warning）。"""
+    monkeypatch.setattr(m, "spot_inst_ids", lambda session=None: None)
+    assert m.resolve_inst_id("BTC") == "BTC-USDT"
+
+
+def test_fetch_kline_requests_one_extra_bar(monkeypatch):
+    """请求 limit+1 根、丢掉进行中 bar 后正好 limit 根。
+
+    现场：请求 180 根、过滤 confirm=0 后 got=179 < min_history=180 →
+    `[TD] SKIP | bars=179` 每轮恒跳过。
+    """
+    monkeypatch.setattr(m, "spot_inst_ids", lambda session=None: frozenset({"SOL-USDT"}))
+    asked = {}
+
+    class _Sess:
+        def get(self, url, params=None, timeout=None):
+            asked.update(params)
+            n = int(params["limit"])
+            top = _ms(BASE)
+            rows = [
+                [str(top - i * STEP_MS), "100", "101", "99", "100.5", "10", "10", "1005",
+                 "0" if i == 0 else "1"]
+                for i in range(n)
+            ]
+            return _Resp(rows)
+
+    df = m.fetch_kline("SOL", bar="1m", limit=180, session=_Sess())
+    assert asked["limit"] == 181, "必须多拉 1 根给进行中 bar"
+    assert asked["instId"] == "SOL-USDT"
+    assert len(df) == 180
