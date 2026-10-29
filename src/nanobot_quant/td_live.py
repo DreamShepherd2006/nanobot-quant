@@ -674,6 +674,95 @@ class _TdLiveRunner:
                 file=sys.stderr, flush=True,
             )
 
+    def _reconcile_verify_ord(self, bm: Any, symbol: str) -> None:
+        """重启时按交易所订单号逐批核对台账（P4，docs/quant-system.md §33.52.5）。
+
+        为什么需要：``slot_model="shared_pool"`` 下同账号的多个逻辑 slot 共用
+        一份币，**余额反推无法判断「台账有、实盘无」**（余额够就都算在仓）。
+        P1 起 ``open_lot`` 会记 ``ord_id``/``fill_px``，此处用它们回查交易所
+        订单，逐批给出台账与实盘是否一致的结论。
+
+        判定（只标记、绝不自动改台账——用户原则：宁可人工确认也不静默删批次）：
+        - ``filled`` 且 ``filled >= qty × 0.99`` → ``ok``（顺带回填实际均价）
+        - ``filled`` 但明显少于台账量 → ``short``（部分成交/被截断）
+        - ``cancelled`` / ``filled == 0`` → ``missing``（台账有、实盘无）
+        - 仍 ``open/submitted`` → ``pending``（未定，下轮再看）
+        - 查询异常 → ``unknown``（fail-safe，保留台账）
+
+        无 ``ord_id`` 的旧批次（本改动前导入/开仓）跳过——它们继续由余额
+        反推路径兜底，不引入新的判定风险。
+        """
+        strategy = getattr(self, "_strategy", None)
+        if strategy is None:
+            return
+        checked = mismatch = 0
+        for slot in list(getattr(bm, "slots", None) or []):
+            if str(slot.get("status")) != "open":
+                continue
+            lot = slot.get("lot") or {}
+            oid = str(lot.get("ord_id") or "").strip()
+            if not oid:
+                continue
+            try:
+                qty = float(lot.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty <= 0:
+                continue
+            try:
+                broker = strategy._cex_slot_broker(slot)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[DIAG] td_live 对账(ord_id): {symbol} slot={slot.get('slot')} "
+                      f"broker 创建失败: {exc}", file=sys.stderr, flush=True)
+                continue
+            try:
+                pair = broker.inst_id_of(symbol)
+            except Exception:  # noqa: BLE001
+                pair = ""
+            checked += 1
+            try:
+                status, filled, _left, avg = broker._query_order(oid, pair)
+            except Exception as exc:  # noqa: BLE001
+                slot["lot"]["reconcile"] = "unknown"
+                print(f"[DIAG] TD RECON | symbol={symbol} slot={slot.get('slot')} "
+                      f"ord={oid} 查询失败({exc}) → unknown（保留台账）",
+                      file=sys.stderr, flush=True)
+                continue
+            try:
+                filled = float(filled or 0)
+            except (TypeError, ValueError):
+                filled = 0.0
+            if status == "filled" and filled >= qty * 0.99:
+                verdict = "ok"
+                if avg and not lot.get("fill_px"):
+                    try:
+                        slot["lot"]["fill_px"] = float(avg)
+                    except (TypeError, ValueError):
+                        pass
+            elif status == "filled" and filled > 0:
+                verdict = "short"
+            elif status in ("open", "submitted", "new", "partially_filled", "pending"):
+                # 仍挂着（filled 可能是 0）——先判 pending，避免误报 missing
+                verdict = "pending"
+            elif status == "cancelled" or filled <= 0:
+                verdict = "missing"
+            else:
+                verdict = "unknown"
+            slot["lot"]["reconcile"] = verdict
+            if verdict in ("missing", "short"):
+                mismatch += 1
+                print(f"[DIAG] TD RECON MISMATCH | symbol={symbol} slot={slot.get('slot')} "
+                      f"ord={oid} 台账 qty={qty:.6g} 实盘 filled={filled:.6g} "
+                      f"status={status} → {verdict}（台账保留，请人工核对）",
+                      file=sys.stderr, flush=True)
+        try:
+            bm.save()
+        except Exception:  # noqa: BLE001 — 对账标记落盘失败不阻塞启动
+            pass
+        if checked:
+            print(f"[DIAG] td_live 对账(ord_id): {symbol} 核对 {checked} 批"
+                  f"（不符 {mismatch}）", file=sys.stderr, flush=True)
+
     def _reconcile_import_shared_pool(
         self, bm: Any, symbol: str, tokens_json: list[dict] | None
     ) -> None:
@@ -1149,6 +1238,16 @@ class _TdLiveRunner:
                         f"[DIAG] td_live 对账: {sym} 失败: {exc}",
                         file=sys.stderr, flush=True,
                     )
+                # P4（2026-10-29）：逐批按交易所订单号核对（余额反推的前置补充）
+                if importer in (self._reconcile_import_shared_pool,
+                                self._reconcile_import_cex):
+                    try:
+                        self._reconcile_verify_ord(bm, sym)
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[DIAG] td_live 对账(ord_id): {sym} 失败: {exc}",
+                            file=sys.stderr, flush=True,
+                        )
         except Exception as exc:  # noqa: BLE001
             print(
                 f"[DIAG] td_live 对账: 未执行（{exc}）",

@@ -183,6 +183,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
     "kline_concurrency": 4,     # int 1-20 — TD 每轮并发拉取各标的 K 线的线程数（1=串行；标的池大时加大提速）
     "min_hold_bars": 10,        # int 0-300 — 买入后 N 根 bar 内 TD SELL（高9/cd13）不触发（0=关闭；止损/止盈不受限，2026-08-28）
+    "sell_all_max_per_round": 20,  # int 1-200 — 高9/cd13 全平单轮最多平多少批（P4 限流，2026-10-29）
     "trend_period": "1H",      # enum — 大周期趋势过滤周期（TD 趋势状态按该周期 K 线计算；默认 1H，可改 15m/4H/1D 等）
     # ── 贝叶斯闸门（2026-08-31，回测侧，默认关）────────────────────────
     #  gate_enabled 只作用于回测（driver 注入 strategy.parameters）；
@@ -323,6 +324,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "td", "min": 0, "max": 300, "step": 1, "std": 10, "integer": True,
         "label": "最短持有期（bar）",
         "hint": "买入后 N 根 bar 内 TD SELL（高9/cd13）不触发——避免震荡市双向 countdown 刚买就卖（UNI 49 秒案例）；止损/止盈不受限（风控优先）；0=关闭；场景卡片内留空 = 跟随全局值（2026-08-28）",
+    },
+    "sell_all_max_per_round": {
+        "group": "td", "min": 1, "max": 200, "step": 1, "std": 20, "integer": True,
+        "label": "全平单轮上限（批）",
+        "hint": "高9/cd13 触发的「全平」单轮最多平多少批，剩余下一轮继续——shared_pool 下 100 批齐平会连发 100 张市价单（打穿薄盘口 + 撞交易所限频）。20 = 默认；批次少时可调小观察逐批效果",
     },
     "trend_period": {
         "group": "td", "type": "enum", "enum": list(PERIODS),

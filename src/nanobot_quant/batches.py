@@ -311,10 +311,17 @@ class BatchManager:
         open_lots.sort(key=key, reverse=(order == "lifo"))
         return open_lots[0]
 
-    def pick_all_slots(self, order: str = "fifo") -> list[dict[str, Any]]:
+    def pick_all_slots(
+        self, order: str = "fifo", limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         """返回全部 open 批次按 exit_order 排序（td_sell_all 高9 全平，2026-08-25）。
 
         fifo：entry_time 最早在前（先买先卖）；lifo：最新在前。
+
+        ``limit``（2026-10-29，P4 全平限流，docs/quant-system.md §33.52.6）：
+        单轮最多平多少批——shared_pool 下 100 批齐平会连发 100 张市价单
+        （打穿薄盘口 + 撞交易所限频），按轮限流、剩余下一轮继续。
+        ``None`` 或 <=0 = 不限（旧行为）。
         """
         open_lots = [
             s for s in self.slots
@@ -324,6 +331,8 @@ class BatchManager:
             return []
         key = lambda s: s["lot"]["entry_time"]  # noqa: E731
         open_lots.sort(key=key, reverse=(order == "lifo"))
+        if limit is not None and int(limit) > 0:
+            open_lots = open_lots[: int(limit)]
         return open_lots
 
     # ── 状态机 ──────────────────────────────────────────────────────

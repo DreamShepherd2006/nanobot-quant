@@ -172,6 +172,14 @@ class CexBroker(Broker):
                 return f"{prefix}: {label}"
         return f"{prefix}: {payload}"
 
+    def inst_id_of(self, symbol: str) -> str:
+        """symbol → 交易所交易对（P4 统一接口，与 OkxCexBroker 同名）。
+
+        重启对账要按订单号回查，Gate 侧需要 pair；这里复用 gate_pair，
+        保证与下单路径同一映射（tokens.json 的 gate_symbol 优先）。
+        """
+        return gate_pair(symbol, self._tokens_json)
+
     def _query_order(self, order_id: str, pair: str) -> tuple[str, float, float, float]:
         """Query order status → (lumibot_status, filled, left, avg_price)."""
         try:

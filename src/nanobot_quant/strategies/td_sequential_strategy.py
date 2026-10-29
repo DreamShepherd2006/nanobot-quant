@@ -272,6 +272,14 @@ class TdSequentialStrategy(Strategy):
         self._td_sell_all = bool(
             self.parameters.get("td_sell_all", False) or False
         )
+        # 全平限流（P4，2026-10-29，docs/quant-system.md §33.52.6）：高9/cd13
+        # 全平单轮最多平 N 批，剩余下一轮继续——shared_pool 下 100 批齐平会
+        # 连发 100 张市价单（打穿薄盘口 + 撞交易所限频）。
+        try:
+            self._sell_all_max = max(1, int(self.parameters.get(
+                "sell_all_max_per_round", 20) or 20))
+        except (TypeError, ValueError):
+            self._sell_all_max = 20
         # 单边交易成本（Gate taker 0.1%）：止损/止盈净值口径
         self._fee_rate = float(self.parameters.get("fee_rate", 0.001) or 0.0)
         # ── 真分账 v1.1（2026-08-10）：BUY 起点 + 默认账户还原 ──
@@ -772,6 +780,22 @@ class TdSequentialStrategy(Strategy):
             except Exception:  # noqa: BLE001
                 broker_name = "?"
             sl_diag = getattr(getattr(self, "_risk", None), "stop_loss_pct", "?")
+            # 2026-10-29（展示层，方案 A）：按当前场景标的池裁剪 LIVE_STATE
+            # ——改池/缩池后旧标的条目停更但保留，页面会继续渲染（标题虚高）。
+            # 仅实盘写 LIVE_STATE，回测不得污染实盘状态（PR #254 守卫）。
+            if self.parameters.get("live_mode"):
+                try:
+                    from nanobot_quant.td_live_state import prune_symbols
+
+                    _removed = prune_symbols(name, self.symbols)
+                    if _removed:
+                        print(
+                            f"[DIAG] td_live LIVE_STATE 清理: scene={name} "
+                            f"移除已出池标的 {_removed}",
+                            file=sys.stderr, flush=True,
+                        )
+                except Exception:  # noqa: BLE001 — 纯展示状态，绝不打断交易
+                    pass
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
                 f"channel={self.parameters.get('execution_channel', '?')} "
@@ -1401,6 +1425,10 @@ class TdSequentialStrategy(Strategy):
                         lot_qty = self._cex_filled(order) or qty
                         self.batch_manager.open_lot(
                             slot=slot["slot"], qty=lot_qty, entry_price=price,
+                            # P4（2026-10-29）：记交易所订单号 + 实际均价，
+                            # 供重启逐批对账（shared_pool 无法靠余额反推批次）
+                            ord_id=self._cex_ord_id(order),
+                            fill_px=self._cex_avg_price(order),
                         )
                         # 最短持有期（2026-08-28）：买入后 min_hold_bars 根 bar 内
                         # TD SELL（高9/cd13）不触发——避免震荡市双向 countdown
@@ -1610,7 +1638,15 @@ class TdSequentialStrategy(Strategy):
                 f" momentum={self._momentum_exit} stall_n={self._cd_stall_n}"
             )
             if self._td_sell_all:
-                candidates = bm.pick_all_slots(self._exit_order)
+                _open_n = self._count_open_lots(bm)
+                candidates = bm.pick_all_slots(
+                    self._exit_order, limit=self._sell_all_max)
+                if _open_n > len(candidates):
+                    self.logger.info(
+                        f"TD SELL ALL LIMIT | symbol={self.symbol} 本轮候选 "
+                        f"{len(candidates)}/{_open_n} 批（上限 {self._sell_all_max}），"
+                        f"剩余下轮继续"
+                    )
                 sold_any = False
                 hold_skipped = 0
                 for s in candidates:
@@ -1669,7 +1705,15 @@ class TdSequentialStrategy(Strategy):
         elif cd_sell >= exit_countdown:
             reason = f"cd_sell={cd_sell}"
             if self._cd_exit_all:
-                candidates = bm.pick_all_slots(self._exit_order)
+                _open_n = self._count_open_lots(bm)
+                candidates = bm.pick_all_slots(
+                    self._exit_order, limit=self._sell_all_max)
+                if _open_n > len(candidates):
+                    self.logger.info(
+                        f"TD CD EXIT ALL LIMIT | symbol={self.symbol} 本轮候选 "
+                        f"{len(candidates)}/{_open_n} 批（上限 {self._sell_all_max}），"
+                        f"剩余下轮继续"
+                    )
                 sold_any = False
                 hold_skipped = 0
                 for s in candidates:
@@ -2340,7 +2384,10 @@ class TdSequentialStrategy(Strategy):
             qty = float(filled)
             bm = self._batch_managers.get(symbol) or self.batch_manager
             bm.open_lot(slot=slot_id, qty=qty,
-                        entry_price=float(info.get("price") or avg or 0))
+                        entry_price=float(info.get("price") or avg or 0),
+                        # P4：订单号来自 pending 记录（该笔已查单确认成交）
+                        ord_id=str(info.get("order_id") or "") or None,
+                        fill_px=avg or None)
             bm.save()
             self.logger.info(
                 f"TD BATCH LONG (CEX CONFIRM) | symbol={symbol} slot={slot_id} "
@@ -2613,6 +2660,28 @@ class TdSequentialStrategy(Strategy):
             return float(f) if f not in (None, "", 0) else None
         except (TypeError, ValueError):
             return None
+
+    def _cex_ord_id(self, order) -> str | None:
+        """CEX 交易所订单号（P4 台账对账，2026-10-29）。
+
+        OKX broker 写成 ``order.custom_params["cex"]["ord_id"]``；Gate 侧
+        走 ``order.identifier``（set_identifier）。两者都取不到则返回 None
+        （对账时该批退回余额反推路径）。
+        """
+        cex = (getattr(order, "custom_params", None) or {}).get("cex") or {}
+        oid = cex.get("ord_id") or getattr(order, "identifier", None)
+        return str(oid) if oid else None
+
+    @staticmethod
+    def _count_open_lots(bm) -> int:
+        """台账当前 open 批次数（P4 全平限流日志用，只读）。"""
+        try:
+            return sum(
+                1 for s in (getattr(bm, "slots", None) or [])
+                if str(s.get("status")) == "open" and s.get("lot")
+            )
+        except Exception:  # noqa: BLE001 — 纯日志辅助，绝不打断出场
+            return 0
 
     def _cex_min_quote(self, symbol: str) -> float:
         """Gate 交易对 min_quote_amount（broker 缓存拉取；0=未知不过滤）。

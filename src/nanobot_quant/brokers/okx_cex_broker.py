@@ -538,6 +538,33 @@ class OkxCexBroker(Broker):
     #  Order Reconciliation
     # ═══════════════════════════════════════════════════════════
 
+    def _query_order(
+        self, order_id: str, pair: str = "",
+    ) -> tuple[str, float, float, float]:
+        """按 ordId 查单 → ``(status, filled, left, avg_px)``（P4 重启对账）。
+
+        与 ``CexBroker._query_order`` 签名一致，供
+        ``td_live._reconcile_verify_ord`` 统一调用。
+
+        **不依赖进程内 ``_tracked``**（重启后为空）：instId 由调用方用
+        ``inst_id_of(symbol)`` 解析后经 ``pair`` 传入；解析不到返回
+        ``unknown``（fail-safe，台账保留、不自动删批）。
+        """
+        inst = str(pair or "").strip()
+        if not inst:
+            return ("unknown", 0.0, 0.0, 0.0)
+        try:
+            res = okx_spot.query_order(self._creds, inst, order_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX query order error {order_id}: {exc}",
+                  file=sys.stderr, flush=True)
+            return ("unknown", 0.0, 0.0, 0.0)
+        status = str(res.get("status") or "unknown")
+        if status == "pending":
+            # 查单归一里 live/partially_filled 都是 pending；对账层区分「仍挂」
+            status = "open" if str(res.get("state")) in ("live", "partially_filled") else "pending"
+        return (status, _num(res.get("acc_fill_sz")), 0.0, _num(res.get("avg_px")))
+
     def _pull_broker_order(self, identifier: str) -> Any:
         info = self._tracked.get(identifier, {})
         inst = info.get("inst", "")

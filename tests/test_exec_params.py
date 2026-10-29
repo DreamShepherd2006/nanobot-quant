@@ -648,9 +648,11 @@ def test_grouping_scheme2():
     assert {"quantity_mode", "td_quantity", "td_fixed_amount", "td_batches",
             "exit_order", "take_profit_pct", "td_start_slot", "min_account_value",
             "td_symbols", "td_sleeptime", "sub_accounts"} <= scene_group
-    # ③ 只剩全局循环运行（K线窗口 + 并发拉取 + 监控刷新 + 最短持有期 + 趋势周期）
+    # ③ 只剩全局循环运行（K线窗口 + 并发拉取 + 监控刷新 + 最短持有期 + 趋势周期
+    #    + 全平单轮上限 P4 2026-10-29）
     assert td_group == {"td_bars", "kline_concurrency", "td_ui_refresh_s",
-                        "position_display_min_usd", "min_hold_bars", "trend_period"}
+                        "position_display_min_usd", "min_hold_bars", "trend_period",
+                        "sell_all_max_per_round"}
     # ⑤ F1 闸门独立成组（贝叶斯 gate_enabled/gate_red_min 从 ③ 提拔，零行为变化）
     f1_group = {k for k, v in PARAM_META.items() if v["group"] == "f1gate"}
     assert f1_group == {"gate_enabled", "gate_red_min"}
