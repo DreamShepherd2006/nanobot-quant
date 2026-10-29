@@ -60,6 +60,51 @@ def _dust_threshold() -> float:
         return 0.0
 
 
+def validate_scene_pool(
+    batches_n: int, account_ids, channel: str, scene_name: str
+) -> None:
+    """校验场景子账号池是否够用（fail-closed，抛 ValueError）。
+
+    2026-10-29（P5 收尾）：校验规则必须按 **slot_model** 分派——
+    ``shared_pool``（okx_cex）的语义是「逻辑槽共享账号池」，
+    ``slot i → pool[i % len(pool)]``，**1 个账号完全能支撑 N 个逻辑槽**
+    （同账号内共享该账号余额池）。此前无条件要求 ``len(sub_accounts) ≥ batches``
+    是按 ``per_account``（gate：每槽绑一个子账号）写的，用户按共享池语义只填
+    1 个账号时整场景被跳过（实测 16:38 场景 high 直接 fail-closed、TD 全停摆）。
+
+    - shared_pool：有效账号池 ≥ 1 即可（``shared_pool_account_ids`` 负责
+      「场景池 ∩ 本通道已配置账号」的匹配与轮转；为空仍 fail-closed）；
+    - per_account：仍要求 ``len(sub_accounts) ≥ batches``——每槽必须绑一个
+      真实存在的子账号，绝不静默生成交易所不存在的账号。
+    """
+    if not account_ids:
+        return
+    try:
+        from nanobot_quant.brokers.registry import spec_for_channel
+
+        slot_model = str(
+            getattr(spec_for_channel(channel), "slot_model", "") or ""
+        )
+    except Exception:  # noqa: BLE001 — 未知通道交给下游 fail-closed
+        slot_model = ""
+    if slot_model == "shared_pool":
+        from nanobot_quant.batches import shared_pool_account_ids
+
+        eff, err = shared_pool_account_ids(batches_n, account_ids)
+        if not eff:
+            raise ValueError(
+                f"场景 {scene_name} 无可用子账号（shared_pool）: "
+                f"sub_accounts={list(account_ids)}"
+                + (f"（{err}）" if err else "")
+            )
+        return
+    if len(account_ids) < batches_n:
+        raise ValueError(
+            f"场景 {scene_name} 子账号池不足: "
+            f"sub_accounts={len(account_ids)} < batches={batches_n}"
+        )
+
+
 class _TdLiveRunner:
     def __init__(self) -> None:
         self._executor: Any = None
@@ -334,11 +379,7 @@ class _TdLiveRunner:
         if batches_n <= 1:
             return {}
         account_ids = sc.get("sub_accounts") or None
-        if account_ids and len(account_ids) < batches_n:
-            raise ValueError(
-                f"场景 {scene_name} 子账号池不足: "
-                f"sub_accounts={len(account_ids)} < batches={batches_n}"
-            )
+        validate_scene_pool(batches_n, account_ids, channel, scene_name)
         bms: dict[str, Any] = {}
         for sym in symbols:
             bm = self._prepare_batches(

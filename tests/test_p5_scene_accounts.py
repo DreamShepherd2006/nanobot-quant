@@ -74,3 +74,49 @@ def test_scene_card_no_warning_when_pool_matches_channel():
                               ["DreamShepherdbot2"], 1,
                               candidates=["DreamShepherdbot2"])
     assert "不属于当前执行通道" not in html
+
+
+# ── P5 收尾：场景池「够用」判据按 slot_model 分派（2026-10-29） ──────────
+
+def test_shared_pool_single_account_supports_multiple_slots(monkeypatch):
+    """shared_pool：1 个账号 × 3 个逻辑槽是合法配置（同账号共享余额池）。
+
+    回归：此前无条件要求 len(sub_accounts) ≥ batches，用户按共享池语义只填
+    1 个账号时整场景 fail-closed 跳过（TD 全停摆，2026-10-29 实测）。
+    """
+    import nanobot_quant.batches as b
+    from nanobot_quant.td_live import validate_scene_pool
+
+    monkeypatch.setattr(
+        b, "shared_pool_account_ids",
+        lambda count, pool=None: (["DreamShepherdbot2"] * int(count), None),
+    )
+    validate_scene_pool(3, ["DreamShepherdbot2"], "okx_cex", "high")  # 不抛错
+
+
+def test_per_account_still_requires_one_account_per_slot():
+    """per_account（gate）：每槽必须绑一个真实子账号，仍 fail-closed。"""
+    from nanobot_quant.td_live import validate_scene_pool
+
+    with pytest.raises(ValueError, match="子账号池不足"):
+        validate_scene_pool(3, ["gate_bot1"], "gate", "high")
+    validate_scene_pool(1, ["gate_bot1"], "gate", "high")
+
+
+def test_shared_pool_rejects_empty_effective_pool(monkeypatch):
+    """shared_pool：有效池为空（配置读不出来）仍 fail-closed，不静默放过。"""
+    import nanobot_quant.batches as b
+    from nanobot_quant.td_live import validate_scene_pool
+
+    monkeypatch.setattr(b, "shared_pool_account_ids",
+                        lambda count, pool=None: ([], "无已配置账号"))
+    with pytest.raises(ValueError, match="无可用子账号"):
+        validate_scene_pool(3, ["DreamShepherdbot9"], "okx_cex", "high")
+
+
+def test_no_pool_configured_is_allowed():
+    """未配置场景池 → 交给下游默认映射（不在这里拦）。"""
+    from nanobot_quant.td_live import validate_scene_pool
+
+    validate_scene_pool(3, None, "okx_cex", "high")
+    validate_scene_pool(3, [], "gate", "high")
