@@ -224,6 +224,27 @@ class _TdLiveRunner:
             },
             **td_params,
         )
+        # DIAG（2026-10-29）：shared_pool 通道启动自检——逐子账号探测余额，
+        # 把「哪个子账号的 API Key 无效 / 缺字段」一次性打出来（50119 就是
+        # API key doesn't exist；旧日志只报错因、不报账号，定位靠猜）。
+        # 自检失败不阻断启动（fail-open 诊断），但每个账号一条可见结论。
+        if slot_model == "shared_pool":
+            try:
+                from nanobot_quant.okx_cex_credentials import preflight_accounts
+
+                for row in preflight_accounts():
+                    tag = "OK" if row.get("ok") else "FAIL"
+                    print(
+                        f"[DIAG] shared_pool 子账号自检 | {tag} "
+                        f"account={row.get('name')}"
+                        + (f" err={row.get('error')}" if not row.get("ok") else ""),
+                        file=sys.stderr, flush=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[DIAG] shared_pool 子账号自检失败: {type(exc).__name__}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
         # DIAG（2026-08-12）：验证方案 A 参数 merge——strategy.json 变体 +
         # td-params 阈值对 TD 自主循环生效（重启后首次构造时打印一次）。
         print(

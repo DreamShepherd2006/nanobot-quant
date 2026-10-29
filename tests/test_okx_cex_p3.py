@@ -41,7 +41,11 @@ def _strategy(params: dict):
 # ── shared_pool_account_ids ───────────────────────────────────────────────
 
 
-def test_shared_pool_ids_prefer_scene_pool():
+def test_shared_pool_ids_prefer_scene_pool(monkeypatch):
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [{"name": "okx_main", "configured": True}],
+    )
     ids, err = shared_pool_account_ids(3, ["okx_main"])
     assert err == ""
     assert ids == ["okx_main"] * 3

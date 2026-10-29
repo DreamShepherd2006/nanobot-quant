@@ -53,15 +53,25 @@ class _FakeBroker:
 # ── 轮转分配 ─────────────────────────────────────────────────────────────
 
 
-def test_ids_rotate_across_scene_pool():
+def test_ids_rotate_across_scene_pool(monkeypatch):
     """3 账号 × 4 逻辑 slot → 轮转 a,b,c,a（A2：单账号内共享余额池）。"""
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [
+            {"name": n, "configured": True} for n in ("okx_a", "okx_b", "okx_c")
+        ],
+    )
     ids, err = shared_pool_account_ids(4, ["okx_a", "okx_b", "okx_c"])
     assert err == ""
     assert ids == ["okx_a", "okx_b", "okx_c", "okx_a"]
 
 
-def test_ids_single_account_degrades_to_old_behaviour():
+def test_ids_single_account_degrades_to_old_behaviour(monkeypatch):
     """账号池只有 1 个 → 全部 slot 同一账号（与 P3-1 行为一致）。"""
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [{"name": "okx_main", "configured": True}],
+    )
     ids, err = shared_pool_account_ids(3, ["okx_main"])
     assert (ids, err) == (["okx_main"] * 3, "")
 
@@ -81,13 +91,48 @@ def test_ids_use_all_configured_accounts(monkeypatch):
     assert ids == ["bot1", "bot2", "bot1", "bot2", "bot1"]
 
 
-def test_ids_scene_pool_wins_over_configured(monkeypatch):
+def test_ids_scene_pool_wins_when_belongs_to_channel(monkeypatch):
+    """场景池成员属于本通道已配置账号时，优先用场景池（保留用户选择）。"""
     monkeypatch.setattr(
         "nanobot_quant.okx_cex_credentials.list_sub_accounts",
-        lambda: [{"name": "from_cred", "configured": True}],
+        lambda: [
+            {"name": "from_cred", "configured": True},
+            {"name": "scene_a", "configured": True},
+            {"name": "scene_b", "configured": True},
+        ],
     )
     ids, err = shared_pool_account_ids(2, ["scene_a", "scene_b"])
     assert (ids, err) == (["scene_a", "scene_b"], "")
+
+
+def test_ids_ignores_scene_pool_from_other_channel(monkeypatch):
+    """2026-10-29 实测缺口：池里存的是别的通道账号名（gate_botN），
+
+    切到 okx_cex 后会写进台账（交易所不存在该账号）。现规则 = 与本通道
+    已配置账号取交集，全不匹配则回退通道账号列表。
+    """
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [
+            {"name": "DreamShepherdbot1", "configured": True},
+            {"name": "DreamShepherdbot2", "configured": True},
+        ],
+    )
+    ids, err = shared_pool_account_ids(2, ["gate_bot1", "gate_bot2"])
+    assert err == ""
+    assert ids == ["DreamShepherdbot1", "DreamShepherdbot2"]
+
+
+def test_ids_fail_closed_when_channel_accounts_unreadable(monkeypatch):
+    """通道账号读不出来时不能沿用别的通道的账号名（fail-closed）。"""
+
+    def boom():
+        raise RuntimeError("cred file missing")
+
+    monkeypatch.setattr("nanobot_quant.okx_cex_credentials.list_sub_accounts", boom)
+    ids, err = shared_pool_account_ids(2, ["gate_bot1"])
+    assert ids == []
+    assert "无法校验场景池账号" in err
 
 
 def test_ids_fail_closed_without_any_account(monkeypatch):
@@ -97,9 +142,25 @@ def test_ids_fail_closed_without_any_account(monkeypatch):
     assert "子账号" in err
 
 
-def test_ids_strip_blank_preferred_entries():
+def test_ids_strip_blank_preferred_entries(monkeypatch):
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [{"name": "okx_a", "configured": True}],
+    )
     ids, err = shared_pool_account_ids(2, ["", "  ", "okx_a"])
     assert (ids, err) == (["okx_a", "okx_a"], "")
+
+
+def test_dummy_data_source_exposes_datetime():
+    """StrategyExecutor 每轮调 strategy.get_datetime()（实测崩溃点）。"""
+    from datetime import datetime
+
+    from nanobot_quant.brokers._dummy_data_source import DummyDataSource
+
+    ds = DummyDataSource()
+    now = ds.get_datetime(adjust_for_delay=True)
+    assert isinstance(now, datetime)
+    assert ds.get_chains() == {}
 
 
 # ── 余额单轮缓存 ─────────────────────────────────────────────────────────
@@ -204,3 +265,27 @@ def test_activate_scene_clears_shared_pool_cache():
     except Exception:  # noqa: BLE001
         pass
     assert st._sp_balances == {}
+
+
+# ── 启动对账先于 initialize()（2026-10-29 实测崩溃点） ──────────────────
+
+
+def test_cex_slot_broker_before_initialize_uses_lazy_cache(monkeypatch):
+    """对账在 ``initialize()`` 之前调用 ``_cex_slot_broker``。
+
+    ``_cex_brokers`` 原先只在 ``initialize()`` 里建立，对账阶段调用直接抛
+    ``AttributeError: 'TdSequentialStrategy' object has no attribute
+    '_cex_brokers'``（shared_pool 对账全部失败、且台账账号名随之错乱）。
+    """
+    import nanobot_quant.brokers.okx_cex_broker as okxb
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+    monkeypatch.setattr(okxb.OkxCexBroker, "__init__", lambda self, **kw: None)
+    st = TdSequentialStrategy.__new__(TdSequentialStrategy)
+    st.parameters = {"slot_model": "shared_pool", "tokens_json": []}
+
+    broker = st._cex_slot_broker({"slot": 1, "account_id": "acc1"})
+    assert broker is not None
+    assert "1:acc1" in st.__dict__["_cex_brokers"]
+    # 同 slot 再取 → 命中缓存（同一对象），不重复构造
+    assert st._cex_slot_broker({"slot": 1, "account_id": "acc1"}) is broker

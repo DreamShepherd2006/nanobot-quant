@@ -142,4 +142,30 @@ def get_okx_cex_credentials(
             f"okx_cex 子账户 {entry.get('name') or entry.get('uid') or '?'} "
             "凭证不完整，缺: " + ", ".join(missing)
         )
-    return {k: entry[k] for k in _REQUIRED}
+    return {k: str(entry[k]).strip() for k in _REQUIRED}
+
+
+def preflight_accounts(creds: Optional[dict] = None) -> list[dict]:
+    """启动自检：对每个子账号做一次余额探测，返回逐账号结果。
+
+    动因（2026-10-29 实测）：切到 ``okx_cex`` 后每轮只看到一句
+    ``OKX-CEX balance error: 401 … code 50119``（API key doesn't exist），
+    无法看出是**哪个**子账号、也没在启动时暴露——这里在循环启动前逐个
+    校验，把「凭证无效 / 缺字段」一次性打清楚（密钥一律脱敏，只给尾四位）。
+    """
+    out: list[dict] = []
+    for s in list_sub_accounts(creds):
+        name = s.get("name") or s.get("uid") or "(未命名)"
+        if not s.get("configured"):
+            out.append({"name": name, "ok": False,
+                        "error": "缺字段: " + ", ".join(s.get("missing") or [])})
+            continue
+        try:
+            from .okx_options_trade import account_balance
+
+            account_balance(s.get("name") or s.get("uid") or "")
+            out.append({"name": name, "ok": True, "error": ""})
+        except Exception as exc:  # noqa: BLE001
+            out.append({"name": name, "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}"})
+    return out

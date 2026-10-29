@@ -48,14 +48,12 @@ def _base_of(inst_id: str) -> str:
     return (inst_id.split("-")[0] if inst_id else "").upper()
 
 
-class _DummyDataSource:
-    """占位数据源：让 ``Broker.__init__`` 不强制要求真实 data source。"""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def get_chains(self, asset=None, quote=None):
-        return {}
+# 占位数据源（2026-10-29 起两个 CEX broker 共用一份）：
+# 必须含 get_datetime，否则 StrategyExecutor 每轮 get_datetime() 抛
+# AttributeError、循环被 on_bot_crash 打死（本通道实测）。
+from nanobot_quant.brokers._dummy_data_source import (
+    DummyDataSource as _DummyDataSource,
+)
 
 
 class OkxCexBroker(Broker):
@@ -165,7 +163,12 @@ class OkxCexBroker(Broker):
         try:
             bal = account_balance(self._sub_account)
         except Exception as e:  # noqa: BLE001
-            print(f"[DIAG] OKX-CEX balance error: {e}", file=sys.stderr, flush=True)
+            # 账号名是排查 50119（API key doesn't exist）的关键信息，不能只报错因
+            print(
+                f"[DIAG] OKX-CEX balance error | account={self._sub_account or '(default)'}: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
             return {}
         out: dict[str, dict] = {}
         for row in bal.get("details") or []:

@@ -2639,7 +2639,12 @@ class TdSequentialStrategy(Strategy):
         slot_no = int(slot["slot"])
         account = str(slot.get("account_id") or "")
         key = f"{slot_no}:{account}" if account else str(slot_no)
-        broker = self._cex_brokers.get(key)
+        # 懒初始化（2026-10-29）：启动对账在 ``initialize()`` 之前调用
+        # ``_cex_slot_broker``，此时 ``_cex_brokers`` 尚未建立（它是
+        # ``initialize()`` 里的实例属性）——旧写法直接 self._cex_brokers.get()
+        # 报 AttributeError，让 shared_pool 对账全部失败。
+        brokers = self.__dict__.setdefault("_cex_brokers", {})
+        broker = brokers.get(key)
         if broker is None:
             if self._shared_pool_channel:
                 # shared_pool（okx_cex）：Account 由台账 slot.account_id 指定，
@@ -2663,7 +2668,7 @@ class TdSequentialStrategy(Strategy):
                     slippage=str(self.parameters.get("slippage", "0.01")),
                     sub_account=name,
                 )
-            self._cex_brokers[key] = broker
+            brokers[key] = broker
         return broker
 
     def _cex_slot_balances(self, slot: dict, use_snapshot: bool = False) -> dict:

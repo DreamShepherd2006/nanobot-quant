@@ -53,14 +53,12 @@ logger = logging.getLogger("nanobot_quant.brokers.cex")
 _CASH_CURRENCIES = frozenset({"USDT", "USDC", "USDG", "USD", "TUSD"})
 
 
-class _DummyDataSource:
-    """Placeholder so Broker.__init__ does not require a real data source."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def get_chains(self, asset=None, quote=None):
-        return {}
+# 占位数据源（2026-10-29 起两个 CEX broker 共用一份）：
+# 必须含 get_datetime，否则 StrategyExecutor 每轮 get_datetime() 抛
+# AttributeError、循环被 on_bot_crash 打死（okx_cex 实测）。
+from nanobot_quant.brokers._dummy_data_source import (
+    DummyDataSource as _DummyDataSource,
+)
 
 
 class CexBroker(Broker):

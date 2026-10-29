@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -470,22 +471,50 @@ def shared_pool_account_ids(
     新增 shared_pool 通道时在此加分派（当前仅 okx_cex）。
     """
     pool = [str(a).strip() for a in (preferred or []) if str(a or "").strip()]
-    if not pool:
-        try:
-            from .okx_cex_credentials import list_sub_accounts
+    # 2026-10-29：场景池可能存的是**另一条通道**的账号名（gate → gate_botN）。
+    # shared_pool 下账号必须是本通道已配置的子账号，否则台账会写入交易所
+    # 不存在的账号名（实测：切到 okx_cex 后台账写成 gate_bot1-3）。
+    # 规则：preferred ∩ 本通道已配置账号；交集为空 → 回退本通道账号列表。
+    known: list[str] = []
+    known_err = ""
+    try:
+        from .okx_cex_credentials import list_sub_accounts
 
-            pool = [
-                str(s["name"])
-                for s in list_sub_accounts()
-                if s.get("configured") and s.get("name")
-            ]
-        except Exception as exc:  # noqa: BLE001
-            return [], f"读取子账号配置失败：{type(exc).__name__}: {exc}"
-    if not pool:
+        known = [
+            str(s["name"])
+            for s in list_sub_accounts()
+            if s.get("configured") and s.get("name")
+        ]
+    except Exception as exc:  # noqa: BLE001
+        known_err = f"{type(exc).__name__}: {exc}"
+
+    dropped: list[str] = []
+    if not known:
+        # 通道侧账号列表读不出来（或本来就没配）——无论场景池写了什么，
+        # 都不能确认它属于本通道，fail-closed 不当"可用账号"用。
+        if known_err:
+            return [], (
+                "读取子账号配置失败，无法校验场景池账号是否属于该通道："
+                + known_err
+                + ("（场景池：" + ", ".join(pool) + "）" if pool else "")
+            )
         return [], (
             "shared_pool 通道无可用于下单的子账号（请在凭证页配置至少一个"
             "已填全 API Key / Secret / Passphrase 的子账号）"
         )
+    if pool:
+        keep = [a for a in pool if a in known]
+        dropped = [a for a in pool if a not in known]
+        pool = keep
+        if dropped:
+            print(
+                f"[DIAG] shared_pool 账号池: 场景池 {dropped} 不属于该通道"
+                f"已配置子账号，已忽略（使用 {pool or known}）",
+                file=sys.stderr,
+                flush=True,
+            )
+    if not pool:
+        pool = known
     n = max(int(count), 1)
     return [pool[i % len(pool)] for i in range(n)], ""
 
