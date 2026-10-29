@@ -434,7 +434,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],
-        "label": "子账号池", "hint": "本场景使用的 Gate 子账号（slot i ↔ 列表第 i 个；S3 调度分频起消费，S1 仅配置）",
+        "label": "子账号池", "hint": "本场景使用的子账号（候选按当前执行通道给：gate=Gate 子账号、okx_cex=OKX 现货子账号；slot i ↔ 列表第 i 个，多个 slot 可共用同一账号）",
     },
     # ── ⑤ UI ────────────────────────────────────────────────────────────
     "td_ui_refresh_s": {

@@ -66,6 +66,16 @@ def _channel_family(channel: str) -> str:
     （okx_dex/gate），兼容旧值 dex/cex 归一化。
     """
     c = str(channel or "")
+    # 2026-10-29（P5）：改为查 broker 注册表——此前这里维护第二份白名单
+    # ("gate","cex"/"okx_dex","dex")，新增 okx_cex 后没跟上 ⇒ okx_cex 被当成
+    # DEX 处理（服务端渲染按 dex 分支），与运行时 spec 的 family 不一致。
+    # 注册表是唯一事实源：新增通道自动正确（注册 spec 即接入）。
+    try:
+        from .brokers.registry import spec_for_channel
+
+        return str(spec_for_channel(c or "okx_dex").family)
+    except Exception:  # noqa: BLE001 — 未知通道回退旧白名单，页面仍可渲染
+        pass
     if c in ("gate", "cex"):
         return "cex"
     if c in ("okx_dex", "dex"):
@@ -299,6 +309,7 @@ def _scene_card_html(
     family: str,
     gate_accounts: list[str],
     idx: int,
+    candidates: list[str] | None = None,
 ) -> str:
     """④ 多场景卡片（S1 配置层，2026-08-20）。
 
@@ -309,6 +320,10 @@ def _scene_card_html(
     sdef = SCENES[scene_key]
     scene_def = DEFAULT_SCENES.get(scene_key, {})
     prefix = f"scenes_{scene_key}_"
+    # P5（2026-10-29）：场景池里不属于当前通道的账号运行时会整批忽略
+    # （shared_pool_account_ids fail-soft 回退到全部可用账号），页面必须显式说清。
+    _bad = _invalid_pool_names(scene.get("sub_accounts"),
+                               candidates if candidates is not None else gate_accounts)
     opts = options or {}
     fields = []
     for fk in SCENE_FIELD_ORDER:
@@ -323,10 +338,18 @@ def _scene_card_html(
                                       prefix, field_name=fk,
                                       std_override=scene_def.get(fk)))
     badge = "🟢 启用" if scene.get("enabled") else "⚪ 停用"
+    warn = ""
+    if _bad:
+        warn = (
+            f'<div class="banner" style="background:#7a3b00;color:#fff">'
+            f'⚠ 子账号池中 {html.escape(", ".join(_bad))} 不属于当前执行通道，'
+            f'运行时会忽略（该场景回退为使用全部可用账号）</div>'
+        )
     return (
         f'<div class="card scene-card" data-scene="{scene_key}">'
         f'<h3>④-{idx} {sdef["label"]}（{sdef["freq"]} · {sdef["desc"]}）　{badge}</h3>'
         f'{"".join(fields)}'
+        f'{warn}'
         f'</div>'
     )
 
@@ -386,6 +409,48 @@ def _strategy_banner_html() -> str:
         return ""
 
 
+def _okx_cex_accounts() -> list[str]:
+    """OKX CEX 现货子账号候选（P5，2026-10-29）。
+
+    口径与运行时完全一致：只列**已配置完整凭证**的子账号，并排除期权线
+    占用的那一个（``option_account_name()``）——期权与现货的资金/担保不能
+    混在同一子账号里（用户 2026-10-29 设计）。
+    """
+    try:
+        from .okx_cex_credentials import list_sub_accounts, option_account_name
+
+        opt = option_account_name()
+        names = [str(s["name"]) for s in list_sub_accounts()
+                 if s.get("configured") and s.get("name")]
+        return [n for n in names if n != opt]
+    except Exception:  # noqa: BLE001 — 配置读不出来就当无候选（页面仍可手填）
+        return []
+
+
+def _channel_accounts(channel: str) -> list[str]:
+    """子账号池候选——**按当前执行通道**给（P5，2026-10-29）。
+
+    此前一律给 Gate 子账号（``gate_botN``），而 okx_cex 通道的已配置账号是
+    ``DreamShepherdbotN`` ⇒ 场景池里存的值永远匹配不上、被运行时整批忽略
+    （日志「场景池 [...] 不属于该通道已配置子账号，已忽略」）。
+    """
+    fam = _channel_family(channel or "okx_dex")
+    if fam == "cex" and str(channel or "").startswith("okx"):
+        return _okx_cex_accounts()
+    if fam == "cex":
+        return _gate_accounts()
+    # DEX 通道不消费 sub_accounts（slot = 子钱包），保留 Gate 候选仅作占位。
+    return _gate_accounts()
+
+
+def _invalid_pool_names(pool, candidates: list[str]) -> list[str]:
+    """场景池中「不属于当前通道候选」的账号（页面提示用，不影响保存）。"""
+    if not candidates:
+        return []
+    cand = {str(c) for c in candidates}
+    return [str(a) for a in (pool or []) if str(a) and str(a) not in cand]
+
+
 def _gate_accounts() -> list[str]:
     """Gate 子账号可选列表（gate.json slot_map / sub_accounts），兜底 gate_bot1-5。
 
@@ -438,7 +503,7 @@ def _render_page(params: dict, message: str = "") -> str:
     token_opts = {"td_symbols": [s for s in load_token_symbols()
                                   if s not in _STABLECOINS]}
     family = _channel_family(params.get("execution_channel", "okx_dex"))
-    gate_accounts = _gate_accounts()
+    gate_accounts = _channel_accounts(params.get("execution_channel", "okx_dex"))
     groups = "".join(
         _group_html(g, params, token_opts, family)
         for g in GROUP_TITLES
@@ -447,7 +512,7 @@ def _render_page(params: dict, message: str = "") -> str:
     scenes = params.get("scenes") or {}
     scene_cards = "".join(
         _scene_card_html(sk, scenes.get(sk, {}), token_opts, family,
-                         gate_accounts, i + 1)
+                         gate_accounts, i + 1, candidates=gate_accounts)
         for i, sk in enumerate(SCENES)
     )
     return (
