@@ -289,3 +289,36 @@ def test_cex_slot_broker_before_initialize_uses_lazy_cache(monkeypatch):
     assert "1:acc1" in st.__dict__["_cex_brokers"]
     # 同 slot 再取 → 命中缓存（同一对象），不重复构造
     assert st._cex_slot_broker({"slot": 1, "account_id": "acc1"}) is broker
+
+
+# ── 账号分工：期权用第一个子账号，现货用剩下的（2026-10-29 用户确认） ──
+
+
+def test_ids_exclude_option_account_from_spot_pool(monkeypatch):
+    """期权账号（含保证金）不得混进现货池。"""
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.option_account_name", lambda: "DreamShepherdbot1"
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [
+            {"name": n, "configured": True}
+            for n in ("DreamShepherdbot1", "DreamShepherdbot2", "DreamShepherdbot3")
+        ],
+    )
+    ids, err = shared_pool_account_ids(3, [])
+    assert err == ""
+    assert ids == ["DreamShepherdbot2", "DreamShepherdbot3", "DreamShepherdbot2"]
+
+
+def test_ids_fail_closed_when_only_option_account_configured(monkeypatch):
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.option_account_name", lambda: "DreamShepherdbot1"
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [{"name": "DreamShepherdbot1", "configured": True}],
+    )
+    ids, err = shared_pool_account_ids(3, [])
+    assert ids == []
+    assert "非期权" in err

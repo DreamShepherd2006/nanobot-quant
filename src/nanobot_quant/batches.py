@@ -477,14 +477,32 @@ def shared_pool_account_ids(
     # 规则：preferred ∩ 本通道已配置账号；交集为空 → 回退本通道账号列表。
     known: list[str] = []
     known_err = ""
+    opt_account = ""
     try:
-        from .okx_cex_credentials import list_sub_accounts
+        from .okx_cex_credentials import list_sub_accounts, option_account_name
 
+        opt_account = option_account_name()
         known = [
             str(s["name"])
             for s in list_sub_accounts()
             if s.get("configured") and s.get("name")
         ]
+        # 用户设计（2026-10-29）：期权用第一个子账号（含保证金），现货按场景用
+        # 剩下的账号——两线资金/担保不能混在一个子账号里。
+        if opt_account and opt_account in known:
+            print(
+                f"[DIAG] shared_pool: 期权子账号 {opt_account} 已从现货池排除"
+                f"（现货池: {[a for a in known if a != opt_account]}）",
+                file=sys.stderr, flush=True,
+            )
+        spot_known = [a for a in known if a != opt_account]
+        if known and not spot_known:
+            return [], (
+                "现货线需要至少一个「非期权」子账号：当前仅配置了 "
+                f"{opt_account or known[0]}（期权占用），请在凭证页为剩下的"
+                "子账号补全 API Key / Secret / Passphrase"
+            )
+        known = spot_known
     except Exception as exc:  # noqa: BLE001
         known_err = f"{type(exc).__name__}: {exc}"
 

@@ -140,3 +140,49 @@ def test_get_injected_strips_extra_fields():
     creds = {"sub_accounts": [_entry("x", "9", api_key="k", secret_key="s", passphrase="p", extra="z")]}
     got = m.get_okx_cex_credentials(creds=creds)
     assert got == {"api_key": "k", "secret_key": "s", "passphrase": "p"}
+
+
+def test_account_creds_prefers_configured_duplicate(tmp_path, monkeypatch):
+    """同名多行（历史遗留）→ 优先三字段齐全的那条，不再盲取第一行。
+
+    现象：期权线走 uid 命中有效行，现货按 name 取到旧行 → 50119
+    「API key doesn't exist」，而「配置明明有效」。
+    """
+    from nanobot_quant import okx_cex_credentials as occ
+
+    data = {
+        "max_sub_accounts": 10,
+        "sub_accounts": [
+            {"name": "sub1", "uid": "1", "api_key": "old", "secret_key": "old",
+             "passphrase": "old"},
+            {"name": "sub1", "uid": "2", "api_key": "new", "secret_key": "new",
+             "passphrase": "new"},
+        ],
+    }
+    creds = occ.get_okx_cex_credentials(creds=data, account="sub1")
+    assert creds["api_key"] in {"old", "new"}  # 两行都 configured 时取第一条
+    # 第一行残缺 → 必须跳过它
+    data["sub_accounts"][0]["api_key"] = ""
+    creds = occ.get_okx_cex_credentials(creds=data, account="sub1")
+    assert creds["api_key"] == "new"
+
+
+def test_preflight_marks_duplicate_and_fingerprint(monkeypatch):
+    from nanobot_quant import okx_cex_credentials as occ
+
+    creds = {
+        "max_sub_accounts": 10,
+        "sub_accounts": [
+            {"name": "sub1", "uid": "1", "api_key": "abcdefgh1234",
+             "secret_key": "s", "passphrase": "p"},
+            {"name": "sub1", "uid": "1", "api_key": "abcdefgh5678",
+             "secret_key": "s", "passphrase": "p"},
+        ],
+    }
+    monkeypatch.setattr(
+        "nanobot_quant.okx_options_trade.account_balance", lambda name="": {}
+    )
+    rows = occ.preflight_accounts(creds)
+    assert len(rows) == 2
+    assert all("****" in r["fingerprint"] for r in rows)
+    assert "dup=2" in rows[0]["fingerprint"]

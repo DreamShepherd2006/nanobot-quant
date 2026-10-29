@@ -597,3 +597,18 @@ def _isolate_event_throttle():
     yield
     event_log.reset()
 
+
+
+@pytest.fixture(autouse=True)
+def _isolate_option_account(monkeypatch):
+    """测试默认「无期权专用子账号」，不读真实 option_params.json。
+
+    2026-10-29：现货 shared_pool 池会排除期权线占用的子账号；测试环境
+    （Nightly 容器存在 /data）可能读到真实 option_params.json，使单测结果
+    依赖现场配置。需要验证「期权账号被排除」的用例自行再 patch 该名字。
+    """
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.option_account_name",
+        lambda: "",
+        raising=False,
+    )

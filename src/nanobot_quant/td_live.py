@@ -236,7 +236,7 @@ class _TdLiveRunner:
                     tag = "OK" if row.get("ok") else "FAIL"
                     print(
                         f"[DIAG] shared_pool 子账号自检 | {tag} "
-                        f"account={row.get('name')}"
+                        f"account={row.get('name')} {row.get('fingerprint', '')}"
                         + (f" err={row.get('error')}" if not row.get("ok") else ""),
                         file=sys.stderr, flush=True,
                     )
