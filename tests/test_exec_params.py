@@ -1019,3 +1019,16 @@ def test_page_renders_td_periods_by_channel(monkeypatch, tmp_path):
     assert 'value="30m"' in html
     assert 'value="2H"' in html
     assert 'value="3D"' in html
+
+
+def test_save_exec_params_logs_channel_switch(tmp_path, monkeypatch, capsys):
+    """通道变化必须留审计痕迹（重建后旧页面静默写回旧通道的坑）。"""
+    from nanobot_quant import exec_params as ep
+
+    p = tmp_path / "exec_params.json"
+    monkeypatch.setattr(ep, "exec_params_path", lambda: p)
+    assert ep.save_exec_params({"execution_channel": "okx_cex"})["ok"] is True
+    res = ep.save_exec_params({"execution_channel": "okx_dex"})
+    assert res["ok"] is True
+    err = capsys.readouterr().err
+    assert "执行通道切换: okx_cex → okx_dex" in err

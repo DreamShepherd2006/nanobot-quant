@@ -761,6 +761,7 @@ class TdSequentialStrategy(Strategy):
             sl_diag = getattr(getattr(self, "_risk", None), "stop_loss_pct", "?")
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
+                f"channel={self.parameters.get('execution_channel', '?')} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
                 f"stop_loss={sl_diag} "
                 f"family={self.parameters.get('channel_family')} "

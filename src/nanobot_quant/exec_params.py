@@ -32,6 +32,7 @@ limit, 15% drawdown, 10% stop-loss, 1% slippage, 5% SOL buffer).
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -768,6 +769,24 @@ def save_exec_params(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": capacity_err}
 
     path = exec_params_path()
+    prev_channel = ""
+    try:
+        if path.is_file():
+            prev_channel = str(
+                (json.loads(path.read_text(encoding="utf-8")) or {})
+                .get("execution_channel") or ""
+            )
+    except (OSError, ValueError):
+        prev_channel = ""
+    new_channel = str(merged.get("execution_channel") or "")
+    if prev_channel and new_channel and prev_channel != new_channel:
+        # 2026-10-29：通道切换必须可审计——重建后浏览器未硬刷新时，旧版页面
+        # 的通道下拉没有新选项，会把通道静默写回旧值（曾把 okx_cex 写回
+        # okx_dex，日志里只有 onchainos 痕迹）。
+        print(
+            f"[DIAG] 执行通道切换: {prev_channel} → {new_channel}",
+            file=sys.stderr, flush=True,
+        )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
