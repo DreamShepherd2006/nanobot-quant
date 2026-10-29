@@ -56,6 +56,17 @@ from nanobot_quant.brokers._dummy_data_source import (
 )
 
 
+def _default_quote_ccy() -> str:
+    """从 WebUI 执行参数读计价币（失败/非法 → USDT）。"""
+    try:
+        from ..exec_params import load_exec_params
+
+        v = str(load_exec_params().get("quote_ccy") or "USDT").upper().strip()
+        return v if v in ("USDT", "USDC") else "USDT"
+    except Exception:  # noqa: BLE001 — 参数读失败不应打死下单
+        return "USDT"
+
+
 class OkxCexBroker(Broker):
     """Lumibot Broker，路由到 OKX CEX 现货市价单。
 
@@ -83,7 +94,7 @@ class OkxCexBroker(Broker):
         credentials: Optional[dict] = None,
         tokens_json: Optional[list[dict]] = None,
         sub_account: Optional[str] = None,
-        quote: str = "USDT",
+        quote: Optional[str] = None,
         slippage: str = "0.01",
         **kwargs,
     ):
@@ -94,7 +105,12 @@ class OkxCexBroker(Broker):
         self.market = "24/7"
         self._tokens_json = tokens_json or []
         self._sub_account = sub_account or ""
-        self._quote = (quote or "USDT").upper().strip()
+        # 2026-10-29：计价币由 WebUI /config/exec 的「计价币（OKX CEX）」决定
+        # （quote_ccy），显式传参仍然优先（测试/回测可覆盖）。
+        self._quote = (quote or _default_quote_ccy()).upper().strip()
+        if self._quote not in ("USDT", "USDC"):
+            self._quote = "USDT"
+        self.__dict__.setdefault("_other_quote", "USDC" if self._quote == "USDT" else "USDT")
         self._slippage = float(slippage)
 
         self._creds = account_creds(self._sub_account)

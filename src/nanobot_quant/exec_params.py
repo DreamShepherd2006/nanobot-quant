@@ -177,6 +177,7 @@ DEFAULT_EXEC_PARAMS: dict[str, Any] = {
     "slippage": 0.01,           # float [0,1) — swap slippage tolerance in percent (1 = 1%)
     "sol_buffer_pct": 0.05,     # float [0,1) — extra SOL reserved on buys
     "execution_channel": "okx_dex", # enum — 实例名（okx_dex=OKX DEX 链上 / gate=Gate.io 交易所）；旧值 dex/cex 自动迁移
+    "quote_ccy": "USDT",      # enum USDT/USDC — OKX CEX 计价币（2026-10-29）：决定报价/下单金额与现金校验用哪一侧稳定币
     "min_position_value": 1.0, # float ≥0 — 对账导入阈值(USD)：链上持仓价值低于该值视为 dust 不导入（0=关闭）
     # ── ③ TD 循环运行（全局）──────────────────────────────────────────
     "td_bars": 120,             # int 20-300 — TD 每轮拉取最近 N 根 K 线（固定窗口）
@@ -251,6 +252,13 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "fee_rate": {
         "group": "exec", "min": 0.0, "max": 0.01, "step": 0.001, "std": 0.001,
         "label": "交易成本(费率)", "hint": "单边交易成本（Gate taker 0.1%=0.001）。止损/止盈按净值触发：净盈亏 = 毛盈亏 − 2×费率（双边）；0=不计成本",
+    },
+    "quote_ccy": {
+        "group": "exec", "type": "enum", "enum": ["USDT", "USDC"], "std": "USDT",
+        "channels": "okx_cex",
+        "enum_labels": {"USDT": "USDT（默认）", "USDC": "USDC"},
+        "label": "计价币（OKX CEX）",
+        "hint": "OKX 现货同一币常并存 XXX-USDT 与 XXX-USDC 两组对。此处选定子账号资金所在的稳定币：报价、下单金额、现金校验都按它走（USDT 优先，该币只有另一侧对才会自动兜底）。Gate 通道固定 USDT，不受此项影响",
     },
     "slippage": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.01,

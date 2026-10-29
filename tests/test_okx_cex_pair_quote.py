@@ -66,3 +66,38 @@ def test_broker_falls_back_to_raw_symbol_on_bad_mapping(catalog, monkeypatch):
     b = _bare_broker()
     monkeypatch.setattr(b, "_base_ticker", lambda s: "XSOL")
     assert b.inst_id_of("SOL") == "SOL-USDT"
+
+
+# ── 计价币由 WebUI 参数决定（quote_ccy，2026-10-29）────────────────
+
+
+def test_quote_ccy_param_meta_and_validation():
+    from nanobot_quant import exec_params as ep
+
+    meta = ep.PARAM_META["quote_ccy"]
+    assert meta["type"] == "enum" and meta["enum"] == ["USDT", "USDC"]
+    assert meta["channels"] == "okx_cex", "只在 OKX CEX 通道下显示（Gate 固定 USDT）"
+    assert ep.DEFAULT_EXEC_PARAMS["quote_ccy"] == "USDT"
+    assert ep.validate_exec_param("quote_ccy", "USDC") is None
+    assert ep.validate_exec_param("quote_ccy", "USDX") is not None
+
+
+def test_broker_default_quote_reads_webui_param(monkeypatch):
+    from nanobot_quant import exec_params as ep
+
+    monkeypatch.setattr(ep, "load_exec_params", lambda: {"quote_ccy": "USDC"})
+    assert broker_mod._default_quote_ccy() == "USDC"
+
+    monkeypatch.setattr(ep, "load_exec_params", lambda: {"quote_ccy": "usdc"})
+    assert broker_mod._default_quote_ccy() == "USDC"      # 大小写归一
+
+    monkeypatch.setattr(ep, "load_exec_params", lambda: {"quote_ccy": "BOGUS"})
+    assert broker_mod._default_quote_ccy() == "USDT"      # 非法回退
+
+
+def test_broker_explicit_quote_wins(monkeypatch):
+    monkeypatch.setattr(broker_mod, "account_creds",
+                        lambda name: {"api_key": "k", "secret_key": "s", "passphrase": "p"})
+    monkeypatch.setattr(broker_mod, "_default_quote_ccy", lambda: "USDC")
+    b = OkxCexBroker(quote="USDT")
+    assert b._quote == "USDT", "显式传参优先于 WebUI 参数（测试/回测可覆盖）"
