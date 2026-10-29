@@ -30,8 +30,15 @@ class DummyDataSource:
         return {}
 
     def get_datetime(self, adjust_for_delay: bool = False):
-        """当前 UTC 时间（naive，与 lumibot 内部时间比较口径一致）。"""
-        return datetime.now(timezone.utc).replace(tzinfo=None)
+        """当前时间（**aware UTC**）。
+
+        必须 aware：lumibot ``StrategyExecutor._handle_lifecycle_methods`` 会把它
+        与 ``broker.market_close_time()``（经 ``utc_to_local`` 必为 aware）比较；
+        返回 naive 会在每一轮抛
+        ``TypeError: can't compare offset-naive and offset-aware datetimes``，
+        进而 ``on_bot_crash`` 打死整个 TD 循环（2026-10-29 okx_cex 通道实测）。
+        """
+        return datetime.now(timezone.utc)
 
     def get_last_price(self, asset=None, quote=None):
         """占位源不提供行情（取价统一走数据源注册表）；返回 None 不抛。"""

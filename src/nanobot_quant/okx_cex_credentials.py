@@ -183,6 +183,27 @@ def option_account_name() -> str:
     return (rows[0].get("name") or rows[0].get("uid") or "") if rows else ""
 
 
+def spot_account_names(creds: Optional[dict] = None) -> list[str]:
+    """现货池账号名 = 已配置子账号 − 期权占用账号。
+
+    与 ``batches.shared_pool_account_ids`` 同一口径（单一来源：期权账号一律排除），
+    供 broker 聚合余额用：shared_pool 下主 broker 不绑具体子账号，若不显式
+    指定就会落到 ``account_balance(None)`` = **默认账号（第一个，即期权账号）**
+    → 50119 → 余额 0 → portfolio BLOCK（2026-10-29 okx_cex 实测）。
+    """
+    try:
+        rows = [s for s in list_sub_accounts(creds) if s.get("configured")]
+    except Exception:  # noqa: BLE001
+        return []
+    names = [str(s.get("name") or s.get("uid") or "") for s in rows]
+    names = [n for n in names if n]
+    try:
+        opt = option_account_name()
+    except Exception:  # noqa: BLE001
+        opt = ""
+    return [n for n in names if n != opt]
+
+
 def preflight_accounts(creds: Optional[dict] = None) -> list[dict]:
     """启动自检：对每个子账号做一次余额探测，返回逐账号结果。
 

@@ -159,13 +159,60 @@ class OkxCexBroker(Broker):
         return px
 
     def _balances(self) -> dict:
-        """子账号资产 → ``{ccy: {available, locked, eq_usd}}``；失败返回 {}（fail-closed）。"""
+        """子账号资产 → ``{ccy: {available, locked, eq_usd}}``；失败返回 {}（fail-closed）。
+
+        未绑具体子账号（shared_pool 主 broker）时**聚合现货池**：直接查默认账号
+        会落到第一个子账号（期权占用）→ 50119 → 余额 0 → portfolio BLOCK。
+        现货池 = 已配置子账号 − 期权账号（``spot_account_names``，与批次账号池
+        同一口径）。
+        """
+        if not self._sub_account:
+            names = self._spot_names()
+            if len(names) > 0:
+                return self._merged_balances(names)
+            # 现货池为空（例如只配了一个账号且被期权占用）：退回默认账号，
+            # 由 _fetch_account_balances 打 DIAG，调用方 fail-closed。
+        return self._fetch_account_balances(self._sub_account)
+
+    def _spot_names(self) -> list[str]:
+        """现货池账号名（带 5s 进程内缓存，避免每轮反复读盘）。（""）"""
+        now = time.monotonic()
+        cached = self.__dict__.get("_spot_names_cache")
+        if cached and now - cached[1] < 5.0:
+            return cached[0]
         try:
-            bal = account_balance(self._sub_account)
+            from nanobot_quant.okx_cex_credentials import spot_account_names
+
+            names = spot_account_names()
+        except Exception:  # noqa: BLE001
+            names = []
+        self.__dict__["_spot_names_cache"] = (names, now)
+        return names
+
+    def _merged_balances(self, names: list[str]) -> dict:
+        """现货池多账号余额聚合（available/locked/eq_usd 逐币种求和）。"""
+        out: dict[str, dict] = {}
+        ok = 0
+        for name in names:
+            bal = self._fetch_account_balances(name)
+            if not bal:
+                continue
+            ok += 1
+            for ccy, row in bal.items():
+                cur = out.setdefault(
+                    ccy, {"available": 0.0, "locked": 0.0, "eq_usd": 0.0}
+                )
+                for k in ("available", "locked", "eq_usd"):
+                    cur[k] += _num(row.get(k))
+        return out if ok else {}
+
+    def _fetch_account_balances(self, account: str) -> dict:
+        try:
+            bal = account_balance(account)
         except Exception as e:  # noqa: BLE001
             # 账号名是排查 50119（API key doesn't exist）的关键信息，不能只报错因
             print(
-                f"[DIAG] OKX-CEX balance error | account={self._sub_account or '(default)'}: {e}",
+                f"[DIAG] OKX-CEX balance error | account={account or '(default)'}: {e}",
                 file=sys.stderr,
                 flush=True,
             )
