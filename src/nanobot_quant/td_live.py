@@ -71,6 +71,10 @@ class _TdLiveRunner:
             "symbols": None,
             "sleeptime": None,
             "quantity_mode": None,
+            # 执行通道（2026-10-29 P3-3 修复）：切换通道必须重启循环——
+            # 否则旧 broker/数据源（如 Gate）继续跑，而批次台账已被
+            # handler 按新通道重建 ⇒ 账实不一致。
+            "channel": None,
         }
 
     # ── 构造 ──────────────────────────────────────────────────────────
@@ -1040,6 +1044,7 @@ class _TdLiveRunner:
                 symbols=params["td_symbols"],
                 sleeptime=params["td_sleeptime"],
                 quantity_mode=params["quantity_mode"],
+                channel=_channel_of(params),
                 scenes_fp=_scenes_fingerprint(params),
             )
             print(
@@ -1236,14 +1241,18 @@ class _TdLiveRunner:
             )
             if running:
                 scenes_fp = _scenes_fingerprint(params)
-                changed = any(
-                    self._state.get(k) != params.get(pk)
-                    for k, pk in (
-                        ("symbols", "td_symbols"),
-                        ("sleeptime", "td_sleeptime"),
-                        ("quantity_mode", "quantity_mode"),
+                changed = (
+                    self._state.get("channel") != _channel_of(params)
+                    or self._state.get("scenes_fp") != scenes_fp
+                    or any(
+                        self._state.get(k) != params.get(pk)
+                        for k, pk in (
+                            ("symbols", "td_symbols"),
+                            ("sleeptime", "td_sleeptime"),
+                            ("quantity_mode", "quantity_mode"),
+                        )
                     )
-                ) or self._state.get("scenes_fp") != scenes_fp
+                )
                 if not changed:
                     return self.status()
                 # 参数变化 → 重启循环（先停旧的，避免双循环）；
@@ -1275,6 +1284,19 @@ def _scenes_fingerprint(params: dict[str, Any]) -> str:
 
     scenes = params.get("scenes") or {}
     return json.dumps(scenes, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _channel_of(params: dict[str, Any]) -> str:
+    """规范化后的执行通道（旧 dex/cex 别名迁移，供重启判据比较）。
+
+    2026-10-29 修复：切换 `execution_channel` 必须重启 TD 循环——broker、
+    数据源、批次账号模型（per_account / shared_pool）全随通道变化；不重启
+    就会出现「旧通道（如 Gate）继续下单、台账已按新通道重建」的账实不一致
+    （实测：切换后日志仍打 `CEX price … gate ticker`、无对账行）。
+    """
+    from nanobot_quant.exec_params import normalize_execution_channel
+
+    return normalize_execution_channel(params.get("execution_channel", "okx_dex"))
 
 
 # 场景周期 → 秒：统一走 data_sources.periods.INTERVAL_SECONDS（16 周期全量，

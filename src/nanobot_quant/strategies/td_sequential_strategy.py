@@ -763,6 +763,8 @@ class TdSequentialStrategy(Strategy):
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
                 f"stop_loss={sl_diag} "
+                f"family={self.parameters.get('channel_family')} "
+                f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
                 file=sys.stderr, flush=True,
             )
