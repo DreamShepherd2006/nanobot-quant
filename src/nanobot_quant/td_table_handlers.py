@@ -937,6 +937,38 @@ def _slot_map_txt(sub_accounts) -> str:
     return f"slot 1-{n} ({', '.join(str(a) for a in sub_accounts)})"
 
 
+
+def _shared_pool_map_txt(sub_accounts, batches: int = 1) -> str:
+    """shared_pool 场景标题里的「实际生效池账号」（C90，2026-10-29）。
+
+    ``slot_model=shared_pool`` 下批次是**逻辑槽位**、共用同一余额池，
+    而场景 ``sub_accounts`` 可能还存着**另一条通道**的账号名（Gate 迁移
+    残留 ``gate_bot1-3``）——那种情况执行层会忽略它、改用本通道已配置的
+    子账号（``shared_pool_account_ids``）。此处按同一函数解析并展示**真正
+    生效**的账号；场景池与生效池无交集时显式标「⚠ 场景池已忽略」，避免
+    页面继续显示被忽略的名字、让人误以为执行落在别的通道。
+    """
+    accts = [str(a) for a in (sub_accounts or []) if str(a or "").strip()]
+    try:
+        from nanobot_quant.batches import shared_pool_account_ids
+
+        slot_ids, err = shared_pool_account_ids(max(int(batches or 1), 1), accts)
+    except Exception as exc:  # noqa: BLE001 — 展示层失败不阻塞页面
+        return f"共享池（账号解析失败: {exc}）"
+    if not slot_ids:
+        return "共享池 ⚠ 无可用账号" + (f"（{err}）" if err else "")
+    by_acct: dict[str, list[int]] = {}
+    for i, a in enumerate(slot_ids, start=1):
+        by_acct.setdefault(a, []).append(i)
+    parts = []
+    for acct, slots in by_acct.items():
+        rng = f"{slots[0]}-{slots[-1]}" if len(slots) > 1 else str(slots[0])
+        parts.append(f"{acct}（slot {rng}）")
+    txt = "共享池 " + "、".join(parts)
+    if accts and not (set(accts) & set(slot_ids)):
+        txt += " ⚠ 场景池已忽略"
+    return txt
+
 def _pos_row(lot: dict) -> str:
     """持仓小节单行（标的/slot/数量/成本价/现价/浮盈%）。"""
     pnl = lot.get("pnl_pct")
@@ -1059,7 +1091,7 @@ def _scene_positions_block(sc: str, running: bool) -> str:
     )
 
 
-def _scene_funds_block(sc: str, running: bool) -> str:
+def _scene_funds_block(sc: str, running: bool, shared_pool: bool = False) -> str:
     """场景卡片资金小表（2026-08-22 拍板：持仓小节下方，slot→子账号
     计价币可用 + 总资产）。计价币由策略写入的 ``quote`` 字段决定
     （okx_cex 可能是 USDC；缺省 USDT 兼容旧快照）。
@@ -1067,6 +1099,12 @@ def _scene_funds_block(sc: str, running: bool) -> str:
     仅运行中展示——策略每轮写入 LIVE_STATE funds（CEX 通道主 key 批量
     拉，见 _write_account_funds）；未运行无资金快照，不渲染（避免显示
     过时数据）。DEX 子钱包资金展示待补（docs/quant-system.md 记录）。
+
+    ``shared_pool=True``（C90，2026-10-29 用户拍板）：okx_cex 的逻辑 slot
+    **共用同一余额池**，任一 slot 都能从池里取钱买单。此时逐账号列各自
+    余额会被误读为「slot2/3 没钱」（实测 bot3/bot4 自身 0、池里 4.34 却
+    在 bot2）——改为池级汇总（Σ各账号可用 / Σ总资产）+ 成员账号明细，
+    并在标题写明「各 slot 共用同一池」。
     """
     if not running:
         return ""
@@ -1081,6 +1119,31 @@ def _scene_funds_block(sc: str, running: bool) -> str:
     if not funds:
         return ""
     quote = str((funds[0] or {}).get("quote") or "USDT").upper()
+
+    if shared_pool:
+        pool_avail = sum(float(f.get("usdt_available") or 0) for f in funds)
+        pool_total = sum(float(f.get("total_asset") or 0) for f in funds)
+        det = ""
+        for f in funds:
+            usdt = f.get("usdt_available")
+            total = f.get("total_asset")
+            det += (
+                f'<tr><td>{_esc(str(f.get("account", "")))}</td>'
+                f'<td>{_esc(str(f.get("slot", "")))}</td>'
+                f'<td class="num">{f"{float(usdt):.4g}" if usdt is not None else "—"}</td>'
+                f'<td class="num">{f"{float(total):.4g}" if total is not None else "—"}</td></tr>'
+            )
+        return (
+            '<div style="margin:8px 0 2px"><span class="muted">💰 共享池资金</span>'
+            f'<span class="muted" style="float:right">各 slot 共用同一池 · 池可用 '
+            f'{pool_avail:.4g} {quote} · 池总资产 {pool_total:.4g}</span></div>'
+            '<table style="margin-top:2px">'
+            f'<tr><th>池成员账号</th><th>slot</th><th>{quote} 可用</th><th>总资产</th></tr>'
+            + det + "</table>"
+            '<div class="muted" style="font-size:0.85em">任一 slot 下单都从该池取余额；'
+            '池可用 = 单个 slot 的下单资金上限（池总资产含持仓市值）。</div>'
+        )
+
     rows = ""
     for f in funds:
         usdt = f.get("usdt_available")
@@ -1138,12 +1201,24 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
     # LIVE_STATE['symbols'] 现为 {scene: {symbol: {...}}}；scenes 配置来自
     # exec_params（enabled 场景按 high/mid/low 固定顺序）。阈值 per-scene：
     # 场景字段 entry_setup/exit_setup/exit_countdown 优先，None 回退全局 td_params。
+    _ep: dict = {}
     try:
         _ep = load_exec_params()
         _scenes_cfg = _ep.get("scenes") or {}
     except Exception as _scexc:  # noqa: BLE001
         print(f"[TD-PAGE] load_exec_params failed: {_scexc!r}", file=sys.stderr, flush=True)
         _scenes_cfg = {}
+    # C90（2026-10-29）：资金模型决定资金小表口径与场景标题里的账号文案——
+    # shared_pool（okx_cex）下各 slot 共用同一余额池，逐 slot 展示各自账号
+    # 余额会误导（可见 0 但能买单）。解析失败退化为 per_account（旧行为）。
+    try:
+        from nanobot_quant.brokers.registry import spec_for_channel
+
+        _slot_model = str(getattr(spec_for_channel(
+            str(_ep.get("execution_channel") or "")), "slot_model", "") or "per_account")
+    except Exception:  # noqa: BLE001
+        _slot_model = "per_account"
+    _is_shared_pool = _slot_model == "shared_pool"
     _SCENE_META = {
         "high": ("📈 高频", "high"),
         "mid": ("📊 中频", "mid"),
@@ -1178,7 +1253,11 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         syms = sym_scenes.get(sc, {}) or {}
         st_txt = "🟢 运行中" if (st.get("running") and syms) else "⏹ 无数据"
         sleep_txt = _esc(str(sc_cfg.get("sleeptime") or "—"))
-        slot_txt = _slot_map_txt(sc_cfg.get("sub_accounts") or [])
+        if _is_shared_pool:
+            slot_txt = _shared_pool_map_txt(
+                sc_cfg.get("sub_accounts") or [], int(sc_cfg.get("batches") or 1))
+        else:
+            slot_txt = _slot_map_txt(sc_cfg.get("sub_accounts") or [])
         upd_txt = _esc(str(max((d.get("updated_at") or "" for d in syms.values()), default="—")))
         rows = ""
         for sym, d in sorted(syms.items()):
@@ -1224,7 +1303,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
             f'{rows}</table>'
             f'{_scene_positions_block(sc, bool(st.get("running")))}'
-            f'{_scene_funds_block(sc, bool(st.get("running")))}</div>'
+            f'{_scene_funds_block(sc, bool(st.get("running")), shared_pool=_is_shared_pool)}</div>'
         )
     if not blocks:
         blocks = '<div class="muted" style="padding:8px 0">暂无场景数据</div>'

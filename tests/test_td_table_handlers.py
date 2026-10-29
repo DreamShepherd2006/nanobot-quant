@@ -897,3 +897,136 @@ def test_render_f1_hides_countdown_columns_when_absent(monkeypatch):
     assert "Sell Setup" in html
     assert "Buy CD" not in html
     assert "Sell CD" not in html
+
+
+# ── C90：shared_pool 展示层口径（2026-10-29）─────────────────────────────
+
+
+def test_shared_pool_map_txt_shows_actual_pool(monkeypatch):
+    """场景标题显示**实际生效**的池账号；场景池被忽略时显式标注。"""
+    import nanobot_quant.batches as batches_mod
+
+    monkeypatch.setattr(
+        batches_mod, "shared_pool_account_ids",
+        lambda count, preferred: (["DreamShepherdbot2", "DreamShepherdbot3", "DreamShepherdbot4"], ""),
+        raising=True,
+    )
+    from nanobot_quant.td_table_handlers import _shared_pool_map_txt
+
+    # Gate 迁移残留的场景池 → 被忽略，标题写真实池 + 警告
+    txt = _shared_pool_map_txt(["gate_bot1", "gate_bot2", "gate_bot3"], batches=3)
+    assert "共享池" in txt
+    assert "DreamShepherdbot2（slot 1）" in txt
+    assert "gate_bot1" not in txt
+    assert "⚠ 场景池已忽略" in txt
+
+    # 场景池与实际池一致 → 不加警告
+    txt2 = _shared_pool_map_txt(["DreamShepherdbot2", "DreamShepherdbot3"], batches=2)
+    assert "⚠" not in txt2
+    assert "DreamShepherdbot2（slot 1）" in txt2
+
+    # 同账号多 slot → 合并成区间
+    monkeypatch.setattr(
+        batches_mod, "shared_pool_account_ids",
+        lambda count, preferred: (["botA", "botA", "botB"], ""), raising=True,
+    )
+    txt3 = _shared_pool_map_txt([], batches=3)
+    assert "botA（slot 1-2）" in txt3 and "botB（slot 3）" in txt3
+
+    # 无可用账号 → fail-closed 文案
+    monkeypatch.setattr(
+        batches_mod, "shared_pool_account_ids",
+        lambda count, preferred: ([], "未配置子账号"), raising=True,
+    )
+    txt4 = _shared_pool_map_txt([], batches=1)
+    assert "⚠ 无可用账号" in txt4 and "未配置子账号" in txt4
+
+
+def _shared_pool_live_html(monkeypatch, tmp_path, funds, sub_accounts):
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    scenes = {
+        "high": {"enabled": True, "sleeptime": "1m", "batches": 3,
+                 "sub_accounts": sub_accounts},
+        "mid": {"enabled": False, "sleeptime": "15m"},
+        "low": {"enabled": False, "sleeptime": "1H"},
+    }
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "okx_cex", "scenes": scenes})
+    ev_file = tmp_path / "td_live_events.jsonl"
+    monkeypatch.setattr(td_live_state, "events_path", lambda: ev_file)
+    td_live_state.set_loop(True, next_iteration="13:33:00")
+    td_live_state.update_symbol("SOL", {
+        "setup_buy": 2, "setup_sell": 0, "cd_buy": 0, "cd_sell": 0,
+        "score": 5.9, "price": 100.65, "signal": "HOLD",
+        "time": "2026-10-29 13:26:00 UTC", "updated_at": "2026-10-29 13:32:13",
+    }, scene="high")
+    td_live_state.set_account_funds("high", funds)
+    return _render_live(with_script=False, tq={})
+
+
+def test_render_live_shared_pool_funds_aggregate(monkeypatch, tmp_path: Path):
+    """shared_pool：资金小表改池级汇总（Σ可用/Σ总资产）+ 成员明细。
+
+    实测现场：bot2 4.337 / bot3 0 / bot4 0，逐账号展示会被误读成
+    「slot2/3 没钱」，而任一 slot 都能从池里取那 4.337。
+    """
+    funds = [
+        {"slot": 1, "account": "DreamShepherdbot2", "usdt_available": 4.336671,
+         "total_asset": 14.38, "quote": "USDC"},
+        {"slot": 2, "account": "DreamShepherdbot3", "usdt_available": 0,
+         "total_asset": 0, "quote": "USDC"},
+        {"slot": 3, "account": "DreamShepherdbot4", "usdt_available": 0,
+         "total_asset": 0, "quote": "USDC"},
+    ]
+    html = _shared_pool_live_html(
+        monkeypatch, tmp_path, funds, ["gate_bot1", "gate_bot2", "gate_bot3"])
+    assert "💰 共享池资金" in html
+    assert "💰 子账号资金" not in html, "shared_pool 下不再用逐账号口径的标题"
+    assert "各 slot 共用同一池" in html
+    assert "池可用 4.337" in html
+    assert "池总资产 14.38" in html
+    assert "USDC 可用" in html
+    assert "DreamShepherdbot2" in html
+
+
+def test_render_live_shared_pool_scene_title(monkeypatch, tmp_path: Path):
+    """shared_pool：场景标题写实际池账号，不再显示被忽略的 gate_bot1-3。"""
+    import nanobot_quant.batches as batches_mod
+
+    monkeypatch.setattr(
+        batches_mod, "shared_pool_account_ids",
+        lambda count, preferred: (
+            ["DreamShepherdbot2", "DreamShepherdbot3", "DreamShepherdbot4"], ""),
+        raising=True,
+    )
+    funds = [{"slot": 1, "account": "DreamShepherdbot2",
+              "usdt_available": 4.336671, "total_asset": 14.38, "quote": "USDC"}]
+    html = _shared_pool_live_html(
+        monkeypatch, tmp_path, funds, ["gate_bot1", "gate_bot2", "gate_bot3"])
+    assert "共享池 DreamShepherdbot2（slot 1）" in html
+    assert "⚠ 场景池已忽略" in html
+    assert "gate_bot1-3" not in html
+
+
+def test_render_live_gate_channel_keeps_per_account_funds(monkeypatch, tmp_path: Path):
+    """gate 通道（per_account）零行为变化：仍逐 slot 展示。"""
+    from nanobot_quant import td_live_state
+    from nanobot_quant.td_table_handlers import _render_live
+
+    scenes = {"high": {"enabled": True, "sleeptime": "1m",
+                       "sub_accounts": ["gate_bot1", "gate_bot2"]},
+              "mid": {"enabled": False, "sleeptime": "15m"},
+              "low": {"enabled": False, "sleeptime": "1H"}}
+    monkeypatch.setattr("nanobot_quant.td_table_handlers.load_exec_params",
+                        lambda: {"execution_channel": "gate", "scenes": scenes})
+    monkeypatch.setattr(td_live_state, "events_path", lambda: tmp_path / "e.jsonl")
+    td_live_state.set_loop(True, next_iteration="13:33:00")
+    td_live_state.set_account_funds("high", [
+        {"slot": 1, "account": "gate_bot1", "usdt_available": 3.98, "total_asset": 4.02},
+    ])
+    html = _render_live(with_script=False, tq={})
+    assert "💰 子账号资金" in html
+    assert "💰 共享池资金" not in html
+    assert "slot 1-2 (gate_bot1-2)" in html
