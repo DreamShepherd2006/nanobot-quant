@@ -1141,7 +1141,7 @@ def _scene_funds_block(sc: str, running: bool, shared_pool: bool = False) -> str
             f'<tr><th>池成员账号</th><th>slot</th><th>{quote} 可用</th><th>总资产</th></tr>'
             + det + "</table>"
             '<div class="muted" style="font-size:0.85em">任一 slot 下单都从该池取余额；'
-            '下方「共享池合计」为可用资金上限。</div>'
+            '池可用 = 单个 slot 的下单资金上限（池总资产含持仓市值）。</div>'
         )
 
     rows = ""
