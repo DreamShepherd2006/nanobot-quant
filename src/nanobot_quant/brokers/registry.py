@@ -131,10 +131,16 @@ def _create_okx_cex(*, tokens_json: Optional[list[dict]] = None,
                     data_source: Any = None, **kw: Any) -> Any:
     """OKX CEX 现货 broker（§33.52 P2）。
 
-    不传 ``data_source`` 时 broker 内部用占位源——K 线取数在 P3 接入
-    （``bar:{timestep}`` 路径与 ``gate`` 同构）。
+    数据源与 ``gate`` 同构复用 ``CexDataSource``（同一实现、``source="okx_cex"``
+    ——取数走数据源注册表，与执行同所）；此前不传 data_source 时 broker 内部
+    用 ``DummyDataSource`` 占位，导致 ``[TD] DATA ERROR … 'DummyDataSource'
+    object has no attribute 'get_historical_prices'``（2026-10-29 P3 实测）。
     """
     from nanobot_quant.brokers.okx_cex_broker import OkxCexBroker
+    from nanobot_quant.data.cex_data_source import CexDataSource
+
+    if data_source is None:
+        data_source = CexDataSource(tokens_json=tokens_json or [], source="okx_cex")
 
     return OkxCexBroker(
         tokens_json=tokens_json or [],
@@ -163,9 +169,10 @@ register(BrokerSpec(
     data_source="onchainos",
     create_broker=_create_okx_dex,
 ))
-# OKX CEX（§33.52 P2，2026-10-28）：slot_model=shared_pool——批次是逻辑槽位，
-# 同场景多个 slot 共享同一子账号余额池。**P2 只注册 spec、不开放 UI**：
-# EXECUTION_CHANNELS 不含本项、数据源 kind 仍为 research（拍板 A，§33.52.10）。
+# OKX CEX（§33.52 P2 注册、P3-3 开放，2026-10-28）：slot_model=shared_pool
+# ——批次是逻辑槽位，同场景多个 slot 共享同一子账号余额池；slot 轮转分配
+# 到可用账号（A2）。EXECUTION_CHANNELS 已含本项、数据源 kind=executable
+# （用户拍板「通道开放与开 UI 同批」）。
 register(BrokerSpec(
     name="okx_cex",
     display="OKX CEX（现货）",

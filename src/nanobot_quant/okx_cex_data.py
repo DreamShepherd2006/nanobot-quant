@@ -28,6 +28,17 @@ from nanobot_quant.kline_paging import KlineRangeTooLarge, max_bars_for, paginat
 
 logger = logging.getLogger(__name__)
 
+#: 同一 ticker 的解析告警只打一次（每轮 SKIP 的标的会反复触发，刷屏无信息量）
+_WARNED: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    if msg in _WARNED:
+        return
+    _WARNED.add(msg)
+    logger.warning("%s", msg)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -116,9 +127,132 @@ def to_inst_id(ticker: str, quote: str = "USDT") -> str:
 _to_inst_id = to_inst_id
 
 
+# ── instId 解析（以交易所清单为准，不靠启发式猜）─────────────────────────
+_spot_ids_cache: tuple[float, frozenset[str]] | None = None
+#: 失败退避截止时刻（避免每轮首个标的都白拉一次、并把「未取到清单」刷进日志）
+_spot_ids_fail_until: float = 0.0
+_SPOT_IDS_TTL = 600
+_SPOT_IDS_FAIL_BACKOFF = 5.0  # 秒（失败退避）
+
+
+def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozenset[str]]:
+    """全部 SPOT instId 集合（600s 进程级缓存；失败返回 None）。
+
+    2026-10-29 根因：`to_inst_id` 靠「常见币白名单 + X 前缀股票」启发猜 instId，
+    白名单外的币（SOL/BNB/AAVE）被当股票 → `XSOL-USDT` → OKX code=51001，
+    TD 逐轮 DATA ERROR。启发式注定漏，故改为**查交易所清单判定**（SPOT 一次
+    全量、免签名、免费），清单拉不到才退回旧启发（fail-soft 但有痕迹）。
+    """
+    global _spot_ids_cache, _spot_ids_fail_until
+    now = time.time()
+    if _spot_ids_cache and now - _spot_ids_cache[0] < _SPOT_IDS_TTL:
+        return _spot_ids_cache[1]
+    if now < _spot_ids_fail_until:
+        # 刚失败过：用旧清单顶着（stale-while-error），比返回 None 好——
+        # None 会让 instId 解析退回启发式、日志再刷一条「未取到清单」。
+        return _spot_ids_cache[1] if _spot_ids_cache else None
+    try:
+        _sess = session or requests
+        resp = _sess.get(f"{_BASE_URL}/api/v5/public/instruments",
+                         params={"instType": "SPOT"}, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != "0":
+            logger.warning("spot instruments: code=%s msg=%s",
+                           payload.get("code"), payload.get("msg"))
+            _spot_ids_fail_until = now + _SPOT_IDS_FAIL_BACKOFF
+            return _spot_ids_cache[1] if _spot_ids_cache else None
+        ids = frozenset(str(d.get("instId") or "") for d in payload.get("data") or [])
+        if not ids:
+            return None
+        _spot_ids_cache = (now, ids)
+        return ids
+    except Exception as exc:  # noqa: BLE001 — 清单是优化，失败不应打死取数
+        logger.warning("spot instruments fetch failed — %s", exc)
+        _spot_ids_fail_until = now + _SPOT_IDS_FAIL_BACKOFF
+        return _spot_ids_cache[1] if _spot_ids_cache else None
+
+
+def resolve_inst_id(ticker: str, quote: str = "USDT",
+                    session: Optional[requests.Session] = None,
+                    strict: bool = False) -> str:
+    """ticker → 真实存在的 OKX SPOT instId（清单优先，启发式兜底）。
+
+    >>> resolve_inst_id("BTC")      # 'BTC-USDT'
+    >>> resolve_inst_id("SOL")      # 'SOL-USDT'（白名单漏洞修正）
+    >>> resolve_inst_id("SPCX")     # 'XSPCX-USDT'（代币化股票）
+    """
+    t = (ticker or "").upper().strip()
+    q = (quote or "USDT").upper().strip()
+    if "-" in t:                     # 已是完整 instId
+        if strict:
+            ids0 = spot_inst_ids(session=session)
+            if ids0 and t not in ids0:
+                return ""
+        return t
+    ids = spot_inst_ids(session=session)
+    if ids:
+        # 候选顺序：给定计价币 → USDC 兜底（OKX 现货同一币常有 XXX-USDT 与
+        # XXX-USDC 两组对，用户实测 SOL/ETH 两组都在）→ 代币化股票的 X 前缀。
+        cands = [f"{t}-{q}"]
+        if q != "USDC":
+            cands.append(f"{t}-USDC")
+        cands.append(f"X{t}-{q}")
+        if q != "USDC":
+            cands.append(f"X{t}-USDC")
+        for cand in cands:
+            if cand in ids:
+                return cand
+        _warn_once(f"resolve_inst_id({t}): none of {cands} on OKX SPOT")
+        if strict:
+            return ""
+    return to_inst_id(t, quote=q)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _normalize_ticker(t: str) -> str:
+    """ticker 归一化：``SOL_USDT`` → ``SOL-USDT``。
+
+    tokens.json 是用 Gate 口径登记的（下划线），OKX 用连字符。此前
+    ``okx_ticker()`` 原样返回下划线格式 → instId 拼成 ``SOL_USDT-USDT`` →
+    51001（2026-10-29 实盘 SOL 单标的失效根因）。
+    """
+    x = (t or "").upper().strip().replace(" ", "")
+    if "-" not in x and "_" in x:
+        x = x.replace("_", "-")
+    return x
+
+
+def inst_id_for(ticker: str, quote: str = "USDT",
+                session: Optional[requests.Session] = None,
+                strict: bool = False) -> str:
+    """ticker → OKX instId 的**唯一入口**（数据源与 broker 共用，杜绝两处漂移）。
+
+    顺序：归一化 → 清单判定（含 -USDC / X 前缀兜底）→ 失败时退回原始持仓代码
+    （去掉 quote 后缀）→ 最后才用启发式 ``to_inst_id``（fail-soft，会 51001）。
+    """
+    raw = (ticker or "").upper().strip()
+    t = _normalize_ticker(ticker)
+    if raw != t:
+        _warn_once(
+            f"instId 归一化: {raw!r} → {t!r}"
+            f"（tokens.json 的 okx_symbol 建议改成 OKX 口径，如 SOL 或 SOL-USDT）"
+        )
+    inst = resolve_inst_id(t, quote, session=session, strict=True)
+    if inst:
+        return inst
+    base = t.split("-")[0]
+    if base != t:
+        inst = resolve_inst_id(base, quote, session=session, strict=True)
+        if inst:
+            return inst
+    if strict:
+        return ""
+    return to_inst_id(t, quote=quote)
 
 
 def fetch_kline(
@@ -166,9 +300,11 @@ def fetch_kline(
             f"Unsupported bar size '{bar}'. "
             f"Supported: {', '.join(sorted(_BAR_MAP))}"
         )
-    limit = max(1, min(limit, 300))
-
-    inst_id = _to_inst_id(ticker)
+    # 留 1 根给进行中 bar：OKX candles 最后一根常为 confirm=0（进行中），
+    # 过滤后若只请求 limit 根就会少 1（实测 got=179 < min_history=180 →
+    # 每轮 SKIP）。与 gate_cex_data「请求 limit+1、再丢进行中」同构。
+    limit = max(1, min(limit, 299))
+    inst_id = inst_id_for(ticker)
 
     # ── rate-limit ──
     time.sleep(_RATE_DELAY)
@@ -179,7 +315,7 @@ def fetch_kline(
     params: dict = {
         "instId": inst_id,
         "bar": bar_okx,
-        "limit": limit,
+        "limit": limit + 1,
     }
 
     resp = _sess.get(url, params=params, timeout=15)
@@ -249,7 +385,7 @@ def fetch_ticker(ticker: str, *, session: Optional[requests.Session] = None) -> 
     dict
         Keys: ``last``, ``open24h``, ``high24h``, ``low24h``, ``vol24h``.
     """
-    inst_id = _to_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
     time.sleep(_RATE_DELAY)
 
     _sess = session or requests
@@ -299,7 +435,7 @@ def fetch_order_book(
     session:
         Optional ``requests.Session``.
     """
-    inst_id = _to_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
     _sess = session or requests
     url = f"{_BASE_URL}{_ORDER_BOOK_PATH}"
     url_lite = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
@@ -425,7 +561,7 @@ def fetch_kline_range(
     if bar_okx is None:
         raise ValueError(f"Unsupported bar size: {bar!r}")
 
-    inst_id = _to_inst_id(ticker)
+    inst_id = inst_id_for(ticker)
     start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
     start_ms = int(start_dt.timestamp() * 1000)

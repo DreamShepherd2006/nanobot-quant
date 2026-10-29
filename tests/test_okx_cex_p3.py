@@ -41,7 +41,11 @@ def _strategy(params: dict):
 # ── shared_pool_account_ids ───────────────────────────────────────────────
 
 
-def test_shared_pool_ids_prefer_scene_pool():
+def test_shared_pool_ids_prefer_scene_pool(monkeypatch):
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: [{"name": "okx_main", "configured": True}],
+    )
     ids, err = shared_pool_account_ids(3, ["okx_main"])
     assert err == ""
     assert ids == ["okx_main"] * 3
@@ -264,8 +268,13 @@ def test_price_prefers_gate_source_for_per_account(monkeypatch):
 # ── 契约守卫：P3-1 不开放通道 ─────────────────────────────────────────────
 
 
-def test_okx_cex_not_executable_until_p3_2():
-    """P3-1 只做内部改造：通道仍不可选（P3-2 开放时删除本用例）。"""
+def test_okx_cex_executable_after_p3_3():
+    """P3-1 期曾锁定「通道不可选」；P3-3（2026-10-28 用户拍板）已开放。
+
+    ``slot_model=shared_pool`` 不变：批次仍是逻辑槽位、同账号内共享余额池。
+    """
+    from nanobot_quant.brokers.registry import spec_for_channel
     from nanobot_quant.exec_params import EXECUTION_CHANNELS
 
-    assert "okx_cex" not in EXECUTION_CHANNELS
+    assert "okx_cex" in EXECUTION_CHANNELS
+    assert spec_for_channel("okx_cex").slot_model == "shared_pool"

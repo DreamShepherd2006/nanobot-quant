@@ -666,6 +666,7 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             message += f"；{td_notice}"
         gatekeeper._log(
             f"🛡️ 执行参数已更新: "
+            f"channel={result['params'].get('execution_channel')} "
             f"position={result['params'].get('max_position_pct')} "
             f"drawdown={result['params'].get('max_drawdown_pct')} "
             f"stop_loss={result['params'].get('stop_loss_pct')} "

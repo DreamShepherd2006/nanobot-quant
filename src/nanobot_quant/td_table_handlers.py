@@ -1061,7 +1061,8 @@ def _scene_positions_block(sc: str, running: bool) -> str:
 
 def _scene_funds_block(sc: str, running: bool) -> str:
     """场景卡片资金小表（2026-08-22 拍板：持仓小节下方，slot→子账号
-    USDT 可用 + 总资产）。
+    计价币可用 + 总资产）。计价币由策略写入的 ``quote`` 字段决定
+    （okx_cex 可能是 USDC；缺省 USDT 兼容旧快照）。
 
     仅运行中展示——策略每轮写入 LIVE_STATE funds（CEX 通道主 key 批量
     拉，见 _write_account_funds）；未运行无资金快照，不渲染（避免显示
@@ -1079,6 +1080,7 @@ def _scene_funds_block(sc: str, running: bool) -> str:
         funds = []
     if not funds:
         return ""
+    quote = str((funds[0] or {}).get("quote") or "USDT").upper()
     rows = ""
     for f in funds:
         usdt = f.get("usdt_available")
@@ -1093,9 +1095,9 @@ def _scene_funds_block(sc: str, running: bool) -> str:
         )
     return (
         '<div style="margin:8px 0 2px"><span class="muted">💰 子账号资金</span>'
-        '<span class="muted" style="float:right">USDT 可用 · 总资产（含持仓，USDT 计）</span></div>'
+        f'<span class="muted" style="float:right">{quote} 可用 · 总资产（含持仓，{quote} 计）</span></div>'
         '<table style="margin-top:2px">'
-        '<tr><th>slot</th><th>子账号</th><th>USDT 可用</th><th>总资产</th></tr>'
+        f'<tr><th>slot</th><th>子账号</th><th>{quote} 可用</th><th>总资产</th></tr>'
         + rows + "</table>"
     )
 

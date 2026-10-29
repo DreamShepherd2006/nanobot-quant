@@ -57,8 +57,10 @@ register(DataSourceSpec(
 ))
 register(DataSourceSpec(
     name="okx_cex",
-    display="OKX CEX",
-    kind="research",
+    display="OKX CEX（现货）",
+    # 2026-10-28 P3-3：随执行通道开放转 executable（此前 kind=research
+    # 锁住了「不参与执行」，现由用户拍板「通道开放与开 UI 同批」）。
+    kind="executable",
     exchange="okx",
     fetch_kline=okx_cex.fetch_kline,
     get_price=okx_cex.get_price,

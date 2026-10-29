@@ -108,6 +108,36 @@ def test_param_change_restarts(monkeypatch):
     assert fake.stop_event.is_set()  # 旧循环已收到停止信号
 
 
+def test_channel_change_restarts(monkeypatch):
+    """切换执行通道必须重启循环（P3-3 实测缺口，2026-10-29）。
+
+    不重启的后果：旧通道 broker/数据源继续跑（如实测日志仍打
+    ``CEX price … gate ticker``、无对账行），而批次台账已被 handler
+    按新通道重建 ⇒ 账实不一致。
+    """
+    fake = _FakeExecutor()
+    runner = _fresh_runner(monkeypatch, fake)
+    runner.sync_from_params(_params(td_enabled=True, execution_channel="gate"))
+    time.sleep(0.05)
+    st = runner.sync_from_params(
+        _params(td_enabled=True, execution_channel="okx_cex")
+    )
+    assert st["running"] is True
+    time.sleep(0.1)
+    assert fake.stop_event.is_set()  # 旧（gate）循环已收到停止信号
+
+
+def test_channel_legacy_alias_does_not_restart(monkeypatch):
+    """旧别名 ``dex`` 与规范化后的 ``okx_dex`` 等价 → 不触发重启。"""
+    fake = _FakeExecutor()
+    runner = _fresh_runner(monkeypatch, fake)
+    runner.sync_from_params(_params(td_enabled=True, execution_channel="dex"))
+    time.sleep(0.05)
+    runner.sync_from_params(_params(td_enabled=True, execution_channel="okx_dex"))
+    time.sleep(0.1)
+    assert fake.stop_event.is_set() is False
+
+
 def test_disable_stops_loop(monkeypatch):
     fake = _FakeExecutor()
     runner = _fresh_runner(monkeypatch, fake)

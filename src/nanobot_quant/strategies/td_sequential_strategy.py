@@ -39,6 +39,10 @@ def _parse_sleeptime_seconds(value: str) -> int:
     return INTERVAL_SECONDS.get(str(value).strip(), 60)
 
 
+#: 美元锚稳定币：估值时按 1:1 计入总资产（不取价——取不到价会算成 0）
+_STABLE_CCY = frozenset({"USDT", "USDC", "USD", "USDG"})
+
+
 def _order_error(order) -> str | None:
     """提取 lumibot Order 错误信息（兼容 .error / ._error / .status）。"""
     if order is None:
@@ -64,6 +68,11 @@ class TdSequentialStrategy(Strategy):
     and default to the values in ``DEFAULT_TD_PARAMS`` (== pre-parameterisation
     hardcoded behaviour).
     """
+
+    #: 对账（启动导入天然持仓）发生在 ``initialize()`` **之前**，此时实例属性
+    #: ``_min_hold_bars`` 尚未赋值——2026-10-29 实盘 SOL 因 AttributeError
+    #: 整个对账失败。类属性只作兜底，initialize() 会按参数覆盖实例属性。
+    _min_hold_bars = 0
 
     parameters = {
         "symbol": "AAPL",
@@ -534,6 +543,9 @@ class TdSequentialStrategy(Strategy):
 
             if self.parameters.get("channel_family") != "cex":
                 return  # DEX 通道资金展示待补
+            if self._shared_pool_channel:
+                self._write_shared_pool_funds()
+                return
             ep = load_exec_params() or {}
             sc_cfg = (ep.get("scenes") or {}).get(self._current_scene or "default") or {}
             accts = sc_cfg.get("sub_accounts") or []
@@ -558,13 +570,14 @@ class TdSequentialStrategy(Strategy):
             for i, acct in enumerate(accts, start=1):
                 uid = str((subs_cfg.get(acct) or {}).get("uid") or "")
                 bal = sub_by_uid.get(uid, {})
-                usdt = float((bal.get("USDT") or {}).get("available") or 0)
+                _q = self._cex_quote_ccy()
+                usdt = float((bal.get(_q) or {}).get("available") or 0)
                 total = 0.0
                 for cur, v in bal.items():
                     amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
                     if amt <= 0:
                         continue
-                    if cur == "USDT":
+                    if cur in _STABLE_CCY:
                         total += amt
                     else:
                         try:
@@ -577,10 +590,73 @@ class TdSequentialStrategy(Strategy):
                     "slot": i,
                     "account": acct,
                     "uid": uid,
+                    "quote": _q,
                     "usdt_available": round(usdt, 6),
                     "total_asset": round(total, 6),
                 })
             td_live_state.set_account_funds(self._current_scene or "default", funds)
+        except Exception:  # noqa: BLE001
+            pass  # 展示层：失败不阻塞策略主循环
+
+    def _write_shared_pool_funds(self) -> None:
+        """shared_pool（okx_cex）资金小表：按**账号**展示、同账号多 slot 合并一行。
+
+        Gate 版按 slot→UID→主 key 批量拉（``fetch_all_balances``）；
+        shared_pool 下无 UID 概念、OKX 也无「主 key 批量子账号余额」等价
+        接口，故用各账号自己的 broker 查（与 ``_cex_slot_balances`` 同源，
+        命中单轮缓存时不额外发请求）。USDT/USDC/USD 按 1:1 计入总资产。
+        展示层异常不阻塞主循环。
+        """
+        try:
+            from nanobot_quant import td_live_state
+            from nanobot_quant.batches import shared_pool_account_ids
+            from nanobot_quant.exec_params import load_exec_params
+
+            ep = load_exec_params() or {}
+            sc = self._current_scene or "default"
+            sc_cfg = (ep.get("scenes") or {}).get(sc) or {}
+            accts = [str(a) for a in (sc_cfg.get("sub_accounts") or []) if str(a)]
+            if not accts:
+                return
+            batches = int(sc_cfg.get("batches") or 1)
+            slot_ids, _err = shared_pool_account_ids(batches, accts)
+            if not slot_ids:
+                return
+            by_acct: dict[str, list[int]] = {}
+            for i, a in enumerate(slot_ids, start=1):
+                by_acct.setdefault(a, []).append(i)
+            stables = {"USDT", "USDC", "USD"}
+            funds: list[dict] = []
+            for acct, slots in by_acct.items():
+                label = f"{slots[0]}-{slots[-1]}" if len(slots) > 1 else str(slots[0])
+                bal = self._cex_slot_balances(
+                    {"slot": slots[0], "account_id": acct}, use_snapshot=True
+                ) or {}
+                _q = self._cex_quote_ccy()
+                usdt = float((bal.get(_q) or {}).get("available") or 0)
+                total = 0.0
+                for cur, v in bal.items():
+                    amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
+                    if amt <= 0:
+                        continue
+                    if cur in stables:
+                        total += amt
+                        continue
+                    try:
+                        px = float(self._cex_price_of(cur) or 0)
+                    except Exception:  # noqa: BLE001
+                        px = 0.0
+                    if px > 0:
+                        total += amt * px
+                funds.append({
+                    "slot": label,
+                    "account": acct,
+                    "uid": "",
+                    "quote": _q,
+                    "usdt_available": round(usdt, 6),
+                    "total_asset": round(total, 6),
+                })
+            td_live_state.set_account_funds(sc, funds)
         except Exception:  # noqa: BLE001
             pass  # 展示层：失败不阻塞策略主循环
 
@@ -608,6 +684,9 @@ class TdSequentialStrategy(Strategy):
         自动一致（不可把判定放 on_trading_iteration——回测不走该路径）。
         """
         self._current_scene = name
+        # shared_pool（okx_cex，§33.52）：余额单轮缓存——每轮（场景激活）
+        # 清空，同账号多 slot 只查一次（回测走 _slot_broker_factory，无影响）。
+        self._sp_balances = {}
         # 共振错峰（2026-08-26 晚拍板）：波结束判定——上一轮该场景所有
         # 标的离开买9信号区 → 新波，清额度 + 清 _wave_tried。回测 driver
         # 每 bar 激活场景亦执行，与实盘语义一致。
@@ -695,8 +774,11 @@ class TdSequentialStrategy(Strategy):
             sl_diag = getattr(getattr(self, "_risk", None), "stop_loss_pct", "?")
             print(
                 f"[DIAG] td_live 场景激活: {name} {self.sleeptime} "
+                f"channel={self.parameters.get('execution_channel', '?')} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
                 f"stop_loss={sl_diag} "
+                f"family={self.parameters.get('channel_family')} "
+                f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
                 file=sys.stderr, flush=True,
             )
@@ -1908,15 +1990,26 @@ class TdSequentialStrategy(Strategy):
         - BUY pending：SUCCESS → open_lot 补建仓 + LONG 记录；
           ERROR/CANCELLED → BUY_FAIL（不建仓）。
         PENDING/UNKNOWN → 继续等待。
+
+        2026-10-29（okx_cex 通道实测）：空转也要落地——无 pending 时立即返回；
+        ``home`` 改惰性获取：``_home_account_id()`` 走 onchainos CLI（DEX 概念），
+        每轮无条件调用会在 CEX 通道白跑一次 DEX 命令——日志里每轮一条
+        ``[DIAG] ensure_onchainos_dir`` 即由此而来。
         """
+        if not getattr(self, "_pending_sells", None) and not getattr(
+            self, "_pending_buys", None
+        ):
+            return
         from nanobot_quant.onchainos_cli import swap_status
-        home = self._home_account_id()
+        home = None
         for slot_id in list(self._pending_sells):
             info = self._pending_sells[slot_id]
             if info.get("cex"):
                 self._confirm_cex_sell(slot_id, info)
                 continue
             aid = info.get("account_id", "")
+            if aid and home is None:
+                home = self._home_account_id()
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
                     f"TD PENDING CHECK SKIP | slot={slot_id} switch 到账户失败"
@@ -2020,6 +2113,8 @@ class TdSequentialStrategy(Strategy):
                 self._confirm_cex_buy(slot_id, info)
                 continue
             aid = info.get("account_id", "")
+            if aid and home is None:
+                home = self._home_account_id()
             if aid and not self._wallet_switch(aid):
                 self.logger.warning(
                     f"TD PENDING CHECK SKIP | slot={slot_id} switch 到账户失败"
@@ -2571,7 +2666,12 @@ class TdSequentialStrategy(Strategy):
         slot_no = int(slot["slot"])
         account = str(slot.get("account_id") or "")
         key = f"{slot_no}:{account}" if account else str(slot_no)
-        broker = self._cex_brokers.get(key)
+        # 懒初始化（2026-10-29）：启动对账在 ``initialize()`` 之前调用
+        # ``_cex_slot_broker``，此时 ``_cex_brokers`` 尚未建立（它是
+        # ``initialize()`` 里的实例属性）——旧写法直接 self._cex_brokers.get()
+        # 报 AttributeError，让 shared_pool 对账全部失败。
+        brokers = self.__dict__.setdefault("_cex_brokers", {})
+        broker = brokers.get(key)
         if broker is None:
             if self._shared_pool_channel:
                 # shared_pool（okx_cex）：Account 由台账 slot.account_id 指定，
@@ -2595,7 +2695,7 @@ class TdSequentialStrategy(Strategy):
                     slippage=str(self.parameters.get("slippage", "0.01")),
                     sub_account=name,
                 )
-            self._cex_brokers[key] = broker
+            brokers[key] = broker
         return broker
 
     def _cex_slot_balances(self, slot: dict, use_snapshot: bool = False) -> dict:
@@ -2622,6 +2722,28 @@ class TdSequentialStrategy(Strategy):
                 pass  # 匹配异常 → 走下方回退/fail-closed 分支
             if getattr(self, "_balances_prefetched", False):
                 return {}  # 预取失败/未覆盖 → fail-closed
+        if use_snapshot and self._shared_pool_channel:
+            # shared_pool（okx_cex，§33.52）：同一账号的 N 个逻辑 slot 共享
+            # 一份余额池——按账号做「单轮缓存」，避免同账号每个 slot 各查
+            # 一次（N slot × 每轮 N 次网络请求，200 slot 时不可行）。
+            # 缓存每轮在 _activate_scene 清空；查询失败缓存 {} 本轮不再重试
+            # （fail-closed：资金按 0 → SLOT SKIP，不盲下单）。
+            cache = getattr(self, "_sp_balances", None)
+            if cache is None:
+                cache = self._sp_balances = {}
+            acct = str(slot.get("account_id") or "")
+            if acct in cache:
+                return cache[acct]
+            try:
+                bal = self._cex_slot_broker(slot)._balances()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    f"TD CEX BAL ERR | symbol={getattr(self, 'symbol', '')} "
+                    f"account={acct} {exc}"
+                )
+                bal = {}
+            cache[acct] = bal or {}
+            return cache[acct]
         try:
             return self._cex_slot_broker(slot)._balances()
         except Exception as exc:  # noqa: BLE001
@@ -2640,6 +2762,19 @@ class TdSequentialStrategy(Strategy):
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 
     # ── P3（2026-10-28）：通道批次账号模型分派 ─────────────────────
+    def _cex_quote_ccy(self) -> str:
+        """本通道计价币（okx_cex 支持 USDT/USDC）。
+
+        以已构建 broker 的解析结果为准（``quote_of`` 会按交易所清单选对，
+        如资金在 USDC 侧则用 ``XXX-USDC``），回退执行参数 ``quote_ccy``。
+        """
+        for b in (self.__dict__.get("_cex_brokers") or {}).values():
+            q = str(getattr(b, "_quote", "") or "").upper()
+            if q in ("USDT", "USDC"):
+                return q
+        q = str(self.parameters.get("quote_ccy") or "USDT").upper()
+        return q if q in ("USDT", "USDC") else "USDT"
+
     @property
     def _slot_model(self) -> str:
         """批次账号模型：per_account（gate 每批绑子账号）/ shared_pool（okx_cex）。"""
@@ -2695,7 +2830,7 @@ class TdSequentialStrategy(Strategy):
                 avail = float(b.get("available") or 0) + float(b.get("locked") or 0)
                 if avail <= 0:
                     continue
-                if cur == "USDT":
+                if cur in _STABLE_CCY:
                     total += avail
                 else:
                     try:
@@ -2706,7 +2841,8 @@ class TdSequentialStrategy(Strategy):
             return total
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
-                f"TD CEX PV ERR | symbol={self.symbol} slot={slot['slot']} {exc}"
+                f"TD CEX PV ERR | symbol={getattr(self, 'symbol', '')} "
+                f"slot={slot['slot']} {exc}"
             )
             return 0.0
 
@@ -2766,8 +2902,11 @@ class TdSequentialStrategy(Strategy):
         后，本轮所有估值/持仓小节/止损止盈调用全部命中缓存（零网络）。
         """
         symbols = [s for s in getattr(self, "symbols", []) if s]
-        if "GT" not in symbols:
-            symbols.append("GT")
+        # GT 是 Gate 平台币（子账号 dust 估值遗留）——OKX CEX 通道没有该币，
+        # 每轮对 GT 取价只会打一条 resolve 失败告警（2026-10-29）。
+        if getattr(getattr(self, "broker", None), "__class__", None).__name__ == "CexBroker":
+            if "GT" not in symbols:
+                symbols.append("GT")
         if not symbols:
             return
         from concurrent.futures import ThreadPoolExecutor
@@ -2791,8 +2930,10 @@ class TdSequentialStrategy(Strategy):
         self._slot_balances = {}
         self._name_to_uid = {}
         if self._shared_pool_channel:
-            # shared_pool（okx_cex）：无 Gate 子账号快照（余额归 broker 单账号
-            # 查询），BUY 路径回退逐查（_cex_slot_balances use_snapshot=False）。
+            # shared_pool（okx_cex）：无 Gate 子账号快照可预取（OKX 无「主 key
+            # 批量子账号余额」接口）。余额改动按**账号级单轮缓存**在
+            # ``_cex_slot_balances(use_snapshot=True)`` 内惰性完成——同账号多
+            # 个 slot 只查一次（P3-2a，§33.52），不在本轮开头主动预取。
             return
         self._balances_prefetched = False
         if self.parameters.get("channel_family") != "cex":
@@ -2932,12 +3073,13 @@ class TdSequentialStrategy(Strategy):
                         file=sys.stderr, flush=True,
                     )
                     return None
-            bal = self._cex_slot_quote_balance(slot, "USDT", use_snapshot=True)
+            quote = self._cex_quote_ccy()
+            bal = self._cex_slot_quote_balance(slot, quote, use_snapshot=True)
             needed = qty * price
             if bal < needed:
                 self.logger.warning(
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 资金不足 "
-                    f"({bal:.4f} < {needed:.4f} USDT)"
+                    f"({bal:.4f} < {needed:.4f} {quote})"
                 )
                 return None
             req = self._portfolio.build_buy_order(
@@ -3215,12 +3357,13 @@ class TdSequentialStrategy(Strategy):
         到期 = 买入时刻 + min_hold_bars × bar 周期；min_hold_bars=0 不记录。
         ts 缺省用当前 bar 时间（实盘 BUY 路径）；对账/确认路径显式传时间。
         """
-        if self._min_hold_bars <= 0:
+        if int(self.__dict__.get("_min_hold_bars", 0) or 0) <= 0:
             return
-        base = self._bar_utc_ts(ts) if ts is not None else self._current_bar_time
+        until = self.__dict__.setdefault("_min_hold_until", {})
+        base = self._bar_utc_ts(ts) if ts is not None else self.__dict__.get("_current_bar_time")
         if base is None:
             return
-        self._min_hold_until[(symbol, slot)] = base + pd.Timedelta(
+        until[(symbol, slot)] = base + pd.Timedelta(
             seconds=self._min_hold_bars * self._bar_seconds()
         )
 
@@ -3234,14 +3377,14 @@ class TdSequentialStrategy(Strategy):
         """买入后 min_hold_bars 根 bar 内 TD SELL（高9/cd13）被拦截。"""
         if self._min_hold_bars <= 0:
             return False
-        until = self._min_hold_until.get((self.symbol, slot["slot"]))
+        until = self.__dict__.setdefault("_min_hold_until", {}).get((self.symbol, slot["slot"]))
         if until is None:
             return False
         return self._current_bar_time < until
 
     def _min_hold_remaining(self, slot: dict) -> int:
         """剩余持有 bar 数（诊断日志用；未记录返回 -1）。"""
-        until = self._min_hold_until.get((self.symbol, slot["slot"]))
+        until = self.__dict__.setdefault("_min_hold_until", {}).get((self.symbol, slot["slot"]))
         if until is None:
             return -1
         remain = (until - self._current_bar_time).total_seconds()

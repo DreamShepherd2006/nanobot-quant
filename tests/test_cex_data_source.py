@@ -139,7 +139,7 @@ class TestGetHistoricalPrices:
 
     def test_empty_kline_raises(self, ds, fake):
         fake.kline = None
-        with pytest.raises(RuntimeError, match="No Gate CEX kline"):
+        with pytest.raises(RuntimeError, match="No gate_cex kline"):
             ds.get_historical_prices(_asset(), length=2, timestep="day")
 
 

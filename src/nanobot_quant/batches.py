@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -459,29 +460,81 @@ def shared_pool_account_ids(
     shared_pool 语义（§33.52）= 批次是**逻辑槽位**、共享同一账号的余额池，
     批次数不受账号数限制（与 per_account「每批绑一个子账号」相反）。
 
-    账号来源优先级：场景 ``sub_accounts`` 首项 → 该通道第一个已配置子账号。
-    返回 ``([acct] * count, "")``；无可用账号时返回 ``([], 原因)``，由调用方
-    fail-closed（绝不静默生成不存在的账号名）。
+    账号来源优先级：场景 ``sub_accounts`` → 该通道已配置子账号（按顺序）。
+    **slot 轮转分配**（A2 方案，§33.52）：``slot i`` 归属 ``pool[i % len(pool)]``
+    ——每账号 N 个逻辑 slot、单账号内 slot 共享该账号余额池；账号池只有
+    1 个时退化为「全部 slot 共用同一账号」（旧行为）。
+
+    无可用账号时返回 ``([], 原因)``，由调用方 fail-closed（绝不静默生成
+    不存在的账号名）。
 
     新增 shared_pool 通道时在此加分派（当前仅 okx_cex）。
     """
-    acct = str((preferred or [""])[0] or "")
-    if not acct:
-        try:
-            from .okx_cex_credentials import list_sub_accounts
+    pool = [str(a).strip() for a in (preferred or []) if str(a or "").strip()]
+    # 2026-10-29：场景池可能存的是**另一条通道**的账号名（gate → gate_botN）。
+    # shared_pool 下账号必须是本通道已配置的子账号，否则台账会写入交易所
+    # 不存在的账号名（实测：切到 okx_cex 后台账写成 gate_bot1-3）。
+    # 规则：preferred ∩ 本通道已配置账号；交集为空 → 回退本通道账号列表。
+    known: list[str] = []
+    known_err = ""
+    opt_account = ""
+    try:
+        from .okx_cex_credentials import list_sub_accounts, option_account_name
 
-            for s in list_sub_accounts():
-                if s.get("configured") and s.get("name"):
-                    acct = str(s["name"])
-                    break
-        except Exception as exc:  # noqa: BLE001
-            return [], f"读取子账号配置失败：{type(exc).__name__}: {exc}"
-    if not acct:
+        opt_account = option_account_name()
+        known = [
+            str(s["name"])
+            for s in list_sub_accounts()
+            if s.get("configured") and s.get("name")
+        ]
+        # 用户设计（2026-10-29）：期权用第一个子账号（含保证金），现货按场景用
+        # 剩下的账号——两线资金/担保不能混在一个子账号里。
+        if opt_account and opt_account in known:
+            print(
+                f"[DIAG] shared_pool: 期权子账号 {opt_account} 已从现货池排除"
+                f"（现货池: {[a for a in known if a != opt_account]}）",
+                file=sys.stderr, flush=True,
+            )
+        spot_known = [a for a in known if a != opt_account]
+        if known and not spot_known:
+            return [], (
+                "现货线需要至少一个「非期权」子账号：当前仅配置了 "
+                f"{opt_account or known[0]}（期权占用），请在凭证页为剩下的"
+                "子账号补全 API Key / Secret / Passphrase"
+            )
+        known = spot_known
+    except Exception as exc:  # noqa: BLE001
+        known_err = f"{type(exc).__name__}: {exc}"
+
+    dropped: list[str] = []
+    if not known:
+        # 通道侧账号列表读不出来（或本来就没配）——无论场景池写了什么，
+        # 都不能确认它属于本通道，fail-closed 不当"可用账号"用。
+        if known_err:
+            return [], (
+                "读取子账号配置失败，无法校验场景池账号是否属于该通道："
+                + known_err
+                + ("（场景池：" + ", ".join(pool) + "）" if pool else "")
+            )
         return [], (
             "shared_pool 通道无可用于下单的子账号（请在凭证页配置至少一个"
             "已填全 API Key / Secret / Passphrase 的子账号）"
         )
-    return [acct] * max(int(count), 1), ""
+    if pool:
+        keep = [a for a in pool if a in known]
+        dropped = [a for a in pool if a not in known]
+        pool = keep
+        if dropped:
+            print(
+                f"[DIAG] shared_pool 账号池: 场景池 {dropped} 不属于该通道"
+                f"已配置子账号，已忽略（使用 {pool or known}）",
+                file=sys.stderr,
+                flush=True,
+            )
+    if not pool:
+        pool = known
+    n = max(int(count), 1)
+    return [pool[i % len(pool)] for i in range(n)], ""
 
 
 def ensure_batches(
