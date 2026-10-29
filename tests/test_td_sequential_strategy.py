@@ -1115,12 +1115,22 @@ def test_cex_price_of_caches_and_prefetch_concurrent(monkeypatch):
     n = len(calls)
     assert s._cex_price_of("CRCLX") == 88.0
     assert len(calls) == n                      # 命中缓存零网络
-    # 预取：池标的 + GT 并发（每个标的只查一次）
+    # 预取：池标的 + GT 并发（每个标的只查一次）——GT 是 Gate 平台币，
+    # 只有 gate 通道（CexBroker）才需要（2026-10-29：OKX CEX 通道没有 GT）
     TdSequentialStrategy._price_cache.clear()
     calls.clear()
     s.symbols = ["SOL", "CRCLX"]
+    s.broker = type("CexBroker", (), {})()
     s._prefetch_ticker_prices()
     assert sorted(set(calls)) == ["CRCLX", "GT", "SOL"]
+
+    # okx_cex 通道：不预取 GT（避免每轮一条 resolve 失败告警）
+    TdSequentialStrategy._price_cache.clear()
+    calls.clear()
+    s.symbols = ["SOL", "CRCLX"]
+    s.broker = type("OkxCexBroker", (), {})()
+    s._prefetch_ticker_prices()
+    assert sorted(set(calls)) == ["CRCLX", "SOL"]
     assert s._cex_price_of("SOL") == 105.0      # 预取已填缓存（零网络）
 
 

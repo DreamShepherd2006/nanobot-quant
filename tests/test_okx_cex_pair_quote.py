@@ -151,3 +151,29 @@ def test_cash_diag_reports_available(monkeypatch, capsys):
     b._log_cash_once({"USDC": {"available": 12.5, "total": 12.5}})
     err = capsys.readouterr().err
     assert "现货池现金 | {'USDC': 12.5}" in err
+
+
+# ── 2026-10-29 实盘日志暴露的三处（对账 min_hold / 计价币 / 估值）──
+
+
+def test_min_hold_safe_before_initialize():
+    """对账发生在 initialize() 之前：_min_hold_* 不能 AttributeError。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+    s = TdSequentialStrategy.__new__(TdSequentialStrategy)
+    s.parameters = {}
+    s._note_min_hold("SOL", {"slot": 1}, None)          # 不抛
+    assert isinstance(s.__dict__.get("_min_hold_until", {}), dict)
+    assert TdSequentialStrategy._min_hold_bars == 0      # 类属性兜底
+
+
+def test_cex_quote_ccy_follows_broker():
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+    s = TdSequentialStrategy.__new__(TdSequentialStrategy)
+    s.parameters = {"quote_ccy": "USDT"}
+    s._cex_brokers = {("1", "DreamShepherdbot2"): type("B", (), {"_quote": "USDC"})()}
+    assert s._cex_quote_ccy() == "USDC", "BUY 资金校验必须按实际计价币，不能硬编码 USDT"
+
+    s._cex_brokers = {}
+    assert s._cex_quote_ccy() == "USDT"                  # 回退执行参数

@@ -169,7 +169,7 @@ class OkxCexBroker(Broker):
             )
             print(
                 f"[DIAG] OKX-CEX pair | {symbol} → {inst}"
-                f"（OKX 可选对: {avail or '清单不可用'}）",
+                f"（OKX 可选对: {avail or '本次未取到清单'}）",
                 file=sys.stderr, flush=True,
             )
         return inst

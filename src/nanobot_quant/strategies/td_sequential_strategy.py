@@ -39,6 +39,10 @@ def _parse_sleeptime_seconds(value: str) -> int:
     return INTERVAL_SECONDS.get(str(value).strip(), 60)
 
 
+#: 美元锚稳定币：估值时按 1:1 计入总资产（不取价——取不到价会算成 0）
+_STABLE_CCY = frozenset({"USDT", "USDC", "USD", "USDG"})
+
+
 def _order_error(order) -> str | None:
     """提取 lumibot Order 错误信息（兼容 .error / ._error / .status）。"""
     if order is None:
@@ -64,6 +68,11 @@ class TdSequentialStrategy(Strategy):
     and default to the values in ``DEFAULT_TD_PARAMS`` (== pre-parameterisation
     hardcoded behaviour).
     """
+
+    #: 对账（启动导入天然持仓）发生在 ``initialize()`` **之前**，此时实例属性
+    #: ``_min_hold_bars`` 尚未赋值——2026-10-29 实盘 SOL 因 AttributeError
+    #: 整个对账失败。类属性只作兜底，initialize() 会按参数覆盖实例属性。
+    _min_hold_bars = 0
 
     parameters = {
         "symbol": "AAPL",
@@ -561,13 +570,14 @@ class TdSequentialStrategy(Strategy):
             for i, acct in enumerate(accts, start=1):
                 uid = str((subs_cfg.get(acct) or {}).get("uid") or "")
                 bal = sub_by_uid.get(uid, {})
-                usdt = float((bal.get("USDT") or {}).get("available") or 0)
+                _q = self._cex_quote_ccy()
+                usdt = float((bal.get(_q) or {}).get("available") or 0)
                 total = 0.0
                 for cur, v in bal.items():
                     amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
                     if amt <= 0:
                         continue
-                    if cur == "USDT":
+                    if cur in _STABLE_CCY:
                         total += amt
                     else:
                         try:
@@ -580,6 +590,7 @@ class TdSequentialStrategy(Strategy):
                     "slot": i,
                     "account": acct,
                     "uid": uid,
+                    "quote": _q,
                     "usdt_available": round(usdt, 6),
                     "total_asset": round(total, 6),
                 })
@@ -621,7 +632,8 @@ class TdSequentialStrategy(Strategy):
                 bal = self._cex_slot_balances(
                     {"slot": slots[0], "account_id": acct}, use_snapshot=True
                 ) or {}
-                usdt = float((bal.get("USDT") or {}).get("available") or 0)
+                _q = self._cex_quote_ccy()
+                usdt = float((bal.get(_q) or {}).get("available") or 0)
                 total = 0.0
                 for cur, v in bal.items():
                     amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
@@ -640,6 +652,7 @@ class TdSequentialStrategy(Strategy):
                     "slot": label,
                     "account": acct,
                     "uid": "",
+                    "quote": _q,
                     "usdt_available": round(usdt, 6),
                     "total_asset": round(total, 6),
                 })
@@ -2749,6 +2762,19 @@ class TdSequentialStrategy(Strategy):
         return float(bal.get("available") or 0) + float(bal.get("locked") or 0)
 
     # ── P3（2026-10-28）：通道批次账号模型分派 ─────────────────────
+    def _cex_quote_ccy(self) -> str:
+        """本通道计价币（okx_cex 支持 USDT/USDC）。
+
+        以已构建 broker 的解析结果为准（``quote_of`` 会按交易所清单选对，
+        如资金在 USDC 侧则用 ``XXX-USDC``），回退执行参数 ``quote_ccy``。
+        """
+        for b in (self.__dict__.get("_cex_brokers") or {}).values():
+            q = str(getattr(b, "_quote", "") or "").upper()
+            if q in ("USDT", "USDC"):
+                return q
+        q = str(self.parameters.get("quote_ccy") or "USDT").upper()
+        return q if q in ("USDT", "USDC") else "USDT"
+
     @property
     def _slot_model(self) -> str:
         """批次账号模型：per_account（gate 每批绑子账号）/ shared_pool（okx_cex）。"""
@@ -2804,7 +2830,7 @@ class TdSequentialStrategy(Strategy):
                 avail = float(b.get("available") or 0) + float(b.get("locked") or 0)
                 if avail <= 0:
                     continue
-                if cur == "USDT":
+                if cur in _STABLE_CCY:
                     total += avail
                 else:
                     try:
@@ -2876,8 +2902,11 @@ class TdSequentialStrategy(Strategy):
         后，本轮所有估值/持仓小节/止损止盈调用全部命中缓存（零网络）。
         """
         symbols = [s for s in getattr(self, "symbols", []) if s]
-        if "GT" not in symbols:
-            symbols.append("GT")
+        # GT 是 Gate 平台币（子账号 dust 估值遗留）——OKX CEX 通道没有该币，
+        # 每轮对 GT 取价只会打一条 resolve 失败告警（2026-10-29）。
+        if getattr(getattr(self, "broker", None), "__class__", None).__name__ == "CexBroker":
+            if "GT" not in symbols:
+                symbols.append("GT")
         if not symbols:
             return
         from concurrent.futures import ThreadPoolExecutor
@@ -3044,12 +3073,13 @@ class TdSequentialStrategy(Strategy):
                         file=sys.stderr, flush=True,
                     )
                     return None
-            bal = self._cex_slot_quote_balance(slot, "USDT", use_snapshot=True)
+            quote = self._cex_quote_ccy()
+            bal = self._cex_slot_quote_balance(slot, quote, use_snapshot=True)
             needed = qty * price
             if bal < needed:
                 self.logger.warning(
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 资金不足 "
-                    f"({bal:.4f} < {needed:.4f} USDT)"
+                    f"({bal:.4f} < {needed:.4f} {quote})"
                 )
                 return None
             req = self._portfolio.build_buy_order(
@@ -3327,12 +3357,13 @@ class TdSequentialStrategy(Strategy):
         到期 = 买入时刻 + min_hold_bars × bar 周期；min_hold_bars=0 不记录。
         ts 缺省用当前 bar 时间（实盘 BUY 路径）；对账/确认路径显式传时间。
         """
-        if self._min_hold_bars <= 0:
+        if int(self.__dict__.get("_min_hold_bars", 0) or 0) <= 0:
             return
-        base = self._bar_utc_ts(ts) if ts is not None else self._current_bar_time
+        until = self.__dict__.setdefault("_min_hold_until", {})
+        base = self._bar_utc_ts(ts) if ts is not None else self.__dict__.get("_current_bar_time")
         if base is None:
             return
-        self._min_hold_until[(symbol, slot)] = base + pd.Timedelta(
+        until[(symbol, slot)] = base + pd.Timedelta(
             seconds=self._min_hold_bars * self._bar_seconds()
         )
 
@@ -3346,14 +3377,14 @@ class TdSequentialStrategy(Strategy):
         """买入后 min_hold_bars 根 bar 内 TD SELL（高9/cd13）被拦截。"""
         if self._min_hold_bars <= 0:
             return False
-        until = self._min_hold_until.get((self.symbol, slot["slot"]))
+        until = self.__dict__.setdefault("_min_hold_until", {}).get((self.symbol, slot["slot"]))
         if until is None:
             return False
         return self._current_bar_time < until
 
     def _min_hold_remaining(self, slot: dict) -> int:
         """剩余持有 bar 数（诊断日志用；未记录返回 -1）。"""
-        until = self._min_hold_until.get((self.symbol, slot["slot"]))
+        until = self.__dict__.setdefault("_min_hold_until", {}).get((self.symbol, slot["slot"]))
         if until is None:
             return -1
         remain = (until - self._current_bar_time).total_seconds()
