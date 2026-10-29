@@ -534,6 +534,9 @@ class TdSequentialStrategy(Strategy):
 
             if self.parameters.get("channel_family") != "cex":
                 return  # DEX 通道资金展示待补
+            if self._shared_pool_channel:
+                self._write_shared_pool_funds()
+                return
             ep = load_exec_params() or {}
             sc_cfg = (ep.get("scenes") or {}).get(self._current_scene or "default") or {}
             accts = sc_cfg.get("sub_accounts") or []
@@ -584,6 +587,66 @@ class TdSequentialStrategy(Strategy):
         except Exception:  # noqa: BLE001
             pass  # 展示层：失败不阻塞策略主循环
 
+    def _write_shared_pool_funds(self) -> None:
+        """shared_pool（okx_cex）资金小表：按**账号**展示、同账号多 slot 合并一行。
+
+        Gate 版按 slot→UID→主 key 批量拉（``fetch_all_balances``）；
+        shared_pool 下无 UID 概念、OKX 也无「主 key 批量子账号余额」等价
+        接口，故用各账号自己的 broker 查（与 ``_cex_slot_balances`` 同源，
+        命中单轮缓存时不额外发请求）。USDT/USDC/USD 按 1:1 计入总资产。
+        展示层异常不阻塞主循环。
+        """
+        try:
+            from nanobot_quant import td_live_state
+            from nanobot_quant.batches import shared_pool_account_ids
+            from nanobot_quant.exec_params import load_exec_params
+
+            ep = load_exec_params() or {}
+            sc = self._current_scene or "default"
+            sc_cfg = (ep.get("scenes") or {}).get(sc) or {}
+            accts = [str(a) for a in (sc_cfg.get("sub_accounts") or []) if str(a)]
+            if not accts:
+                return
+            batches = int(sc_cfg.get("batches") or 1)
+            slot_ids, _err = shared_pool_account_ids(batches, accts)
+            if not slot_ids:
+                return
+            by_acct: dict[str, list[int]] = {}
+            for i, a in enumerate(slot_ids, start=1):
+                by_acct.setdefault(a, []).append(i)
+            stables = {"USDT", "USDC", "USD"}
+            funds: list[dict] = []
+            for acct, slots in by_acct.items():
+                label = f"{slots[0]}-{slots[-1]}" if len(slots) > 1 else str(slots[0])
+                bal = self._cex_slot_balances(
+                    {"slot": slots[0], "account_id": acct}, use_snapshot=True
+                ) or {}
+                usdt = float((bal.get("USDT") or {}).get("available") or 0)
+                total = 0.0
+                for cur, v in bal.items():
+                    amt = float(v.get("available") or 0) + float(v.get("locked") or 0)
+                    if amt <= 0:
+                        continue
+                    if cur in stables:
+                        total += amt
+                        continue
+                    try:
+                        px = float(self._cex_price_of(cur) or 0)
+                    except Exception:  # noqa: BLE001
+                        px = 0.0
+                    if px > 0:
+                        total += amt * px
+                funds.append({
+                    "slot": label,
+                    "account": acct,
+                    "uid": "",
+                    "usdt_available": round(usdt, 6),
+                    "total_asset": round(total, 6),
+                })
+            td_live_state.set_account_funds(sc, funds)
+        except Exception:  # noqa: BLE001
+            pass  # 展示层：失败不阻塞策略主循环
+
     def _activate_scene(self, name: str, rt: dict) -> None:
         """S3a（2026-08-20）：激活场景运行时。
 
@@ -608,6 +671,9 @@ class TdSequentialStrategy(Strategy):
         自动一致（不可把判定放 on_trading_iteration——回测不走该路径）。
         """
         self._current_scene = name
+        # shared_pool（okx_cex，§33.52）：余额单轮缓存——每轮（场景激活）
+        # 清空，同账号多 slot 只查一次（回测走 _slot_broker_factory，无影响）。
+        self._sp_balances = {}
         # 共振错峰（2026-08-26 晚拍板）：波结束判定——上一轮该场景所有
         # 标的离开买9信号区 → 新波，清额度 + 清 _wave_tried。回测 driver
         # 每 bar 激活场景亦执行，与实盘语义一致。
@@ -2622,6 +2688,28 @@ class TdSequentialStrategy(Strategy):
                 pass  # 匹配异常 → 走下方回退/fail-closed 分支
             if getattr(self, "_balances_prefetched", False):
                 return {}  # 预取失败/未覆盖 → fail-closed
+        if use_snapshot and self._shared_pool_channel:
+            # shared_pool（okx_cex，§33.52）：同一账号的 N 个逻辑 slot 共享
+            # 一份余额池——按账号做「单轮缓存」，避免同账号每个 slot 各查
+            # 一次（N slot × 每轮 N 次网络请求，200 slot 时不可行）。
+            # 缓存每轮在 _activate_scene 清空；查询失败缓存 {} 本轮不再重试
+            # （fail-closed：资金按 0 → SLOT SKIP，不盲下单）。
+            cache = getattr(self, "_sp_balances", None)
+            if cache is None:
+                cache = self._sp_balances = {}
+            acct = str(slot.get("account_id") or "")
+            if acct in cache:
+                return cache[acct]
+            try:
+                bal = self._cex_slot_broker(slot)._balances()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    f"TD CEX BAL ERR | symbol={getattr(self, 'symbol', '')} "
+                    f"account={acct} {exc}"
+                )
+                bal = {}
+            cache[acct] = bal or {}
+            return cache[acct]
         try:
             return self._cex_slot_broker(slot)._balances()
         except Exception as exc:  # noqa: BLE001
@@ -2706,7 +2794,8 @@ class TdSequentialStrategy(Strategy):
             return total
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
-                f"TD CEX PV ERR | symbol={self.symbol} slot={slot['slot']} {exc}"
+                f"TD CEX PV ERR | symbol={getattr(self, 'symbol', '')} "
+                f"slot={slot['slot']} {exc}"
             )
             return 0.0
 
@@ -2791,8 +2880,10 @@ class TdSequentialStrategy(Strategy):
         self._slot_balances = {}
         self._name_to_uid = {}
         if self._shared_pool_channel:
-            # shared_pool（okx_cex）：无 Gate 子账号快照（余额归 broker 单账号
-            # 查询），BUY 路径回退逐查（_cex_slot_balances use_snapshot=False）。
+            # shared_pool（okx_cex）：无 Gate 子账号快照可预取（OKX 无「主 key
+            # 批量子账号余额」接口）。余额改动按**账号级单轮缓存**在
+            # ``_cex_slot_balances(use_snapshot=True)`` 内惰性完成——同账号多
+            # 个 slot 只查一次（P3-2a，§33.52），不在本轮开头主动预取。
             return
         self._balances_prefetched = False
         if self.parameters.get("channel_family") != "cex":

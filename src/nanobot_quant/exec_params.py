@@ -216,9 +216,9 @@ EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
 
 #: Valid execution channels — concrete broker instances (spec names).
 #: 大类（dex/cex）由 spec.family 表达，UI 按大类分组显示（方案 C，2026-08-17）：
-#:   链上 DEX 组：okx_dex；交易所（CEX）组：gate。
+#:   链上 DEX 组：okx_dex；交易所（CEX）组：gate / okx_cex。
 #: 新增交易所 = 注册 BrokerSpec + 此处加一项 + enum_groups 加一项，上层零改动。
-EXECUTION_CHANNELS: tuple[str, ...] = ("okx_dex", "gate")
+EXECUTION_CHANNELS: tuple[str, ...] = ("okx_dex", "gate", "okx_cex")
 
 #: Legacy channel values auto-migrated on load/save (2026-08-17 方案 C).
 LEGACY_CHANNEL_ALIASES: dict[str, str] = {"dex": "okx_dex", "cex": "gate"}
@@ -266,12 +266,13 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "enum_labels": {
             "okx_dex": "OKX DEX（链上 · OnchainOS 子钱包）",
             "gate": "Gate.io（交易所 · 子账号）",
+            "okx_cex": "OKX CEX（交易所 · 子账号 · 现货）",
         },
         "enum_groups": {
             "链上 DEX（TEE 签名 · 子钱包）": ["okx_dex"],
-            "交易所 CEX（API Key · 子账号）": ["gate"],
+            "交易所 CEX（API Key · 子账号）": ["gate", "okx_cex"],
         },
-        "label": "执行通道", "hint": "两大执行家族是完全不同的概念：dex=链上 DEX（OKX OnchainOS 子钱包，TEE 签名，默认）；cex=交易所（当前实例 Gate.io，子账号 API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到交易所时 TD 循环 K 线数据源联动切换为同所 Gate CEX 公共端点。未来多家 CEX/DEX 在此下拉分组内扩展",
+        "label": "执行通道", "hint": "两大执行家族是完全不同的概念：dex=链上 DEX（OKX OnchainOS 子钱包，TEE 签名，默认）；cex=交易所（Gate.io / OKX CEX，子账号 API Key）。只影响之后的新下单（execute_signal / TD 循环），不迁移持仓；切到交易所时 TD 循环 K 线数据源联动切换为同所公共端点（gate→Gate CEX、okx_cex→OKX CEX）。gate=每批绑一个子账号（per_account）；okx_cex=每批是逻辑槽位、同账号内共享余额池（shared_pool）。切通道后台账按通道隔离（batches.<channel>.*），旧台账保留不互通",
     },
     "td_enabled": {
         "group": "scene", "type": "bool", "std": False,

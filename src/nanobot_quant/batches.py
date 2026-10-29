@@ -459,29 +459,35 @@ def shared_pool_account_ids(
     shared_pool 语义（§33.52）= 批次是**逻辑槽位**、共享同一账号的余额池，
     批次数不受账号数限制（与 per_account「每批绑一个子账号」相反）。
 
-    账号来源优先级：场景 ``sub_accounts`` 首项 → 该通道第一个已配置子账号。
-    返回 ``([acct] * count, "")``；无可用账号时返回 ``([], 原因)``，由调用方
-    fail-closed（绝不静默生成不存在的账号名）。
+    账号来源优先级：场景 ``sub_accounts`` → 该通道已配置子账号（按顺序）。
+    **slot 轮转分配**（A2 方案，§33.52）：``slot i`` 归属 ``pool[i % len(pool)]``
+    ——每账号 N 个逻辑 slot、单账号内 slot 共享该账号余额池；账号池只有
+    1 个时退化为「全部 slot 共用同一账号」（旧行为）。
+
+    无可用账号时返回 ``([], 原因)``，由调用方 fail-closed（绝不静默生成
+    不存在的账号名）。
 
     新增 shared_pool 通道时在此加分派（当前仅 okx_cex）。
     """
-    acct = str((preferred or [""])[0] or "")
-    if not acct:
+    pool = [str(a).strip() for a in (preferred or []) if str(a or "").strip()]
+    if not pool:
         try:
             from .okx_cex_credentials import list_sub_accounts
 
-            for s in list_sub_accounts():
-                if s.get("configured") and s.get("name"):
-                    acct = str(s["name"])
-                    break
+            pool = [
+                str(s["name"])
+                for s in list_sub_accounts()
+                if s.get("configured") and s.get("name")
+            ]
         except Exception as exc:  # noqa: BLE001
             return [], f"读取子账号配置失败：{type(exc).__name__}: {exc}"
-    if not acct:
+    if not pool:
         return [], (
             "shared_pool 通道无可用于下单的子账号（请在凭证页配置至少一个"
             "已填全 API Key / Secret / Passphrase 的子账号）"
         )
-    return [acct] * max(int(count), 1), ""
+    n = max(int(count), 1)
+    return [pool[i % len(pool)] for i in range(n)], ""
 
 
 def ensure_batches(

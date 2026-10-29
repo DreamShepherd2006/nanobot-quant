@@ -31,15 +31,28 @@ def test_registry_contains_all_sources():
 
 
 def test_kind_split():
-    assert executable_sources() == ["gate_cex", "onchainos"]
-    assert set(research_sources()) == {"okx_cex", "eastmoney", "sina", "yfinance"}
+    # okx_cex 于 P3-3 转 executable（随执行通道开放）
+    assert executable_sources() == ["gate_cex", "onchainos", "okx_cex"]
+    assert set(research_sources()) == {"eastmoney", "sina", "yfinance"}
 
 
-def test_okx_cex_is_research_until_execution_integrated():
-    """OKX CEX 保留为注册表成员，但现阶段不参与执行（业务量化未完成）。"""
+def test_okx_cex_executable_after_channel_open():
+    """OKX CEX 随 P3-3 开放为执行通道（2026-10-28 用户拍板「开放与开 UI 同批」）。
+
+    旧契约（P2 期）：kind 锁 research、kind=research 表示「不参与执行」。
+    开放后：kind=executable + EXECUTION_CHANNELS 含 okx_cex + BrokerSpec
+    slot_model=shared_pool（批次是逻辑槽位、同账号共享余额池）。
+    """
     spec = get_data_source("okx_cex")
-    assert spec.kind == "research"
+    assert spec.kind == "executable"
     assert spec.exchange == "okx"
+
+    from nanobot_quant.brokers.registry import spec_for_channel
+    from nanobot_quant.exec_params import EXECUTION_CHANNELS
+
+    assert "okx_cex" in EXECUTION_CHANNELS
+    assert spec_for_channel("okx_cex").data_source == "okx_cex"
+    assert spec_for_channel("okx_cex").slot_model == "shared_pool"
 
 
 def test_channel_binding_structural_same_source():

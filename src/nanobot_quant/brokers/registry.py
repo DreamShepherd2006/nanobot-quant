@@ -163,9 +163,10 @@ register(BrokerSpec(
     data_source="onchainos",
     create_broker=_create_okx_dex,
 ))
-# OKX CEX（§33.52 P2，2026-10-28）：slot_model=shared_pool——批次是逻辑槽位，
-# 同场景多个 slot 共享同一子账号余额池。**P2 只注册 spec、不开放 UI**：
-# EXECUTION_CHANNELS 不含本项、数据源 kind 仍为 research（拍板 A，§33.52.10）。
+# OKX CEX（§33.52 P2 注册、P3-3 开放，2026-10-28）：slot_model=shared_pool
+# ——批次是逻辑槽位，同场景多个 slot 共享同一子账号余额池；slot 轮转分配
+# 到可用账号（A2）。EXECUTION_CHANNELS 已含本项、数据源 kind=executable
+# （用户拍板「通道开放与开 UI 同批」）。
 register(BrokerSpec(
     name="okx_cex",
     display="OKX CEX（现货）",

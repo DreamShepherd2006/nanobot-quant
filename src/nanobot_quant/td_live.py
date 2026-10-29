@@ -645,6 +645,126 @@ class _TdLiveRunner:
                 file=sys.stderr, flush=True,
             )
 
+    def _reconcile_import_shared_pool(
+        self, bm: Any, symbol: str, tokens_json: list[dict] | None
+    ) -> None:
+        """启动对账：shared_pool（okx_cex）账号余额 → 台账 open 批次（P3-2b）。
+
+        与 Gate 版（``_reconcile_import_cex``，主 key 批量拉子账号 + UID 映射链）
+        的区别：
+        - 无「主 key 批量拉子账号」接口——每个 slot 用**自身 account_id 的
+          broker** 直查余额（OKX 子账号 key 只能查自己）；
+        - **同一 (账号, 标的) 只导入 1 个 slot**：shared_pool 下同账号的 N 个
+          逻辑 slot 共享同一份币（A2），逐 slot 导入会重复计数；账号内已有
+          open 批次时也跳过（币已被那批占用）；
+        - 已 open 的 slot 跳过（幂等，重启不重复导入）；
+        - 导入阈值 = ``min_position_value``（与 DEX/CEX 同源，0=关闭）；
+        - 精度可卖性：``floor(余额 → lotSz)`` 后 < ``minSz`` 的仓不导入——
+          Gate 侧 BNB/ETH 精度死锁的 CEX 版防护（宁可留仓不导入台账，也
+          不制造「有仓卖不掉」的死 slot）；
+        - ``entry_price`` = ``cost_price``（WebUI 设置）→ okx ticker 兜底。
+        """
+        import time as _t
+
+        from nanobot_quant.tokens_store import token_meta
+
+        strategy = getattr(self, "_strategy", None)
+        if strategy is None:
+            return
+        min_pos_value = _dust_threshold()
+        meta = token_meta(symbol, tokens_json)
+        cost = meta.get("cost_price")
+        reports: list[str] = []
+        imported_any = False
+        seen_accounts: set[str] = set()
+        for slot in bm.slots:
+            acct = str(slot.get("account_id") or "")
+            if slot.get("status") != "available":
+                # 该账号已有 open 批次（TD 自己开的）：共享池的币已被那批占用
+                seen_accounts.add(acct)
+                continue
+            if acct in seen_accounts:
+                continue
+            try:
+                broker = strategy._cex_slot_broker(slot)
+            except Exception as exc:  # noqa: BLE001
+                reports.append(f"{symbol} 账户{acct or '?'} broker 创建失败: {exc}")
+                continue
+            try:
+                inst = broker.inst_id_of(symbol)
+            except Exception:  # noqa: BLE001
+                inst = ""
+            base = (inst.split("-")[0] if inst else "").upper()
+            try:
+                row = broker._balances().get(base) or {}
+            except Exception as exc:  # noqa: BLE001
+                reports.append(f"{symbol} 账户{acct or '?'} 余额查询失败: {exc}")
+                continue
+            seen_accounts.add(acct)
+            qty = float(row.get("available") or 0.0)
+            if qty <= 0:
+                continue
+            px = 0.0
+            try:
+                px = float(broker._price_of(symbol) or 0.0)
+            except Exception:  # noqa: BLE001
+                px = 0.0
+            if px <= 0:
+                reports.append(
+                    f"{symbol} 账户{acct or '?'} 取价失败，跳过导入（无法判阈值）"
+                )
+                continue
+            if min_pos_value > 0 and qty * px < min_pos_value:
+                reports.append(
+                    f"{symbol} 账户{acct or '?'} dust ${qty * px:.2f} < "
+                    f"${min_pos_value:g}（min_position_value），跳过导入"
+                )
+                continue
+            # 精度可卖性（防死锁）：floor 到 lotSz 后 < minSz 不导入
+            lot, min_sz = 0.0, 0.0
+            try:
+                lim = broker.limits_of(symbol) or {}
+                lot = float(lim.get("lot_sz") or 0.0)
+                min_sz = float(lim.get("min_sz") or 0.0)
+            except Exception:  # noqa: BLE001
+                lot, min_sz = 0.0, 0.0
+            sellable = qty
+            if lot > 0:
+                sellable = round(math.floor(qty / lot) * lot, 12)
+            if sellable <= 0 or (min_sz > 0 and sellable < min_sz):
+                reports.append(
+                    f"{symbol} 账户{acct or '?'} 精度死锁：可卖 {sellable:g} "
+                    f"< minSz {min_sz:g}（lotSz {lot:g}，余额 {qty:g}）——"
+                    "不导入台账（仓保留在账号）"
+                )
+                continue
+            price = float(cost) if cost else px
+            note = "cost_price" if cost else "okx ticker"
+            bm.open_lot(
+                qty=sellable,
+                entry_price=price,
+                entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
+                slot=slot["slot"],
+            )
+            # 对账导入同样进入最短持有期（避免导入后立即被 TD SELL 打出）
+            _note = getattr(strategy, "_note_min_hold", None)
+            if _note:
+                _note(symbol, slot["slot"], _t)
+            imported_any = True
+            reports.append(
+                f"{symbol} 账户{acct or '?'} 持仓 {qty:g} → 导入 slot "
+                f"{slot['slot']}（{note} {price:.4g}）"
+            )
+        if imported_any:
+            bm.save()
+        for r in reports:
+            print(f"[DIAG] td_live 对账: {r}", file=sys.stderr, flush=True)
+        if not reports:
+            print(
+                f"[DIAG] td_live 对账: {symbol} 无天然持仓（或全部低于阈值）",
+                file=sys.stderr, flush=True,
+            )
+
     def _prepare_all_batches(
         self, td_batches: int, symbols: list[str], channel: str = "dex"
     ) -> dict[str, Any]:
@@ -747,9 +867,16 @@ class _TdLiveRunner:
                     [str(a) for a in account_ids][:td_batches]
                     if account_ids else None
                 )
-                if want_ids and slot_model == "shared_pool":
-                    # shared_pool：所有 slot 共用首项账号（§33.52）
-                    want_ids = [want_ids[0]] * td_batches
+                if slot_model == "shared_pool":
+                    # shared_pool（§33.52 A2）：slot 轮转分配到可用账号
+                    # （每账号 N 个逻辑 slot、单账号内共享该账号余额池）。
+                    # 账号池只有 1 个时退化为「全部 slot 共用同一账号」。
+                    # 与 ensure_batches 同一函数，避免两处规则漂移。
+                    want_ids, _pool_err = shared_pool_account_ids(
+                        td_batches, account_ids
+                    )
+                    if _pool_err:
+                        want_ids = None
                 if want_ids is not None and cur_ids != want_ids:
                     opens = [
                         s["slot"]
@@ -977,16 +1104,11 @@ class _TdLiveRunner:
             tokens_json = getattr(strategy, "tokens_json", None)
             if (strategy.parameters or {}).get("channel_family") == "cex":
                 if (strategy.parameters or {}).get("slot_model") == "shared_pool":
-                    # shared_pool（okx_cex）天然持仓导入尚未实现（P3-2）：
-                    # 现有实现依赖 slot→gate_botN→UID 映射链，shared_pool 下
-                    # 语义不同。显式跳过（不静默）——切通道前须人工核对台账。
-                    print(
-                        "[DIAG] td_live 对账: shared_pool 通道天然持仓自动导入"
-                        "未实现（P3-2）——本次跳过，请人工核对台账与余额",
-                        file=sys.stderr, flush=True,
-                    )
-                    return
-                importer = self._reconcile_import_cex
+                    # shared_pool（okx_cex，P3-2b）：无「主 key 批量拉子账号」
+                    # 接口——每个 slot 用自身 account_id 的 broker 直查。
+                    importer = self._reconcile_import_shared_pool
+                else:
+                    importer = self._reconcile_import_cex
             else:
                 importer = self._reconcile_import
             for sym, bm in managers.items():

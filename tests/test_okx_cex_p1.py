@@ -188,14 +188,11 @@ def test_td_batches_max_raised_to_200():
 
 # ── okx_cex 数据源 kind ──────────────────────────────────────────────────
 
-def test_okx_cex_kind_stays_research_in_p1():
-    """P1 只做基础设施，``kind`` 保留 research；提升为 executable 与
-    broker 注册同批（P2）——``tests/test_data_sources.py`` 已锁定该契约。"""
-    assert get_data_source("okx_cex").kind == "research"
-
-
-def test_executable_sources_unchanged():
-    """P1 不得新增可执行数据源（零行为变化的判据之一）。"""
-    from nanobot_quant.data_sources import executable_sources
-
-    assert executable_sources() == ["gate_cex", "onchainos"]
+# P1 期曾在此锁定两条「不得提前开放」契约：
+#   - ``test_okx_cex_kind_stays_research_in_p1``（kind 保持 research）
+#   - ``test_executable_sources_unchanged``（不得新增可执行数据源）
+# 2026-10-28 P3-3（用户拍板「通道开放与开 UI 同批」）已正式开放
+# ``okx_cex``，两条旧契约随之失效——现由以下用例守护新契约：
+#   tests/test_data_sources.py::test_okx_cex_executable_after_channel_open
+#   tests/test_data_sources.py::test_kind_split
+#   tests/test_broker_registry.py::test_channel_map_aligns_with_enum
