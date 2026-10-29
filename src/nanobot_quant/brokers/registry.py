@@ -131,10 +131,16 @@ def _create_okx_cex(*, tokens_json: Optional[list[dict]] = None,
                     data_source: Any = None, **kw: Any) -> Any:
     """OKX CEX 现货 broker（§33.52 P2）。
 
-    不传 ``data_source`` 时 broker 内部用占位源——K 线取数在 P3 接入
-    （``bar:{timestep}`` 路径与 ``gate`` 同构）。
+    数据源与 ``gate`` 同构复用 ``CexDataSource``（同一实现、``source="okx_cex"``
+    ——取数走数据源注册表，与执行同所）；此前不传 data_source 时 broker 内部
+    用 ``DummyDataSource`` 占位，导致 ``[TD] DATA ERROR … 'DummyDataSource'
+    object has no attribute 'get_historical_prices'``（2026-10-29 P3 实测）。
     """
     from nanobot_quant.brokers.okx_cex_broker import OkxCexBroker
+    from nanobot_quant.data.cex_data_source import CexDataSource
+
+    if data_source is None:
+        data_source = CexDataSource(tokens_json=tokens_json or [], source="okx_cex")
 
     return OkxCexBroker(
         tokens_json=tokens_json or [],

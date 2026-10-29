@@ -125,3 +125,64 @@ def test_spot_account_names_excludes_option_account(monkeypatch):
     )
     monkeypatch.setattr(creds, "option_account_name", lambda: "DreamShepherdbot1")
     assert creds.spot_account_names() == ["DreamShepherdbot2"]
+
+
+# ── 4) okx_cex 通道必须接到真数据源（不得落 DummyDataSource）──────────────
+
+
+def test_cex_data_source_routes_to_okx_registry(monkeypatch):
+    """CexDataSource(source="okx_cex") 取数走 okx_cex 数据源（与执行同所）。
+
+    现场：okx_cex 通道 broker 不传 data_source → 落 DummyDataSource →
+    ``[TD] DATA ERROR … 'DummyDataSource' object has no attribute
+    'get_historical_prices'``，TD 全标的 SKIP（2026-10-29 实测）。
+    """
+    from nanobot_quant.data import cex_data_source as mod
+
+    seen = []
+
+    class _Fake:
+        def fetch_kline(self, symbol, bar=None, limit=None, start=None, end=None):
+            import pandas as pd
+
+            seen.append((symbol, bar, limit))
+            return pd.DataFrame(
+                {
+                    "Open": [1.0, 2.0],
+                    "High": [1.0, 2.0],
+                    "Low": [1.0, 2.0],
+                    "Close": [1.0, 2.0],
+                    "Volume": [1.0, 1.0],
+                }
+            )
+
+        def get_price(self, symbol):
+            seen.append(("price", symbol))
+            return 42.0
+
+    monkeypatch.setattr(mod, "get_data_source", lambda name: (_fake_name.append(name) or _Fake()))
+    _fake_name = []
+
+    ds = mod.CexDataSource(source="okx_cex", use_cache=False)
+    ds._fetch_kline("SOL", "1m", 180)
+    assert _fake_name == ["okx_cex"], "必须走 okx_cex 注册表，不能仍是 gate_cex"
+    assert seen[0] == ("SOL", "1m", 180)
+
+
+def test_registry_okx_cex_broker_gets_real_data_source(monkeypatch):
+    from nanobot_quant.brokers import registry
+
+    captured = {}
+
+    class _FakeBroker:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    import nanobot_quant.brokers.okx_cex_broker as real
+
+    monkeypatch.setattr(real, "OkxCexBroker", _FakeBroker)
+    registry._create_okx_cex(tokens_json=[], sub_account="", quote="USDT", slippage=0.1)
+
+    ds = captured.get("data_source")
+    assert ds is not None, "不得留空让 broker 落 DummyDataSource"
+    assert getattr(ds, "_source", None) == "okx_cex"
