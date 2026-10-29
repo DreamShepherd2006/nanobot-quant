@@ -154,7 +154,8 @@ def spot_inst_ids(session: Optional[requests.Session] = None) -> Optional[frozen
 
 
 def resolve_inst_id(ticker: str, quote: str = "USDT",
-                    session: Optional[requests.Session] = None) -> str:
+                    session: Optional[requests.Session] = None,
+                    strict: bool = False) -> str:
     """ticker → 真实存在的 OKX SPOT instId（清单优先，启发式兜底）。
 
     >>> resolve_inst_id("BTC")      # 'BTC-USDT'
@@ -162,16 +163,29 @@ def resolve_inst_id(ticker: str, quote: str = "USDT",
     >>> resolve_inst_id("SPCX")     # 'XSPCX-USDT'（代币化股票）
     """
     t = (ticker or "").upper().strip()
-    if "-" in t:                     # 已是完整 instId
-        return t
     q = (quote or "USDT").upper().strip()
+    if "-" in t:                     # 已是完整 instId
+        if strict:
+            ids0 = spot_inst_ids(session=session)
+            if ids0 and t not in ids0:
+                return ""
+        return t
     ids = spot_inst_ids(session=session)
     if ids:
-        for cand in (f"{t}-{q}", f"X{t}-{q}"):
+        # 候选顺序：给定计价币 → USDC 兜底（OKX 现货同一币常有 XXX-USDT 与
+        # XXX-USDC 两组对，用户实测 SOL/ETH 两组都在）→ 代币化股票的 X 前缀。
+        cands = [f"{t}-{q}"]
+        if q != "USDC":
+            cands.append(f"{t}-USDC")
+        cands.append(f"X{t}-{q}")
+        if q != "USDC":
+            cands.append(f"X{t}-USDC")
+        for cand in cands:
             if cand in ids:
                 return cand
-        logger.warning("resolve_inst_id(%s): neither %s-%s nor X%s-%s on OKX SPOT",
-                       t, t, q, t, q)
+        logger.warning("resolve_inst_id(%s): none of %s on OKX SPOT", t, cands)
+        if strict:
+            return ""
     return to_inst_id(t, quote=q)
 
 

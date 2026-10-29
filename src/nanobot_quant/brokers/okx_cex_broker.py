@@ -27,7 +27,7 @@ from typing import Any, Optional
 from lumibot.brokers import Broker
 
 from .. import okx_sdk, okx_spot
-from ..okx_cex_data import to_inst_id
+from ..okx_cex_data import resolve_inst_id, spot_inst_ids, to_inst_id
 from ..okx_options_trade import account_balance, account_creds
 
 logger = logging.getLogger(__name__)
@@ -109,13 +109,8 @@ class OkxCexBroker(Broker):
     #  Helpers
     # ═══════════════════════════════════════════════════════════
 
-    def inst_id_of(self, symbol: str) -> str:
-        """symbol → OKX 现货 instId（先经 tokens.json 的 ``okx_symbol`` 映射，
-        再走与数据源相同的 ``to_inst_id`` 规则）。
-
-        ``okx_symbol`` 必须登记正确（CRCLX → XCRCL）：否则 ``to_inst_id`` 会按
-        「股票加 X」规则得到 ``XCRCLX-USDT``，下单报 51001（fail-closed）。
-        """
+    def _base_ticker(self, symbol: str) -> str:
+        """symbol → 交易所 ticker（tokens.json 的 ``okx_symbol`` 优先）。"""
         base = symbol
         try:
             from ..gate_credentials import okx_ticker
@@ -124,7 +119,50 @@ class OkxCexBroker(Broker):
         except Exception as e:  # noqa: BLE001
             print(f"[DIAG] OKX-CEX okx_ticker {symbol} error: {e}",
                   file=sys.stderr, flush=True)
-        return to_inst_id(base, self._quote)
+        return base
+
+    def inst_id_of(self, symbol: str) -> str:
+        """symbol → OKX 现货 instId（**以交易所 SPOT 清单为准**，不靠启发猜）。
+
+        2026-10-29 实盘：``to_inst_id`` 的「常见币白名单 + 股票加 X」启发把
+        SOL/BNB/AAVE 当成股票拼 ``XSOL-USDT`` → 51001。现走 ``resolve_inst_id``
+        （清单判定，候选含 ``-USDT`` / ``-USDC`` / ``X`` 前缀），失败才回退启发。
+        首次解析会打一条诊断（选中对 + 该 base 在 OKX 的全部可选对）。
+        """
+        base = self._base_ticker(symbol)
+        inst = resolve_inst_id(base, self._quote, strict=True)
+        if not inst and base.upper() != symbol.upper():
+            # tokens.json 的 okx_symbol 登记错误（如把 SOL 写成 XSOL）：回退原始
+            # symbol 再按交易所清单解析一次，别让一条脏映射打死整个标的。
+            inst = resolve_inst_id(symbol, self._quote, strict=True)
+            if inst:
+                print(
+                    f"[DIAG] OKX-CEX pair | {symbol}: tokens.json okx_symbol={base!r} "
+                    f"在 OKX 不存在，已回退原始 symbol → {inst}",
+                    file=sys.stderr, flush=True,
+                )
+        if not inst:
+            inst = to_inst_id(base, quote=self._quote)
+        logged = self.__dict__.setdefault("_pair_logged", set())
+        if symbol not in logged:
+            logged.add(symbol)
+            ids = spot_inst_ids() or frozenset()
+            avail = sorted(
+                i for i in ids
+                if i.startswith(f"{base.upper()}-") or i.startswith(f"X{base.upper()}-")
+            )
+            print(
+                f"[DIAG] OKX-CEX pair | {symbol} → {inst}"
+                f"（OKX 可选对: {avail or '清单不可用'}）",
+                file=sys.stderr, flush=True,
+            )
+        return inst
+
+    def quote_of(self, symbol: str) -> str:
+        """该标的实际采用的计价币（从解析出的 instId 尾部取，USDT/USDC 自适应）。"""
+        inst = self.inst_id_of(symbol)
+        tail = inst.rsplit("-", 1)[-1].upper() if "-" in inst else self._quote
+        return tail or self._quote
 
     def limits_of(self, symbol: str) -> dict:
         """合约规格 ``{lot_sz, min_sz, tick_sz}``（300s 缓存；失败抛异常）。"""
@@ -169,10 +207,27 @@ class OkxCexBroker(Broker):
         if not self._sub_account:
             names = self._spot_names()
             if len(names) > 0:
-                return self._merged_balances(names)
+                merged = self._merged_balances(names)
+                self._log_cash_once(merged)
+                return merged
             # 现货池为空（例如只配了一个账号且被期权占用）：退回默认账号，
             # 由 _fetch_account_balances 打 DIAG，调用方 fail-closed。
         return self._fetch_account_balances(self._sub_account)
+
+    def _log_cash_once(self, bal: dict) -> None:
+        """首次（且现金分布变化时）打印现货池现金快照。
+
+        2026-10-29：OKX 现货同一币并存 ``XXX-USDT`` / ``XXX-USDC`` 两组对，
+        资金到底在哪一侧决定能否下单——必须可见，不能等「USDT 不足」才猜。
+        """
+        snap = {
+            c: round(_num((bal.get(c) or {}).get("available")), 6)
+            for c in sorted(_CASH_CURRENCIES)
+            if _num((bal.get(c) or {}).get("available")) > 0
+        }
+        if snap and snap != self.__dict__.get("_cash_logged"):
+            self.__dict__["_cash_logged"] = snap
+            print(f"[DIAG] OKX-CEX 现货池现金 | {snap}", file=sys.stderr, flush=True)
 
     def _spot_names(self) -> list[str]:
         """现货池账号名（带 5s 进程内缓存，避免每轮反复读盘）。（""）"""
@@ -334,14 +389,20 @@ class OkxCexBroker(Broker):
                 sz = shrunk
         else:
             px = self._price_of(symbol)
-            cash = _num((balances.get(self._quote) or {}).get("available"))
+            quote = self.quote_of(symbol)
+            cash = _num((balances.get(quote) or {}).get("available"))
             if px <= 0:
                 order.set_error(f"OKX {symbol} 取价失败（fail-closed，不盲下单）")
                 return order
             need = sz * px
             if need > cash * 1.001:  # 0.1% 容差（价格瞬时波动）
                 order.set_error(
-                    f"OKX {self._quote} 不足：需 {need:.4f}，可用 {cash:.4f}"
+                    f"OKX {quote} 不足：需 {need:.4f}，可用 {cash:.4f}"
+                    f"（instId={inst}；现货池现金：" + ", ".join(
+                        f"{c}={_num((balances.get(c) or {}).get('available')):.4f}"
+                        for c in sorted(_CASH_CURRENCIES)
+                        if _num((balances.get(c) or {}).get("available")) > 0
+                    ) + "）"
                 )
                 return order
 
