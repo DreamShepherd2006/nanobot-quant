@@ -23,13 +23,73 @@
 from __future__ import annotations
 
 import math
+import sys
 import time
 
 from nanobot_quant import okx_sdk
 from nanobot_quant.okx_sdk import OkxSdkError
 
-#: 现货下单保证金模式（acctLv=3 必需）
+#: 现货下单保证金模式默认值（acctLv=3 必需）；acctLv<3 的账号用 cash，
+#: 实际值由 :func:`td_mode_for` 按账号能力决定。
 SPOT_TDMODE = "cross"
+
+#: api_key → tdMode（按账号 acctLv 自适应，进程内缓存）
+_TDMODE_CACHE: dict[str, str] = {}
+
+
+def fmt_decimal(value) -> str:
+    """定点十进制字符串，**禁止科学计数法**。
+
+    OKX 的 ``sz`` 收到 ``5.13e-05`` 直接报 ``51000 Parameter sz error``
+    （2026-10-30 实测：BTC 4U 下单量 4/77971.7 = 5.13e-05，三 slot 全失败）。
+    精度给到 12 位小数足够覆盖所有现货 lotSz（最小 1e-8）。
+
+    传字符串时**原样透传**（调用方可能已按业务精度格式化，如期权线补买的
+    ``"50.00"``——不能因统一格式化把它变成 ``"50"`` 改掉既有行为）。
+    """
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return "0"
+        if "e" not in s.lower():
+            return s
+        value = float(s)
+    v = num(value)
+    if v == 0:
+        return "0"
+    return f"{v:.12f}".rstrip("0").rstrip(".") or "0"
+
+
+def td_mode_for(creds: dict) -> str:
+    """按账号 ``acctLv`` 返回可用的现货 ``tdMode``。
+
+    - ``acctLv`` 3/4（跨币种 / 组合保证金）→ ``cross``（期权线子账号属此类）
+    - ``acctLv`` 1/2（简单 / 单币种保证金）→ ``cash``——此类账号传 ``cross``
+      会报 ``54000 Margin trading is not supported.``（2026-10-30 现货线
+      DreamShepherdbot2 实测，ETH 三 slot 全失败）。
+
+    查询失败时保持旧行为（``cross``）并打诊断，不静默改语义。
+    """
+    key = str(creds.get("api_key") or "")
+    cached = _TDMODE_CACHE.get(key)
+    if cached:
+        return cached
+    mode = SPOT_TDMODE
+    try:
+        rows = okx_sdk.check(okx_sdk.account_for(creds).get_account_config())
+        row = rows[0] if isinstance(rows, list) and rows else {}
+        lv = str((row or {}).get("acctLv") or "")
+        if lv in ("3", "4"):
+            mode = "cross"
+        elif lv:
+            mode = "cash"
+        print(f"[DIAG] OKX tdMode 自适应 | acctLv={lv or '?'} → {mode}",
+              file=sys.stderr, flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[DIAG] OKX tdMode 自适应查询失败（保持 {mode}）: {e}",
+              file=sys.stderr, flush=True)
+    _TDMODE_CACHE[key] = mode
+    return mode
 
 #: 轮询节奏——与期权补买/出货原实现逐字一致（10 次 × 0.5s），勿独立调整
 POLL_TRIES = 10
@@ -92,10 +152,10 @@ def market_order(
     """
     params = {
         "instId": inst_id,
-        "tdMode": SPOT_TDMODE,
+        "tdMode": td_mode_for(creds),
         "side": side,
         "ordType": "market",
-        "sz": str(sz),
+        "sz": fmt_decimal(sz),
         "tgtCcy": tgt_ccy,
     }
     # OKX 的 tag 只接受 1–16 位字母数字：空串 / 含 `-`、`_` 都会 51000

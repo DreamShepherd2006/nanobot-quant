@@ -189,7 +189,10 @@ class OkxCexBroker(Broker):
 
     def limits_of(self, symbol: str) -> dict:
         """合约规格 ``{lot_sz, min_sz, tick_sz}``（300s 缓存；失败抛异常）。"""
-        inst = self.inst_id_of(symbol)
+        return self.limits_of_inst(self.inst_id_of(symbol))
+
+    def limits_of_inst(self, inst: str) -> dict:
+        """按 instId 取合约规格（供「换对后重算 sz」路径直接用）。"""
         now = time.time()
         cached = self._limits_cache.get(inst)
         if cached and now - cached[0] < self._LIMITS_TTL:
@@ -198,26 +201,80 @@ class OkxCexBroker(Broker):
         self._limits_cache[inst] = (now, lim)
         return lim
 
+    def _price_of_inst(self, inst: str) -> float:
+        """指定 instId 的当前价（15s 缓存；0 = 取价失败）。"""
+        now = time.time()
+        cached = self._price_cache.get(inst)
+        if cached and now - cached[0] < self._PRICE_TTL:
+            return cached[1]
+        px = 0.0
+        try:
+            rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=inst))
+            row = rows[0] if isinstance(rows, list) and rows else {}
+            px = _num(row.get("last"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX price {inst} error: {e}", file=sys.stderr, flush=True)
+        if px > 0:
+            self._price_cache[inst] = (now, px)
+        return px
+
     def _price_of(self, symbol: str) -> float:
         """当前价（15s 缓存；0 = 取价失败 → 调用方 fail-closed）。
 
         直接用 OKX ``/market/ticker``（不经数据源模块，避开 pandas 依赖），
         instId 与本 broker 的 quote 一致（``-USDT`` 或 ``-USDC``）。
         """
-        now = time.time()
-        cached = self._price_cache.get(symbol)
-        if cached and now - cached[0] < self._PRICE_TTL:
-            return cached[1]
-        px = 0.0
         try:
-            rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=self.inst_id_of(symbol)))
-            row = rows[0] if isinstance(rows, list) and rows else {}
-            px = _num(row.get("last"))
+            return self._price_of_inst(self.inst_id_of(symbol))
         except Exception as e:  # noqa: BLE001
             print(f"[DIAG] OKX-CEX price {symbol} error: {e}", file=sys.stderr, flush=True)
-        if px > 0:
-            self._price_cache[symbol] = (now, px)
-        return px
+            return 0.0
+
+    def _pair_for_buy(self, symbol: str, quantity: float, balances: dict):
+        """BUY 时选**账号真的有钱**的计价币交易对（USDT / USDC 双对并存）。
+
+        2026-10-30 实测：现货池现金全在 USDC（14.57），而 tokens.json 的
+        ``okx_symbol`` 指向 SOL-USDT ⇒ 每轮报「USDT 不足：需 3.9999，可用
+        0.0000」。资金在哪一侧决定能不能成交，必须按余额选，不能靠配置猜
+        （OKX 对同一 base 常同时开 ``-USDT`` 与 ``-USDC``）。
+
+        返回 ``(inst, quote, px, cash)``；全部买不起时返回现金最多的那个，
+        让报错信息能直接展不出钱在哪。
+        """
+        base = self._base_ticker(symbol)
+        insts: list[str] = []
+        for q in (self._quote, "USDC", "USDT"):
+            try:
+                cand = inst_id_for(base, q, strict=True)
+            except Exception:  # noqa: BLE001
+                cand = ""
+            if cand and cand not in insts:
+                insts.append(cand)
+        if not insts:
+            try:
+                insts = [self.inst_id_of(symbol)]
+            except Exception:  # noqa: BLE001
+                return "", "", 0.0, 0.0
+        best = None
+        for inst in insts:
+            quote = inst.rsplit("-", 1)[-1].upper()
+            cash = _num((balances.get(quote) or {}).get("available"))
+            px = self._price_of_inst(inst)
+            if px <= 0:
+                continue
+            if cash > 0 and quantity * px <= cash * 1.001:
+                print(
+                    f"[DIAG] OKX-CEX BUY 选对 {symbol} → {inst}"
+                    f"（{quote} 可用 {cash:.4f}，其余候选 {insts}）",
+                    file=sys.stderr, flush=True,
+                )
+                return inst, quote, px, cash
+            if best is None or cash > best[3]:
+                best = (inst, quote, px, cash)
+        if best:
+            return best
+        first = insts[0]
+        return first, first.rsplit("-", 1)[-1].upper(), self._price_of_inst(first), 0.0
 
     def _balances(self) -> dict:
         """子账号资产 → ``{ccy: {available, locked, eq_usd}}``；失败返回 {}（fail-closed）。
@@ -452,9 +509,32 @@ class OkxCexBroker(Broker):
                 )
                 sz = shrunk
         else:
-            px = self._price_of(symbol)
-            quote = self.quote_of(symbol)
-            cash = _num((balances.get(quote) or {}).get("available"))
+            # 资金在哪一侧决定能不能成交：USDT/USDC 双对并存，按余额选对
+            # （2026-10-30 实测：钱全在 USDC，却硬按配置去下 SOL-USDT）。
+            inst_b, quote, px, cash = self._pair_for_buy(symbol, quantity, balances)
+            if not inst_b:
+                order.set_error(f"OKX {symbol} 无可用现货对（fail-closed）")
+                return order
+            if inst_b != inst:
+                inst = inst_b
+                try:
+                    lim = self.limits_of_inst(inst)
+                except Exception as e:  # noqa: BLE001
+                    order.set_error(f"OKX 合约规格不可用 {inst}: {e}")
+                    return order
+                lot = _num(lim.get("lot_sz"))
+                min_sz = _num(lim.get("min_sz"))
+                sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
+                if sz <= 0:
+                    order.set_error(
+                        f"OKX {inst} 下单量取整后为 0（qty={quantity} lotSz={lot}）"
+                    )
+                    return order
+                if min_sz > 0 and sz < min_sz:
+                    order.set_error(
+                        f"OKX {inst} 下单量 {sz} < minSz {min_sz}（fail-closed，不凑单）"
+                    )
+                    return order
             if px <= 0:
                 order.set_error(f"OKX {symbol} 取价失败（fail-closed，不盲下单）")
                 return order
