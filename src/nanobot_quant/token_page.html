@@ -46,18 +46,20 @@
   .modal-box input, .modal-box select { width:100%; box-sizing:border-box; padding:8px 10px; border:1px solid #ccc; border-radius:6px; }
   .modal-actions { margin-top:16px; display:flex; gap:10px; justify-content:flex-end; }
   td.muted { color:#888; }
+  .bad { color:#c62828; font-weight:500; }
 </style>
 </head>
 <body>
 <h1>🪙 代币管理（DEX 链上地址 · CEX 交易对映射）</h1>
 <p class="subtitle">管理自定义代币（tokens.json）。录入不等于信任——地址有疑问（链不匹配/格式错误）的条目在执行前会被拦截，需你确认后才放行；确认记忆化，改地址后自动重置。<br>
-DEX 通道：合约地址 + 链 + 确认门；CEX 通道：交易对（gate_symbol 或回退 {symbol}_USDT），地址/链字段对 CEX 不参与执行。</p>
+DEX 通道：合约地址 + 链 + 确认门；CEX 通道：交易对（Gate 用 gate_symbol、OKX 用 okx_symbol，留空自动探测），地址/链字段对 CEX 不参与执行。<br>
+表里的交易对是**实际解析结果**（与下单同源），解析不出来会标红——OKX 代币化股票前缀不统一（SPCX → XSPCX，但 CRCLX → XCRCL），这类需手动填 okx_symbol。</p>
 
 <div class="card">
   <h2>➕ 新增代币</h2>
   <div class="form-row">
     <input type="text" id="f-symbol" placeholder="Symbol（如 WEVM / SOL）" autocomplete="off">
-    <input type="text" id="f-address" placeholder="合约地址（原生币 SOL 可留空，自动填充）" autocomplete="off">
+    <input type="text" id="f-address" placeholder="合约地址（内建白名单币可不填，自动填充）" autocomplete="off">
     <select id="f-chain">
       <option value="solana" selected>solana</option>
       <option value="bnb">bnb</option>
@@ -73,12 +75,12 @@ DEX 通道：合约地址 + 链 + 确认门；CEX 通道：交易对（gate_symb
     <button class="btn-primary" id="btn-add">添加</button>
   </div>
   <div class="form-row" style="margin-top:8px">
-    <input type="text" id="f-gate" placeholder="Gate 交易对（可选，如 XSPX 或 XSPX_USDT；留空=回退 {SYMBOL}_USDT）" autocomplete="off">
-    <input type="text" id="f-okx" placeholder="OKX 交易对（可选，如 XSPX；留空=回退 {SYMBOL}-USDT）" autocomplete="off">
+    <input type="text" id="f-gate" placeholder="Gate 交易对（可选，如 SPCX 或 SPCX_USDT；留空 = 自动 {SYMBOL}_USDT）" autocomplete="off">
+    <input type="text" id="f-okx" placeholder="OKX 交易对（可选，如 XSPCX；留空 = 按当前计价币自动探测，含代币化股票 X 前缀）" autocomplete="off">
   </div>
 </div>
 
-<div class="builtin">L1 内建白名单（无需管理）：{builtin_html}</div>
+<div class="builtin">L1 内建白名单（无需管理，登记时地址与链自动填充）：{builtin_html}</div>
 
 <div class="card">
   <h2>📋 自定义代币（{count_html}）</h2>
@@ -103,10 +105,10 @@ DEX 通道：合约地址 + 链 + 确认门；CEX 通道：交易对（gate_symb
       <option value="tron">tron</option>
       <option value="xrp">xrp</option>
     </select>
-    <label>Gate 交易对（可选；留空 = 清除映射、回退 {SYMBOL}_USDT）</label>
-    <input type="text" id="e-gate" placeholder="如 XSPX 或 XSPX_USDT" autocomplete="off">
-    <label>OKX 交易对（可选；留空 = 清除映射、回退 {SYMBOL}-USDT）</label>
-    <input type="text" id="e-okx" placeholder="如 XSPX" autocomplete="off">
+    <label>Gate 交易对（可选；留空 = 清除映射，自动 {SYMBOL}_USDT）</label>
+    <input type="text" id="e-gate" placeholder="如 SPCX 或 SPCX_USDT" autocomplete="off">
+    <label>OKX 交易对（可选；留空 = 清除映射，按当前计价币自动探测）</label>
+    <input type="text" id="e-okx" placeholder="如 XSPCX / XCRCL" autocomplete="off">
     <div class="modal-actions">
       <button class="btn-primary" id="e-save">保存</button>
       <button class="btn-outline" id="e-cancel">取消</button>
