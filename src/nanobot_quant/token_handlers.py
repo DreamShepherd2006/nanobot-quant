@@ -104,6 +104,45 @@ def _quote_ccy() -> str:
         return "USDT"
 
 
+_GATE_PAIRS_TTL = 600.0
+# {"ts": float, "pairs": set[str] | None}（None = 查询失败）——展示层全局缓存，
+# 避免每次开页对 2000+ 交易对逐条查一次。
+_gate_pairs_cache: dict = {"ts": 0.0, "pairs": None}
+
+
+def _gate_pairs() -> set[str] | None:
+    """Gate 现货交易对全集（公开端点、免 key、600s 缓存）。``None`` = 查询失败。
+
+    用全量清单一次拉完（~2000 条）而不是逐条 ``/currency_pairs/{pair}``：
+    21 个条目 = 1 次请求而非 21 次，且查询失败时能区分“未校验”与“不存在”。
+    """
+    import time
+
+    now = time.time()
+    if now - float(_gate_pairs_cache["ts"]) < _GATE_PAIRS_TTL:
+        return _gate_pairs_cache["pairs"]
+    pairs: set[str] | None = None
+    try:
+        import requests
+
+        resp = requests.get(
+            "https://api.gateio.ws/api/v4/spot/currency_pairs",
+            timeout=10,
+            headers={"Accept": "application/json"},
+        )
+        if resp.status_code == 200:
+            pairs = {
+                str(p.get("id", "")).upper() for p in resp.json() if p.get("id")
+            }
+    except Exception:  # noqa: BLE001 — 校验失败只降级为“未校验”，绝不阻断页面
+        pairs = None
+    _gate_pairs_cache["ts"] = (
+        now if pairs is not None else now - _GATE_PAIRS_TTL + 60
+    )  # 失败 60s 后重试
+    _gate_pairs_cache["pairs"] = pairs
+    return pairs
+
+
 def _cex_resolution(entry: dict, tokens: list[dict] | None = None) -> dict:
     """该条目在两所**实际**会被用到的交易对（与执行同源，不是另拼一套）。
 
@@ -111,36 +150,74 @@ def _cex_resolution(entry: dict, tokens: list[dict] | None = None) -> dict:
     2026-10-30 SOL 计价币事故即此类：页面写死 ``-USDT``、实际下单 ``-USDC``；
     CRCLX 更隐蔽：页面显示 ``CRCLX-USDT`` 看着正常，实际 OKX 解析失败 51001。
 
-    返回 ``{"gate": "CRCLX_USDT", "okx": "XCRCL-USDC", "okx_err": "", "quote": "USDC"}``；
-    OKX 解析失败时 ``okx`` 为空串、``okx_err`` 给原因（页面渲染红字）。
+    两所都区分**三种结局**，因为处置完全不同：
+
+    - 解析成功：真能下单
+    - 标的存在但当前计价币没对（如 XAUT 只有 -USDT）：换计价币或换标的
+    - 压根没这个标的（如 SPYX / SPCXB）：换标的或只走 DEX
+
+    返回 ``{"gate", "gate_ok", "okx", "okx_err", "okx_other", "quote"}``；
+    ``gate_ok``/``okx`` 失败信息由页面渲染成红/橙字，保存时拼进 message。
     """
     from .gate_credentials import gate_pair, okx_ticker
     from .okx_cex_data import inst_id_for
 
     sym = str(entry.get("symbol", ""))
     quote = _quote_ccy()
+
     gate = ""
     try:
-        gate = gate_pair(sym, tokens)
+        gate = gate_pair(sym, tokens)  # 格式对 ≠ 存在，故还要查清单
     except Exception:  # noqa: BLE001
         gate = ""
+    pairs = _gate_pairs()
+    gate_ok = None if pairs is None else bool(gate) and gate.upper() in pairs
+
     okx = ""
     err = ""
+    other = ""
     try:
-        okx = inst_id_for(okx_ticker(sym, tokens), quote=quote, strict=True)
+        ticker = okx_ticker(sym, tokens)
+        okx = inst_id_for(ticker, quote=quote, strict=True)
         if not okx:
-            err = "无对应交易对（执行将 51001）"
+            # 当前计价币下解析失败 → 再探另一个计价币，区分“没这个标的”
+            # 与“有这个标的、但当前计价币没对”（XAUT 只有 XAUT-USDT）。
+            for q in ("USDT", "USDC"):
+                if q == quote:
+                    continue
+                other = inst_id_for(ticker, quote=q, strict=True)
+                if other:
+                    break
+            err = "" if other else "OKX 无此标的"
     except Exception as exc:  # noqa: BLE001 — 网络/限流只降级，不炸页面
         err = f"解析失败：{type(exc).__name__}"
-    return {"gate": gate, "okx": okx, "okx_err": err, "quote": quote}
+    return {
+        "gate": gate,
+        "gate_ok": gate_ok,
+        "okx": okx,
+        "okx_err": err,
+        "okx_other": other,
+        "quote": quote,
+    }
 
 
-def _okx_note(entry: dict, tokens: list[dict] | None = None) -> str:
-    """保存成功后追加的 OKX 解析结论（仅提示，不阻断保存）。"""
+def _cex_note(entry: dict, tokens: list[dict] | None = None) -> str:
+    """保存成功后追加的两所校验结论（仅提示，不阻断保存）。"""
     res = _cex_resolution(entry, tokens)
+    parts: list[str] = []
+    if res["gate_ok"] is False:
+        parts.append(f"⚠ Gate 无 {res['gate']}")
     if res["okx"]:
-        return f"｜OKX 解析：{res['okx']}"
-    return f"｜⚠ OKX {res['okx_err'] or '无法解析'}"
+        parts.append(f"OKX 解析：{res['okx']}")
+    elif res["okx_other"]:
+        parts.append(
+            f"⚠ OKX 仅有 {res['okx_other']}"
+            f"（当前计价币 {res['quote']} 下将 51001）"
+        )
+    else:
+        parts.append("❌ OKX 无此标的" if not res["okx_err"].startswith("解析失败")
+                     else f"⚠ {res['okx_err']}")
+    return "｜" + "｜".join(parts)
 
 
 def _render_list() -> str:
@@ -156,11 +233,28 @@ def _render_list() -> str:
         # 两所交易对一律取「解析结果」而非登记值——与执行同源（gate_pair /
         # inst_id_for），杜绝页面显示与实际下单漂移。
         res = _cex_resolution(entry, entries)
-        gate_cell = html_escape(res["gate"]) if res["gate"] else "—"
+        if res["gate_ok"] is False:
+            gate_cell = (
+                f"<span class='bad' title='Gate 无此交易对'>❌ {html_escape(res['gate'])}</span>"
+            )
+        elif res["gate_ok"] is None:
+            gate_cell = (
+                f"<span class='mono'>{html_escape(res['gate']) or '—'}</span>"
+                " <span class='muted'>(未校验)</span>"
+            )
+        else:
+            gate_cell = html_escape(res["gate"]) if res["gate"] else "—"
         if res["okx"]:
             okx_cell = f"<span class='mono'>{html_escape(res['okx'])}</span>"
+        elif res["okx_other"]:
+            okx_cell = (
+                f"<span class='warn'>⚠ 仅有 {html_escape(res['okx_other'])}"
+                f"（当前计价币 {html_escape(res['quote'])} 下将 51001）</span>"
+            )
         else:
-            okx_cell = f"<span class='bad'>❌ {html_escape(res['okx_err'] or '无法解析')}</span>"
+            okx_cell = (
+                f"<span class='bad'>❌ {html_escape(res['okx_err'] or '无法解析')}</span>"
+            )
         rows.append(
             "<tr>"
             f"<td class='sym'>{html_escape(sym)}</td>"
@@ -266,7 +360,7 @@ async def token_add(request: Request) -> JSONResponse:
     check = _validate_token_entry(entry, chain=chain)
     entries.append(entry)
     _write_tokens(entries)
-    note = _okx_note(entry, entries)  # 仅提示，不阻断保存（网络抖动不应存不下去）
+    note = _cex_note(entry, entries)  # 仅提示，不阻断保存（网络抖动不应存不下去）
 
     if check["ok"]:
         return JSONResponse({"ok": True, "status": "clean",
@@ -327,7 +421,7 @@ async def token_edit(request: Request) -> JSONResponse:
                         entry.pop(k, None)
             _write_tokens(entries)
             check = _validate_token_entry(entry, chain=chain)
-            note = _okx_note(entry, entries)
+            note = _cex_note(entry, entries)
             if check["ok"]:
                 return JSONResponse({"ok": True, "status": "clean",
                                      "message": f"{symbol} 已更新，校验通过{note}"})
@@ -359,7 +453,7 @@ async def token_meta(request: Request) -> JSONResponse:
         else:
             entry.pop(k, None)  # 留空 = 恢复自动映射
     _write_tokens(entries)
-    note = _okx_note(entry, entries)
+    note = _cex_note(entry, entries)
     return JSONResponse({"ok": True,
                          "message": f"{symbol} 映射已更新（OKX: {entry.get('okx_symbol') or '自动'} / "
                                     f"Gate: {entry.get('gate_symbol') or '自动'}）{note}"})

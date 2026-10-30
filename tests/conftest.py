@@ -534,6 +534,22 @@ def _isolate_batches_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_gate_pairs(monkeypatch):
+    """代币页的 Gate 交易对校验默认不联网（返回 None = 未校验）。
+
+    ``_gate_pairs()`` 会去打 Gate 公开端点拉全量清单（600s 缓存）。
+    测试若真实联网：慢（10s 超时）、依赖网络、结果随行情/上架变化而飘。
+    需要校验结果的用例自行 monkeypatch 成具体集合。
+    """
+    try:
+        from nanobot_quant import token_handlers as _th
+    except Exception:  # noqa: BLE001 — 依赖缺失时不影响其他测试
+        return
+    monkeypatch.setattr(_th, "_gate_pairs_orig", _th._gate_pairs, raising=False)
+    monkeypatch.setattr(_th, "_gate_pairs", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_exec_params(tmp_path, monkeypatch):
     """隔离 exec_params.json 候选路径（2026-08-21 页面场景化）。
 
