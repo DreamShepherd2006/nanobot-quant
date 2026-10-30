@@ -94,30 +94,80 @@ def _token_status(entry: dict) -> dict:
 # ── page rendering ─────────────────────────────────────────────────
 
 
+def _quote_ccy() -> str:
+    """当前 OKX CEX 计价币（与执行同一来源：exec_params.quote_ccy）。"""
+    try:
+        from .exec_params import load_exec_params
+
+        return str(load_exec_params().get("quote_ccy") or "USDT").upper()
+    except Exception:  # noqa: BLE001 — 展示层绝不因取参失败而 500
+        return "USDT"
+
+
+def _cex_resolution(entry: dict, tokens: list[dict] | None = None) -> dict:
+    """该条目在两所**实际**会被用到的交易对（与执行同源，不是另拼一套）。
+
+    展示层必须调执行那一刻的同一个函数，否则页面与真实下单会各说一套——
+    2026-10-30 SOL 计价币事故即此类：页面写死 ``-USDT``、实际下单 ``-USDC``；
+    CRCLX 更隐蔽：页面显示 ``CRCLX-USDT`` 看着正常，实际 OKX 解析失败 51001。
+
+    返回 ``{"gate": "CRCLX_USDT", "okx": "XCRCL-USDC", "okx_err": "", "quote": "USDC"}``；
+    OKX 解析失败时 ``okx`` 为空串、``okx_err`` 给原因（页面渲染红字）。
+    """
+    from .gate_credentials import gate_pair, okx_ticker
+    from .okx_cex_data import inst_id_for
+
+    sym = str(entry.get("symbol", ""))
+    quote = _quote_ccy()
+    gate = ""
+    try:
+        gate = gate_pair(sym, tokens)
+    except Exception:  # noqa: BLE001
+        gate = ""
+    okx = ""
+    err = ""
+    try:
+        okx = inst_id_for(okx_ticker(sym, tokens), quote=quote, strict=True)
+        if not okx:
+            err = "无对应交易对（执行将 51001）"
+    except Exception as exc:  # noqa: BLE001 — 网络/限流只降级，不炸页面
+        err = f"解析失败：{type(exc).__name__}"
+    return {"gate": gate, "okx": okx, "okx_err": err, "quote": quote}
+
+
+def _okx_note(entry: dict, tokens: list[dict] | None = None) -> str:
+    """保存成功后追加的 OKX 解析结论（仅提示，不阻断保存）。"""
+    res = _cex_resolution(entry, tokens)
+    if res["okx"]:
+        return f"｜OKX 解析：{res['okx']}"
+    return f"｜⚠ OKX {res['okx_err'] or '无法解析'}"
+
+
 def _render_list() -> str:
+    entries = _read_tokens()
+    quote = _quote_ccy()
     rows = []
-    for entry in _read_tokens():
+    for entry in entries:
         sym = str(entry.get("symbol", ""))
         addr = str(entry.get("address", ""))
         chain = str(entry.get("chain") or "solana")
         st = _token_status(entry)
         issue = f"<div class='issue'>{html_escape(st['issue'])}</div>" if st["issue"] else ""
-        # Gate CEX pair for this entry (mirrors gate_pair(): gate_symbol wins, else symbol)
-        gs = str(entry.get("gate_symbol") or entry.get("symbol") or sym).upper().strip()
-        base = gs.replace("-", "").replace("_", "")
-        if base.endswith("USDT"):
-            base = base[:-4]
-        pair = f"{base}_USDT"
-        # OKX CEX ticker (research source): okx_symbol wins, else symbol; OKX pair uses '-'
-        osym = str(entry.get("okx_symbol") or entry.get("symbol") or sym).upper().strip()
-        opair = f"{osym.replace('-', '').replace('_', '')}-USDT"
+        # 两所交易对一律取「解析结果」而非登记值——与执行同源（gate_pair /
+        # inst_id_for），杜绝页面显示与实际下单漂移。
+        res = _cex_resolution(entry, entries)
+        gate_cell = html_escape(res["gate"]) if res["gate"] else "—"
+        if res["okx"]:
+            okx_cell = f"<span class='mono'>{html_escape(res['okx'])}</span>"
+        else:
+            okx_cell = f"<span class='bad'>❌ {html_escape(res['okx_err'] or '无法解析')}</span>"
         rows.append(
             "<tr>"
             f"<td class='sym'>{html_escape(sym)}</td>"
             f"<td class='addr mono'>{html_escape(addr)}</td>"
             f"<td>{html_escape(chain)}</td>"
-            f"<td class='mono'>{html_escape(pair)}</td>"
-            f"<td class='mono muted'>{html_escape(opair)}</td>"
+            f"<td class='mono'>{gate_cell}</td>"
+            f"<td>{okx_cell}</td>"
             f"<td><span class='status {st['cls']}'>{st['label']}</span>{issue}</td>"
             "<td class='actions'>"
             f"<button class='btn-outline' data-act='confirm' data-symbol='{html_escape(sym)}' "
@@ -132,17 +182,18 @@ def _render_list() -> str:
         )
 
     table = (
-        "<table><thead><tr><th>Symbol</th><th>地址</th><th>链</th><th>Gate 交易对</th><th>OKX 交易对</th><th>状态</th><th>操作</th></tr></thead>"
+        "<table><thead><tr><th>Symbol</th><th>地址</th><th>链</th><th>Gate 交易对</th>"
+        f"<th>OKX 交易对（{html_escape(quote)}）</th><th>状态</th><th>操作</th></tr></thead>"
         f"<tbody>{''.join(rows) or '<tr><td colspan=7 class=empty>暂无自定义代币条目。'
-        'L1 内建白名单（SOL / USDC / USDT）自动可用，无需录入。</td></tr>'}</tbody></table>"
+        'L1 内建白名单自动可用，无需录入。</td></tr>'}</tbody></table>"
     )
 
-    builtin = "、".join(_BUILTIN_TOKENS) + "（ETH/BTC/BNB 自动填充 WETH/WBTC/WBNB 地址）"
+    builtin = "、".join(_BUILTIN_TOKENS)
     return (
         _PAGE_HTML
         .replace("{table_html}", table)
         .replace("{builtin_html}", html_escape(str(builtin)))
-        .replace("{count_html}", str(len(_read_tokens())))
+        .replace("{count_html}", str(len(entries)))
     )
 
 
@@ -215,14 +266,15 @@ async def token_add(request: Request) -> JSONResponse:
     check = _validate_token_entry(entry, chain=chain)
     entries.append(entry)
     _write_tokens(entries)
+    note = _okx_note(entry, entries)  # 仅提示，不阻断保存（网络抖动不应存不下去）
 
     if check["ok"]:
         return JSONResponse({"ok": True, "status": "clean",
-                             "message": f"{symbol} 已添加，校验通过，执行时直接放行"})
+                             "message": f"{symbol} 已添加，校验通过，执行时直接放行{note}"})
     return JSONResponse({"ok": True, "status": "needs_confirmation",
                          "issue": check["issue"],
                          "message": f"{symbol} 已添加，但地址有疑问（{check['issue']}）——"
-                                    "执行将被拦截，需在页面点击「确认」或带 confirm=true 重试"})
+                                    f"执行将被拦截，需在页面点击「确认」或带 confirm=true 重试{note}"})
 
 
 async def token_confirm(request: Request) -> JSONResponse:
@@ -275,13 +327,14 @@ async def token_edit(request: Request) -> JSONResponse:
                         entry.pop(k, None)
             _write_tokens(entries)
             check = _validate_token_entry(entry, chain=chain)
+            note = _okx_note(entry, entries)
             if check["ok"]:
                 return JSONResponse({"ok": True, "status": "clean",
-                                     "message": f"{symbol} 已更新，校验通过"})
+                                     "message": f"{symbol} 已更新，校验通过{note}"})
             return JSONResponse({"ok": True, "status": "needs_confirmation",
                                  "issue": check["issue"],
                                  "message": f"{symbol} 已更新，但地址有疑问（{check['issue']}）——"
-                                            "执行将被拦截，需确认后才放行"})
+                                            f"执行将被拦截，需确认后才放行{note}"})
     return JSONResponse({"ok": False, "error": f"{symbol} 不存在"}, status_code=404)
 
 
@@ -306,8 +359,10 @@ async def token_meta(request: Request) -> JSONResponse:
         else:
             entry.pop(k, None)  # 留空 = 恢复自动映射
     _write_tokens(entries)
+    note = _okx_note(entry, entries)
     return JSONResponse({"ok": True,
-                         "message": f"{symbol} 映射已更新（OKX: {entry.get('okx_symbol') or '自动'} / Gate: {entry.get('gate_symbol') or '自动'}）"})
+                         "message": f"{symbol} 映射已更新（OKX: {entry.get('okx_symbol') or '自动'} / "
+                                    f"Gate: {entry.get('gate_symbol') or '自动'}）{note}"})
 
 
 async def token_delete(request: Request) -> JSONResponse:

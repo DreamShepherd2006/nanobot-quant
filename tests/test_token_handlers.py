@@ -377,21 +377,110 @@ class TestEditMappings:
 
 
 class TestRenderListOkxColumn:
-    def test_okx_column(self, _isolated_tokens):
-        """tokens 页 OKX 交易对列：symbol 回退 + okx_symbol 覆盖。"""
+    """OKX 列必须显示「解析结果」而非登记值——页面与执行同源。
+
+    2026-10-30 旧实现自己拼 ``-USDT``（忽略计价币）、不剥 quote 后缀、
+    不走 X 前缀探测，导致 CRCLX 在页面上显示 CRCLX-USDT「看着正常」、
+    实际执行 51001。现改为直调 ``inst_id_for``。
+    """
+
+    @staticmethod
+    def _mock_okx(monkeypatch, mapping):
+        """mapping: ticker(大写) -> instId；缺省视为解析失败（返回空串）。"""
+        from nanobot_quant import exec_params, okx_cex_data
+
+        monkeypatch.setattr(
+            exec_params, "load_exec_params", lambda: {"quote_ccy": "USDC"}
+        )
+        monkeypatch.setattr(
+            okx_cex_data,
+            "inst_id_for",
+            lambda ticker, quote=None, session=None, strict=False: mapping.get(
+                str(ticker).upper(), ""
+            ),
+        )
+
+    def test_okx_column_shows_resolved_inst(self, _isolated_tokens, monkeypatch):
+        """登记 okx_symbol → 显示真实 instId（含当前计价币），表头标明计价币。"""
         from nanobot_quant.token_handlers import _render_list
 
+        self._mock_okx(monkeypatch, {"XCRCL": "XCRCL-USDC", "SPCX": "XSPX-USDC"})
         _write_tokens(
             [
                 {"symbol": "CRCLX", "address": SOLANA_ADDR,
-                 "chain": "solana", "confirmed": True},
-                {"symbol": "SPX", "address": SOLANA_ADDR,
                  "chain": "solana", "confirmed": True,
-                 "okx_symbol": "XSPX"},
+                 "okx_symbol": "XCRCL"},
+                {"symbol": "SPCX", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True},
             ]
         )
         html = _render_list()
-        assert "<th>OKX 交易对</th>" in html
-        assert ">CRCLX-USDT<" in html
-        assert ">XSPX-USDT<" in html
-        assert ">SPX-USDT<" not in html
+        assert "<th>OKX 交易对（USDC）</th>" in html  # 表头带实际计价币
+        assert ">XCRCL-USDC<" in html
+        assert ">XSPX-USDC<" in html                  # symbol 回退 + X 前缀探测
+        assert "CRCLX-USDC" not in html               # 不再是「登记值直接拼」
+
+    def test_okx_column_flags_unresolved(self, _isolated_tokens, monkeypatch):
+        """解析不出来 → 红字 + 51001 提示，而不是像旧版那样显示一个假交易对。"""
+        from nanobot_quant.token_handlers import _render_list
+
+        self._mock_okx(monkeypatch, {})  # 全部解析失败
+        _write_tokens(
+            [{"symbol": "CRCLX", "address": SOLANA_ADDR,
+              "chain": "solana", "confirmed": True}]
+        )
+        html = _render_list()
+        assert "class='bad'" in html
+        assert "51001" in html
+        assert "CRCLX-USDT" not in html  # 不再凭空造一个「看着对」的交易对
+
+    def test_okx_column_survives_network_error(self, _isolated_tokens, monkeypatch):
+        """拉清单抛异常时只降级标红，绝不把整个页面打成 500。"""
+        from nanobot_quant import exec_params, okx_cex_data
+        from nanobot_quant.token_handlers import _render_list
+
+        monkeypatch.setattr(
+            exec_params, "load_exec_params", lambda: {"quote_ccy": "USDC"}
+        )
+
+        def boom(*a, **kw):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(okx_cex_data, "inst_id_for", boom)
+        _write_tokens(
+            [{"symbol": "SOL", "address": SOLANA_ADDR,
+              "chain": "solana", "confirmed": True}]
+        )
+        html = _render_list()
+        assert ">SOL_USDT<" in html      # Gate 列照常
+        assert "解析失败" in html         # OKX 列降级提示
+
+    def test_add_message_carries_okx_resolution(self, _isolated_tokens, monkeypatch):
+        """保存成功后的 message 附带 OKX 解析结论（仅提示，不阻断保存）。"""
+        from nanobot_quant.token_handlers import token_add
+
+        self._mock_okx(monkeypatch, {"XCRCL": "XCRCL-USDC"})
+        resp = _call(
+            token_add,
+            {"symbol": "CRCLX", "address": SOLANA_ADDR, "chain": "solana",
+             "okx_symbol": "XCRCL"},
+        )
+        assert resp.status_code == 200
+        msg = json.loads(resp.body)["message"]
+        assert "OKX 解析：XCRCL-USDC" in msg
+        assert _read_tokens()[0]["okx_symbol"] == "XCRCL"  # 照样落盘
+
+    def test_add_message_warns_when_unresolved(self, _isolated_tokens, monkeypatch):
+        """解析失败：告警进 message，但保存仍然成功（网络/限流不该存不下去）。"""
+        from nanobot_quant.token_handlers import token_add
+
+        self._mock_okx(monkeypatch, {})
+        resp = _call(
+            token_add,
+            {"symbol": "CRCLX", "address": SOLANA_ADDR, "chain": "solana"},
+        )
+        assert resp.status_code == 200
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+        assert "⚠ OKX" in body["message"] and "51001" in body["message"]
+        assert _read_tokens()[0]["symbol"] == "CRCLX"
