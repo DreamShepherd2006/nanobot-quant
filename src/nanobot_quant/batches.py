@@ -461,6 +461,10 @@ class BatchManager:
         return out
 
 
+# 上次播报过的现货池成员（None = 本进程还没打过）。见 shared_pool_account_ids。
+_SPOT_POOL_LOGGED: tuple[str, ...] | None = None
+
+
 def shared_pool_account_ids(
     count: int, preferred: Optional[list[str]] = None
 ) -> tuple[list[str], str]:
@@ -499,11 +503,19 @@ def shared_pool_account_ids(
         # 用户设计（2026-10-29）：期权用第一个子账号（含保证金），现货按场景用
         # 剩下的账号——两线资金/担保不能混在一个子账号里。
         if opt_account and opt_account in known:
-            print(
-                f"[DIAG] shared_pool: 期权子账号 {opt_account} 已从现货池排除"
-                f"（现货池: {[a for a in known if a != opt_account]}）",
-                file=sys.stderr, flush=True,
-            )
+            # 2026-10-30 用户反馈：这行原来**每次调用**都打，而 1m 循环 × 4 标的
+            # 每轮调一次、页面 10s 轮询又调一次 ⇒ 每分钟几十条纯噪音。
+            # 改为「现货池成员变化时才打一次」——保留「期权账号被排除」这条
+            # 关键事实的可见性（重启/改凭证后的首轮一定会打），又不刷屏。
+            _spot_names = tuple(a for a in known if a != opt_account)
+            global _SPOT_POOL_LOGGED
+            if _spot_names != _SPOT_POOL_LOGGED:
+                _SPOT_POOL_LOGGED = _spot_names
+                print(
+                    f"[DIAG] shared_pool: 期权子账号 {opt_account} 已从现货池排除"
+                    f"（现货池: {list(_spot_names)}）",
+                    file=sys.stderr, flush=True,
+                )
         spot_known = [a for a in known if a != opt_account]
         if known and not spot_known:
             return [], (
