@@ -54,41 +54,32 @@ def test_market_order_sends_fixed_point_sz(monkeypatch):
     assert captured["set_order"]["sz"] == "0.0000513"
 
 
-# ── 2. tdMode 按账号 acctLv 自适应 ──────────────────────────────────────
+# ── 2. tdMode：现货一律 cash，撞错才自适应 ────────────────────────────
 
-@pytest.mark.parametrize("lv,expected", [("3", "cross"), ("4", "cross"),
-                                        ("1", "cash"), ("2", "cash")])
-def test_td_mode_follows_acct_level(monkeypatch, lv, expected):
-    import nanobot_quant.okx_sdk as sdk
+def test_default_td_mode_is_cash():
+    """现货交易不需要保证金 ⇒ 默认现金模式（用户 2026-10-30 核实子账号模式）。
 
-    class _Acc:
-        def get_account_config(self):
-            return {"code": "0", "data": [{"acctLv": lv}]}
+    Bot2–5 是「现货模式」子账号，传 cross 直接 54000；而 acctLv 是主账户级
+    属性、对子账号不成立，所以不能靠它判断。
+    """
+    assert okx_spot.SPOT_TDMODE == "cash"
 
-    monkeypatch.setattr(sdk, "account_for", lambda c: _Acc())
+
+def test_td_mode_for_returns_cached_or_cash():
     okx_spot._TDMODE_CACHE.clear()
-    assert okx_spot.td_mode_for({"api_key": f"k{lv}"}) == expected
+    assert okx_spot.td_mode_for({"api_key": "k1"}) == "cash"
+    okx_spot._TDMODE_CACHE["k1"] = "cross"       # 撞错后记住的值
+    assert okx_spot.td_mode_for({"api_key": "k1"}) == "cross"
 
 
-def test_td_mode_query_failure_keeps_legacy_cross(monkeypatch):
-    import nanobot_quant.okx_sdk as sdk
-
-    def _boom(_c):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(sdk, "account_for", _boom)
-    okx_spot._TDMODE_CACHE.clear()
-    assert okx_spot.td_mode_for({"api_key": "kfail"}) == "cross"
-
-
-def test_market_order_uses_adaptive_td_mode(monkeypatch):
+def test_market_order_uses_cash_by_default(monkeypatch):
     import nanobot_quant.okx_sdk as sdk
 
     captured = {}
     monkeypatch.setattr(sdk, "trade_for",
                         lambda c: _FakeTrade(captured, _ok([{"sCode": "0", "ordId": "E1"}])))
-    monkeypatch.setattr(okx_spot, "td_mode_for", lambda creds: "cash")
-    okx_spot.market_order({"api_key": "k"}, inst_id="ETH-USDC", side="buy", sz=0.0017)
+    okx_spot._TDMODE_CACHE.clear()
+    okx_spot.market_order({"api_key": "kc"}, inst_id="ETH-USDC", side="buy", sz=0.0017)
     assert captured["set_order"]["tdMode"] == "cash"
 
 
@@ -132,3 +123,105 @@ def test_source_has_no_auto_pair_switching():
     parts = src.split('"""')
     body = parts[2] if len(parts) >= 3 else src
     assert "USDC" not in body and "insts" not in body
+
+
+# ── 4. 54000 自动降级 cash 重试（acctLv 查不准时的兜底）─────────────────
+
+def test_margin_not_supported_degrades_to_cash(monkeypatch):
+    """acctLv 选了 cross 但账户实际不支保证金 → 54000 → 降级 cash 重试一次。
+
+    54000 是明确拒单（订单未成交），重试不产生重复仓。
+    """
+    import nanobot_quant.okx_sdk as sdk
+    from nanobot_quant.okx_sdk import OkxSdkError
+
+    calls = []
+
+    class _Trade:
+        def set_order(self, **kw):
+            calls.append(kw["tdMode"])
+            if len(calls) == 1:
+                return {"code": "1", "msg": "All operations failed",
+                        "data": [{"sCode": "54000", "sMsg": "Margin trading is not supported."}]}
+            return {"code": "0", "data": [{"sCode": "0", "ordId": "B2"}]}
+
+    monkeypatch.setattr(sdk, "trade_for", lambda c: _Trade())
+    monkeypatch.setattr(okx_spot, "td_mode_for", lambda creds: "cross")
+    okx_spot._TDMODE_CACHE.clear()
+
+    res = okx_spot.market_order({"api_key": "kb"}, inst_id="BTC-USDC", side="buy", sz=1e-05)
+    assert calls == ["cross", "cash"]          # 先 cross，撞 54000 后降级
+    assert res["ord_id"] == "B2"
+    # 降级结果写回缓存，后续订单直接用 cash（不再撞一次 54000）
+    assert okx_spot._TDMODE_CACHE["kb"] == "cash"
+
+
+def test_other_rejections_are_not_retried(monkeypatch):
+    """只有 54000 才降级重试，别的拒单必须原样抛（不能吞错误）。"""
+    import pytest as _pytest
+
+    import nanobot_quant.okx_sdk as sdk
+
+    calls = []
+
+    class _Trade:
+        def set_order(self, **kw):
+            calls.append(kw["tdMode"])
+            return {"code": "1", "msg": "All operations failed",
+                    "data": [{"sCode": "51000", "sMsg": "Parameter sz error"}]}
+
+    monkeypatch.setattr(sdk, "trade_for", lambda c: _Trade())
+    monkeypatch.setattr(okx_spot, "td_mode_for", lambda creds: "cash")
+    with _pytest.raises(sdk.OkxSdkError):
+        okx_spot.market_order({"api_key": "kx"}, inst_id="BTC-USDC", side="buy", sz=1e-05)
+    assert calls == ["cash"]                   # 只发一次
+
+
+def test_td_mode_error_switches_to_cross(monkeypatch):
+    """跨币种保证金子账号（Bot1）不接受 cash → 51000 Parameter tdMode error
+    → 自动切 cross 重试一次并记忆（期权线补买走的就是这条）。"""
+    import nanobot_quant.okx_sdk as sdk
+
+    calls = []
+
+    class _Trade:
+        def set_order(self, **kw):          # -USDC 等普通对
+            return self._go(kw)
+
+        def send_request(self, path, method, **kw):   # -USD（统一 USD 订单簿）
+            return self._go(kw)
+
+        def _go(self, kw):
+            calls.append(kw["tdMode"])
+            if len(calls) == 1:
+                return {"code": "1", "msg": "All operations failed",
+                        "data": [{"sCode": "51000", "sMsg": "Parameter tdMode error"}]}
+            return {"code": "0", "data": [{"sCode": "0", "ordId": "C1"}]}
+
+    monkeypatch.setattr(sdk, "trade_for", lambda c: _Trade())
+    okx_spot._TDMODE_CACHE.clear()
+    res = okx_spot.market_order({"api_key": "kbot1"}, inst_id="SOL-USD", side="buy", sz="0.1")
+    assert calls == ["cash", "cross"]
+    assert res["ord_id"] == "C1"
+    assert okx_spot._TDMODE_CACHE["kbot1"] == "cross"
+
+
+def test_51000_other_params_not_treated_as_td_mode(monkeypatch):
+    """51000 是通用参数错误码，只有消息里带 tdMode 才切换（否则会掩盖 sz 等问题）。"""
+    import pytest as _pytest
+
+    import nanobot_quant.okx_sdk as sdk
+
+    calls = []
+
+    class _Trade:
+        def set_order(self, **kw):
+            calls.append(kw["tdMode"])
+            return {"code": "1", "msg": "All operations failed",
+                    "data": [{"sCode": "51000", "sMsg": "Parameter sz error"}]}
+
+    monkeypatch.setattr(sdk, "trade_for", lambda c: _Trade())
+    okx_spot._TDMODE_CACHE.clear()
+    with _pytest.raises(sdk.OkxSdkError):
+        okx_spot.market_order({"api_key": "ksz"}, inst_id="BTC-USDC", side="buy", sz=1e-05)
+    assert calls == ["cash"]        # 不切换、只发一次

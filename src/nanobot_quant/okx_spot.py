@@ -29,11 +29,27 @@ import time
 from nanobot_quant import okx_sdk
 from nanobot_quant.okx_sdk import OkxSdkError
 
-#: 现货下单保证金模式默认值（acctLv=3 必需）；acctLv<3 的账号用 cash，
-#: 实际值由 :func:`td_mode_for` 按账号能力决定。
-SPOT_TDMODE = "cross"
+#: 现货下单保证金模式默认值。
+#:
+#: **现货交易不需要保证金** ⇒ 一律 ``cash``。历史遗留值曾是 ``cross``（2026-09-07
+#: 期权线在 Bot1 上实测「cash → 51000」后定稿），但 Bot1 是**跨币种保证金模式**
+#: 子账号的特例；2026-10-30 用户核实子账号真实模式：
+#:
+#: | 子账号 | 账户模式 | 用途 |
+#: |---|---|---|
+#: | DreamShepherdbot1 | 跨币种保证金 | 期权线 |
+#: | DreamShepherdbot2–5 | **现货模式** | 现货线 |
+#:
+#: 现货模式账号传 ``cross`` 直接 ``54000 Margin trading is not supported.``。
+#: 「按 ``acctLv`` 判断」也不可靠——``acctLv`` 是主账户级属性，对子账号不成立
+#: （Bot2 挂在统一账户下、子账号本身却是现货模式）。
+#:
+#: 所以策略 = **现金优先 + 撞错自适应**：默认 ``cash``；若该账号确实不接受
+#: ``cash``（``51000 Parameter tdMode error``），自动切 ``cross`` 重试一次并
+#: 记住（见 :func:`market_order`）。两种拒单都是「订单未成交」，重试无资金风险。
+SPOT_TDMODE = "cash"
 
-#: api_key → tdMode（按账号 acctLv 自适应，进程内缓存）
+#: api_key → tdMode（撞错后自动切换并记忆，进程内缓存）
 _TDMODE_CACHE: dict[str, str] = {}
 
 
@@ -61,35 +77,9 @@ def fmt_decimal(value) -> str:
 
 
 def td_mode_for(creds: dict) -> str:
-    """按账号 ``acctLv`` 返回可用的现货 ``tdMode``。
+    """该账号当前使用的现货 ``tdMode``（默认 ``cash``，撞错后由下单路径改写）。"""
+    return _TDMODE_CACHE.get(str(creds.get("api_key") or ""), SPOT_TDMODE)
 
-    - ``acctLv`` 3/4（跨币种 / 组合保证金）→ ``cross``（期权线子账号属此类）
-    - ``acctLv`` 1/2（简单 / 单币种保证金）→ ``cash``——此类账号传 ``cross``
-      会报 ``54000 Margin trading is not supported.``（2026-10-30 现货线
-      DreamShepherdbot2 实测，ETH 三 slot 全失败）。
-
-    查询失败时保持旧行为（``cross``）并打诊断，不静默改语义。
-    """
-    key = str(creds.get("api_key") or "")
-    cached = _TDMODE_CACHE.get(key)
-    if cached:
-        return cached
-    mode = SPOT_TDMODE
-    try:
-        rows = okx_sdk.check(okx_sdk.account_for(creds).get_account_config())
-        row = rows[0] if isinstance(rows, list) and rows else {}
-        lv = str((row or {}).get("acctLv") or "")
-        if lv in ("3", "4"):
-            mode = "cross"
-        elif lv:
-            mode = "cash"
-        print(f"[DIAG] OKX tdMode 自适应 | acctLv={lv or '?'} → {mode}",
-              file=sys.stderr, flush=True)
-    except Exception as e:  # noqa: BLE001
-        print(f"[DIAG] OKX tdMode 自适应查询失败（保持 {mode}）: {e}",
-              file=sys.stderr, flush=True)
-    _TDMODE_CACHE[key] = mode
-    return mode
 
 #: 轮询节奏——与期权补买/出货原实现逐字一致（10 次 × 0.5s），勿独立调整
 POLL_TRIES = 10
@@ -141,6 +131,7 @@ def market_order(
     sz,
     tgt_ccy: str = "base_ccy",
     tag: str = "",
+    td_mode: str | None = None,
 ) -> dict:
     """现货市价单 → ``{"ord_id", "cl_ord_id", "s_code", "s_msg", "rejected"}``。
 
@@ -152,7 +143,7 @@ def market_order(
     """
     params = {
         "instId": inst_id,
-        "tdMode": td_mode_for(creds),
+        "tdMode": td_mode or td_mode_for(creds),
         "side": side,
         "ordType": "market",
         "sz": fmt_decimal(sz),
@@ -163,12 +154,35 @@ def market_order(
     if tag:
         params["tag"] = tag
     api = okx_sdk.trade_for(creds)
-    if inst_id.upper().endswith("-USD"):
-        # Crypto-USD（统一 USD 订单簿）：用 USDC 成交须显式声明
-        params["tradeQuoteCcy"] = "USDC"
-        data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
-    else:
-        data = okx_sdk.check(api.set_order(**params))
+
+    def _send(p: dict):
+        if inst_id.upper().endswith("-USD"):
+            # Crypto-USD（统一 USD 订单簿）：用 USDC 成交须显式声明
+            p["tradeQuoteCcy"] = "USDC"
+            return okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **p))
+        return okx_sdk.check(api.set_order(**p))
+
+    try:
+        data = _send(params)
+    except OkxSdkError as e:
+        # 54000 = 该账号不支持保证金交易（acctLv 查询不准、或子账号被限）。
+        # 54000 是明确拒单（订单未成交），降级 cash 重试一次安全——
+        # 2026-10-30 实测：Bot2/3 按 acctLv 选了 cross 仍报 54000，
+        # 降级后同类报错不再阻断现货买卖。
+        msg = str(e)
+        cur = params.get("tdMode")
+        alt = ""
+        if "54000" in msg and cur != "cash":
+            alt = "cash"          # 该账号不支持保证金交易
+        elif "51000" in msg and "tdMode" in msg and cur != "cross":
+            alt = "cross"         # 该账户模式不接受 cash（跨币种保证金子账号）
+        if not alt:
+            raise
+        print(f"[DIAG] OKX tdMode {cur} → {alt} 重试 | {inst_id} | {e}",
+              file=sys.stderr, flush=True)
+        _TDMODE_CACHE[str(creds.get("api_key") or "")] = alt
+        params["tdMode"] = alt
+        data = _send(params)
     row = data[0] if isinstance(data, list) and data else {}
     s_code = row.get("sCode")
     rejected = s_code not in (None, "", "0")

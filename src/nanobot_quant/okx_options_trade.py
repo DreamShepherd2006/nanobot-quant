@@ -1486,7 +1486,7 @@ def spot_cover(account: str, *, spot_inst: str,
     try:
         req = okx_spot.market_order(
             a["creds"], inst_id=spot_inst, side="buy", sz=sz,
-            tgt_ccy=tgt, tag=TAG_COVER,
+            tgt_ccy=tgt, tag=TAG_COVER, td_mode="cross",
         )
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",
@@ -1587,7 +1587,7 @@ def spot_exit(account: str, *, spot_inst: str,
     try:
         req = okx_spot.market_order(
             a["creds"], inst_id=spot_inst, side="sell", sz=sz,
-            tgt_ccy=tgt, tag=TAG_EXIT,
+            tgt_ccy=tgt, tag=TAG_EXIT, td_mode="cross",
         )
     except Exception as e:
         update_ledger(lambda x: x["id"] == entry["id"], status="failed",

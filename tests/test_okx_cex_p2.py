@@ -76,7 +76,7 @@ class _FakeTrade:
 _OK = lambda rows: {"code": "0", "data": rows}  # noqa: E731
 
 
-def test_market_order_params_cross_and_base_ccy(monkeypatch):
+def test_market_order_params_cash_and_base_ccy(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         _sdk, "trade_for",
@@ -87,8 +87,9 @@ def test_market_order_params_cross_and_base_ccy(monkeypatch):
     )
     assert req["ord_id"] == "A1" and req["rejected"] is False
     p = captured["set_order"]
-    # acctLv=3 现货单必须 cross（cash → 51000，留空 → 50014）
-    assert p["tdMode"] == "cross"
+    # 现货交易不需要保证金 ⇒ 默认 cash（2026-10-30 定稿）；撞 54000/51000 时
+    # market_order 内部会自适应切换（期权线 Bot1 显式传 td_mode="cross"）
+    assert p["tdMode"] == "cash"
     assert p["ordType"] == "market"
     assert p["tgtCcy"] == "base_ccy"
     assert p["side"] == "buy"
@@ -484,6 +485,8 @@ def test_spot_cover_delegates_with_identical_params(monkeypatch):
         "sz": "0.1",
         "tgt_ccy": "base_ccy",
         "tag": ot.TAG_COVER,
+        # 期权线子账号是跨币种保证金模式（cash → 51000）⇒ 显式指定
+        "td_mode": "cross",
     }
 
 
@@ -551,6 +554,8 @@ def test_spot_exit_delegates_with_identical_params(monkeypatch):
         "sz": "0.1",
         "tgt_ccy": "base_ccy",
         "tag": ot.TAG_EXIT,
+        # 期权线子账号跨币种保证金 ⇒ 显式 cross（现货线走默认 cash）
+        "td_mode": "cross",
     }
 
 
