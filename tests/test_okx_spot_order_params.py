@@ -92,43 +92,43 @@ def test_market_order_uses_adaptive_td_mode(monkeypatch):
     assert captured["set_order"]["tdMode"] == "cash"
 
 
-# ── 3. BUY 按余额选对（USDT / USDC 双对）─────────────────────────────────
+# ── 3. 计价币只认 WebUI 参数，不自动换对 ──────────────────────────────────
 
-def _broker_with(balances, prices, pairs=None):
+def _broker(quote, balances, px):
     from nanobot_quant.brokers.okx_cex_broker import OkxCexBroker
 
     b = OkxCexBroker.__new__(OkxCexBroker)
-    b._quote = "USDT"
+    b._quote = quote
     b._price_cache = {}
-    b._price_of_inst = lambda inst: prices.get(inst, 0.0)   # type: ignore[method-assign]
-    b._base_ticker = lambda symbol: symbol.split("/")[0]     # type: ignore[method-assign]
-    b._pairs = pairs or {"SOL": ["SOL-USDT", "SOL-USDC"]}
-    import nanobot_quant.brokers.okx_cex_broker as m
-    m.inst_id_for = lambda base, q, strict=False: (   # type: ignore[assignment]
-        f"{base}-{q}" if f"{base}-{q}" in b._pairs.get(base, []) else "")
+    b._price_of_inst = lambda inst: px          # type: ignore[method-assign]
+    b.inst_id_of = lambda symbol: f"{symbol}-{quote}"   # type: ignore[method-assign]
+    b.quote_of = lambda symbol: quote           # type: ignore[method-assign]
     b.balances = balances
     return b
 
 
-def test_buy_picks_quote_with_balance():
-    """钱在 USDC 时不能硬下 SOL-USDT（2026-10-30 SOL 三 slot 全失败）。"""
-    b = _broker_with({"USDT": {"available": 0.0}, "USDC": {"available": 14.57}},
-                     {"SOL-USDT": 96.78, "SOL-USDC": 96.75})
+def test_buy_pair_follows_configured_quote_only():
+    """用户拍板（2026-10-30）：计价币是 WebUI 上**人**选的，系统不替用户猜。"""
+    b = _broker("USDT", {"USDT": {"available": 0.0}, "USDC": {"available": 14.57}}, 96.78)
     inst, quote, px, cash = b._pair_for_buy("SOL", 0.041, b.balances)
+    assert inst == "SOL-USDT" and quote == "USDT"   # 不因为 USDC 有钱就切过去
+    assert cash == 0.0 and px == pytest.approx(96.78)
+
+
+def test_buy_pair_uses_usdc_when_user_selected_usdc():
+    b = _broker("USDC", {"USDT": {"available": 99.0}, "USDC": {"available": 14.57}}, 96.75)
+    inst, quote, _px, cash = b._pair_for_buy("SOL", 0.041, b.balances)
     assert inst == "SOL-USDC" and quote == "USDC" and cash == pytest.approx(14.57)
-    assert px == pytest.approx(96.75)
 
 
-def test_buy_prefers_configured_pair_when_both_funded():
-    b = _broker_with({"USDT": {"available": 50.0}, "USDC": {"available": 50.0}},
-                     {"SOL-USDT": 96.78, "SOL-USDC": 96.75})
-    inst, quote, _px, _cash = b._pair_for_buy("SOL", 0.041, b.balances)
-    assert inst == "SOL-USDT"
+def test_source_has_no_auto_pair_switching():
+    """回归锁：不得再出现「按余额自动选对」的实现（用户明确否决）。"""
+    import inspect
 
+    from nanobot_quant.brokers.okx_cex_broker import OkxCexBroker
 
-def test_buy_returns_richest_pair_when_underfunded():
-    """两边都不够时给现金最多的那个，让报错信息指向真正有钱的币。"""
-    b = _broker_with({"USDT": {"available": 0.0}, "USDC": {"available": 1.0}},
-                     {"SOL-USDT": 96.78, "SOL-USDC": 96.75})
-    inst, quote, _px, cash = b._pair_for_buy("SOL", 1.0, b.balances)
-    assert inst == "SOL-USDC" and cash == pytest.approx(1.0)
+    src = inspect.getsource(OkxCexBroker._pair_for_buy)
+    # 只看代码体（docstring 里会提到被否决的方案，不作为判据）
+    parts = src.split('"""')
+    body = parts[2] if len(parts) >= 3 else src
+    assert "USDC" not in body and "insts" not in body

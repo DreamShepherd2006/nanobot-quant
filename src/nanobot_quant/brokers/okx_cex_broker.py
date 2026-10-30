@@ -231,50 +231,16 @@ class OkxCexBroker(Broker):
             return 0.0
 
     def _pair_for_buy(self, symbol: str, quantity: float, balances: dict):
-        """BUY 时选**账号真的有钱**的计价币交易对（USDT / USDC 双对并存）。
+        """已废弃（2026-10-30 用户拍板）：计价币**只认 WebUI 参数**，不自动选对。
 
-        2026-10-30 实测：现货池现金全在 USDC（14.57），而 tokens.json 的
-        ``okx_symbol`` 指向 SOL-USDT ⇒ 每轮报「USDT 不足：需 3.9999，可用
-        0.0000」。资金在哪一侧决定能不能成交，必须按余额选，不能靠配置猜
-        （OKX 对同一 base 常同时开 ``-USDT`` 与 ``-USDC``）。
-
-        返回 ``(inst, quote, px, cash)``；全部买不起时返回现金最多的那个，
-        让报错信息能直接展不出钱在哪。
-        """
-        base = self._base_ticker(symbol)
-        insts: list[str] = []
-        for q in (self._quote, "USDC", "USDT"):
-            try:
-                cand = inst_id_for(base, q, strict=True)
-            except Exception:  # noqa: BLE001
-                cand = ""
-            if cand and cand not in insts:
-                insts.append(cand)
-        if not insts:
-            try:
-                insts = [self.inst_id_of(symbol)]
-            except Exception:  # noqa: BLE001
-                return "", "", 0.0, 0.0
-        best = None
-        for inst in insts:
-            quote = inst.rsplit("-", 1)[-1].upper()
-            cash = _num((balances.get(quote) or {}).get("available"))
-            px = self._price_of_inst(inst)
-            if px <= 0:
-                continue
-            if cash > 0 and quantity * px <= cash * 1.001:
-                print(
-                    f"[DIAG] OKX-CEX BUY 选对 {symbol} → {inst}"
-                    f"（{quote} 可用 {cash:.4f}，其余候选 {insts}）",
-                    file=sys.stderr, flush=True,
-                )
-                return inst, quote, px, cash
-            if best is None or cash > best[3]:
-                best = (inst, quote, px, cash)
-        if best:
-            return best
-        first = insts[0]
-        return first, first.rsplit("-", 1)[-1].upper(), self._price_of_inst(first), 0.0
+    原本实现会按「哪个币有钱」自动在 ``-USDT`` / ``-USDC`` 间切换，但用户
+    明确：用 USDT 还是 USDC 是**用户在 WebUI 选定**的事，系统不替用户猜。
+    保留此方法仅作旧调用兼容，行为与 ``inst_id_of`` 完全一致。
+    """
+        inst = self.inst_id_of(symbol)
+        quote = inst.rsplit("-", 1)[-1].upper()
+        cash = _num((balances.get(quote) or {}).get("available"))
+        return inst, quote, self._price_of_inst(inst), cash
 
     def _balances(self) -> dict:
         """子账号资产 → ``{ccy: {available, locked, eq_usd}}``；失败返回 {}（fail-closed）。
@@ -509,44 +475,28 @@ class OkxCexBroker(Broker):
                 )
                 sz = shrunk
         else:
-            # 资金在哪一侧决定能不能成交：USDT/USDC 双对并存，按余额选对
-            # （2026-10-30 实测：钱全在 USDC，却硬按配置去下 SOL-USDT）。
+            # 计价币**只认用户配置**（WebUI「计价币」，默认 USDT）：不在
+            # -USDT / -USDC 之间自动切换。资金在另一个币种时明确报错并
+            # 提示去改参数，而不是静默换对（2026-10-30 用户拍板）。
             inst_b, quote, px, cash = self._pair_for_buy(symbol, quantity, balances)
             if not inst_b:
                 order.set_error(f"OKX {symbol} 无可用现货对（fail-closed）")
                 return order
-            if inst_b != inst:
-                inst = inst_b
-                try:
-                    lim = self.limits_of_inst(inst)
-                except Exception as e:  # noqa: BLE001
-                    order.set_error(f"OKX 合约规格不可用 {inst}: {e}")
-                    return order
-                lot = _num(lim.get("lot_sz"))
-                min_sz = _num(lim.get("min_sz"))
-                sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
-                if sz <= 0:
-                    order.set_error(
-                        f"OKX {inst} 下单量取整后为 0（qty={quantity} lotSz={lot}）"
-                    )
-                    return order
-                if min_sz > 0 and sz < min_sz:
-                    order.set_error(
-                        f"OKX {inst} 下单量 {sz} < minSz {min_sz}（fail-closed，不凑单）"
-                    )
-                    return order
             if px <= 0:
                 order.set_error(f"OKX {symbol} 取价失败（fail-closed，不盲下单）")
                 return order
             need = sz * px
             if need > cash * 1.001:  # 0.1% 容差（价格瞬时波动）
+                others = ", ".join(
+                    f"{c}={_num((balances.get(c) or {}).get('available')):.4f}"
+                    for c in sorted(_CASH_CURRENCIES)
+                    if _num((balances.get(c) or {}).get("available")) > 0
+                )
                 order.set_error(
                     f"OKX {quote} 不足：需 {need:.4f}，可用 {cash:.4f}"
-                    f"（instId={inst}；现货池现金：" + ", ".join(
-                        f"{c}={_num((balances.get(c) or {}).get('available')):.4f}"
-                        for c in sorted(_CASH_CURRENCIES)
-                        if _num((balances.get(c) or {}).get("available")) > 0
-                    ) + "）"
+                    f"（instId={inst}；现货池现金：{others or '无'}）"
+                    f"——计价币由 WebUI「计价币」参数决定（当前 {self._quote}），"
+                    f"若资金在别的币种请到 /config/exec 改该参数，系统不自动换对"
                 )
                 return order
 
