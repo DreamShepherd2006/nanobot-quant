@@ -278,3 +278,40 @@ def test_okx_cex_executable_after_p3_3():
 
     assert "okx_cex" in EXECUTION_CHANNELS
     assert spec_for_channel("okx_cex").slot_model == "shared_pool"
+
+
+# ── 日志降频（2026-10-30 用户反馈：每次调用都打，实盘每轮必刷屏）──────────
+
+
+def test_pool_exclusion_logged_once_until_pool_changes(monkeypatch, capsys):
+    """「期权账号已从现货池排除」只在**池成员变化**时打一次。
+
+    用户实测：1m 循环 × 4 标的每轮调一次、页面 10s 轮询又调一次 ⇒ 每分钟
+    几十条纯噪音。可见性保留（首轮必打、改凭证后重打），但不刷屏。
+    """
+    monkeypatch.setattr(batches_mod, "_SPOT_POOL_LOGGED", None, raising=False)
+
+    def _accounts(names):
+        return [{"name": n, "configured": True} for n in names]
+
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: _accounts(["DreamShepherdbot1", "DreamShepherdbot2"]),
+    )
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.option_account_name",
+        lambda: "DreamShepherdbot1",
+    )
+
+    for _ in range(5):
+        shared_pool_account_ids(3)
+    first = capsys.readouterr().err
+    assert first.count("已从现货池排除") == 1
+
+    # 池成员变化（新增一个现货账号）→ 应重打一次
+    monkeypatch.setattr(
+        "nanobot_quant.okx_cex_credentials.list_sub_accounts",
+        lambda: _accounts(["DreamShepherdbot1", "DreamShepherdbot2", "DreamShepherdbot3"]),
+    )
+    shared_pool_account_ids(3)
+    assert capsys.readouterr().err.count("已从现货池排除") == 1
