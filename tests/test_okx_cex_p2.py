@@ -331,7 +331,9 @@ def test_submit_order_rounds_to_lot_and_fills(broker, monkeypatch):
     assert captured["inst_id"] == "SOL-USDT"
     assert captured["side"] == "buy"
     assert captured["tgt_ccy"] == "base_ccy"
-    assert float(captured["sz"]) == pytest.approx(0.123)   # floor(0.1234, 0.001)
+    # BUY 按 lotSz **向上**取整：fixed_amount 是最小下单金额，floor 会买少
+    # （BNB 4U → 3.58U）。SELL 仍向下（不能超持仓），见 submit_order_rounds_*。
+    assert float(captured["sz"]) == pytest.approx(0.124)   # ceil(0.1234, 0.001)
     assert o.status == "fill"
     assert o.custom_params["cex"]["avg_price"] == 99.5
     assert o.custom_params["cex"]["ord_id"] == "OID1"

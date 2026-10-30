@@ -446,7 +446,17 @@ class OkxCexBroker(Broker):
 
         lot = _num(lim.get("lot_sz"))
         min_sz = _num(lim.get("min_sz"))
-        sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
+        if side == "buy":
+            # fixed_amount 是**最小下单金额** ⇒ 按 lotSz 向上取整（floor 会把
+            # BNB 的 4U 买成 3.58U）；同时保证到账后仍卖得掉（见 plan_buy_sz）。
+            # SELL 保持向下取整：卖出不能超过持仓。
+            try:
+                sz = okx_spot.plan_buy_sz(quantity, lot, min_sz)
+            except Exception as e:  # noqa: BLE001
+                order.set_error(f"OKX {inst} 下单量计算失败: {e}")
+                return order
+        else:
+            sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
         if sz <= 0:
             order.set_error(f"OKX {inst} 下单量取整后为 0（qty={quantity} lotSz={lot}）")
             return order

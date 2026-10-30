@@ -106,6 +106,51 @@ def floor_step(value: float, step: float) -> float:
     return round(n * step, 12)
 
 
+#: OKX 普通用户现货 taker 费率（用于估算「买入到账后还剩多少可卖」）
+SPOT_FEE_TAKER = 0.001
+
+
+def plan_buy_sz(
+    target_qty: float,
+    lot: float,
+    min_sz: float,
+    fee: float = SPOT_FEE_TAKER,
+    max_steps_over: int = 3,
+) -> float:
+    """把「想买多少」变成合法下单量：**按 ``lotSz`` 向上取整**。
+
+    规则（2026-10-30 用户拍板）：``fixed_amount``（如 4U）是**最小下单金额**，
+    所以取整不能让它掉到 4U 以下——``floor`` 会把 BNB 的 4U 买成 0.005 个
+    （≈3.58U，低 10%），必须用 ``ceil``。代价是可能超支不到一个步进的价值
+    （``lot × px``），数学上界就是它。
+
+    同时保证「买进来卖得掉」：手续费从基础币扣 ⇒ 到账 = ``sz×(1−fee)``，
+    再按 ``lotSz`` 向下取整后若 < ``minSz`` 就是永久卖不掉的死仓
+    （Gate BNB 精度死锁的同一机制）。不足时向上补到可卖的最小步进数。
+
+    补的步进超过 ``max_steps_over`` 则抛错——说明 fixed_amount 太小、
+    该标的在当前价位做不了，宁可显式拒绝也不无限超支。
+    """
+    qty = num(target_qty)
+    step = num(lot)
+    if step <= 0:                      # 规格缺失：调用方另行 fail-closed
+        return qty
+    if qty <= 0:
+        return 0.0
+    n = max(1, math.ceil(qty / step - 1e-12))
+    n0 = n
+    min_steps = max(1, math.ceil(num(min_sz) / step - 1e-12)) if num(min_sz) > 0 else 1
+    while math.floor(n * (1.0 - num(fee)) + 1e-9) < min_steps:
+        n += 1
+        if n - n0 > max_steps_over:
+            raise OkxSdkError(
+                f"下单量按 lotSz={step} 需补到 {n} 步才能卖出"
+                f"（minSz={num(min_sz)}，超支超 {max_steps_over} 步）——"
+                f"该标的当前价位下 fixed_amount 太小，请调高或移出标的池"
+            )
+    return round(n * step, 12)
+
+
 def instrument_limits(inst_id: str) -> dict:
     """SPOT 合约规格 → ``{"lot_sz", "min_sz", "tick_sz"}``。
 

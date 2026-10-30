@@ -225,3 +225,40 @@ def test_51000_other_params_not_treated_as_td_mode(monkeypatch):
     with _pytest.raises(sdk.OkxSdkError):
         okx_spot.market_order({"api_key": "ksz"}, inst_id="BTC-USDC", side="buy", sz=1e-05)
     assert calls == ["cash"]        # 不切换、只发一次
+
+
+# ── 5. fixed_amount 是最小金额 ⇒ 按官方精度向上取整 ────────────────────
+
+def test_plan_buy_sz_ceils_not_floors():
+    """4U 是**最小下单金额**：按 lotSz 向上取整，不能 floor 掉一档。
+
+    BNB 实测场景（px≈716、lot 0.001）：4/716 = 0.00558 →
+    floor 给 0.005（3.58U，比设定的 4U 少 10%）；ceil 给 0.006（4.30U，
+    超支 0.30U，小于一个步进的价值 0.72U）。
+    """
+    sz = okx_spot.plan_buy_sz(4 / 716.58, lot=0.001, min_sz=0.001)
+    assert sz == pytest.approx(0.006)
+    assert sz * 716.58 >= 4.0           # 金额不低于设定值
+
+
+def test_plan_buy_sz_keeps_position_sellable():
+    """买入到账要扣手续费，floor 后仍需 ≥ minSz，否则是卖不掉的死仓。"""
+    # 只有 1 个步进、minSz 就是 1 步进：到账 0.999 步 → floor 0 步 → 必须补到 2 步
+    sz = okx_spot.plan_buy_sz(0.001, lot=0.001, min_sz=0.001)
+    assert sz == pytest.approx(0.002)
+    assert okx_spot.floor_step(sz * (1 - okx_spot.SPOT_FEE_TAKER), 0.001) >= 0.001
+
+
+def test_plan_buy_sz_fails_closed_when_fixed_amount_too_small():
+    """补步进超过 3 步 ⇒ 该标的做不了，显式拒绝（不无限超支）。"""
+    import pytest as _pytest
+
+    from nanobot_quant.okx_sdk import OkxSdkError
+
+    with _pytest.raises(OkxSdkError):
+        okx_spot.plan_buy_sz(0.001, lot=0.001, min_sz=0.05)
+
+
+def test_plan_buy_sz_no_lot_returns_target():
+    """规格缺失时原样返回（由调用方 fail-closed）。"""
+    assert okx_spot.plan_buy_sz(0.05, lot=0, min_sz=0) == pytest.approx(0.05)
