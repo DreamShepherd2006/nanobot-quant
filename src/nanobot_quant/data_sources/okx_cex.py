@@ -28,10 +28,14 @@ def fetch_kline(symbol, bar="1D", limit=120,
     """OKX CEX candles for ``symbol`` (instId via ``okx_ticker``)."""
     inst = okx_ticker(symbol, load_tokens_json())
     if start and end:
-        # okx_cex fetch_kline_range takes ISO date strings
+        # 必须保留**时分秒**：KlineCache 的增量按 [缓存尾, now] 传秒级边界，
+        # 截断成 `%Y-%m-%d` 会把区间压成「当天 00:00 → 当天 00:00」——
+        # 每轮只拿到当天第一根（或空），缓存从此卡死不动，且因为
+        # 「无新 bar」是静默分支，页面数据冻结数小时也不会报错
+        # （2026-10-30 实测：4 标的最后 bar 全部停在 00:00 UTC，滞后 3.7h）。
         return _fetch_kline_range_okx(inst,
-                                      start=start.strftime("%Y-%m-%d"),
-                                      end=end.strftime("%Y-%m-%d"),
+                                      start=start.isoformat(),
+                                      end=end.isoformat(),
                                       bar=bar)
     return _fetch_kline_okx(inst, bar=bar, limit=limit)
 

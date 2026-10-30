@@ -23,13 +23,63 @@
 from __future__ import annotations
 
 import math
+import sys
 import time
 
 from nanobot_quant import okx_sdk
 from nanobot_quant.okx_sdk import OkxSdkError
 
-#: 现货下单保证金模式（acctLv=3 必需）
-SPOT_TDMODE = "cross"
+#: 现货下单保证金模式默认值。
+#:
+#: **现货交易不需要保证金** ⇒ 一律 ``cash``。历史遗留值曾是 ``cross``（2026-09-07
+#: 期权线在 Bot1 上实测「cash → 51000」后定稿），但 Bot1 是**跨币种保证金模式**
+#: 子账号的特例；2026-10-30 用户核实子账号真实模式：
+#:
+#: | 子账号 | 账户模式 | 用途 |
+#: |---|---|---|
+#: | DreamShepherdbot1 | 跨币种保证金 | 期权线 |
+#: | DreamShepherdbot2–5 | **现货模式** | 现货线 |
+#:
+#: 现货模式账号传 ``cross`` 直接 ``54000 Margin trading is not supported.``。
+#: 「按 ``acctLv`` 判断」也不可靠——``acctLv`` 是主账户级属性，对子账号不成立
+#: （Bot2 挂在统一账户下、子账号本身却是现货模式）。
+#:
+#: 所以策略 = **现金优先 + 撞错自适应**：默认 ``cash``；若该账号确实不接受
+#: ``cash``（``51000 Parameter tdMode error``），自动切 ``cross`` 重试一次并
+#: 记住（见 :func:`market_order`）。两种拒单都是「订单未成交」，重试无资金风险。
+SPOT_TDMODE = "cash"
+
+#: api_key → tdMode（撞错后自动切换并记忆，进程内缓存）
+_TDMODE_CACHE: dict[str, str] = {}
+
+
+def fmt_decimal(value) -> str:
+    """定点十进制字符串，**禁止科学计数法**。
+
+    OKX 的 ``sz`` 收到 ``5.13e-05`` 直接报 ``51000 Parameter sz error``
+    （2026-10-30 实测：BTC 4U 下单量 4/77971.7 = 5.13e-05，三 slot 全失败）。
+    精度给到 12 位小数足够覆盖所有现货 lotSz（最小 1e-8）。
+
+    传字符串时**原样透传**（调用方可能已按业务精度格式化，如期权线补买的
+    ``"50.00"``——不能因统一格式化把它变成 ``"50"`` 改掉既有行为）。
+    """
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return "0"
+        if "e" not in s.lower():
+            return s
+        value = float(s)
+    v = num(value)
+    if v == 0:
+        return "0"
+    return f"{v:.12f}".rstrip("0").rstrip(".") or "0"
+
+
+def td_mode_for(creds: dict) -> str:
+    """该账号当前使用的现货 ``tdMode``（默认 ``cash``，撞错后由下单路径改写）。"""
+    return _TDMODE_CACHE.get(str(creds.get("api_key") or ""), SPOT_TDMODE)
+
 
 #: 轮询节奏——与期权补买/出货原实现逐字一致（10 次 × 0.5s），勿独立调整
 POLL_TRIES = 10
@@ -53,6 +103,51 @@ def floor_step(value: float, step: float) -> float:
     if step <= 0:
         return float(value)
     n = math.floor(float(value) / step + 1e-12)
+    return round(n * step, 12)
+
+
+#: OKX 普通用户现货 taker 费率（用于估算「买入到账后还剩多少可卖」）
+SPOT_FEE_TAKER = 0.001
+
+
+def plan_buy_sz(
+    target_qty: float,
+    lot: float,
+    min_sz: float,
+    fee: float = SPOT_FEE_TAKER,
+    max_steps_over: int = 3,
+) -> float:
+    """把「想买多少」变成合法下单量：**按 ``lotSz`` 向上取整**。
+
+    规则（2026-10-30 用户拍板）：``fixed_amount``（如 4U）是**最小下单金额**，
+    所以取整不能让它掉到 4U 以下——``floor`` 会把 BNB 的 4U 买成 0.005 个
+    （≈3.58U，低 10%），必须用 ``ceil``。代价是可能超支不到一个步进的价值
+    （``lot × px``），数学上界就是它。
+
+    同时保证「买进来卖得掉」：手续费从基础币扣 ⇒ 到账 = ``sz×(1−fee)``，
+    再按 ``lotSz`` 向下取整后若 < ``minSz`` 就是永久卖不掉的死仓
+    （Gate BNB 精度死锁的同一机制）。不足时向上补到可卖的最小步进数。
+
+    补的步进超过 ``max_steps_over`` 则抛错——说明 fixed_amount 太小、
+    该标的在当前价位做不了，宁可显式拒绝也不无限超支。
+    """
+    qty = num(target_qty)
+    step = num(lot)
+    if step <= 0:                      # 规格缺失：调用方另行 fail-closed
+        return qty
+    if qty <= 0:
+        return 0.0
+    n = max(1, math.ceil(qty / step - 1e-12))
+    n0 = n
+    min_steps = max(1, math.ceil(num(min_sz) / step - 1e-12)) if num(min_sz) > 0 else 1
+    while math.floor(n * (1.0 - num(fee)) + 1e-9) < min_steps:
+        n += 1
+        if n - n0 > max_steps_over:
+            raise OkxSdkError(
+                f"下单量按 lotSz={step} 需补到 {n} 步才能卖出"
+                f"（minSz={num(min_sz)}，超支超 {max_steps_over} 步）——"
+                f"该标的当前价位下 fixed_amount 太小，请调高或移出标的池"
+            )
     return round(n * step, 12)
 
 
@@ -81,6 +176,7 @@ def market_order(
     sz,
     tgt_ccy: str = "base_ccy",
     tag: str = "",
+    td_mode: str | None = None,
 ) -> dict:
     """现货市价单 → ``{"ord_id", "cl_ord_id", "s_code", "s_msg", "rejected"}``。
 
@@ -92,10 +188,10 @@ def market_order(
     """
     params = {
         "instId": inst_id,
-        "tdMode": SPOT_TDMODE,
+        "tdMode": td_mode or td_mode_for(creds),
         "side": side,
         "ordType": "market",
-        "sz": str(sz),
+        "sz": fmt_decimal(sz),
         "tgtCcy": tgt_ccy,
     }
     # OKX 的 tag 只接受 1–16 位字母数字：空串 / 含 `-`、`_` 都会 51000
@@ -103,12 +199,35 @@ def market_order(
     if tag:
         params["tag"] = tag
     api = okx_sdk.trade_for(creds)
-    if inst_id.upper().endswith("-USD"):
-        # Crypto-USD（统一 USD 订单簿）：用 USDC 成交须显式声明
-        params["tradeQuoteCcy"] = "USDC"
-        data = okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **params))
-    else:
-        data = okx_sdk.check(api.set_order(**params))
+
+    def _send(p: dict):
+        if inst_id.upper().endswith("-USD"):
+            # Crypto-USD（统一 USD 订单簿）：用 USDC 成交须显式声明
+            p["tradeQuoteCcy"] = "USDC"
+            return okx_sdk.check(api.send_request("/api/v5/trade/order", "POST", **p))
+        return okx_sdk.check(api.set_order(**p))
+
+    try:
+        data = _send(params)
+    except OkxSdkError as e:
+        # 54000 = 该账号不支持保证金交易（acctLv 查询不准、或子账号被限）。
+        # 54000 是明确拒单（订单未成交），降级 cash 重试一次安全——
+        # 2026-10-30 实测：Bot2/3 按 acctLv 选了 cross 仍报 54000，
+        # 降级后同类报错不再阻断现货买卖。
+        msg = str(e)
+        cur = params.get("tdMode")
+        alt = ""
+        if "54000" in msg and cur != "cash":
+            alt = "cash"          # 该账号不支持保证金交易
+        elif "51000" in msg and "tdMode" in msg and cur != "cross":
+            alt = "cross"         # 该账户模式不接受 cash（跨币种保证金子账号）
+        if not alt:
+            raise
+        print(f"[DIAG] OKX tdMode {cur} → {alt} 重试 | {inst_id} | {e}",
+              file=sys.stderr, flush=True)
+        _TDMODE_CACHE[str(creds.get("api_key") or "")] = alt
+        params["tdMode"] = alt
+        data = _send(params)
     row = data[0] if isinstance(data, list) and data else {}
     s_code = row.get("sCode")
     rejected = s_code not in (None, "", "0")

@@ -189,7 +189,10 @@ class OkxCexBroker(Broker):
 
     def limits_of(self, symbol: str) -> dict:
         """合约规格 ``{lot_sz, min_sz, tick_sz}``（300s 缓存；失败抛异常）。"""
-        inst = self.inst_id_of(symbol)
+        return self.limits_of_inst(self.inst_id_of(symbol))
+
+    def limits_of_inst(self, inst: str) -> dict:
+        """按 instId 取合约规格（供「换对后重算 sz」路径直接用）。"""
         now = time.time()
         cached = self._limits_cache.get(inst)
         if cached and now - cached[0] < self._LIMITS_TTL:
@@ -198,26 +201,46 @@ class OkxCexBroker(Broker):
         self._limits_cache[inst] = (now, lim)
         return lim
 
+    def _price_of_inst(self, inst: str) -> float:
+        """指定 instId 的当前价（15s 缓存；0 = 取价失败）。"""
+        now = time.time()
+        cached = self._price_cache.get(inst)
+        if cached and now - cached[0] < self._PRICE_TTL:
+            return cached[1]
+        px = 0.0
+        try:
+            rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=inst))
+            row = rows[0] if isinstance(rows, list) and rows else {}
+            px = _num(row.get("last"))
+        except Exception as e:  # noqa: BLE001
+            print(f"[DIAG] OKX-CEX price {inst} error: {e}", file=sys.stderr, flush=True)
+        if px > 0:
+            self._price_cache[inst] = (now, px)
+        return px
+
     def _price_of(self, symbol: str) -> float:
         """当前价（15s 缓存；0 = 取价失败 → 调用方 fail-closed）。
 
         直接用 OKX ``/market/ticker``（不经数据源模块，避开 pandas 依赖），
         instId 与本 broker 的 quote 一致（``-USDT`` 或 ``-USDC``）。
         """
-        now = time.time()
-        cached = self._price_cache.get(symbol)
-        if cached and now - cached[0] < self._PRICE_TTL:
-            return cached[1]
-        px = 0.0
         try:
-            rows = okx_sdk.check(okx_sdk.market().get_ticker(instId=self.inst_id_of(symbol)))
-            row = rows[0] if isinstance(rows, list) and rows else {}
-            px = _num(row.get("last"))
+            return self._price_of_inst(self.inst_id_of(symbol))
         except Exception as e:  # noqa: BLE001
             print(f"[DIAG] OKX-CEX price {symbol} error: {e}", file=sys.stderr, flush=True)
-        if px > 0:
-            self._price_cache[symbol] = (now, px)
-        return px
+            return 0.0
+
+    def _pair_for_buy(self, symbol: str, quantity: float, balances: dict):
+        """已废弃（2026-10-30 用户拍板）：计价币**只认 WebUI 参数**，不自动选对。
+
+    原本实现会按「哪个币有钱」自动在 ``-USDT`` / ``-USDC`` 间切换，但用户
+    明确：用 USDT 还是 USDC 是**用户在 WebUI 选定**的事，系统不替用户猜。
+    保留此方法仅作旧调用兼容，行为与 ``inst_id_of`` 完全一致。
+    """
+        inst = self.inst_id_of(symbol)
+        quote = inst.rsplit("-", 1)[-1].upper()
+        cash = _num((balances.get(quote) or {}).get("available"))
+        return inst, quote, self._price_of_inst(inst), cash
 
     def _balances(self) -> dict:
         """子账号资产 → ``{ccy: {available, locked, eq_usd}}``；失败返回 {}（fail-closed）。
@@ -423,7 +446,17 @@ class OkxCexBroker(Broker):
 
         lot = _num(lim.get("lot_sz"))
         min_sz = _num(lim.get("min_sz"))
-        sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
+        if side == "buy":
+            # fixed_amount 是**最小下单金额** ⇒ 按 lotSz 向上取整（floor 会把
+            # BNB 的 4U 买成 3.58U）；同时保证到账后仍卖得掉（见 plan_buy_sz）。
+            # SELL 保持向下取整：卖出不能超过持仓。
+            try:
+                sz = okx_spot.plan_buy_sz(quantity, lot, min_sz)
+            except Exception as e:  # noqa: BLE001
+                order.set_error(f"OKX {inst} 下单量计算失败: {e}")
+                return order
+        else:
+            sz = okx_spot.floor_step(quantity, lot) if lot > 0 else quantity
         if sz <= 0:
             order.set_error(f"OKX {inst} 下单量取整后为 0（qty={quantity} lotSz={lot}）")
             return order
@@ -452,21 +485,28 @@ class OkxCexBroker(Broker):
                 )
                 sz = shrunk
         else:
-            px = self._price_of(symbol)
-            quote = self.quote_of(symbol)
-            cash = _num((balances.get(quote) or {}).get("available"))
+            # 计价币**只认用户配置**（WebUI「计价币」，默认 USDT）：不在
+            # -USDT / -USDC 之间自动切换。资金在另一个币种时明确报错并
+            # 提示去改参数，而不是静默换对（2026-10-30 用户拍板）。
+            inst_b, quote, px, cash = self._pair_for_buy(symbol, quantity, balances)
+            if not inst_b:
+                order.set_error(f"OKX {symbol} 无可用现货对（fail-closed）")
+                return order
             if px <= 0:
                 order.set_error(f"OKX {symbol} 取价失败（fail-closed，不盲下单）")
                 return order
             need = sz * px
             if need > cash * 1.001:  # 0.1% 容差（价格瞬时波动）
+                others = ", ".join(
+                    f"{c}={_num((balances.get(c) or {}).get('available')):.4f}"
+                    for c in sorted(_CASH_CURRENCIES)
+                    if _num((balances.get(c) or {}).get("available")) > 0
+                )
                 order.set_error(
                     f"OKX {quote} 不足：需 {need:.4f}，可用 {cash:.4f}"
-                    f"（instId={inst}；现货池现金：" + ", ".join(
-                        f"{c}={_num((balances.get(c) or {}).get('available')):.4f}"
-                        for c in sorted(_CASH_CURRENCIES)
-                        if _num((balances.get(c) or {}).get("available")) > 0
-                    ) + "）"
+                    f"（instId={inst}；现货池现金：{others or '无'}）"
+                    f"——计价币由 WebUI「计价币」参数决定（当前 {self._quote}），"
+                    f"若资金在别的币种请到 /config/exec 改该参数，系统不自动换对"
                 )
                 return order
 

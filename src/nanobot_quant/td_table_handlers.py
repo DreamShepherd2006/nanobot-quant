@@ -908,14 +908,62 @@ def _trade_rows(events: list[dict], tq: dict | None = None) -> list[dict]:
 
 
 def _fmt_qty(q) -> str:
-    """交易数量格式化：无/零显示 —，否则 6 位有效数字。"""
+    """交易数量格式化：定点 + 去尾零，**永不输出科学计数法**。
+
+    原实现用 ``f"{v:.6g}"``，BTC 的 0.00005094 会渲染成 ``5.094e-05``
+    ——页面上读不出量级（2026-10-30 实盘，用户要求改正）。12 位小数足以
+    覆盖到 1e-12，OKX 最小 lotSz（BTC 1e-8）远在上限内；去尾零后 BNB
+    的 0.00558 仍是 ``0.00558``，不会多出一串 0。
+    """
     try:
         v = float(q or 0)
     except (TypeError, ValueError):
         return "—"
     if v <= 0:
         return "—"
-    return f"{v:.6g}"
+    txt = f"{v:.12f}".rstrip("0").rstrip(".")
+    return txt or "0"
+
+
+def _fmt_pos_price(v) -> str:
+    """持仓表价格：定点显示（``.4g`` 会把 78534 渲染成 ``7.853e+04``）。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if f <= 0:
+        return "—"
+    if f >= 100:
+        return f"{f:.2f}"
+    if f >= 1:
+        return f"{f:.4f}".rstrip("0").rstrip(".")
+    return f"{f:.8f}".rstrip("0").rstrip(".")
+
+
+def _pos_value_txt(qty, price, entry) -> str:
+    """持仓价值（USD）= 数量 × 现价。
+
+    2026-10-30 用户要求新增：池子「总资产」已含持仓市值，但持仓小节只有
+    数量，看不出这仓占多少钱。TD 未运行（无现价）时改用成本价估算并加
+    ``≈`` 前缀，明确标注「估值非实时」。
+    """
+    try:
+        q = float(qty)
+    except (TypeError, ValueError):
+        return "—"
+    if q <= 0:
+        return "—"
+    approx = False
+    px = price
+    try:
+        if px is None or float(px) <= 0:
+            px, approx = entry, True
+        val = q * float(px)
+    except (TypeError, ValueError):
+        return "—"
+    if val <= 0:
+        return "—"
+    return f"{'≈' if approx else ''}${val:,.2f}"
 
 
 def _slot_map_txt(sub_accounts) -> str:
@@ -970,17 +1018,22 @@ def _shared_pool_map_txt(sub_accounts, batches: int = 1) -> str:
     return txt
 
 def _pos_row(lot: dict) -> str:
-    """持仓小节单行（标的/slot/数量/成本价/现价/浮盈%）。"""
+    """持仓小节单行（标的/slot/数量/价值/成本价/现价/浮盈%）。
+
+    2026-10-30 用户要求：① 数量与价格定点显示（此前 BTC 显示成
+    ``5.094e-05`` / ``7.853e+04``）；② 新增「价值(USD)」列，直接看出
+    这仓占多少钱。
+    """
     pnl = lot.get("pnl_pct")
     pnl_txt = f"{pnl * 100:+.2f}%" if pnl is not None else "—"
-    price = lot.get("price")
-    price_txt = f"{float(price):.4g}" if price else "—"
-    entry = lot.get("entry_price")
-    entry_txt = f"{float(entry):.4g}" if entry else "—"
+    entry_txt = _fmt_pos_price(lot.get("entry_price"))
+    price_txt = _fmt_pos_price(lot.get("price"))
+    value_txt = _pos_value_txt(lot.get("qty"), lot.get("price"), lot.get("entry_price"))
     return (
         f'<tr><td><b>{_esc(str(lot.get("symbol", "")))}</b></td>'
         f'<td>{_esc(str(lot.get("slot", "")))}</td>'
-        f'<td class="num">{_esc(str(lot.get("qty", "")))}</td>'
+        f'<td class="num">{_esc(_fmt_qty(lot.get("qty")))}</td>'
+        f'<td class="num">{value_txt}</td>'
         f'<td class="num">{entry_txt}</td>'
         f'<td class="num">{price_txt}</td>'
         f'<td class="num">{pnl_txt}</td></tr>'
@@ -1086,7 +1139,8 @@ def _scene_positions_block(sc: str, running: bool) -> str:
         '<div style="margin:8px 0 2px"><span class="muted">持仓（open 批次）</span>'
         '<span class="muted" style="float:right">运行中=实时价 · 未运行=台账快照（无现价）</span></div>'
         '<table style="margin-top:2px">'
-        '<tr><th>标的</th><th>slot</th><th>数量</th><th>成本价</th><th>现价</th><th>浮盈%</th></tr>'
+        '<tr><th>标的</th><th>slot</th><th>数量</th><th>价值(USD)</th>'
+        '<th>成本价</th><th>现价</th><th>浮盈%</th></tr>'
         + "".join(rows) + "</table>"
     )
 
@@ -1268,9 +1322,32 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             score = d.get("score", 0)
             price = d.get("price", 0)
             signal = _esc(str(d.get("signal", "HOLD")))
-            note = _esc(str(d.get("note", "")))
-            if note:
-                note = f'<span class="muted"> · {note}</span>'
+            note_txt = str(d.get("note", "") or "")
+            # 数据陈旧告警（2026-10-30）：K 线缓存停止推进时，页面原本一切
+            # 正常（信号照旧 HOLD、价格不动），只有「最后 bar」一个时间戳
+            # 可以看出来。这里主动把滞后量与醒目标记打出来——
+            # 2026-10-30 实测：OKX 区间参数把时间截断成日期，4 个标的的
+            # 缓存卡在 00:00 UTC 达 3.7 小时而毫无提示。
+            _lag = d.get("lag_s")
+            _stale_bad = None
+            try:
+                from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+                _per_s = int(INTERVAL_SECONDS.get(str(sc_cfg.get("sleeptime") or ""), 0) or 0)
+                if isinstance(_lag, (int, float)) and _per_s and _lag > 2 * _per_s:
+                    _stale_bad = (
+                        f"数据滞后 {int(_lag // 60)} 分钟（K 线未推进）"
+                        if _lag >= 120 else f"数据滞后 {int(_lag)} 秒（K 线未推进）"
+                    )
+            except Exception:  # noqa: BLE001
+                _stale_bad = None
+            if _stale_bad:
+                note_txt = f"{note_txt} · {_stale_bad}" if note_txt else _stale_bad
+            if note_txt:
+                note = (f'<span class="sig sell">⚠️ {_esc(note_txt)}</span>'
+                        if _stale_bad else f'<span class="muted"> · {_esc(note_txt)}</span>')
+            else:
+                note = ""
             sig_cls = {
                 "LONG": "sig buy", "EXIT": "sig sell", "BUY_FAIL": "sig sell",
                 "EXIT_FAIL": "sig sell", "SKIP": "sig hold",

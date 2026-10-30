@@ -227,14 +227,43 @@ def _normalize_ticker(t: str) -> str:
     return x
 
 
-def inst_id_for(ticker: str, quote: str = "USDT",
+#: 交易对形式的后缀（长的在前，避免 "-USDT" 被 "USDT" 先匹配）
+_QUOTE_SUFFIXES = ("-USDT", "-USDC", "_USDT", "_USDC", "USDT", "USDC")
+
+
+def strip_quote_suffix(ticker: str) -> str:
+    """把带 quote 的交易对（``SOL_USDT`` / ``SOL-USDT`` / ``SOLUSDT``）还原成 base。
+
+    **WebUI 的「计价币」是唯一裁判**（2026-10-30 用户明确）：tokens.json 的
+    ``okx_symbol`` 若带着 Gate 口径的 quote 后缀，会把 base 钉死成 USDT，
+    结果 USDC 账户买不进去——2026-10-30 实盘日志：``SOL → SOL-USDT``，
+    而现货池里只有 USDC。剥掉后缀后由 ``resolve_inst_id`` 按计价币重选。
+
+    后缀剥完为空（ticker 本身就是 ``USDT``）时原样返回，不动稳定币。
+    """
+    t = (ticker or "").strip()
+    up = t.upper()
+    for suf in _QUOTE_SUFFIXES:
+        if up.endswith(suf) and len(t) > len(suf):
+            cand = t[: -len(suf)].rstrip("-_")
+            if cand:
+                return cand
+    return t
+
+
+def inst_id_for(ticker: str, quote: Optional[str] = None,
                 session: Optional[requests.Session] = None,
                 strict: bool = False) -> str:
     """ticker → OKX instId 的**唯一入口**（数据源与 broker 共用，杜绝两处漂移）。
 
-    顺序：归一化 → 清单判定（含 -USDC / X 前缀兜底）→ 失败时退回原始持仓代码
-    （去掉 quote 后缀）→ 最后才用启发式 ``to_inst_id``（fail-soft，会 51001）。
+    顺序：归一化 →（调用方指定计价币时）剥 quote 后缀按计价币重选 → 清单判定
+    （含 -USDC / X 前缀兜底）→ 失败时退回原始持仓代码 → 最后才用启发式
+    ``to_inst_id``（fail-soft，会 51001）。
+
+    ``quote=None`` 表示调用方不关心计价币（如只看价格的数据源），此时完全沿用
+    ticker 自身的形态——传 ``SOL-USDC`` 就解析成 ``SOL-USDC``，不做改写。
     """
+    q = quote or "USDT"
     raw = (ticker or "").upper().strip()
     t = _normalize_ticker(ticker)
     if raw != t:
@@ -242,17 +271,25 @@ def inst_id_for(ticker: str, quote: str = "USDT",
             f"instId 归一化: {raw!r} → {t!r}"
             f"（tokens.json 的 okx_symbol 建议改成 OKX 口径，如 SOL 或 SOL-USDT）"
         )
-    inst = resolve_inst_id(t, quote, session=session, strict=True)
+    # WebUI 的「计价币」是唯一裁判（2026-10-30 用户明确）：tokens.json 里带
+    # quote 的登记值（SOL_USDT）不得把 base 钉死成 USDT——否则 USDC 账户
+    # 买不进去（实盘日志 SOL → SOL-USDT 而现货池只有 USDC）。
+    base = strip_quote_suffix(t)
+    if quote and base and base.upper() != t.upper():
+        inst = resolve_inst_id(base, q, session=session, strict=True)
+        if inst:
+            return inst
+    inst = resolve_inst_id(t, q, session=session, strict=True)
     if inst:
         return inst
     base = t.split("-")[0]
     if base != t:
-        inst = resolve_inst_id(base, quote, session=session, strict=True)
+        inst = resolve_inst_id(base, q, session=session, strict=True)
         if inst:
             return inst
     if strict:
         return ""
-    return to_inst_id(t, quote=quote)
+    return to_inst_id(t, quote=q)
 
 
 def fetch_kline(

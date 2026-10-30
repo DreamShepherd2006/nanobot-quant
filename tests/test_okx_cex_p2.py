@@ -76,7 +76,7 @@ class _FakeTrade:
 _OK = lambda rows: {"code": "0", "data": rows}  # noqa: E731
 
 
-def test_market_order_params_cross_and_base_ccy(monkeypatch):
+def test_market_order_params_cash_and_base_ccy(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         _sdk, "trade_for",
@@ -87,8 +87,9 @@ def test_market_order_params_cross_and_base_ccy(monkeypatch):
     )
     assert req["ord_id"] == "A1" and req["rejected"] is False
     p = captured["set_order"]
-    # acctLv=3 现货单必须 cross（cash → 51000，留空 → 50014）
-    assert p["tdMode"] == "cross"
+    # 现货交易不需要保证金 ⇒ 默认 cash（2026-10-30 定稿）；撞 54000/51000 时
+    # market_order 内部会自适应切换（期权线 Bot1 显式传 td_mode="cross"）
+    assert p["tdMode"] == "cash"
     assert p["ordType"] == "market"
     assert p["tgtCcy"] == "base_ccy"
     assert p["side"] == "buy"
@@ -330,7 +331,9 @@ def test_submit_order_rounds_to_lot_and_fills(broker, monkeypatch):
     assert captured["inst_id"] == "SOL-USDT"
     assert captured["side"] == "buy"
     assert captured["tgt_ccy"] == "base_ccy"
-    assert float(captured["sz"]) == pytest.approx(0.123)   # floor(0.1234, 0.001)
+    # BUY 按 lotSz **向上**取整：fixed_amount 是最小下单金额，floor 会买少
+    # （BNB 4U → 3.58U）。SELL 仍向下（不能超持仓），见 submit_order_rounds_*。
+    assert float(captured["sz"]) == pytest.approx(0.124)   # ceil(0.1234, 0.001)
     assert o.status == "fill"
     assert o.custom_params["cex"]["avg_price"] == 99.5
     assert o.custom_params["cex"]["ord_id"] == "OID1"
@@ -484,6 +487,8 @@ def test_spot_cover_delegates_with_identical_params(monkeypatch):
         "sz": "0.1",
         "tgt_ccy": "base_ccy",
         "tag": ot.TAG_COVER,
+        # 期权线子账号是跨币种保证金模式（cash → 51000）⇒ 显式指定
+        "td_mode": "cross",
     }
 
 
@@ -551,6 +556,8 @@ def test_spot_exit_delegates_with_identical_params(monkeypatch):
         "sz": "0.1",
         "tgt_ccy": "base_ccy",
         "tag": ot.TAG_EXIT,
+        # 期权线子账号跨币种保证金 ⇒ 显式 cross（现货线走默认 cash）
+        "td_mode": "cross",
     }
 
 
