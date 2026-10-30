@@ -421,18 +421,112 @@ class TestRenderListOkxColumn:
         assert "CRCLX-USDC" not in html               # 不再是「登记值直接拼」
 
     def test_okx_column_flags_unresolved(self, _isolated_tokens, monkeypatch):
-        """解析不出来 → 红字 + 51001 提示，而不是像旧版那样显示一个假交易对。"""
+        """真没这个标的 → 红字「OKX 无此标的」（与「仅其它计价币」区分）。"""
         from nanobot_quant.token_handlers import _render_list
 
         self._mock_okx(monkeypatch, {})  # 全部解析失败
         _write_tokens(
-            [{"symbol": "CRCLX", "address": SOLANA_ADDR,
+            [{"symbol": "SPYX", "address": SOLANA_ADDR,
               "chain": "solana", "confirmed": True}]
         )
         html = _render_list()
         assert "class='bad'" in html
-        assert "51001" in html
-        assert "CRCLX-USDT" not in html  # 不再凭空造一个「看着对」的交易对
+        assert "OKX 无此标的" in html
+        assert "SPYX-USDT" not in html  # 不再凭空造一个「看着对」的交易对
+
+    def test_okx_column_marks_other_quote_only(self, _isolated_tokens, monkeypatch):
+        """有别的计价币对（XAUT 只有 -USDT）→ 橙字，不是「无对应交易对」。
+
+        两种情形处置完全不同：缺对 = 换计价币；真没标的 = 换标的。
+        """
+        from nanobot_quant import exec_params, okx_cex_data
+        from nanobot_quant.token_handlers import _render_list
+
+        monkeypatch.setattr(
+            exec_params, "load_exec_params", lambda: {"quote_ccy": "USDC"}
+        )
+        monkeypatch.setattr(
+            okx_cex_data,
+            "inst_id_for",
+            lambda t, quote=None, session=None, strict=False: (
+                "XAUT-USDT" if str(t).upper() == "XAUT" and quote == "USDT" else ""
+            ),
+        )
+        _write_tokens(
+            [{"symbol": "XAUT", "address": SOLANA_ADDR,
+              "chain": "ethereum", "confirmed": True}]
+        )
+        html = _render_list()
+        assert "class='warn'" in html
+        assert "仅有 XAUT-USDT" in html
+        assert "当前计价币 USDC" in html
+        assert "OKX 无此标的" not in html
+
+    def test_gate_column_flags_nonexistent_pair(self, _isolated_tokens, monkeypatch):
+        """Gate 格式对 ≠ 存在：MU_USDT 拼得出来但交易所没有，必须标红。"""
+        from nanobot_quant import token_handlers
+        from nanobot_quant.token_handlers import _render_list
+
+        monkeypatch.setattr(
+            token_handlers, "_gate_pairs", lambda *a, **kw: {"SOL_USDT", "BTC_USDT"}
+        )
+        _write_tokens(
+            [
+                {"symbol": "MU", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True},
+                {"symbol": "SOL", "address": SOLANA_ADDR,
+                 "chain": "solana", "confirmed": True},
+            ]
+        )
+        html = _render_list()
+        assert "❌ MU_USDT" in html            # 假绿变红
+        assert "❌ SOL_USDT" not in html        # 真实存在的不动
+
+    def test_gate_column_unchecked_when_listing_fails(
+        self, _isolated_tokens, monkeypatch
+    ):
+        """拉不到清单时显式标「未校验」，不猜、也不因为网络问题误标红。"""
+        from nanobot_quant import token_handlers
+        from nanobot_quant.token_handlers import _render_list
+
+        monkeypatch.setattr(token_handlers, "_gate_pairs", lambda *a, **kw: None)
+        _write_tokens(
+            [{"symbol": "SOL", "address": SOLANA_ADDR,
+              "chain": "solana", "confirmed": True}]
+        )
+        html = _render_list()
+        assert ">SOL_USDT<" in html
+        assert "(未校验)" in html
+        assert "❌" not in html
+
+    def test_gate_pairs_cache_reused(self, monkeypatch):
+        """全量清单 600s 缓存：第二次渲染不再发请求。"""
+        import time
+
+        from nanobot_quant import token_handlers as th
+
+        calls = {"n": 0}
+
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return [{"id": "SOL_USDT"}, {"id": "BTC_USDT"}]
+
+        def fake_get(*a, **kw):
+            calls["n"] += 1
+            return _Resp()
+
+        monkeypatch.setitem(th._gate_pairs_cache, "ts", 0.0)
+        monkeypatch.setitem(th._gate_pairs_cache, "pairs", None)
+        monkeypatch.setattr("requests.get", fake_get, raising=False)
+        real = getattr(th, "_gate_pairs_orig", th._gate_pairs)  # 绕开 autouse 的 stub
+        first = real()
+        second = real()
+        assert first == {"SOL_USDT", "BTC_USDT"} == second
+        assert calls["n"] == 1  # 第二次命中缓存
+        assert time.time() - th._gate_pairs_cache["ts"] < 5
 
     def test_okx_column_survives_network_error(self, _isolated_tokens, monkeypatch):
         """拉清单抛异常时只降级标红，绝不把整个页面打成 500。"""
@@ -482,5 +576,5 @@ class TestRenderListOkxColumn:
         assert resp.status_code == 200
         body = json.loads(resp.body)
         assert body["ok"] is True
-        assert "⚠ OKX" in body["message"] and "51001" in body["message"]
+        assert "❌ OKX 无此标的" in body["message"]
         assert _read_tokens()[0]["symbol"] == "CRCLX"
