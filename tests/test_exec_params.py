@@ -639,6 +639,20 @@ def test_legacy_td_symbol_migrates_to_symbols_pool(tmp_path):
 
 # ── 方案2 分组（2026-08-20）─────────────────────────────────────────────
 
+def test_quote_ccy_hint_states_restart_requirement():
+    """计价币改完必须停/开 TD 循环才生效——文案必须写明，不能只靠口头约定。
+
+    broker 在 ``__init__`` 里一次性读 ``quote_ccy`` 存为 ``self._quote``，实例缓存在
+    ``_cex_brokers`` 不重建；而 ``sync_from_params`` 的重启指纹（channel + scenes_fp）
+    不含 ``quote_ccy`` ⇒ 运行中的循环会继续用旧计价币下单，页面却已显示新值。
+    这类“页面已变、执行仍旧”的静默失效最难度查，故锁在文案里。
+    """
+    hint = PARAM_META["quote_ccy"]["hint"]
+    assert "停止 TD" in hint
+    assert "重新激活" in hint
+    assert "沿用旧计价币" in hint  # 说清后果，不只是说“要重启”
+
+
 def test_grouping_scheme2():
     """④ 仓位与分批吸收数量三参；③ 纯调度；标题按方案 2。"""
     from nanobot_quant.exec_params import GROUP_TITLES

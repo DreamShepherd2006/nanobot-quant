@@ -259,7 +259,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "channels": "okx_cex",
         "enum_labels": {"USDT": "USDT（默认）", "USDC": "USDC"},
         "label": "计价币（OKX CEX）",
-        "hint": "OKX 现货同一币常并存 XXX-USDT 与 XXX-USDC 两组对。此处选定子账号资金所在的稳定币：报价、下单金额、现金校验都按它走（USDT 优先，该币只有另一侧对才会自动兜底）。Gate 通道固定 USDT，不受此项影响",
+        "hint": "OKX 现货同一币常并存 XXX-USDT 与 XXX-USDC 两组对。此处选定子账号资金所在的稳定币：报价、下单金额、现金校验都按它走（USDT 优先，该币只有另一侧对才会自动兜底）。Gate 通道固定 USDT，不受此项影响。⚠ 修改后需停止 TD 循环再重新激活才生效——运行中的循环会沿用旧计价币（页面显示立刻变，但下单仍是旧对）",
     },
     "slippage": {
         "group": "exec", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.01,
