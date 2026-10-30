@@ -1165,6 +1165,7 @@ class TdSequentialStrategy(Strategy):
         # ── 实时状态共享（td-table「实时监控」tab，2026-08-11）──
         # 无条件更新内存（同进程零成本）；信号动作由 _record 更新 signal。
         _last_ts = df.index[-1] if len(df) else None
+        _lag_s = None
         if _last_ts is not None:
             try:
                 if getattr(_last_ts, "tzinfo", None) is not None:
@@ -1172,6 +1173,18 @@ class TdSequentialStrategy(Strategy):
                 else:
                     _last_ts = _last_ts.tz_localize("UTC")
                 _time_s = _last_ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+                # 数据陈旧度量（2026-10-30）：K 线缓存卡死时页面一切正常、
+                # 不报错、TB 继续出 HOLD——必须把「最后一根 bar 距现在多久」
+                # 显式拄上去，否则数据冻结数小时也无人知觉。
+                try:
+                    from datetime import datetime as _dt
+                    from datetime import timezone as _tz
+
+                    _lag_s = max(
+                        0, int((_dt.now(_tz.utc) - _last_ts).total_seconds()),
+                    )
+                except Exception:  # noqa: BLE001
+                    _lag_s = None
             except Exception:  # noqa: BLE001
                 _time_s = str(df.index[-1])
         else:
@@ -1184,6 +1197,7 @@ class TdSequentialStrategy(Strategy):
             "score": score,
             "price": price,
             "time": _time_s,
+            "lag_s": _lag_s,
         }
         try:
             if self.parameters.get("live_mode"):

@@ -1268,9 +1268,32 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             score = d.get("score", 0)
             price = d.get("price", 0)
             signal = _esc(str(d.get("signal", "HOLD")))
-            note = _esc(str(d.get("note", "")))
-            if note:
-                note = f'<span class="muted"> · {note}</span>'
+            note_txt = str(d.get("note", "") or "")
+            # 数据陈旧告警（2026-10-30）：K 线缓存停止推进时，页面原本一切
+            # 正常（信号照旧 HOLD、价格不动），只有「最后 bar」一个时间戳
+            # 可以看出来。这里主动把滞后量与醒目标记打出来——
+            # 2026-10-30 实测：OKX 区间参数把时间截断成日期，4 个标的的
+            # 缓存卡在 00:00 UTC 达 3.7 小时而毫无提示。
+            _lag = d.get("lag_s")
+            _stale_bad = None
+            try:
+                from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+                _per_s = int(INTERVAL_SECONDS.get(str(sc_cfg.get("sleeptime") or ""), 0) or 0)
+                if isinstance(_lag, (int, float)) and _per_s and _lag > 2 * _per_s:
+                    _stale_bad = (
+                        f"数据滞后 {int(_lag // 60)} 分钟（K 线未推进）"
+                        if _lag >= 120 else f"数据滞后 {int(_lag)} 秒（K 线未推进）"
+                    )
+            except Exception:  # noqa: BLE001
+                _stale_bad = None
+            if _stale_bad:
+                note_txt = f"{note_txt} · {_stale_bad}" if note_txt else _stale_bad
+            if note_txt:
+                note = (f'<span class="sig sell">⚠️ {_esc(note_txt)}</span>'
+                        if _stale_bad else f'<span class="muted"> · {_esc(note_txt)}</span>')
+            else:
+                note = ""
             sig_cls = {
                 "LONG": "sig buy", "EXIT": "sig sell", "BUY_FAIL": "sig sell",
                 "EXIT_FAIL": "sig sell", "SKIP": "sig hold",
