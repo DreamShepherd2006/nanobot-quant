@@ -510,7 +510,10 @@ def test_render_live_positions_block(monkeypatch, tmp_path: Path):
 
     html = _render_live(with_script=False, tq={})
     assert "持仓（open 批次）" in html
-    assert "<th>标的</th><th>slot</th><th>数量</th><th>成本价</th><th>现价</th><th>浮盈%</th>" in html
+    # 2026-10-30 用户要求新增「价值(USD)」列（数量 × 现价）
+    assert ("<th>标的</th><th>slot</th><th>数量</th><th>价值(USD)</th>"
+            "<th>成本价</th><th>现价</th><th>浮盈%</th>") in html
+    assert "$3.99" in html          # 0.045 × 88.65
     assert "+0.75%" in html          # 0.0075 → +0.75%
     assert ">88.65<" in html         # ticker 现价
     assert ">87.99<" in html         # 成本价
