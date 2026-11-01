@@ -95,12 +95,15 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "td_sell_all", "cd_exit_min_profit", "cd_exit_all", "cd_entry_setup_gap",
     # EMA 折价入场门（2026-11-01）——场景专属，无扁平键
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
+    # 共振错峰波锁容量（2026-11-01 用户拍板上实盘、默认 1）
+    "wave_max_buys",
 )
 
 #: 场景卡片字段渲染顺序。
 SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
+    "wave_max_buys",
     "entry_setup", "entry_countdown", "cd_entry_setup_gap",
     # EMA 折价入场门（默认关；周期下拉 21~1597）
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
@@ -135,6 +138,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
+        "wave_max_buys": 1,
     },
     "mid": {
         "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
@@ -152,6 +156,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
+        "wave_max_buys": 1,
     },
     "low": {
         "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
@@ -169,6 +174,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "td_sell_all": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
+        "wave_max_buys": 1,
     },
 }
 
@@ -465,6 +471,13 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "min": 0.0, "max": 5.0, "step": 0.01, "std": 0.1,
         "label": "EMA 折价偏移(%)",
         "hint": "要求收盘价低于 EMA 的幅度（%）：0=只要在均线下方即可，0.1=必须低 0.1% 以上",
+    },
+    "wave_max_buys": {
+        "group": "scene", "min": 1, "max": 10, "step": 1, "std": 1, "integer": True,
+        "label": "每波建仓上限(笔)",
+        "hint": "共振错峰波锁容量：同一波内该场景最多建仓 N 笔（1=原行为，全局每波 1 笔）；"
+                "同标的仍受周期门控约束（setup 未重置不重建仓）；波结束（所有标的离开买9区）后清零。"
+                "标的池越大越适合调高——每波 1 笔会把大量同时到 9 的标的挡在门外",
     },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],

@@ -357,6 +357,11 @@ class BacktestDriver:
                 ),
                 "exit_order": self._merged_params.get("exit_order", "fifo"),
                 "take_profit_pct": self._merged_params.get("take_profit_pct", 0.0),
+                # 共振错峰波锁容量（2026-11-01 实盘化）：每波每场景最多建仓 N 笔，
+                # 默认 1 = 原行为；场景级覆盖值已在 _merged_params 里（覆盖 > 场景 > 默认）
+                "wave_max_buys": int(
+                    self._merged_params.get("wave_max_buys", 1) or 1
+                ),
                 # 贝叶斯闸门（2026-08-31，回测侧）：WebUI 回测页覆盖参数优先，
                 # 缺省回退 exec_params 平铺开关（/config/exec 持久化，默认 False=
                 # 回测与原版一致）；td_live 不注入 → 实盘恒 False（实盘接入待
