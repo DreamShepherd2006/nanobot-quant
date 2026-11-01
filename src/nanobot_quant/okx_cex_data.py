@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -54,6 +55,46 @@ _HISTORY_PATH = "/api/v5/market/history-candles"
 # Rate control: OKX allows ~20 req / 2 s on public endpoints.
 # We use a conservative 150 ms inter-request delay.
 _RATE_DELAY = 0.150
+
+# 跨线程全局节流：5 标的并发拉长历史时，各线程独立 sleep 会把峰值推到
+# ~33 req/s（> OKX 10 req/s）⇒ 429 Too Many Requests（2026-11-01 C95 实证：
+# 首轮 prefetch 2137 根 = 40 个请求，SOL/BNB/BTC/ETH 全部 429）。
+_RATE_LOCK = threading.Lock()
+_last_req_monotonic = 0.0
+
+# 429 指数退避重试（限流是瞬时的，重试即可自愈；仍失败则由调用方 fail-closed）
+_RETRY_ATTEMPTS = 4
+_RETRY_BACKOFF_S = 1.0
+
+
+def _throttle() -> None:
+    """保证任意两次公开行情请求间隔 ≥ ``_RATE_DELAY``（跨线程）。"""
+    global _last_req_monotonic
+    with _RATE_LOCK:
+        wait = _RATE_DELAY - (time.monotonic() - _last_req_monotonic)
+        if wait > 0:
+            time.sleep(wait)
+        _last_req_monotonic = time.monotonic()
+
+
+def _get_with_retry(session, url: str, params: dict, *, timeout: float = 15):
+    """节流 + GET，遇 429 按指数退避重试（1s/2s/4s）。"""
+    last_err: Optional[Exception] = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        _throttle()
+        try:
+            resp = session.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except requests.HTTPError as exc:  # type: ignore[attr-defined]
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 429 and attempt < _RETRY_ATTEMPTS - 1:
+                last_err = exc
+                time.sleep(_RETRY_BACKOFF_S * (2 ** attempt))
+                continue
+            raise
+    if last_err is not None:  # pragma: no cover - 循环总会 return/raise
+        raise last_err
 
 # Mapping from our bar names to OKX bar values.
 # OKX accepts: 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D, 1W, 1M, 3M
@@ -629,15 +670,13 @@ def fetch_kline_range(
     state = {"cursor": end_ms + 1}
 
     def _fetch_page(cursor_ms: int) -> list:
-        time.sleep(_RATE_DELAY)
         params: dict = {
             "instId": inst_id,
             "bar": bar_okx,
             "limit": 300,
             "after": int(cursor_ms),
         }
-        resp = _sess.get(url, params=params, timeout=15)
-        resp.raise_for_status()
+        resp = _get_with_retry(_sess, url, params)
         payload = resp.json()
         if payload.get("code") != "0":
             raise requests.RequestException(
