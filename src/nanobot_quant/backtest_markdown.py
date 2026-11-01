@@ -490,6 +490,13 @@ def _spot_md(res: dict) -> str:
         ("EMA 周期 n", cfg.get("ema_n")),
         ("斜率跨度 k", cfg.get("ema_k")),
         ("EMA 预热(bar)", cfg.get("ema_warmup")),
+        # EMA 折价入场门（2026-11-01）：只拦 BUY、默认关；与趋势闸门判斜率
+        # 是两个口径。关闭时也必须显式写一行，不静默省略。
+        ("EMA 折价入场门", (
+            f"开（n={cfg.get('entry_ema_period')}，偏移 {_num(cfg.get('entry_ema_offset_pct'), 2)}%，"
+            f"预热 {cfg.get('entry_ema_warmup')} 根）"
+            if cfg.get("entry_ema_enabled") else "关"
+        )),
         ("逐 bar 表", "全量" if cfg.get("bars_mode") == "full" else "精简"),
     ]))
     # 闸门效果（仅闸门开时输出；关时也不能静默——写一行说明）

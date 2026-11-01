@@ -221,3 +221,136 @@ def test_gate_only_applies_to_buy_signal():
     s._evaluate_symbol()
     assert s._skip_counts.get("entry_ema", 0) == 0
     assert s._skip_counts.get("entry_ema_na", 0) == 0
+
+
+def test_backtest_driver_injects_entry_ema_params():
+    """回测侧必须显式注入 entry_ema_* —— 否则策略读类默认值（False）⇒
+    回测里这道门恒关（与 IV 闸门 / F1 闸门同型的「死门」缺陷，2026-11-01）。"""
+    from pathlib import Path
+
+    src = Path("src/nanobot_quant/backtest/driver.py").read_text()
+    for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+        assert f'"{key}":' in src, f"driver 未注入 {key}"
+    # 预热带必须与趋势闸门取较大值，否则 EMA 仍在收敛期、折价值失真
+    assert "max(self.ema_warmup, self.entry_ema_warmup)" in src
+    assert "extra_warmup_bars=self.warmup_bars" in src
+
+
+# ── 回测页覆盖入口（A+B 的 B 部分）──────────────────────────────────────
+# 面上三个字段：开关 / 周期 / 偏移；默认留空 = 跟随场景配置。
+
+def test_overrides_coerced_for_entry_ema_fields():
+    from nanobot_quant.backtest_handlers import _coerce_overrides
+
+    got = _coerce_overrides({
+        "entry_ema_enabled": "on",
+        "entry_ema_period": "987",
+        "entry_ema_offset_pct": "0.5",
+    })
+    assert got == {
+        "entry_ema_enabled": True,
+        "entry_ema_period": 987,
+        "entry_ema_offset_pct": 0.5,
+    }
+    assert _coerce_overrides({"entry_ema_enabled": "off"})["entry_ema_enabled"] is False
+    assert _coerce_overrides({"entry_ema_period": "", "entry_ema_offset_pct": None}) == {}
+
+
+def test_scenes_effective_exposes_entry_ema_defaults():
+    """页面 placeholder 跟随场景值 ⇒ _effective 必须含这三键。"""
+    from nanobot_quant.backtest_handlers import _scenes
+
+    for scene in ("high", "mid", "low"):
+        eff = (_scenes().get(scene) or {}).get("_effective") or {}
+        for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+            assert key in eff, f"{scene}._effective 缺 {key}"
+
+
+def test_backtest_page_exposes_entry_ema_controls():
+    """结构性锁定：三个输入框 + OV_KEYS 联动 + 结果区生效行。"""
+    from pathlib import Path
+
+    html = Path("src/nanobot_quant/backtest_page.html").read_text()
+    for el_id in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+        assert f'id="{el_id}"' in html, f"页面缺输入框 {el_id}"
+    # 三个 id 都要进 OV_KEYS（placeholder 才跟随场景）
+    block = html.split("const OV_KEYS = [", 1)[1].split("];", 1)[0]
+    for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+        assert f'"{key}"' in block, f"OV_KEYS 缺 {key}"
+    assert "EMA 折价入场门" in html          # 结果区「实际生效」行
+    # 斐波那契 16 档齐全（首项 1）
+    for v in (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597):
+        assert f'<option value="{v}">{v}</option>' in html, f"周期下拉缺 {v}"
+
+
+def test_driver_snapshot_and_markdown_expose_entry_ema():
+    """结果快照与 markdown 都必须显式写出这道门（关也要写，不静默省略）。"""
+    from pathlib import Path
+
+    drv = Path("src/nanobot_quant/backtest/driver.py").read_text()
+    for key in ("entry_ema_enabled", "entry_ema_period",
+                "entry_ema_offset_pct", "entry_ema_warmup"):
+        assert f'"{key}": self.' in drv, f"backtest_config 缺 {key}"
+
+    from nanobot_quant.backtest_markdown import render_markdown
+    base = {
+        "scene": "high", "symbols": ["SOL"], "timestep": "1m",
+        "backtest_config": {
+            "scene": "high", "symbols": ["SOL"], "timestep": "1m",
+            "entry_ema_enabled": True, "entry_ema_period": 610,
+            "entry_ema_offset_pct": 0.1, "entry_ema_warmup": 2137,
+        },
+        "initial_cash": 100.0, "final_net": 100.0, "roi_pct": 0.0,
+        "fills": 0, "fills_detail": [], "slots_summary": {},
+        "skip_counts": {}, "net_values": [],
+    }
+    md = render_markdown(base)
+    assert "EMA 折价入场门" in md
+    assert "预热 2137 根" in md
+
+    base["backtest_config"]["entry_ema_enabled"] = False
+    md_off = render_markdown(base)
+    assert "EMA 折价入场门" in md_off and "| EMA 折价入场门 | 关 |" in md_off
+
+
+def test_progress_write_is_throttled_per_stage(tmp_path, monkeypatch):
+    """进度写盘节流（2026-11-01）：同阶段内最多 1 秒落一次盘。
+
+    重放循环曾每 bar 把含逐 bar 明细的 payload 序列化写 /data（FUSE），
+    累计 O(n²)，1440 根 bar 写 ~200MB。节流后数值不变、只减写盘次数。
+    """
+    import json as _json
+
+    import nanobot_quant.backtest.driver as drv_mod
+    from nanobot_quant.backtest.driver import BacktestDriver
+
+    d = BacktestDriver.__new__(BacktestDriver)
+    d.progress_path = tmp_path / "p.json"
+    d.progress_extra = {}
+    d._last_progress_write = 0.0
+    d._last_progress_stage = None
+    d._progress_min_interval = 1.0
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(drv_mod.time, "monotonic", lambda: clock["t"])
+
+    def done_bars() -> int:
+        return _json.loads(d.progress_path.read_text())["progress"]["bars_done"]
+
+    d._write_progress("replay", 1, 100, None, 0)
+    assert done_bars() == 1
+
+    # 同一秒内的后续 bar 不落盘（避免每 bar 序列化）
+    d._write_progress("replay", 2, 100, None, 0)
+    d._write_progress("replay", 3, 100, None, 0)
+    assert done_bars() == 1
+
+    # 越过间隔后恢复落盘
+    clock["t"] += 1.5
+    d._write_progress("replay", 4, 100, None, 0)
+    assert done_bars() == 4
+
+    # 阶段切换无视节流、立即落盘（prefetch→replay 的状态变化不能被吞）
+    d._write_progress("prefetch", 0, 100, None, 0)
+    payload = _json.loads(d.progress_path.read_text())["progress"]
+    assert payload["stage"] == "prefetch"

@@ -42,6 +42,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -214,6 +215,36 @@ class BacktestDriver:
         )
         # 预热始终按 n 推算（界面只读）——即使闸门关也用于展示表头
         self.ema_warmup = ema_warmup_bars(self.ema_n)
+        # EMA 折价入场门（2026-11-01）：需要 n + 5τ 根历史，预热不足会让
+        # EMA 处于收敛期、折价值系统性失真。与趋势闸门共用同一预热带，取较大值。
+        _ee_on = self._merged_params.get("entry_ema_enabled")
+        if _ee_on is None:
+            _ee_on = self.params.get("entry_ema_enabled")
+        self.entry_ema_enabled = bool(_ee_on) if _ee_on is not None else False
+        self.entry_ema_n = int(
+            self._merged_params.get("entry_ema_period")
+            or self.params.get("entry_ema_period")
+            or 610
+        )
+        _ee_off = self._merged_params.get("entry_ema_offset_pct")
+        if _ee_off is None:
+            _ee_off = self.params.get("entry_ema_offset_pct")
+        self.entry_ema_offset_pct = float(_ee_off) if _ee_off is not None else 0.1
+        self.entry_ema_warmup = (
+            self.entry_ema_n + ema_warmup_bars(self.entry_ema_n)
+            if self.entry_ema_enabled
+            else 0
+        )
+        self.warmup_bars = max(self.ema_warmup, self.entry_ema_warmup)
+        # 进度写盘节流（2026-11-01）：重放循环曾每 bar 无条件把 payload（含
+        # 逐 bar 明细）序列化写盘到 /data（FUSE 网络卷）——累计量 O(n²)，
+        # 1440 根 bar 实测写 ~200MB、回测耗时翻倍以上。改为同一阶段内最多
+        # 每 ``_progress_min_interval`` 秒落盘一次；阶段切换立即落盘，保证
+        # prefetch→replay 的状态变化不被吞掉（跨进程的 MCP 入口仍能看
+        # 到近实时进度，页面解析成本不变）。
+        self._last_progress_write = 0.0
+        self._last_progress_stage: str | None = None
+        self._progress_min_interval = 1.0
         # 逐 bar 表模式：lean（默认，只存信号/成交/闸门翻转行）/ full（全量）
         self.bars_mode = str(
             self._merged_params.get("bars_mode")
@@ -250,7 +281,7 @@ class BacktestDriver:
                 else (lambda sym: resolve_symbol(sym, self.source, tokens))
             ),
             # EMA 长记忆变量需额外向前预热（C72：只拉长取数、不改评估起点）
-            extra_warmup_bars=self.ema_warmup,
+            extra_warmup_bars=self.warmup_bars,
         )
 
         # 6. 撮合参数
@@ -356,6 +387,11 @@ class BacktestDriver:
                 "ema_gate_enabled": self.ema_gate_enabled,
                 "ema_n": self.ema_n,
                 "ema_k": self.ema_k,
+                # EMA 折价入场门（2026-11-01，回测侧）——必须显式注入，否则策略
+                # 读类默认值 ⇒ 回测里这道门恒关（与 IV 闸门/F1 闸门同型死门缺陷）。
+                "entry_ema_enabled": self.entry_ema_enabled,
+                "entry_ema_period": self.entry_ema_n,
+                "entry_ema_offset_pct": self.entry_ema_offset_pct,
                 "channel_family": "cex",  # Step 3 回测撮合对齐 CexBroker（USDT）
                 # 与 td_live 同一桥接模式：数据源契约从 broker.data_source 读
                 "drops_in_progress_bars": bool(
@@ -487,6 +523,7 @@ class BacktestDriver:
         fills_detail: list[dict] | None = None,
         capital_stats: dict | None = None,
         bars_rows: list[dict] | None = None,
+        force: bool = False,
     ) -> None:
         """运行中进度写入（WebUI/MCP 轮询展示用，失败静默不阻塞回测）。
 
@@ -496,6 +533,18 @@ class BacktestDriver:
         """
         if not self.progress_path:
             return
+        # 节流（2026-11-01）：同阶段内按时间间隔落盘，避免每 bar 重复序列化。
+        # ``force=True`` 用于收尾：节流会吞掉最后几根 bar 的进度，收尾必须
+        # 落一次终态（bars_done == total），否则进度文件永远停在中间值。
+        now = time.monotonic()
+        if (
+            not force
+            and stage == self._last_progress_stage
+            and (now - self._last_progress_write) < self._progress_min_interval
+        ):
+            return
+        self._last_progress_stage = stage
+        self._last_progress_write = now
         pct = (
             round(bars_done / bars_total * 100, 1)
             if bars_total and bars_done is not None
@@ -775,8 +824,26 @@ class BacktestDriver:
                 capital_stats=self._capital_stats(
                     fills_detail, self.initial_quote * self.batches, ts.isoformat()
                 ),
-                bars_rows=bar_rows[-5000:],
+                bars_rows=bar_rows[-500:],
             )
+
+        # 收尾强写终态（2026-11-01）：绕过节流，保证进度文件 bars_done==total。
+        # 只写一次，不影响性能；跨进程的 MCP 入口也靠这次拿到 100%。
+        self._write_progress(
+            "replay",
+            total_bars,
+            total_bars,
+            net_values[-1]["ts"] if net_values else None,
+            sum(len(b._tracked) for b in slot_brokers.values()),
+            fills_detail=fills_detail,
+            capital_stats=self._capital_stats(
+                fills_detail,
+                self.initial_quote * self.batches,
+                net_values[-1]["ts"] if net_values else None,
+            ),
+            bars_rows=bar_rows[-500:],
+            force=True,
+        )
 
         # 成交记录（_tracked 是累计列表，结束时统计一次）
         fills = sum(len(b._tracked) for b in slot_brokers.values())
@@ -905,6 +972,12 @@ class BacktestDriver:
                 "ema_n": self.ema_n,
                 "ema_k": self.ema_k,
                 "ema_warmup": self.ema_warmup,
+                # EMA 折价入场门（2026-11-01）：与上面的趋势闸门是两个口径。
+                # 预热数为 0 表示门关（不影响取数窗口）。
+                "entry_ema_enabled": self.entry_ema_enabled,
+                "entry_ema_period": self.entry_ema_n,
+                "entry_ema_offset_pct": self.entry_ema_offset_pct,
+                "entry_ema_warmup": self.entry_ema_warmup,
                 "bars_mode": self.bars_mode,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）
