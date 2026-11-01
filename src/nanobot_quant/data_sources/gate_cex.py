@@ -6,7 +6,7 @@ gate_pair() 映射（tokens.json gate_symbol 优先，自动 BASE_QUOTE）。
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -18,6 +18,17 @@ from nanobot_quant.gate_cex_data import (
     fetch_gate_ticker,
 )
 from nanobot_quant.gate_credentials import gate_pair, load_tokens_json
+from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+# 单次 `candlesticks` 请求的上限（Gate 取 1000 会报 400，留安全边界）。
+_SINGLE_FETCH_MAX = 1000
+
+
+def _interval_seconds(bar: str) -> int:
+    sec = INTERVAL_SECONDS.get(bar)
+    if not sec:
+        raise ValueError(f"unknown bar {bar!r} for paged fetch")
+    return sec
 
 
 def fetch_kline(symbol, bar="1D", limit=120,
@@ -31,6 +42,16 @@ def fetch_kline(symbol, bar="1D", limit=120,
         # 返回实际可用数据而非 HTTP Error 400（2026-08-25 修复）。
         return fetch_gate_kline_range_paged(pair, int(start.timestamp()),
                                             int(end.timestamp()), bar=bar)
+    if limit > _SINGLE_FETCH_MAX:
+        # 单次端点拿不全时改走区间分页（与 OKX 侧同口径）。
+        # 2026-11-01 C95：EMA 折价门 n=610 需 2137 根，单次端点只回一小截，
+        # 会让 KlineCache 每轮全量重建且策略 `bars < min_history` 恒 SKIP
+        # （页面显示 🟢 运行中、实际一笔不交易）。
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(seconds=_interval_seconds(bar) * (limit + 2))
+        df = fetch_gate_kline_range_paged(pair, int(start_dt.timestamp()),
+                                          int(end_dt.timestamp()), bar=bar)
+        return df.tail(limit)
     return fetch_gate_kline(pair, bar=bar, limit=limit)
 
 

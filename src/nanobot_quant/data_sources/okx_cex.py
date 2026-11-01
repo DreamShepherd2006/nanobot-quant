@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -20,6 +20,17 @@ from nanobot_quant.okx_cex_data import (
     fetch_order_book,
     fetch_ticker,
 )
+from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+# `candles` 端点恒返回最近约 300 根（请求 limit 更大也只回这么多）。
+_SINGLE_FETCH_MAX = 299
+
+
+def _interval_seconds(bar: str) -> int:
+    sec = INTERVAL_SECONDS.get(bar)
+    if not sec:
+        raise ValueError(f"unknown bar {bar!r} for paged fetch")
+    return sec
 
 
 def fetch_kline(symbol, bar="1D", limit=120,
@@ -37,6 +48,19 @@ def fetch_kline(symbol, bar="1D", limit=120,
                                       start=start.isoformat(),
                                       end=end.isoformat(),
                                       bar=bar)
+    if limit > _SINGLE_FETCH_MAX:
+        # 单次 `candles` 只回最近 ~300 根 ⇒ 超过时必须走 history-candles
+        # 反向分页。2026-11-01 C95 实测：EMA 折价门 n=610 需 2137 根，
+        # 单次路径只回 299 根 → KlineCache 每轮全量重建（len < length 恒真）
+        # 且策略 `bars=299 < min_history=300` 每轮 SKIP，页面显示 🟢 运行中
+        # 而实际一笔不交易。
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(seconds=_interval_seconds(bar) * (limit + 2))
+        df = _fetch_kline_range_okx(inst,
+                                    start=start_dt.isoformat(),
+                                    end=end_dt.isoformat(),
+                                    bar=bar)
+        return df.tail(limit)
     return _fetch_kline_okx(inst, bar=bar, limit=limit)
 
 
