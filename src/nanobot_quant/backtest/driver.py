@@ -214,6 +214,23 @@ class BacktestDriver:
         )
         # 预热始终按 n 推算（界面只读）——即使闸门关也用于展示表头
         self.ema_warmup = ema_warmup_bars(self.ema_n)
+        # EMA 折价入场门（2026-11-01）：需要 n + 5τ 根历史，预热不足会让
+        # EMA 处于收敛期、折价值系统性失真。与趋势闸门共用同一预热带，取较大值。
+        _ee_on = self._merged_params.get("entry_ema_enabled")
+        if _ee_on is None:
+            _ee_on = self.params.get("entry_ema_enabled")
+        self.entry_ema_enabled = bool(_ee_on) if _ee_on is not None else False
+        self.entry_ema_n = int(
+            self._merged_params.get("entry_ema_period")
+            or self.params.get("entry_ema_period")
+            or 610
+        )
+        self.entry_ema_warmup = (
+            self.entry_ema_n + ema_warmup_bars(self.entry_ema_n)
+            if self.entry_ema_enabled
+            else 0
+        )
+        self.warmup_bars = max(self.ema_warmup, self.entry_ema_warmup)
         # 逐 bar 表模式：lean（默认，只存信号/成交/闸门翻转行）/ full（全量）
         self.bars_mode = str(
             self._merged_params.get("bars_mode")
@@ -250,7 +267,7 @@ class BacktestDriver:
                 else (lambda sym: resolve_symbol(sym, self.source, tokens))
             ),
             # EMA 长记忆变量需额外向前预热（C72：只拉长取数、不改评估起点）
-            extra_warmup_bars=self.ema_warmup,
+            extra_warmup_bars=self.warmup_bars,
         )
 
         # 6. 撮合参数
@@ -356,6 +373,15 @@ class BacktestDriver:
                 "ema_gate_enabled": self.ema_gate_enabled,
                 "ema_n": self.ema_n,
                 "ema_k": self.ema_k,
+                # EMA 折价入场门（2026-11-01，回测侧）——必须显式注入，否则策略
+                # 读类默认值 ⇒ 回测里这道门恒关（与 IV 闸门/F1 闸门同型死门缺陷）。
+                "entry_ema_enabled": self.entry_ema_enabled,
+                "entry_ema_period": self.entry_ema_n,
+                "entry_ema_offset_pct": float(
+                    self._merged_params.get("entry_ema_offset_pct")
+                    if self._merged_params.get("entry_ema_offset_pct") is not None
+                    else self.params.get("entry_ema_offset_pct", 0.1)
+                ),
                 "channel_family": "cex",  # Step 3 回测撮合对齐 CexBroker（USDT）
                 # 与 td_live 同一桥接模式：数据源契约从 broker.data_source 读
                 "drops_in_progress_bars": bool(

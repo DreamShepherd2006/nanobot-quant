@@ -194,7 +194,10 @@
       <div class="ov-item"><label for="ema_gate_enabled">EMA 趋势闸门</label><select id="ema_gate_enabled" onchange="syncEmaWarmup()"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">只拦 BUY（slope≤0）；默认关</span></div>
       <div class="ov-item"><label for="ema_n">EMA 周期 n</label><select id="ema_n" onchange="syncEmaWarmup()"><option value="">（跟随场景/144）</option><option value="5">5</option><option value="8">8</option><option value="13">13</option><option value="21">21</option><option value="34">34</option><option value="55">55</option><option value="89">89</option><option value="144">144</option></select><span class="f-hint">斐波那契族（探索用，裁决值需冻结）</span></div>
       <div class="ov-item"><label for="ema_k">斜率跨度 k</label><input type="number" id="ema_k" min="1" max="50" step="1" placeholder="3"><span class="f-hint">slope=(EMA_t−EMA_t−k)/(k·ATR20)</span></div>
-      <div class="ov-item"><label>EMA 预热(bar)</label><input type="text" id="ema_warmup" readonly value="自动：5τ（n=144 → 362）" style="background:#f1f5f9;"><span class="f-hint">只读：按 n 自动推算，不允许手填过小</span></div>
+      <div class="ov-item"><label for="ema_warmup">EMA 预热(bar)</label><input type="text" id="ema_warmup" readonly value="自动：5τ（n=144 → 362）" style="background:#f1f5f9;"><span class="f-hint">只读：按 n 自动推算，不允许手填过小</span></div>
+      <div class="ov-item"><label for="entry_ema_enabled">📉 EMA 折价入场门</label><select id="entry_ema_enabled"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">只拦 BUY：收盘需低于 EMA×(1−偏移%)；与上面的趋势闸门判斜率不同口径</span></div>
+      <div class="ov-item"><label for="entry_ema_period">折价门 EMA 周期</label><select id="entry_ema_period"><option value="">（跟随场景/610）</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="8">8</option><option value="13">13</option><option value="21">21</option><option value="34">34</option><option value="55">55</option><option value="89">89</option><option value="144">144</option><option value="233">233</option><option value="377">377</option><option value="610">610</option><option value="987">987</option><option value="1597">1597</option></select><span class="f-hint">斐波那契族；1/2/3 贴近现价、几乎恒拦（只适合调试）</span></div>
+      <div class="ov-item"><label for="entry_ema_offset_pct">折价偏移(%)</label><input type="number" id="entry_ema_offset_pct" min="0" max="5" step="0.05" placeholder="场景值"><span class="f-hint">收盘 ≤ EMA×(1−x%) 才放行买9</span></div>
       <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
       <div class="ov-item"><label for="ema_compare">两臂对照</label><label style="display:flex;gap:4px;align-items:center;font-weight:400;"><input type="checkbox" id="ema_compare" checked> 同时跑无闸门基线</label><span class="f-hint">耗时 ×2；仅展示、禁配对推断</span></div>
     </div>
@@ -419,7 +422,8 @@ const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd
   "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
   "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
   "momentum_exit","td_sell_all","cd_exit_all",
-  "gate_enabled","gate_red_min"];
+  "gate_enabled","gate_red_min",
+  "entry_ema_enabled","entry_ema_period","entry_ema_offset_pct"];
 
 function sceneValue(scene, key) {
   const cfg = SCENES[scene] || {};
@@ -487,14 +491,14 @@ function collectOverrides() {
     "exit_setup","exit_countdown","min_hold_bars",
     "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
-    "gate_red_min","ema_n","ema_k"];
+    "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct"];
   numKeys.forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
     if (v !== "") overrides[id] = parseFloat(v);
   });
-  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled","ema_gate_enabled"].forEach(id => {
+  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled"].forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
@@ -626,6 +630,7 @@ function paramsRows(res) {
     ["平仓顺序", cfg.exit_order ?? "—"],
     ["建仓起始批次", cfg.td_start_slot ?? "—"],
     ["子账户最小资金", cfg.min_account_value != null ? `${cfg.min_account_value} USD` : "—"],
+    ["EMA 折价入场门", cfg.entry_ema_enabled ? `开（n=${cfg.entry_ema_period ?? "—"}，偏移 ${cfg.entry_ema_offset_pct ?? "—"}%，预热 ${cfg.entry_ema_warmup ?? "—"} 根）` : "关"],
   ];
   return rows
     .map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`)

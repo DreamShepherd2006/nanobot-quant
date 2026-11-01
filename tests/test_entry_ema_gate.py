@@ -221,3 +221,105 @@ def test_gate_only_applies_to_buy_signal():
     s._evaluate_symbol()
     assert s._skip_counts.get("entry_ema", 0) == 0
     assert s._skip_counts.get("entry_ema_na", 0) == 0
+
+
+# ── 回测侧接线（预热窗口）─────────────────────────────────────────────
+# 回测是「一次性预切数据再逐 bar 回放」，不像实盘每轮动态多拉 ⇒ driver 必须
+# 自己把预热算进取数窗口，否则 EMA 还在收敛期、折价值失真且不显眼。
+
+def _bt_params(**over):
+    p = {
+        "scenes": {
+            "high": {
+                "enabled": True, "sleeptime": "1m", "symbols": ["SOL"],
+                "batches": 1, "sub_accounts": ["gate_bot1"], "entry_setup": 9,
+            }
+        },
+        "td_bars": 300, "fee_rate": 0.001,
+    }
+    p.update(over)
+    return p
+
+
+def test_driver_warmup_includes_entry_ema_when_enabled():
+    """门开启时取数窗口 = max(趋势闸门预热, EMA 折价门预热)。"""
+    from nanobot_quant.backtest.driver import BacktestDriver
+    from nanobot_quant.environment.sensors import ema_warmup_bars
+
+    d = BacktestDriver(
+        scene="high", params=_bt_params(),
+        overrides={"entry_ema_enabled": True, "entry_ema_period": 610},
+    )
+    expect = 610 + ema_warmup_bars(610)          # 610 + 1527 = 2137
+    assert d.entry_ema_n == 610
+    assert d.entry_ema_warmup == expect
+    assert d.warmup_bars >= expect
+
+
+def test_driver_no_extra_warmup_when_gate_off():
+    """门关闭时预热不受影响（零行为变化）。"""
+    from nanobot_quant.backtest.driver import BacktestDriver
+
+    off = BacktestDriver(scene="high", params=_bt_params())
+    on = BacktestDriver(
+        scene="high", params=_bt_params(),
+        overrides={"entry_ema_enabled": True, "entry_ema_period": 610},
+    )
+    assert off.entry_ema_warmup == 0
+    assert on.warmup_bars > off.warmup_bars
+
+
+def test_driver_injects_entry_ema_params_into_strategy():
+    """_activate_scene 场景值缺席时，parameters 兜底必须带上门参数。"""
+    from pathlib import Path
+
+    src = Path("src/nanobot_quant/backtest/driver.py").read_text()
+    for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+        assert f'"{key}":' in src, f"driver 未注入 {key}"
+
+
+# ── 回测页覆盖入口（A+B 的 B 部分）──────────────────────────────────────
+# 面上三个字段：开关 / 周期 / 偏移；默认留空 = 跟随场景配置。
+
+def test_overrides_coerced_for_entry_ema_fields():
+    from nanobot_quant.backtest_handlers import _coerce_overrides
+
+    got = _coerce_overrides({
+        "entry_ema_enabled": "on",
+        "entry_ema_period": "987",
+        "entry_ema_offset_pct": "0.5",
+    })
+    assert got == {
+        "entry_ema_enabled": True,
+        "entry_ema_period": 987,
+        "entry_ema_offset_pct": 0.5,
+    }
+    assert _coerce_overrides({"entry_ema_enabled": "off"})["entry_ema_enabled"] is False
+    assert _coerce_overrides({"entry_ema_period": "", "entry_ema_offset_pct": None}) == {}
+
+
+def test_scenes_effective_exposes_entry_ema_defaults():
+    """页面 placeholder 跟随场景值 ⇒ _effective 必须含这三键。"""
+    from nanobot_quant.backtest_handlers import _scenes
+
+    for scene in ("high", "mid", "low"):
+        eff = (_scenes().get(scene) or {}).get("_effective") or {}
+        for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+            assert key in eff, f"{scene}._effective 缺 {key}"
+
+
+def test_backtest_page_exposes_entry_ema_controls():
+    """结构性锁定：三个输入框 + OV_KEYS 联动 + 结果区生效行。"""
+    from pathlib import Path
+
+    html = Path("src/nanobot_quant/backtest_page.html").read_text()
+    for el_id in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+        assert f'id="{el_id}"' in html, f"页面缺输入框 {el_id}"
+    # 三个 id 都要进 OV_KEYS（placeholder 才跟随场景）
+    block = html.split("const OV_KEYS = [", 1)[1].split("];", 1)[0]
+    for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
+        assert f'"{key}"' in block, f"OV_KEYS 缺 {key}"
+    assert "EMA 折价入场门" in html          # 结果区「实际生效」行
+    # 斐波那契 16 档齐全（首项 1）
+    for v in (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597):
+        assert f'<option value="{v}">{v}</option>' in html, f"周期下拉缺 {v}"

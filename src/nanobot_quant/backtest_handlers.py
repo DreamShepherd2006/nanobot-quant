@@ -86,6 +86,11 @@ _OV_FIELDS: dict[str, tuple] = {
     # 默认关 → 回测与原版完全一致；阈值 0.45=red-only / 0.20=yellow+red。
     "gate_enabled": ("flat", "gate_enabled", False),
     "gate_red_min": ("flat", "gate_red_min", 0.45),
+    # EMA 折价入场门（2026-11-01）：场景级。与上面的趋势闸门（判斜率符号）
+    # 是两个口径，互不干扰；只拦 BUY，默认关。
+    "entry_ema_enabled": ("scene", None, False),
+    "entry_ema_period": ("scene", None, 610),
+    "entry_ema_offset_pct": ("scene", None, 0.1),
 }
 
 
@@ -195,14 +200,18 @@ _OV_INT = {
     "cd_stall_n", "td_start_slot",
     # EMA 趋势变量（2026-10-20，C73/C74 研究线，回测侧）
     "ema_n", "ema_k",
+    # EMA 折价入场门（2026-11-01，回测侧覆盖）
+    "entry_ema_period",
 }
 _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
     "stop_loss_pct", "take_profit_pct", "min_account_value",
+    "entry_ema_offset_pct",
 }
 _OV_BOOL = {
     "momentum_exit", "td_sell_all", "cd_exit_all",
     "ema_gate_enabled", "ema_compare_baseline",
+    "entry_ema_enabled",
 }
 
 
