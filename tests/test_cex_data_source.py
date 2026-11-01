@@ -133,9 +133,17 @@ class TestGetHistoricalPrices:
         ds.get_historical_prices(_asset(), length=120, timestep="bar:minute")
         assert fake.kline_calls[-1]["bar"] == "1m"
 
-    def test_length_clamped_to_1000(self, ds, fake):
-        ds.get_historical_prices(_asset(), length=5000, timestep="day")
-        assert fake.kline_calls[-1]["limit"] == 1000
+    def test_length_clamped_to_hard_cap(self, ds, fake):
+        """超护栏才截断（C95 前为固定 1000，现放宽到 _MAX_HISTORY_BARS）。"""
+        from nanobot_quant.data.cex_data_source import _MAX_HISTORY_BARS
+
+        ds.get_historical_prices(_asset(), length=999_999, timestep="day")
+        assert fake.kline_calls[-1]["limit"] == _MAX_HISTORY_BARS
+
+    def test_ema_fold_length_not_truncated(self, ds, fake):
+        """EMA 折价门 n=610 需 2137 根，不得再被旧 1000 clamp 截断（C95）。"""
+        ds.get_historical_prices(_asset(), length=2137, timestep="day")
+        assert fake.kline_calls[-1]["limit"] == 2137
 
     def test_empty_kline_raises(self, ds, fake):
         fake.kline = None

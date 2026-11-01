@@ -23,6 +23,13 @@ logger = logging.getLogger("nanobot_quant.data.cex")
 # 新周期（3m/2H/6H/8H/12H/3D/7D/30D）随 spec.bars 自动覆盖（2026-08-24 方案 C）。
 _BAR_MAP = lumibot_bar_map("gate_cex")
 
+# 单次历史根数安全上限（防调用方误传超大 length 导致分页拉取过久）。
+# 1000 曾是 Gate ``candlesticks`` 单次上限时代的 clamp，会把 EMA 折价门
+# 需要的 2137 根（n=610 + 5τ 预热 1527）截成 1000，使 EMA 残余偏置从
+# 目标 0.65% 变差到约 3.8%（C95）。数据源已支持超限分页，故改为 20000
+# （覆盖斐波那契族最大 n=1597 所需的 5592 根，1m 上约 14 天）。
+_MAX_HISTORY_BARS = 20_000
+
 _DEFAULT_BAR = "1D"
 
 
@@ -121,7 +128,7 @@ class CexDataSource(DataSource):
                     file=sys.stderr, flush=True,
                 )
             bar = _DEFAULT_BAR
-        limit = max(1, min(int(length), 1000))
+        limit = max(1, min(int(length), _MAX_HISTORY_BARS))
         if self._cache is not None:
             df = self._cache.get(symbol, bar, limit)
             if df is None:
