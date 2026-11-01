@@ -835,12 +835,20 @@ class _TdLiveRunner:
         cost = meta.get("cost_price")
         reports: list[str] = []
         imported_any = False
-        seen_accounts: set[str] = set()
+        # 两遍扇描（2026-11-01，C96）：先登记「已有 open 批次」的账号，再做导入。
+        # 原先边走边登记，判据依赖 slot 遍历顺序：slot 列表按 slot1→slotN 排，
+        # 卖出后 slot1 变 available、slot2 仍 open 时，slot1 会抢在 open 批次登记
+        # 之前被处理；而共享池下它读到的是**整池余额**（其实是 slot2 占用的币），
+        # 于是凭空多出一笔幽灵批次（2026-11-01 BTC slot1 实证：台账多出
+        # 0.00005149、找不到任何买入记录，而池总资产正好少了这一笔的市值）。
+        seen_accounts: set[str] = {
+            str(s.get("account_id") or "")
+            for s in bm.slots
+            if s.get("status") != "available"
+        }
         for slot in bm.slots:
             acct = str(slot.get("account_id") or "")
             if slot.get("status") != "available":
-                # 该账号已有 open 批次（TD 自己开的）：共享池的币已被那批占用
-                seen_accounts.add(acct)
                 continue
             if acct in seen_accounts:
                 continue

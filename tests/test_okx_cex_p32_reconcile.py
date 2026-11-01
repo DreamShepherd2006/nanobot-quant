@@ -190,3 +190,21 @@ def test_balance_error_reported_not_raised(capsys):
 
     assert bm.opened == []
     assert "余额查询失败" in capsys.readouterr().err
+
+
+def test_skips_when_open_lot_comes_after_available_slot(capsys):
+    """反例（C96，2026-11-01）：open 批次排在后面时，前面的 available slot 不得抢跑。
+
+    共享池下 available slot 读到的是**整池余额**——那其实是排在后面的 open
+    批次占用的币。若按遍历顺序「边走边登记」，slot1(available) 会先于
+    slot2(open) 被处理，凭空多出一笔幽灵批次（2026-11-01 BTC slot1 实证：
+    台账多出一笔 0.00005149、找不到任何买入记录，而池总资产正好少了它）。
+    """
+    broker = _FakeBroker(qty=0.5, px=100.0)
+    st = _FakeStrategy({"okx_a": broker})
+    bm = _FakeBM([_slot(1, "okx_a"), _slot(2, "okx_a", "open")])
+
+    _runner(st)._reconcile_import_shared_pool(bm, "SOL", None)
+
+    assert bm.opened == []        # 不得产生幽灵批次
+    assert broker.bal_calls == 0  # 连余额都不该查（账号已被 open 批次占用）
