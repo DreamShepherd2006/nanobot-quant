@@ -42,6 +42,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -235,6 +236,15 @@ class BacktestDriver:
             else 0
         )
         self.warmup_bars = max(self.ema_warmup, self.entry_ema_warmup)
+        # 进度写盘节流（2026-11-01）：重放循环曾每 bar 无条件把 payload（含
+        # 逐 bar 明细）序列化写盘到 /data（FUSE 网络卷）——累计量 O(n²)，
+        # 1440 根 bar 实测写 ~200MB、回测耗时翻倍以上。改为同一阶段内最多
+        # 每 ``_progress_min_interval`` 秒落盘一次；阶段切换立即落盘，保证
+        # prefetch→replay 的状态变化不被吞掉（跨进程的 MCP 入口仍能看
+        # 到近实时进度，页面解析成本不变）。
+        self._last_progress_write = 0.0
+        self._last_progress_stage: str | None = None
+        self._progress_min_interval = 1.0
         # 逐 bar 表模式：lean（默认，只存信号/成交/闸门翻转行）/ full（全量）
         self.bars_mode = str(
             self._merged_params.get("bars_mode")
@@ -513,6 +523,7 @@ class BacktestDriver:
         fills_detail: list[dict] | None = None,
         capital_stats: dict | None = None,
         bars_rows: list[dict] | None = None,
+        force: bool = False,
     ) -> None:
         """运行中进度写入（WebUI/MCP 轮询展示用，失败静默不阻塞回测）。
 
@@ -522,6 +533,18 @@ class BacktestDriver:
         """
         if not self.progress_path:
             return
+        # 节流（2026-11-01）：同阶段内按时间间隔落盘，避免每 bar 重复序列化。
+        # ``force=True`` 用于收尾：节流会吞掉最后几根 bar 的进度，收尾必须
+        # 落一次终态（bars_done == total），否则进度文件永远停在中间值。
+        now = time.monotonic()
+        if (
+            not force
+            and stage == self._last_progress_stage
+            and (now - self._last_progress_write) < self._progress_min_interval
+        ):
+            return
+        self._last_progress_stage = stage
+        self._last_progress_write = now
         pct = (
             round(bars_done / bars_total * 100, 1)
             if bars_total and bars_done is not None
@@ -801,8 +824,26 @@ class BacktestDriver:
                 capital_stats=self._capital_stats(
                     fills_detail, self.initial_quote * self.batches, ts.isoformat()
                 ),
-                bars_rows=bar_rows[-5000:],
+                bars_rows=bar_rows[-500:],
             )
+
+        # 收尾强写终态（2026-11-01）：绕过节流，保证进度文件 bars_done==total。
+        # 只写一次，不影响性能；跨进程的 MCP 入口也靠这次拿到 100%。
+        self._write_progress(
+            "replay",
+            total_bars,
+            total_bars,
+            net_values[-1]["ts"] if net_values else None,
+            sum(len(b._tracked) for b in slot_brokers.values()),
+            fills_detail=fills_detail,
+            capital_stats=self._capital_stats(
+                fills_detail,
+                self.initial_quote * self.batches,
+                net_values[-1]["ts"] if net_values else None,
+            ),
+            bars_rows=bar_rows[-500:],
+            force=True,
+        )
 
         # 成交记录（_tracked 是累计列表，结束时统计一次）
         fills = sum(len(b._tracked) for b in slot_brokers.values())

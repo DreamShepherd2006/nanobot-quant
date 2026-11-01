@@ -311,3 +311,46 @@ def test_driver_snapshot_and_markdown_expose_entry_ema():
     base["backtest_config"]["entry_ema_enabled"] = False
     md_off = render_markdown(base)
     assert "EMA 折价入场门" in md_off and "| EMA 折价入场门 | 关 |" in md_off
+
+
+def test_progress_write_is_throttled_per_stage(tmp_path, monkeypatch):
+    """进度写盘节流（2026-11-01）：同阶段内最多 1 秒落一次盘。
+
+    重放循环曾每 bar 把含逐 bar 明细的 payload 序列化写 /data（FUSE），
+    累计 O(n²)，1440 根 bar 写 ~200MB。节流后数值不变、只减写盘次数。
+    """
+    import json as _json
+
+    import nanobot_quant.backtest.driver as drv_mod
+    from nanobot_quant.backtest.driver import BacktestDriver
+
+    d = BacktestDriver.__new__(BacktestDriver)
+    d.progress_path = tmp_path / "p.json"
+    d.progress_extra = {}
+    d._last_progress_write = 0.0
+    d._last_progress_stage = None
+    d._progress_min_interval = 1.0
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(drv_mod.time, "monotonic", lambda: clock["t"])
+
+    def done_bars() -> int:
+        return _json.loads(d.progress_path.read_text())["progress"]["bars_done"]
+
+    d._write_progress("replay", 1, 100, None, 0)
+    assert done_bars() == 1
+
+    # 同一秒内的后续 bar 不落盘（避免每 bar 序列化）
+    d._write_progress("replay", 2, 100, None, 0)
+    d._write_progress("replay", 3, 100, None, 0)
+    assert done_bars() == 1
+
+    # 越过间隔后恢复落盘
+    clock["t"] += 1.5
+    d._write_progress("replay", 4, 100, None, 0)
+    assert done_bars() == 4
+
+    # 阶段切换无视节流、立即落盘（prefetch→replay 的状态变化不能被吞）
+    d._write_progress("prefetch", 0, 100, None, 0)
+    payload = _json.loads(d.progress_path.read_text())["progress"]
+    assert payload["stage"] == "prefetch"
