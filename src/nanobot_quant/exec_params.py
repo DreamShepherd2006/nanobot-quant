@@ -93,6 +93,8 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
 SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
     "td_sell_all", "cd_exit_min_profit", "cd_exit_all", "cd_entry_setup_gap",
+    # EMA 折价入场门（2026-11-01）——场景专属，无扁平键
+    "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
 )
 
 #: 场景卡片字段渲染顺序。
@@ -100,6 +102,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
     "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
     "entry_setup", "entry_countdown", "cd_entry_setup_gap",
+    # EMA 折价入场门（默认关；周期下拉 21~1597）
+    "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
     "exit_setup", "exit_countdown",
     "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
@@ -121,6 +125,8 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
+        "entry_ema_enabled": False, "entry_ema_period": "610",
+        "entry_ema_offset_pct": 0.1,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
@@ -136,6 +142,8 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
+        "entry_ema_enabled": False, "entry_ema_period": "610",
+        "entry_ema_offset_pct": 0.1,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
@@ -151,6 +159,8 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
+        "entry_ema_enabled": False, "entry_ema_period": "610",
+        "entry_ema_offset_pct": 0.1,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
@@ -431,6 +441,30 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "type": "bool", "std": True,
         "label": "cd13全平",
         "hint": "true=cd 13 一次平掉所有 ≥ 保本门的 open 批次；false=每轮只平一个",
+    },
+    # ── EMA 折价入场门（2026-11-01，默认关）───────────────────────────
+    "entry_ema_enabled": {
+        "group": "scene", "type": "bool", "std": False,
+        "label": "EMA 折价入场门",
+        "hint": "开启后 BUY 额外要求「收盘 ≤ EMA ×(1−偏移%)」——只在价格跌到长期均线下方才买9 建仓；"
+                "默认关（零行为变化）。只拦 BUY，SELL/止损/止盈不受影响。"
+                "注：与回测页「EMA 趋势闸门」（判的是 EMA 斜率符号）是两个不同口径，不可混用",
+    },
+    "entry_ema_period": {
+        "group": "scene", "type": "enum",
+        "enum": ["1", "2", "3", "5", "8", "13", "21", "34", "55", "89", "144",
+                 "233", "377", "610", "987", "1597"],
+        "std": "610",
+        "label": "EMA 周期",
+        "hint": "均线记忆长度（斐波那契族 1~1597，下拉选择）。"
+                "注意 EMA(1) 数学上等于收盘价本身、EMA(2/3) 贴近现价 → 折价门会几乎恒拦，"
+                "小周期只适合调试对比，实盘建议 ≥ 89（1m 实测有效区 610~987）；"
+                "周期越长预热越长（预热=5(n+1)/2 根，n=610 → 共需 2137 根）",
+    },
+    "entry_ema_offset_pct": {
+        "group": "scene", "min": 0.0, "max": 5.0, "step": 0.01, "std": 0.1,
+        "label": "EMA 折价偏移(%)",
+        "hint": "要求收盘价低于 EMA 的幅度（%）：0=只要在均线下方即可，0.1=必须低 0.1% 以上",
     },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],
