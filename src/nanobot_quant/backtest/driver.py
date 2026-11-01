@@ -225,6 +225,10 @@ class BacktestDriver:
             or self.params.get("entry_ema_period")
             or 610
         )
+        _ee_off = self._merged_params.get("entry_ema_offset_pct")
+        if _ee_off is None:
+            _ee_off = self.params.get("entry_ema_offset_pct")
+        self.entry_ema_offset_pct = float(_ee_off) if _ee_off is not None else 0.1
         self.entry_ema_warmup = (
             self.entry_ema_n + ema_warmup_bars(self.entry_ema_n)
             if self.entry_ema_enabled
@@ -377,11 +381,7 @@ class BacktestDriver:
                 # 读类默认值 ⇒ 回测里这道门恒关（与 IV 闸门/F1 闸门同型死门缺陷）。
                 "entry_ema_enabled": self.entry_ema_enabled,
                 "entry_ema_period": self.entry_ema_n,
-                "entry_ema_offset_pct": float(
-                    self._merged_params.get("entry_ema_offset_pct")
-                    if self._merged_params.get("entry_ema_offset_pct") is not None
-                    else self.params.get("entry_ema_offset_pct", 0.1)
-                ),
+                "entry_ema_offset_pct": self.entry_ema_offset_pct,
                 "channel_family": "cex",  # Step 3 回测撮合对齐 CexBroker（USDT）
                 # 与 td_live 同一桥接模式：数据源契约从 broker.data_source 读
                 "drops_in_progress_bars": bool(
@@ -931,6 +931,12 @@ class BacktestDriver:
                 "ema_n": self.ema_n,
                 "ema_k": self.ema_k,
                 "ema_warmup": self.ema_warmup,
+                # EMA 折价入场门（2026-11-01）：与上面的趋势闸门是两个口径。
+                # 预热数为 0 表示门关（不影响取数窗口）。
+                "entry_ema_enabled": self.entry_ema_enabled,
+                "entry_ema_period": self.entry_ema_n,
+                "entry_ema_offset_pct": self.entry_ema_offset_pct,
+                "entry_ema_warmup": self.entry_ema_warmup,
                 "bars_mode": self.bars_mode,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）

@@ -223,59 +223,17 @@ def test_gate_only_applies_to_buy_signal():
     assert s._skip_counts.get("entry_ema_na", 0) == 0
 
 
-# ── 回测侧接线（预热窗口）─────────────────────────────────────────────
-# 回测是「一次性预切数据再逐 bar 回放」，不像实盘每轮动态多拉 ⇒ driver 必须
-# 自己把预热算进取数窗口，否则 EMA 还在收敛期、折价值失真且不显眼。
-
-def _bt_params(**over):
-    p = {
-        "scenes": {
-            "high": {
-                "enabled": True, "sleeptime": "1m", "symbols": ["SOL"],
-                "batches": 1, "sub_accounts": ["gate_bot1"], "entry_setup": 9,
-            }
-        },
-        "td_bars": 300, "fee_rate": 0.001,
-    }
-    p.update(over)
-    return p
-
-
-def test_driver_warmup_includes_entry_ema_when_enabled():
-    """门开启时取数窗口 = max(趋势闸门预热, EMA 折价门预热)。"""
-    from nanobot_quant.backtest.driver import BacktestDriver
-    from nanobot_quant.environment.sensors import ema_warmup_bars
-
-    d = BacktestDriver(
-        scene="high", params=_bt_params(),
-        overrides={"entry_ema_enabled": True, "entry_ema_period": 610},
-    )
-    expect = 610 + ema_warmup_bars(610)          # 610 + 1527 = 2137
-    assert d.entry_ema_n == 610
-    assert d.entry_ema_warmup == expect
-    assert d.warmup_bars >= expect
-
-
-def test_driver_no_extra_warmup_when_gate_off():
-    """门关闭时预热不受影响（零行为变化）。"""
-    from nanobot_quant.backtest.driver import BacktestDriver
-
-    off = BacktestDriver(scene="high", params=_bt_params())
-    on = BacktestDriver(
-        scene="high", params=_bt_params(),
-        overrides={"entry_ema_enabled": True, "entry_ema_period": 610},
-    )
-    assert off.entry_ema_warmup == 0
-    assert on.warmup_bars > off.warmup_bars
-
-
-def test_driver_injects_entry_ema_params_into_strategy():
-    """_activate_scene 场景值缺席时，parameters 兜底必须带上门参数。"""
+def test_backtest_driver_injects_entry_ema_params():
+    """回测侧必须显式注入 entry_ema_* —— 否则策略读类默认值（False）⇒
+    回测里这道门恒关（与 IV 闸门 / F1 闸门同型的「死门」缺陷，2026-11-01）。"""
     from pathlib import Path
 
     src = Path("src/nanobot_quant/backtest/driver.py").read_text()
     for key in ("entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct"):
         assert f'"{key}":' in src, f"driver 未注入 {key}"
+    # 预热带必须与趋势闸门取较大值，否则 EMA 仍在收敛期、折价值失真
+    assert "max(self.ema_warmup, self.entry_ema_warmup)" in src
+    assert "extra_warmup_bars=self.warmup_bars" in src
 
 
 # ── 回测页覆盖入口（A+B 的 B 部分）──────────────────────────────────────
@@ -323,3 +281,33 @@ def test_backtest_page_exposes_entry_ema_controls():
     # 斐波那契 16 档齐全（首项 1）
     for v in (1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597):
         assert f'<option value="{v}">{v}</option>' in html, f"周期下拉缺 {v}"
+
+
+def test_driver_snapshot_and_markdown_expose_entry_ema():
+    """结果快照与 markdown 都必须显式写出这道门（关也要写，不静默省略）。"""
+    from pathlib import Path
+
+    drv = Path("src/nanobot_quant/backtest/driver.py").read_text()
+    for key in ("entry_ema_enabled", "entry_ema_period",
+                "entry_ema_offset_pct", "entry_ema_warmup"):
+        assert f'"{key}": self.' in drv, f"backtest_config 缺 {key}"
+
+    from nanobot_quant.backtest_markdown import render_markdown
+    base = {
+        "scene": "high", "symbols": ["SOL"], "timestep": "1m",
+        "backtest_config": {
+            "scene": "high", "symbols": ["SOL"], "timestep": "1m",
+            "entry_ema_enabled": True, "entry_ema_period": 610,
+            "entry_ema_offset_pct": 0.1, "entry_ema_warmup": 2137,
+        },
+        "initial_cash": 100.0, "final_net": 100.0, "roi_pct": 0.0,
+        "fills": 0, "fills_detail": [], "slots_summary": {},
+        "skip_counts": {}, "net_values": [],
+    }
+    md = render_markdown(base)
+    assert "EMA 折价入场门" in md
+    assert "预热 2137 根" in md
+
+    base["backtest_config"]["entry_ema_enabled"] = False
+    md_off = render_markdown(base)
+    assert "EMA 折价入场门" in md_off and "| EMA 折价入场门 | 关 |" in md_off
