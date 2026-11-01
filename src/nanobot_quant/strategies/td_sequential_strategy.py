@@ -92,6 +92,12 @@ class TdSequentialStrategy(Strategy):
         "cd_exit_all": True,        # cd 13 通道全平（true=一次清所有过门批次；false=每轮一个，2026-08-27）
         "td_sell_all": False,       # 高9 一次平所有盈利批（false=每轮一个）
         "min_hold_bars": 10,        # 买入后 N 根 bar 内 TD SELL（高9/cd13）不触发（0=关闭；止损/止盈不受限，2026-08-28）
+        # EMA 折价入场门（2026-11-01 用户要求）：默认关 → 零行为变化。
+        # 开启后 BUY 额外要求「收盘 ≤ EMA ×(1−偏移%)」——跌到长期均线下方才建仓。
+        # 与「EMA 趋势闸门」（ema_gate_enabled，判斜率符号）是两个不同口径，不可混用。
+        "entry_ema_enabled": False,
+        "entry_ema_period": 610,      # 斐波那契族，WebUI 下拉选择
+        "entry_ema_offset_pct": 0.1,  # 折价偏移（%）：收盘必须低于 EMA 该幅度以上
         **DEFAULT_TD_PARAMS,
     }
 
@@ -757,6 +763,23 @@ class TdSequentialStrategy(Strategy):
             self._min_hold_bars = int(self.parameters.get("min_hold_bars", 10) or 0)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
+        # EMA 折价入场门（2026-11-01）：场景值优先，留空回退全局 parameters。
+        # 与 ema_gate（斜率符号闸门）是两个口径：本门判「价格相对 EMA 的位置」。
+        _sc_on = p.get("entry_ema_enabled")
+        self._entry_ema_enabled = (
+            bool(_sc_on) if _sc_on is not None
+            else bool(self.parameters.get("entry_ema_enabled", False))
+        )
+        _sc_n = p.get("entry_ema_period")
+        self._entry_ema_period = int(
+            _sc_n if _sc_n is not None
+            else self.parameters.get("entry_ema_period", 610) or 610
+        )
+        _sc_off = p.get("entry_ema_offset_pct")
+        self._entry_ema_offset_pct = float(
+            _sc_off if _sc_off is not None
+            else self.parameters.get("entry_ema_offset_pct", 0.1) or 0.0
+        )
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
         # 缺省 None → 保留全局 td_params（td_live 构造 parameters 时已 merge），
         # 非 None 覆盖 self._td_params（策略每 bar 读取处即此处覆盖生效）。
@@ -937,7 +960,9 @@ class TdSequentialStrategy(Strategy):
         """单标的 K 线拉取（线程池 worker）。异常不外抛，包装进返回值。"""
         _drops = bool(self.parameters.get("drops_in_progress_bars", False))
         drop_in_progress = self._is_live_broker and not _drops
-        fetch_len = self._min_history + (1 if drop_in_progress else 0)
+        fetch_len = max(self._min_history, self._ema_fetch_len()) + (
+            1 if drop_in_progress else 0
+        )
         timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
         try:
             bars = self.get_historical_prices(
@@ -950,6 +975,23 @@ class TdSequentialStrategy(Strategy):
     def _cur_scene(self) -> str:
         """当前场景名（未激活场景/纸交易/execute_signal 直调 = "default"）。"""
         return getattr(self, "_current_scene", "") or "default"
+
+    def _ema_fetch_len(self) -> int:
+        """EMA 折价门需要的历史根数（period + 5τ 预热）；关闭时返回 0。
+
+        2026-11-01：EMA 是无限记忆指标，窗口长度是口径契约而非实现细节——
+        预热不足会让 EMA 处于收敛期、折价值系统性失真。预热公式与回测侧
+        ``sensors.ema_warmup_bars`` 同源（5(n+1)/2，只由 n 决定）。
+        """
+        if not getattr(self, "_entry_ema_enabled", False):
+            return 0
+        n = max(int(getattr(self, "_entry_ema_period", 610) or 610), 2)
+        try:
+            from nanobot_quant.environment.sensors import ema_warmup_bars
+
+            return n + int(ema_warmup_bars(n))
+        except Exception:  # noqa: BLE001 — 公式兜底，绝不阻断取数
+            return n + int(5 * (n + 1) / 2)
 
     def _evaluate_symbol(self, prefetched: tuple | None = None) -> None:
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。
@@ -996,7 +1038,7 @@ class TdSequentialStrategy(Strategy):
             _drops_in_progress = bool(self.parameters.get("drops_in_progress_bars", False))
             drop_in_progress = self._is_live_broker and not _drops_in_progress
 
-            fetch_len = self._min_history
+            fetch_len = max(self._min_history, self._ema_fetch_len())
             if drop_in_progress:
                 # live 数据源（OKX DEX kline）会返回进行中的最后一根 bar——
                 # TD 是收盘价状态机，未完成 bar 的 close 会导致 setup 虚增/虚减
@@ -1095,7 +1137,10 @@ class TdSequentialStrategy(Strategy):
             )
             return
 
-        signal = self._calc(df)
+        # EMA 折价门可能要求比 TD 窗口更长的历史（period + 5τ 预热）——
+        # TD 计数口径必须保持完全不变：只喂最近 _min_history 根。
+        _td_df = df.tail(self._min_history) if len(df) > self._min_history else df
+        signal = self._calc(_td_df)
 
         # ── 4. Evaluate signals ──
         setup_buy = signal.get("setup_buy", 0) or 0
@@ -1276,6 +1321,38 @@ class TdSequentialStrategy(Strategy):
         tdst_filter = bool(self._td_params.get("tdst_filter", False))
         support = signal.get("tdst_support")
 
+        # ── EMA 折价入场门（2026-11-01，实盘 + 回测同函数）──
+        # 语义：价格必须跌到长期均线**下方**才允许买9 建仓（收盘 ≤ EMA×(1−偏移%)）。
+        # 与上方 ema_gate（判 EMA 斜率符号的**趋势方向**）是两个不同口径，不可混用。
+        # 边界：只拦 BUY，SELL/止损/止盈完全不受影响；
+        #       EMA 取不到值/异常 → fail-open（不拦）并计入 entry_ema_na，
+        #       数据不足不作惩罚（与 IV/F1/贝叶斯闸门同规）。
+        entry_ema_blocked = False
+        if getattr(self, "_entry_ema_enabled", False) and buy_signal:
+            try:
+                _n = max(int(getattr(self, "_entry_ema_period", 610) or 610), 2)
+                _series = df["Close"].ewm(span=_n, adjust=False).mean()
+                _ema_val = float(_series.iloc[-1])
+                _off = float(getattr(self, "_entry_ema_offset_pct", 0.0) or 0.0)
+                if not (_ema_val > 0):
+                    self._bump_skip("entry_ema_na")
+                elif price > _ema_val * (1.0 - _off / 100.0):
+                    entry_ema_blocked = True
+                    self._bump_skip("entry_ema")
+                    print(
+                        f"[TD] ENTRY EMA BLOCK | symbol={self.symbol} "
+                        f"price={price} ema{_n}={_ema_val:.8f} "
+                        f"need<={_ema_val * (1.0 - _off / 100.0):.8f} (off={_off}%)",
+                        file=sys.stderr, flush=True,
+                    )
+            except Exception as e:  # noqa: BLE001 — 数据异常不拦单
+                self._bump_skip("entry_ema_na")
+                print(
+                    f"[TD] ENTRY EMA NA | symbol={self.symbol} "
+                    f"{type(e).__name__}: {e}",
+                    file=sys.stderr, flush=True,
+                )
+
         # ── 贝叶斯闸门（2026-08-31，回测侧，默认关）──
         # gate_enabled 由回测 driver 注入 parameters（WebUI 开关）；td_live
         # 不注入 → 实盘恒 False。负反馈只拦 BUY，SELL/止损/止盈不碰。
@@ -1396,6 +1473,8 @@ class TdSequentialStrategy(Strategy):
             and not (gate_blocked)
             # EMA 趋势闸门（2026-10-20，回测侧，默认关）：同上只拦 BUY。
             and not (ema_gate_blocked)
+            # EMA 折价入场门（2026-11-01，实盘+回测，默认关）：只拦 BUY。
+            and not (entry_ema_blocked)
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
