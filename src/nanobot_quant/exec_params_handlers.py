@@ -729,6 +729,13 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         message = "执行参数已保存并即时生效"
         if td_notice:
             message += f"；{td_notice}"
+        # 场景级关键参数（仅启用场景）：波锁容量等不属扁平字段，
+        # 不打出来则无法从日志确认保存值（静默生效不可接受）。
+        _scene_diag = " ".join(
+            f"{_sn}.wave_max={_sc.get('wave_max_buys')}"
+            for _sn, _sc in (result["params"].get("scenes") or {}).items()
+            if isinstance(_sc, dict) and _sc.get("enabled")
+        )
         gatekeeper._log(
             f"🛡️ 执行参数已更新: "
             f"channel={result['params'].get('execution_channel')} "
@@ -745,6 +752,7 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f"td_batches={result['params'].get('td_batches')} "
             f"exit_order={result['params'].get('exit_order')} "
             f"take_profit={result['params'].get('take_profit_pct')}"
+            + (f" {_scene_diag}" if _scene_diag else "")
         )
         return JSONResponse({"ok": True, "message": message,
                              "params": result.get("params")})

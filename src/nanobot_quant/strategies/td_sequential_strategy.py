@@ -841,6 +841,7 @@ class TdSequentialStrategy(Strategy):
                 f"channel={self.parameters.get('execution_channel', '?')} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
                 f"stop_loss={sl_diag} "
+                f"wave_max={getattr(self, '_wave_max_buys', 1)} "
                 f"family={self.parameters.get('channel_family')} "
                 f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
