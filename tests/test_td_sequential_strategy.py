@@ -1207,3 +1207,81 @@ def test_prefetch_slot_balances_snapshot_and_fail_closed(monkeypatch):
     assert bal["USDT"]["available"] == 7.0
     # 清理类级缓存不影响本次（无 ticker 调用）
     TdSequentialStrategy._price_cache.clear()
+
+
+# ── 波锁容量 wave_max_buys（2026-10-31，high 1m 验证）───────────────
+# 原波锁固定「每波每场景全局 1 笔」，参数化后 wave_max_buys=N 允许同波
+# 最多 N 笔（默认 1 = 原行为零变化）。同标的仍受周期门控约束。
+
+def test_wave_max_buys_default_one_blocks_second_buy(tmp_path):
+    """默认 N=1：波内已建 1 笔（计数=1）→ 其余标的仍被拦。"""
+    s = _resonance_strategy(tmp_path)
+    s._round_buy_used = {"default": 1}       # 波内已建 1 笔
+    s._wave_max_buys = 1
+    s._evaluate_symbol()
+    assert "order" not in s._captured, "N=1 时额度已满 → 不得建仓"
+    assert s._denied_cycle.get(("default", "AAPL")) is True
+
+
+def test_wave_max_buys_two_allows_second_buy_in_same_wave(monkeypatch, tmp_path):
+    """N=2：波内已建 1 笔 → 本标的仍可建仓（额度未满）。"""
+    from types import SimpleNamespace
+
+    s = _resonance_strategy(tmp_path)
+    s._pending_buys = {}
+    s._is_cex = lambda: True
+    mo = SimpleNamespace(is_filled=lambda: False, custom_params=None, identifier="oid-1")
+    calls: list[int] = []
+    monkeypatch.setattr(
+        s, "_buy_on_slot", lambda slot, price, reason: (calls.append(slot) or (mo, 1.0))
+    )
+    s._round_buy_used = {"default": 1}
+    s._wave_max_buys = 2
+    s._evaluate_symbol()
+    assert calls, "N=2 时额度未满 → 应尝试建仓"
+    assert s._denied_cycle.get(("default", "AAPL")) is not True
+
+
+def test_wave_max_buys_three_blocks_fourth(tmp_path):
+    """N=3：已有 3 笔 → 第 4 笔被拦。"""
+    s = _resonance_strategy(tmp_path)
+    s._round_buy_used = {"default": 3}
+    s._wave_max_buys = 3
+    s._evaluate_symbol()
+    assert "order" not in s._captured
+
+
+def test_wave_end_resets_counter_to_zero(tmp_path):
+    """波结束（所有标的 setup < entry_setup）→ 计数清 0（走真实 _activate_scene）。"""
+    s = _resonance_strategy(tmp_path)
+    s._round_buy_used = {"default": 3}
+    s._wave_tried = {("default", "AAPL"): True}
+    s._last_setup = {"default": {"AAPL": 3, "MSFT": 2}}   # 均 < 9 → 波结束
+    s._activate_scene("default", {"params": {}})
+    assert s._round_buy_used["default"] == 0, "波结束应清零计数"
+    assert s._wave_tried == {}, "波结束应清 _wave_tried"
+
+
+def test_wave_max_buys_legacy_bool_true_still_blocks(tmp_path):
+    """向后兼容：旧代码/旧状态写入 True（bool）在 N=1 下仍视为已用 1 笔。"""
+    s = _resonance_strategy(tmp_path)
+    s._round_buy_used = {"default": True}
+    s._wave_max_buys = 1
+    s._evaluate_symbol()
+    assert "order" not in s._captured
+
+
+def test_activate_scene_reads_wave_max_buys_from_scene(tmp_path):
+    """场景级覆盖：scenes.*.wave_max_buys 生效；留空回退默认 1。"""
+    s = _resonance_strategy(tmp_path)
+    s._activate_scene("default", {"params": {"wave_max_buys": 3}})
+    assert s._wave_max_buys == 3, "场景填值应覆盖"
+    s._activate_scene("default", {"params": {}})
+    assert s._wave_max_buys == 1, "场景留空应回退默认 1"
+
+
+def test_wave_max_buys_not_below_one(tmp_path):
+    """非法值（0/负数）一律夹到 1，不出现「永不建仓」。"""
+    s = _resonance_strategy(tmp_path)
+    s._activate_scene("default", {"params": {"wave_max_buys": 0}})
+    assert s._wave_max_buys == 1

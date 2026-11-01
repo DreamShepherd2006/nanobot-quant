@@ -91,6 +91,7 @@ class TdSequentialStrategy(Strategy):
         "cd_exit_min_profit": 0.0,  # cd 13 通道保本门（≥此值卖；<死扛；0=不亏本金就走，2026-08-27）
         "cd_exit_all": True,        # cd 13 通道全平（true=一次清所有过门批次；false=每轮一个，2026-08-27）
         "td_sell_all": False,       # 高9 一次平所有盈利批（false=每轮一个）
+        "wave_max_buys": 1,         # 共振错峰波锁容量：每波每场景最多建仓 N 笔（1=原行为；场景级可覆盖）
         "min_hold_bars": 10,        # 买入后 N 根 bar 内 TD SELL（高9/cd13）不触发（0=关闭；止损/止盈不受限，2026-08-28）
         # EMA 折价入场门（2026-11-01 用户要求）：默认关 → 零行为变化。
         # 开启后 BUY 额外要求「收盘 ≤ EMA ×(1−偏移%)」——跌到长期均线下方才建仓。
@@ -257,6 +258,10 @@ class TdSequentialStrategy(Strategy):
         self._cd_stall_n = max(
             int(self.parameters.get("cd_stall_n", 3) or 3), 1
         )
+        # 共振错峰波锁容量（场景级可覆盖，见 _activate_scene）：默认 1 = 原行为
+        self._wave_max_buys = max(
+            int(self.parameters.get("wave_max_buys", 1) or 1), 1
+        )
         # 2026-08-29 拍板 B：cd 入场时效门槛——setup 最近归零距当前 ≤ N 根才允许 cd 触发
         # （0=关闭，回归旧 cd 独立触发；场景级覆盖见 _activate_scene）。注意 0 是合法值，
         # 不能用 `or 5` 兜底（会把 0 顶成 5）。
@@ -372,6 +377,8 @@ class TdSequentialStrategy(Strategy):
         心跳=最小场景周期）；回测/纸交易（无场景运行时）保持旧逻辑。
 
         共振错峰（2026-08-26）：每轮（心跳）重置全局建仓额度
+        （2026-11-01：额度为计数而非布尔——每波每场景上限 = wave_max_buys，
+        默认 1 即原行为；标的池较大时可调高，避免大量同时到 9 的标的被挡住）
         （_round_buy_used）——每轮每场景只建 1 笔，共振多标的错轮建仓。
         波结束判定在 _activate_scene 开头（回测 driver 每 bar 亦调用，
         语义与实盘自动一致）。
@@ -693,6 +700,8 @@ class TdSequentialStrategy(Strategy):
 
         2026-08-26（共振错峰）：场景激活时做波结束判定——该场景所有标的
         离开买9信号区（setup < entry_setup）→ 清额度 + 清 _wave_tried。
+
+        2026-11-01（波锁容量上实盘）：额度由场景 `wave_max_buys` 控制（默认 1）。
         额度跨轮保持（波锁），LINK 建仓后其他标的无论是否首次到 9 都被
         拦，等各自 setup 重置；回测 driver 每 bar 调用本方法，语义与实盘
         自动一致（不可把判定放 on_trading_iteration——回测不走该路径）。
@@ -709,7 +718,7 @@ class TdSequentialStrategy(Strategy):
         prev = last_setup.get(name, {})
         if not any(v >= self._td_params.get("entry_setup", 9)
                    for v in prev.values()):
-            self._round_buy_used[name] = False
+            self._round_buy_used[name] = 0
             self._wave_tried = {}
         if not hasattr(self, "_wave_tried"):
             self._wave_tried: dict[tuple, bool] = {}
@@ -753,6 +762,14 @@ class TdSequentialStrategy(Strategy):
         self._cd_exit_min_profit = float(p.get("cd_exit_min_profit") or 0.0)
         self._cd_exit_all = bool(p.get("cd_exit_all", True))
         self._td_sell_all = bool(p.get("td_sell_all") or False)
+        # 波锁容量（场景级；留空回退 parameters 默认值）
+        _wmb = p.get("wave_max_buys")
+        if _wmb is not None and _wmb != "":
+            self._wave_max_buys = max(int(_wmb), 1)
+        else:
+            self._wave_max_buys = max(
+                int(self.parameters.get("wave_max_buys", 1) or 1), 1
+            )
         mh = p.get("min_hold_bars")
         if mh is not None:
             self._min_hold_bars = int(mh)
@@ -824,6 +841,7 @@ class TdSequentialStrategy(Strategy):
                 f"channel={self.parameters.get('execution_channel', '?')} "
                 f"symbols={self.symbols} mode={self.quantity_mode} "
                 f"stop_loss={sl_diag} "
+                f"wave_max={getattr(self, '_wave_max_buys', 1)} "
                 f"family={self.parameters.get('channel_family')} "
                 f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
@@ -1421,7 +1439,11 @@ class TdSequentialStrategy(Strategy):
         # （该场景所有标的离开买9信号区）时清除；_wave_tried 标记本波
         # 已到过 9 的标的（首次到 9 才参与额度竞争，非首次跳过额度检查）。
         scene = self._cur_scene()
-        round_used = bool(getattr(self, "_round_buy_used", {}).get(scene, False))
+        # 波锁容量：每波每场景最多 wave_max_buys 笔（默认 1 = 原行为）。
+        # 计数器跨轮保持，波结束（该场景所有标的离开买9区）时归零。
+        buy_count = int(getattr(self, "_round_buy_used", {}).get(scene, 0) or 0)
+        max_buys = max(int(getattr(self, "_wave_max_buys", 1) or 1), 1)
+        round_used = buy_count >= max_buys
         denied = bool(getattr(self, "_denied_cycle", {}).get((scene, self.symbol), False))
         wave_first = not bool(getattr(self, "_wave_tried", {}).get((scene, self.symbol), False))
         if denied:
@@ -1447,13 +1469,13 @@ class TdSequentialStrategy(Strategy):
             self._bump_skip("batch_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 本轮已建仓"
-                f"（全局每轮 1 笔；等 setup 重置后新周期）",
+                f"（本波 {buy_count}/{max_buys} 笔已满；等 setup 重置后新周期）",
                 file=sys.stderr, flush=True,
             )
             self._denied_cycle[(scene, self.symbol)] = True
             self._wave_tried[(scene, self.symbol)] = True
             self._record(
-                "WAIT", "本轮已建仓（全局每轮 1 笔；等重置后新周期）",
+                "WAIT", f"本轮已建仓（本波 {buy_count}/{max_buys} 笔已满；等重置后新周期）",
                 symbol=self.symbol,
             )
         if (
@@ -1547,9 +1569,12 @@ class TdSequentialStrategy(Strategy):
                         st["bought"] = True
                         st["reset"] = False
                         st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
-                        # 共振错峰：本轮额度已用 + 本波已到过 9
+                        # 共振错峰：本波额度 +1 + 本波已到过 9
                         self._round_buy_used = getattr(self, "_round_buy_used", {})
-                        self._round_buy_used[self._cur_scene()] = True
+                        _sc = self._cur_scene()
+                        self._round_buy_used[_sc] = int(
+                            self._round_buy_used.get(_sc, 0) or 0
+                        ) + 1
                         self._wave_tried = getattr(self, "_wave_tried", {})
                         self._wave_tried[(self._cur_scene(), self.symbol)] = True
                         break
@@ -1595,9 +1620,12 @@ class TdSequentialStrategy(Strategy):
                     st["bought"] = True
                     st["reset"] = False
                     st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
-                    # 共振错峰：本轮额度已用 + 本波已到过 9
+                    # 共振错峰：本波额度 +1 + 本波已到过 9
                     self._round_buy_used = getattr(self, "_round_buy_used", {})
-                    self._round_buy_used[self._cur_scene()] = True
+                    _sc2 = self._cur_scene()
+                    self._round_buy_used[_sc2] = int(
+                        self._round_buy_used.get(_sc2, 0) or 0
+                    ) + 1
                     self._wave_tried = getattr(self, "_wave_tried", {})
                     self._wave_tried[(self._cur_scene(), self.symbol)] = True
                     break
