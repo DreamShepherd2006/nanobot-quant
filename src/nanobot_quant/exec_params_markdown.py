@@ -60,7 +60,22 @@ def _channels_of(meta: dict) -> str | None:
     return str(c) if c else None
 
 
-def _field_rows(group: str, params: dict, channel: str) -> list[tuple[str, str, str]]:
+def _label_of(key: str, meta: dict, family: str) -> str:
+    """字段中文名——**与 /config/exec 页面同源**：CEX 通道优先 ``label_cex``。
+
+    2026-11-02：首版只读了 ``label``，导致 okx_cex 通道的快照显示
+    「批次数量（子钱包）」，而页面上同一项是「子账号」——
+    同一份参数两处叫法不同。
+    """
+    label = str(meta.get("label", key))
+    if family == "cex" and meta.get("label_cex"):
+        label = str(meta["label_cex"])
+    return label
+
+
+def _field_rows(
+    group: str, params: dict, channel: str, family: str
+) -> list[tuple[str, str, str]]:
     """按 PARAM_META 生成 ``(label, value, note)`` 行。
 
     与页面同源：**不过滤掉其它通道的字段**（页面上也是全部渲染、前端按通道
@@ -82,7 +97,7 @@ def _field_rows(group: str, params: dict, channel: str) -> list[tuple[str, str, 
             val_text = str(enum_labels[val])
         else:
             val_text = _fmt(val)
-        rows.append((str(meta.get("label", key)), val_text, "；".join(notes)))
+        rows.append((_label_of(key, meta, family), val_text, "；".join(notes)))
     return rows
 
 
@@ -162,11 +177,11 @@ def render_exec_params_md(
     # 保持与 GROUP_TITLES 相同的节序（① ② ③ ④ ⑤）。
     for group, title in GROUP_TITLES.items():
         if group == "scene":
-            lines += _scene_block(params)
+            lines += _scene_block(params, family)
             continue
         if group in RENDER_SKIP_GROUPS:
             continue
-        rows = _field_rows(group, params, channel)
+        rows = _field_rows(group, params, channel, family)
         if not rows:
             continue
         lines.append(f"## {title}")
@@ -194,7 +209,7 @@ def render_exec_params_md(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _scene_block(params: dict) -> list[str]:
+def _scene_block(params: dict, family: str) -> list[str]:
     """多场景三列对照表（一眼看出「场景覆盖」还是「跟随全局」）。"""
     scenes = params.get("scenes") or {}
     scene_keys = list(SCENES)
@@ -203,7 +218,7 @@ def _scene_block(params: dict) -> list[str]:
     ]
     srows: list[list[str]] = []
     for fkey in SCENE_FIELD_ORDER:
-        label = _scene_field_label(fkey)
+        label = _scene_field_label(fkey, family)
         vals = [_fmt((scenes.get(sk) or {}).get(fkey)) for sk in scene_keys]
         srows.append([label] + vals)
     out = [f"## {GROUP_TITLES.get('scene', '多场景（多时间框架）')}", ""]
@@ -212,12 +227,13 @@ def _scene_block(params: dict) -> list[str]:
     return out
 
 
-def _scene_field_label(fkey: str) -> str:
-    """场景字段 → 中文标签（优先 PARAM_META.label，其次场景专属映射）。"""
+def _scene_field_label(fkey: str, family: str = "cex") -> str:
+    """场景字段 → 中文标签（优先 PARAM_META.label，CEX 通道用 label_cex）。"""
     meta = PARAM_META.get(fkey)
-    if meta and meta.get("label"):
-        return str(meta["label"])
+    if meta:
+        return _label_of(fkey, meta, family)
     flat = SCENE_FIELD_MAP.get(fkey)
-    if flat and PARAM_META.get(flat, {}).get("label"):
-        return str(PARAM_META[flat]["label"])
+    flat_meta = PARAM_META.get(flat) if flat else None
+    if flat_meta:
+        return _label_of(str(flat), flat_meta, family)
     return fkey

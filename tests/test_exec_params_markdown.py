@@ -124,6 +124,18 @@ def test_other_channel_fields_marked():
     assert "仅 `dex` 通道" in line
 
 
+def test_batches_label_follows_channel():
+    """「批次数量」在 CEX 通道必须叫「子账号」——页面按通道切，快照不能写成子钱包。"""
+    cex = _render()          # execution_channel=okx_cex
+    assert "批次数量（子账号）" in cex
+    assert "批次数量（子钱包）" not in cex
+
+    dex = render_exec_params_md(_params(execution_channel="okx_dex"),
+                                now=FIXED_NOW, pairs=PAIRS)
+    assert "批次数量（子钱包）" in dex
+    assert "批次数量（子账号）" not in dex
+
+
 def test_route_registered():
     src = HANDLERS.read_text(encoding="utf-8")
     assert '"/config/exec/params.md", _params_md' in src
