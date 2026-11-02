@@ -950,10 +950,11 @@ def test_load_batch_snapshot_display_min_filter(monkeypatch):
     assert [r["slot"] for r in rows] == [2]
 
 
-# ── 共振错峰（2026-08-26 用户拍板）─────────────────────────────
-# 每轮每场景全局只建 1 笔：本轮已有标的建仓（_round_buy_used）→ 其余标的
-# BUY 被拦并打 _denied_cycle 标记；denied 标的本 setup 周期内不再尝试
-# （等重置），setup 计数变小（reset）时清除标记、新周期恢复建仓资格。
+# ── 共振组错峰（2026-08-26 拍板，2026-11-02 改判据）───────────────
+# 判据：同一**共振组**内最多 wave_max_buys 笔。共振组 = setup 周期区间
+# 相交的标的分组；独立周期（区间不相交）自成一组、不受其他组影响。
+# （旧判据「该场景所有标的 setup < entry_setup 即波结束」已被取代：震荡市
+#  里 1 根 bar 全体回落就重置额度，同一共振被拆成两波。）
 
 def _resonance_strategy(tmp_path):
     from nanobot_quant.batches import BatchManager
@@ -968,12 +969,26 @@ def _resonance_strategy(tmp_path):
     return s
 
 
-def test_resonance_round_quota_blocks_and_denies(tmp_path):
-    """本轮额度已用（其他标的已建）→ 本标的 BUY 被拦 + denied 标记。"""
+def _seed_full_group(s, count=2, symbols=("OTHER",), scene="default"):
+    """造一个“已建满”的共振组，并与 AAPL 的周期区间相交。"""
+    bar_ts = pd.Timestamp("2025-02-27")  # _make_df 最后一根
+    s._cycle_span = {
+        (scene, "AAPL"): {"start": bar_ts, "end": bar_ts, "closed": False}
+    }
+    s._wave_groups = {
+        scene: [{"start": bar_ts, "end": bar_ts, "count": count,
+                 "symbols": set(symbols)}]
+    }
+    return bar_ts
+
+
+def test_resonance_group_quota_blocks_and_denies(tmp_path):
+    """所属共振组已满 → 本标的 BUY 被拦 + denied 标记。"""
     s = _resonance_strategy(tmp_path)
-    s._round_buy_used = {"default": True}  # 模拟：波内其他标的已建（波锁）
+    s._wave_max_buys = 2
+    _seed_full_group(s, count=2)
     s._evaluate_symbol()
-    assert "order" not in s._captured, "额度已用 → 不得建仓"
+    assert "order" not in s._captured, "共振组已满 → 不得建仓"
     assert s._denied_cycle.get(("default", "AAPL")) is True, "被拦标的应打本周期错过标记"
 
 
@@ -985,70 +1000,94 @@ def test_resonance_denied_waits_for_reset_then_allowed(monkeypatch, tmp_path):
     from nanobot_quant.batches import BatchManager
 
     s = _make_strategy()
+    s.broker = None  # _activate_scene 会读 self.broker
     bm = BatchManager("AAPL", ["acc-1", "acc-2"],
                       path=str(tmp_path / "resonance-2.json"))
     s.batch_manager = bm
     s._batch_managers = {"AAPL": bm}
     s._pending_buys = {}
     s._is_cex = lambda: True
+    s._wave_max_buys = 2
     # mock 下单：PENDING 订单（is_filled=False）→ executed 置位但不落台账
     mo = SimpleNamespace(is_filled=lambda: False, custom_params=None, identifier="oid-1")
     monkeypatch.setattr(s, "_buy_on_slot", lambda slot, price, reason: (mo, 1.0))
-    # 首次：波内已有标的建仓 → 被拦 + denied（未下单）
-    s._round_buy_used = {"default": True}
+    # 首次：共振组已满 → 被拦 + denied（未下单）
+    _seed_full_group(s, count=2)
     s._evaluate_symbol()
     assert s._denied_cycle.get(("default", "AAPL")) is True
-    assert not s._pending_buys, "额度已用不得下单"
-    # 下轮：波锁未解除（上一轮 AAVE 仍在信号区），denied 未清 → 仍不建
+    assert not s._pending_buys, "组已满不得下单"
+    # 下轮：denied 未清 → 仍不建
     s._evaluate_symbol()
     assert not s._pending_buys, "denied 标的本周期不得建仓"
     # 中性 bars：setup 计数变小 → reset → denied 清除
     _swap_bars(s, _neutral_closes())
     s._evaluate_symbol()
     assert s._denied_cycle.get(("default", "AAPL")) is not True, "setup 重置应清除 denied"
-    # 新周期重新数到 9（本波已到过 9 → 跳过额度检查）→ 允许建仓
+    # 新周期：旧组内的标的周期已全 closed → 场景激活时整组过期
+    s._activate_scene("default", {"params": {}})
+    assert s._wave_groups.get("default") == [], "组内周期全归零 → 组应过期"
+    # 新周期重新数到 9 → 允许建仓
     _swap_bars(s, _buy_signal_closes())
     s._evaluate_symbol()
     assert s._pending_buys, "重置后新周期应允许建仓"
 
 
-def test_resonance_wave_ends_when_all_leave_signal_zone(tmp_path):
-    """波锁：所有标的离开买9信号区（setup < entry_setup）→ 波结束，清额度
-    + 清 _wave_tried → 下一波首个到 9 的标的正常建仓。"""
-    import nanobot_quant.strategies.td_sequential_strategy as tds
-    from nanobot_quant.batches import BatchManager
+def test_resonance_group_expires_when_all_members_closed(tmp_path):
+    """组内所有标的的 setup 周期都归零（closed）→ 整组过期、额度释放。"""
+    s = _resonance_strategy(tmp_path)
+    bar_ts = pd.Timestamp("2025-02-27")
+    s._cycle_span = {
+        ("default", "AAPL"): {"start": bar_ts, "end": bar_ts, "closed": True}
+    }
+    s._wave_groups = {
+        "default": [{"start": bar_ts, "end": bar_ts, "count": 2,
+                     "symbols": {"AAPL"}}]
+    }
+    s._activate_scene("default", {"params": {}})
+    assert s._wave_groups.get("default") == [], "组内周期全 closed → 组应过期"
 
+
+def test_wave_group_by_cycle_overlap_real_case():
+    """真实案例（2026-11-02 04:37–04:40 实盘）：ETH/BNB/BTC 的 setup 周期
+    区间相交 → 同一共振组，wave_max_buys=2 时第 3 笔必须被拦。
+
+    旧判据（该场景所有标的 setup < entry_setup 即波结束）因 04:38 单根 bar
+    全体回落而重置额度，把同一共振拆成两波、放行了第 3 笔（实盘已发生）。
+    同时验证独立周期（SOL 06:2x）不受已建组影响。
+    """
     s = _make_strategy()
-    bm = BatchManager("AAPL", ["acc-1", "acc-2"],
-                      path=str(tmp_path / "resonance-3.json"))
-    s.batch_manager = bm
-    s._batch_managers = {"AAPL": bm}
-    # 波锁：模拟波内已有标的建仓（AAPL 首次到 9 被拦 → denied + wave_tried）
-    s._round_buy_used = {"default": True}
-    # 上一轮 AAPL 在信号区（setup=9）→ 波未结束
-    s._last_setup = {"default": {"AAPL": 9}}
-    s._evaluate_symbol()
-    assert s._denied_cycle.get(("default", "AAPL")) is True
-    # 中性 bars：所有标的离开信号区（_last_setup 更新为 < entry）
-    _swap_bars(s, _neutral_closes())
-    s._evaluate_symbol()
-    assert s._last_setup["default"]["AAPL"] < 9
-    # on_trading_iteration 开头做波结束判定 → 清额度 + 清 _wave_tried
-    s._round_buy_used = {"default": True}  # 波锁仍锁着（模拟下一轮开头）
-    # 直接调用波结束判定逻辑（on_trading_iteration 首段）
-    for _scene, _prev in list(getattr(s, "_last_setup", {}).items()):
-        if not any(v >= s._td_params.get("entry_setup", 9) for v in _prev.values()):
-            s._round_buy_used[_scene] = False
-            s._wave_tried = {}
-    assert s._round_buy_used.get("default") is False, "波结束应清额度"
-    assert s._wave_tried == {}, "波结束应清 _wave_tried"
+    s._wave_max_buys = 2
+    base = pd.Timestamp("2026-11-02 04:30", tz="UTC")
+
+    def ts(m):
+        return base + pd.Timedelta(minutes=m)
+
+    s._cycle_span = {
+        ("default", "ETH"): {"start": ts(2), "end": ts(8), "closed": False},
+        ("default", "BNB"): {"start": ts(1), "end": ts(14), "closed": False},
+        ("default", "BTC"): {"start": ts(1), "end": ts(16), "closed": False},
+    }
+    s._wave_groups = {}
+    g = s._wave_group_join("default", "ETH", ts(8))
+    assert g["count"] == 1
+    g2 = s._wave_group_join("default", "BNB", ts(9))
+    assert g2 is g and g["count"] == 2, "BNB 与 ETH 周期相交 → 同一组"
+    # 第 3 笔 BTC：同组已 2/2 → 必拦
+    assert s._wave_group_at("default", "BTC", ts(9)) is g
+    assert g["count"] >= s._wave_max_buys, "第 3 笔必须被组额度拦下"
+    # 独立周期（SOL 06:20–06:29）与 04:3x 组不相交 → 自成一组、不受影响
+    s._cycle_span[("default", "SOL")] = {
+        "start": ts(110), "end": ts(119), "closed": False
+    }
+    assert s._wave_group_at("default", "SOL", ts(110)) is None
+    g3 = s._wave_group_join("default", "SOL", ts(110))
+    assert g3 is not g and g3["count"] == 1
 
 
 def test_resonance_no_quota_without_scene():
-    """非场景运行（execute_signal 直调/纸交易，未激活场景）→ 额度机制不
-    生效（_round_buy_used 缺省 False），保持旧行为。"""
+    """非场景运行（execute_signal 直调/纸交易）→ 无共振组，不限制建仓。"""
     s = _make_strategy()
-    assert getattr(s, "_round_buy_used", False) is False
+    assert not getattr(s, "_wave_groups", {})
     s._evaluate_symbol()
     assert "order" in s._captured, "未激活场景不限制建仓"
 
@@ -1209,14 +1248,14 @@ def test_prefetch_slot_balances_snapshot_and_fail_closed(monkeypatch):
     TdSequentialStrategy._price_cache.clear()
 
 
-# ── 波锁容量 wave_max_buys（2026-10-31，high 1m 验证）───────────────
-# 原波锁固定「每波每场景全局 1 笔」，参数化后 wave_max_buys=N 允许同波
-# 最多 N 笔（默认 1 = 原行为零变化）。同标的仍受周期门控约束。
+# ── 共振组容量 wave_max_buys（2026-10-31 参数化，2026-11-02 改判据）──
+# 同一共振组（setup 周期区间相交的标的分组）内最多 N 笔，默认 1 = 原行为。
+# 独立周期自成一组、互不影响；同标的仍受周期门控约束。
 
 def test_wave_max_buys_default_one_blocks_second_buy(tmp_path):
-    """默认 N=1：波内已建 1 笔（计数=1）→ 其余标的仍被拦。"""
+    """默认 N=1：所属共振组已建 1 笔 → 本标的被拦。"""
     s = _resonance_strategy(tmp_path)
-    s._round_buy_used = {"default": 1}       # 波内已建 1 笔
+    _seed_full_group(s, count=1)
     s._wave_max_buys = 1
     s._evaluate_symbol()
     assert "order" not in s._captured, "N=1 时额度已满 → 不得建仓"
@@ -1224,7 +1263,7 @@ def test_wave_max_buys_default_one_blocks_second_buy(tmp_path):
 
 
 def test_wave_max_buys_two_allows_second_buy_in_same_wave(monkeypatch, tmp_path):
-    """N=2：波内已建 1 笔 → 本标的仍可建仓（额度未满）。"""
+    """N=2：同组已建 1 笔 → 本标的仍可建仓（额度未满）。"""
     from types import SimpleNamespace
 
     s = _resonance_strategy(tmp_path)
@@ -1235,7 +1274,7 @@ def test_wave_max_buys_two_allows_second_buy_in_same_wave(monkeypatch, tmp_path)
     monkeypatch.setattr(
         s, "_buy_on_slot", lambda slot, price, reason: (calls.append(slot) or (mo, 1.0))
     )
-    s._round_buy_used = {"default": 1}
+    _seed_full_group(s, count=1)
     s._wave_max_buys = 2
     s._evaluate_symbol()
     assert calls, "N=2 时额度未满 → 应尝试建仓"
@@ -1243,32 +1282,47 @@ def test_wave_max_buys_two_allows_second_buy_in_same_wave(monkeypatch, tmp_path)
 
 
 def test_wave_max_buys_three_blocks_fourth(tmp_path):
-    """N=3：已有 3 笔 → 第 4 笔被拦。"""
+    """N=3：同组已有 3 笔 → 第 4 笔被拦。"""
     s = _resonance_strategy(tmp_path)
-    s._round_buy_used = {"default": 3}
+    _seed_full_group(s, count=3)
     s._wave_max_buys = 3
     s._evaluate_symbol()
     assert "order" not in s._captured
 
 
 def test_wave_end_resets_counter_to_zero(tmp_path):
-    """波结束（所有标的 setup < entry_setup）→ 计数清 0（走真实 _activate_scene）。"""
+    """共振组内标的周期全归零 → 组过期、额度释放（走真实 _activate_scene）。"""
     s = _resonance_strategy(tmp_path)
-    s._round_buy_used = {"default": 3}
-    s._wave_tried = {("default", "AAPL"): True}
-    s._last_setup = {"default": {"AAPL": 3, "MSFT": 2}}   # 均 < 9 → 波结束
+    bar_ts = pd.Timestamp("2025-02-27")
+    s._wave_max_buys = 3
+    s._cycle_span = {
+        ("default", "AAPL"): {"start": bar_ts, "end": bar_ts, "closed": True},
+    }
+    s._wave_groups = {
+        "default": [{"start": bar_ts, "end": bar_ts, "count": 3,
+                     "symbols": {"AAPL"}}]
+    }
     s._activate_scene("default", {"params": {}})
-    assert s._round_buy_used["default"] == 0, "波结束应清零计数"
-    assert s._wave_tried == {}, "波结束应清 _wave_tried"
+    assert s._wave_groups.get("default") == [], "组内周期全 closed → 组应过期"
 
 
-def test_wave_max_buys_legacy_bool_true_still_blocks(tmp_path):
-    """向后兼容：旧代码/旧状态写入 True（bool）在 N=1 下仍视为已用 1 笔。"""
+def test_wave_group_ignores_legacy_round_buy_used(monkeypatch, tmp_path):
+    """旧状态（_round_buy_used / _wave_tried）不再参与判定——只看共振组。"""
+    from types import SimpleNamespace
+
     s = _resonance_strategy(tmp_path)
+    s._pending_buys = {}
+    s._is_cex = lambda: True
+    mo = SimpleNamespace(is_filled=lambda: False, custom_params=None, identifier="oid-1")
+    calls: list[int] = []
+    monkeypatch.setattr(
+        s, "_buy_on_slot", lambda slot, price, reason: (calls.append(slot) or (mo, 1.0))
+    )
     s._round_buy_used = {"default": True}
+    s._wave_tried = {("default", "AAPL"): True}
     s._wave_max_buys = 1
     s._evaluate_symbol()
-    assert "order" not in s._captured
+    assert calls, "旧波锁属性残留不应再拦建仓"
 
 
 def test_activate_scene_reads_wave_max_buys_from_scene(tmp_path):

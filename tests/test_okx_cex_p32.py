@@ -252,9 +252,6 @@ def test_activate_scene_clears_shared_pool_cache():
     """每轮场景激活清空缓存（跨轮不复用旧余额）。"""
     st = _strategy({"channel_family": "cex", "slot_model": "shared_pool"})
     st._sp_balances = {"okx_a": {"USDT": {"available": 1.0}}}
-    st._round_buy_used = {}
-    st._last_setup = {}
-    st._wave_tried = {}
     st._td_params = {"entry_setup": 9}
 
     # 只验证清理动作（_activate_scene 其余分支需要完整运行时，这里直接调用
