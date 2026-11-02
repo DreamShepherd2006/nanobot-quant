@@ -24,8 +24,12 @@ import time
 THROTTLE_S = 3600
 
 #: 视为「无动作」的状态前缀（真实动作不在其中 ⇒ 一律落盘）
+#: 2026-11-02 新增 ``ema_blocked``：EMA 折价入场门拦截（每轮每标的都会
+#: 命中一次，不降噪就是 1m 循环下的刷屏）。前缀机制保证 ``status`` 不同
+#: 的 WAIT 各自占一个降噪键，不会一个把另一个挤掉。
 NO_ACTION_PREFIXES = ("skipped", "failed", "pending_confirm", "dry_run",
-                      "no_action", "no_signal", "cycle_wait")
+                      "no_action", "no_signal", "cycle_wait",
+                      "ema_blocked")
 
 _lock = threading.Lock()
 _last: dict[tuple[str, str, str], float] = {}

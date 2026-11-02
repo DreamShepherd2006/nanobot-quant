@@ -921,8 +921,8 @@ def _fmt_qty(q) -> str:
         return "—"
     if v <= 0:
         return "—"
-    txt = f"{v:.12f}".rstrip("0").rstrip(".")
-    return txt or "0"
+    from nanobot_quant.number_fmt import fmt_decimal
+    return fmt_decimal(v)
 
 
 def _fmt_pos_price(v) -> str:
@@ -1446,12 +1446,14 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f'<td class="num">{_fmt_price(e.get("price"))}</td>'
             f'<td class="num">{_actual_price_cell(e.get("actual_price"))}</td>'
             f'<td class="num">{_slip_cell(e.get("actual_price"), e.get("price"))}</td>'
+            f'<td class="num">{_pnl_cell(e.get("pnl_net_ratio"))}</td>'
+            f'<td class="num">{_pnl_usd_cell(e.get("pnl_net_usd"))}</td>'
             f'<td class="num">{slot_txt}</td>'
             f'<td style="color:{color}"><b>{badge} {_esc(str(e.get("event", "")))}</b></td>'
             f'<td class="note">{_esc(str(e.get("note", "")))}</td></tr>'
         )
     if not tr_rows:
-        tr_rows = ('<tr><td colspan="12" class="muted" style="text-align:left">'
+        tr_rows = ('<tr><td colspan="14" class="muted" style="text-align:left">'
                    '暂无交易记录（买卖信号出现后显示）</td></tr>')
 
     tq = tq or {}
@@ -1507,7 +1509,7 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
         f'<h4 style="margin:18px 0 8px">📊 交易记录（最近 {tr_n} 条）</h4>'
         f'{trade_form}'
         '<table>'
-        '<tr><th>tx_hash</th><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>原因</th></tr>'
+        '<tr><th>tx_hash</th><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>净收益率</th><th>盈亏(USD)</th><th>slot</th><th>状态</th><th>原因</th></tr>'
         f'{tr_rows}'
         '</table>'
         f'<h4 style="margin:18px 0 8px">📜 信号历史（最近 {sq_n} 条）</h4>'
@@ -1956,3 +1958,31 @@ def _slip_cell(ap, strat_p) -> str:
     if ap_f <= 0 or sp_f <= 0:
         return "—"
     return f"{(ap_f - sp_f) / sp_f * 100:+.2f}%"
+
+
+def _pnl_cell(ratio) -> str:
+    """净收益率单元格（2026-11-02）：卖出事件冻结写入的 ``pnl_net_ratio``。
+
+    口径 = 成交价 × (1 − fee_rate) / 入场价 − 1（已扣双边手续费）。
+    缺失（买入行 / 非真实成交 / 历史事件）→ —；正绿负红。
+    """
+    try:
+        if ratio is None:
+            return "—"
+        f = float(ratio) * 100
+    except (TypeError, ValueError):
+        return "—"
+    color = "#1b7f3d" if f >= 0 else "#b3261e"
+    return f'<span style="color:{color};font-weight:600">{f:+.2f}%</span>'
+
+
+def _pnl_usd_cell(usd) -> str:
+    """净盈亏金额单元格（2026-11-02）：``pnl_net_usd`` 四位定点，负红。"""
+    try:
+        if usd is None:
+            return "—"
+        f = float(usd)
+    except (TypeError, ValueError):
+        return "—"
+    color = "#1b7f3d" if f >= 0 else "#b3261e"
+    return f'<span style="color:{color}">{f:+.4f}</span>'
