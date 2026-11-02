@@ -848,6 +848,46 @@ class TdSequentialStrategy(Strategy):
                 file=sys.stderr, flush=True,
             )
 
+    @staticmethod
+    def _fmt_num(v) -> str:
+        """定点格式化数量（禁科学计数法，2026-11-02 用户偏好）。
+
+        ``:.6g`` 会把 0.00005115452 打成 ``5.11545e-05``——交易记录
+        「数量」列早已定点显示，事件「原因」文案却还是 e 计数法，
+        同一数字两种写法。实现与展示层共用 ``number_fmt.fmt_decimal``。
+        """
+        from nanobot_quant.number_fmt import fmt_decimal
+        return fmt_decimal(v)
+
+    def _exit_pnl_fields(self, extra: dict) -> dict:
+        """卖出事件的净收益率与净盈亏（2026-11-02）。
+
+        口径：``净收益率 = 成交价 × (1 − fee_rate) / 入场价 − 1``。
+        入场价取批次台账 ``entry_price``（CEX 为含费摊薄均价），卖出侧
+        手续费从所得计价币扣。值在写事件时冻结——历史数字不随日后
+        ``fee_rate`` 调整而漂移；缺 entry_price / 成交价则不写字段
+        （展示为 —，历史事件同样显示 —，不回填）。
+        """
+        try:
+            ep_f = float(extra.get("entry_price") or 0)
+            px_f = float(extra.get("actual_price") or extra.get("price") or 0)
+        except (TypeError, ValueError):
+            return extra
+        if ep_f <= 0 or px_f <= 0:
+            return extra
+        fee = float(getattr(self, "_fee_rate", 0.001) or 0.0)
+        net_px = px_f * (1.0 - fee)
+        out = dict(extra)
+        out["entry_price"] = ep_f
+        out["pnl_net_ratio"] = net_px / ep_f - 1.0
+        try:
+            q = float(extra.get("qty") or 0)
+        except (TypeError, ValueError):
+            q = 0.0
+        if q > 0:
+            out["pnl_net_usd"] = q * (net_px - ep_f)
+        return out
+
     def _record(self, event: str, note: str = "", *, symbol=None, **extra) -> None:
         """更新实时状态 signal + 追加事件历史（仅 live 模式写文件）。
 
@@ -881,6 +921,8 @@ class TdSequentialStrategy(Strategy):
                 td_live_state.update_symbol(sym, {
                     **sig, "signal": event, "note": note,
                 }, scene=getattr(self, "_current_scene", "") or "")
+                if event == "EXIT":
+                    extra = self._exit_pnl_fields(extra)
                 td_live_state.append_event({
                     "symbol": sym, "event": event, "note": note,
                     "scene": getattr(self, "_current_scene", "") or "",
@@ -1558,7 +1600,7 @@ class TdSequentialStrategy(Strategy):
                         )
                         self._record(
                             "LONG",
-                            f"slot={slot['slot']} qty={lot_qty:.6g} price={price:.2f}",
+                            f"slot={slot['slot']} qty={self._fmt_num(lot_qty)} price={price:.2f}",
                             slot=slot["slot"], qty=lot_qty, price=price,
                             direction="buy", status="ok",
                             actual_price=self._cex_avg_price(order),
@@ -1610,7 +1652,7 @@ class TdSequentialStrategy(Strategy):
                     )
                     self._record(
                         "LONG_PENDING",
-                        f"slot={slot['slot']} qty={qty:.6g} price={price:.2f}",
+                        f"slot={slot['slot']} qty={self._fmt_num(qty)} price={price:.2f}",
                         slot=slot["slot"], qty=qty, price=price,
                         direction="buy", status="pending",
                         tx_hash=pend.get("tx_hash", ""),
@@ -1658,7 +1700,7 @@ class TdSequentialStrategy(Strategy):
                 )
                 self._record(
                     "LONG",
-                    f"qty={req.quantity:.6g} price={price:.2f}",
+                    f"qty={self._fmt_num(req.quantity)} price={price:.2f}",
                 )
                 st["bought"] = True
                 st["reset"] = False
@@ -1707,7 +1749,7 @@ class TdSequentialStrategy(Strategy):
                 )
                 self._record(
                     "EXIT",
-                    f"{exit_reason} qty={req.quantity:.6g} price={price:.2f}",
+                    f"{exit_reason} qty={self._fmt_num(req.quantity)} price={price:.2f}",
                 )
                 return
 
@@ -2065,7 +2107,7 @@ class TdSequentialStrategy(Strategy):
                     qty = sell_qty
                     self._record(
                         "EXIT_SHRINK",
-                        f"slot={slot['slot']} 台账 {qty:.6g} 链上 {bal:.6f} → 缩量",
+                        f"slot={slot['slot']} 台账 {self._fmt_num(qty)} 链上 {bal:.6f} → 缩量",
                     )
             req = self._portfolio.build_sell_order(
                 self.symbol, price, exit_reason,
@@ -2098,8 +2140,9 @@ class TdSequentialStrategy(Strategy):
                 )
                 self._record(
                     "EXIT",
-                    f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                    f"slot={slot['slot']} {exit_reason} qty={self._fmt_num(qty)} price={price:.2f}",
                     slot=slot["slot"], qty=qty, price=price,
+                    entry_price=lot.get("entry_price"),
                     direction="sell", status="ok",
                     tx_hash=((order.custom_params or {}).get("onchain_pending") or {}).get("tx_hash", ""),
                     chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
@@ -2115,6 +2158,7 @@ class TdSequentialStrategy(Strategy):
                 "chain": pend.get("chain", ""),
                 "qty": qty,
                 "price": price,
+                "entry_price": lot.get("entry_price"),
                 "exit_reason": exit_reason,
                 "account_id": slot.get("account_id", ""),
                 "symbol": self.symbol,
@@ -2125,7 +2169,7 @@ class TdSequentialStrategy(Strategy):
             )
             self._record(
                 "EXIT_PENDING",
-                f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                f"slot={slot['slot']} {exit_reason} qty={self._fmt_num(qty)} price={price:.2f}",
                 slot=slot["slot"], qty=qty, price=price,
                 direction="sell", status="pending",
                 tx_hash=pend.get("tx_hash", ""),
@@ -2227,7 +2271,7 @@ class TdSequentialStrategy(Strategy):
                         if bal >= 0 and bal <= info.get("qty", 0) * 0.1:
                             self.logger.info(
                                 f"TD PENDING BALANCE CONFIRM | slot={slot_id} "
-                                f"链上余额 {bal:.6g} ≤ 残留 {info['qty'] * 0.1:.6g} → 卖出成交"
+                                f"链上余额 {self._fmt_num(bal)} ≤ 残留 {self._fmt_num(info['qty'] * 0.1)} → 卖出成交"
                             )
                             status = "SUCCESS"
                 if status == "SUCCESS":
@@ -2242,10 +2286,11 @@ class TdSequentialStrategy(Strategy):
                     )
                     self._record(
                         "EXIT",
-                        f"slot={slot_id} 链上确认平仓 qty={info['qty']:.6g}",
+                        f"slot={slot_id} 链上确认平仓 qty={self._fmt_num(info['qty'])}",
                         symbol=info.get("symbol", self.symbol),
                         slot=slot_id, qty=info.get("qty", 0),
                         price=info.get("price", 0),
+                        entry_price=info.get("entry_price"),
                         actual_price=self._actual_price_from_st(st),
                         direction="sell", status="ok",
                         tx_hash=self._confirmed_tx_hash(info, st),
@@ -2333,13 +2378,13 @@ class TdSequentialStrategy(Strategy):
                         if bal >= info.get("qty", 0) * 0.9:
                             self.logger.info(
                                 f"TD PENDING BALANCE CONFIRM | slot={slot_id} "
-                                f"链上余额 {bal:.6g} ≥ 预期 {info['qty']:.6g} → 成交"
+                                f"链上余额 {self._fmt_num(bal)} ≥ 预期 {self._fmt_num(info['qty'])} → 成交"
                             )
                             status = "SUCCESS"
                         elif bal >= 0:
                             self.logger.info(
                                 f"TD PENDING BALANCE | slot={slot_id} "
-                                f"链上余额 {bal:.6g}（预期 {info['qty']:.6g}）未确认"
+                                f"链上余额 {self._fmt_num(bal)}（预期 {self._fmt_num(info['qty'])}）未确认"
                             )
                 if status == "SUCCESS":
                     bm = self._batch_managers.get(
@@ -2355,7 +2400,7 @@ class TdSequentialStrategy(Strategy):
                         )
                         self._record(
                                 "LONG",
-                                f"slot={slot_id} 链上确认建仓 qty={info['qty']:.6g}",
+                                f"slot={slot_id} 链上确认建仓 qty={self._fmt_num(info['qty'])}",
                                 symbol=info.get("symbol", self.symbol),
                                 slot=slot_id, qty=info.get("qty", 0),
                                 price=info.get("price", 0),
@@ -2445,13 +2490,14 @@ class TdSequentialStrategy(Strategy):
             bm.save()
             self.logger.info(
                 f"TD BATCH EXIT (CEX CONFIRM) | symbol={symbol} slot={slot_id} "
-                f"qty={info.get('qty', 0):.6g} avg={avg}"
+                f"qty={self._fmt_num(info.get('qty', 0))} avg={avg}"
             )
             self._record(
                 "EXIT",
-                f"slot={slot_id} CEX 确认平仓 qty={info.get('qty', 0):.6g}",
+                f"slot={slot_id} CEX 确认平仓 qty={self._fmt_num(info.get('qty', 0))}",
                 symbol=symbol, slot=slot_id, qty=info.get("qty", 0),
                 price=info.get("price", 0),
+                entry_price=info.get("entry_price"),
                 actual_price=avg or None,
                 direction="sell", status="ok",
             )
@@ -2471,7 +2517,7 @@ class TdSequentialStrategy(Strategy):
         else:
             self.logger.info(
                 f"TD PENDING CHECK | slot={slot_id} symbol={symbol} CEX {status} "
-                f"filled={filled:.6g}"
+                f"filled={self._fmt_num(filled)}"
             )
 
     def _confirm_cex_buy(self, slot_id: int, info: dict) -> None:
@@ -2513,11 +2559,11 @@ class TdSequentialStrategy(Strategy):
             bm.save()
             self.logger.info(
                 f"TD BATCH LONG (CEX CONFIRM) | symbol={symbol} slot={slot_id} "
-                f"qty={qty:.6g} price={info.get('price', 0):.2f} avg={avg}"
+                f"qty={self._fmt_num(qty)} price={info.get('price', 0):.2f} avg={avg}"
             )
             self._record(
                 "LONG",
-                f"slot={slot_id} CEX 确认建仓 qty={qty:.6g}",
+                f"slot={slot_id} CEX 确认建仓 qty={self._fmt_num(qty)}",
                 symbol=symbol, slot=slot_id, qty=qty,
                 price=info.get("price", 0),
                 actual_price=avg or None,
@@ -2539,7 +2585,7 @@ class TdSequentialStrategy(Strategy):
         else:
             self.logger.info(
                 f"TD PENDING CHECK | slot={slot_id} symbol={symbol} CEX {status} "
-                f"filled={filled:.6g}"
+                f"filled={self._fmt_num(filled)}"
             )
 
     # ── 真分账 v1.1：子钱包 switch / 资金检查 / 还原 ────────────────
@@ -3326,7 +3372,7 @@ class TdSequentialStrategy(Strategy):
                 )
                 self._record(
                     "EXIT_SHRINK",
-                    f"slot={slot['slot']} 台账 {lot['qty']:.6g} 子账号 {bal:.6f} → 缩量",
+                    f"slot={slot['slot']} 台账 {self._fmt_num(lot['qty'])} 子账号 {bal:.6f} → 缩量",
                 )
             # B 方案（2026-08-26 用户拍板）：卖出价值 < Gate min_quote →
             # 释放台账不卖——服务端会拒单（below min order amount）→
@@ -3393,8 +3439,9 @@ class TdSequentialStrategy(Strategy):
                 )
                 self._record(
                     "EXIT",
-                    f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                    f"slot={slot['slot']} {exit_reason} qty={self._fmt_num(qty)} price={price:.2f}",
                     slot=slot["slot"], qty=qty, price=price,
+                    entry_price=lot.get("entry_price"),
                     direction="sell", status="ok",
                     actual_price=self._cex_avg_price(order),
                 )
@@ -3405,6 +3452,7 @@ class TdSequentialStrategy(Strategy):
                 "order_id": order.identifier,
                 "qty": qty,
                 "price": price,
+                "entry_price": lot.get("entry_price"),
                 "exit_reason": exit_reason,
                 "account_id": slot.get("account_id", ""),
                 "symbol": self.symbol,
@@ -3416,7 +3464,7 @@ class TdSequentialStrategy(Strategy):
             )
             self._record(
                 "EXIT_PENDING",
-                f"slot={slot['slot']} {exit_reason} qty={qty:.6g} price={price:.2f}",
+                f"slot={slot['slot']} {exit_reason} qty={self._fmt_num(qty)} price={price:.2f}",
                 slot=slot["slot"], qty=qty, price=price,
                 direction="sell", status="pending",
             )
