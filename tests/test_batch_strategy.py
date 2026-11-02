@@ -20,17 +20,19 @@ from nanobot_quant.batches import BatchManager
 from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
 
 
-def _bars_with(closes: list[float]):
+def _bars_with(closes: list[float], start: str = "2025-01-01"):
     from lumibot.entities import Bars
 
     # 小写列 = lumibot v4.5.78 Bars 契约（Bars.__init__ 访问 df["close"] 派生
     # return 列）；CexDataSource 修复后输出小写列，测试 mock 须同契约
     # （2026-08-17 A 修复）。
+    # start 参数（2026-11-02）：模拟“新信号周期”时必须让 bar 时间戳单调推进——
+    # 共振组按 setup 周期区间相交分组，时间戳回退会把新周期误判为旧组内。
     df = pd.DataFrame(
         {"open": closes, "high": [c + 1 for c in closes],
          "low": [c - 1 for c in closes], "close": closes,
          "volume": [1_000_000] * len(closes)},
-        index=pd.date_range("2025-01-01", periods=len(closes), freq="D"),
+        index=pd.date_range(start, periods=len(closes), freq="D"),
     )
     return Bars(df, "ONCHAIN", None)
 
@@ -131,9 +133,10 @@ def test_batch_buy_accumulates_multiple_lots(tmp_path):
     assert "order" not in s._captured
     assert len(bm.open_slots()) == 1
     # 新周期：setup 计数归小（reset）后再触发 → 允许建第二个
-    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)])
+    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)],
+                         start="2025-06-01")
     s.on_trading_iteration()  # 中性 60 根 → setup_buy=0 → reset=True
-    s._bars = _bars_with(_buy_closes())
+    s._bars = _bars_with(_buy_closes(), start="2025-08-01")
     s._captured.clear()
     s.on_trading_iteration()
     assert "order" in s._captured
@@ -400,9 +403,10 @@ def test_batch_slot_reuse_after_close(tmp_path):
     assert "order" not in s._captured
     assert bm.slots[0]["status"] == "available"
     # 新周期：setup 归小后重新触发 → 复用 slot 1
-    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)])
+    s._bars = _bars_with([100.0 + (i % 2) * 2 for i in range(60)],
+                         start="2025-06-01")
     s.on_trading_iteration()  # 中性 60 根 → reset=True
-    s._bars = _bars_with(_buy_closes())
+    s._bars = _bars_with(_buy_closes(), start="2025-08-01")
     s._captured.clear()
     s.on_trading_iteration()
     assert "order" in s._captured
