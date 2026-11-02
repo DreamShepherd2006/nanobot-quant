@@ -20,7 +20,7 @@ import json
 import os
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from .exec_params import (
     DEFAULT_SCENES,
@@ -696,6 +696,31 @@ def register_exec_params_routes(app, gatekeeper) -> None:
     Called by nanobot-legion gatekeeper_routes.py during app creation.
     """
 
+    async def _params_md(request: Request):
+        """当前配置的 markdown 快照（2026-11-02）。
+
+        页面「📋 复制参数 Markdown」按钮取它；也可直接在浏览器打开
+        ``/config/exec/params.md`` 手动复制。
+
+        ``render_exec_params_md`` 里的交易对解析会调 OKX 公共接口（600s 缓存），
+        同步执行会堵住事件循环 —— 一律丢进线程池。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return PlainTextResponse(
+                f"🔒 {err}",
+                status_code=403 if "Commander" in err else 401,
+            )
+        try:
+            from .exec_params_markdown import render_exec_params_md
+
+            md = await asyncio.to_thread(render_exec_params_md, load_exec_params())
+        except Exception as e:  # noqa: BLE001 — 快照失败要说原因，不能给空白
+            return PlainTextResponse(
+                f"生成参数快照失败：{type(e).__name__}: {e}", status_code=500
+            )
+        return PlainTextResponse(md, media_type="text/markdown; charset=utf-8")
+
     async def _page(request: Request):
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -759,3 +784,5 @@ def register_exec_params_routes(app, gatekeeper) -> None:
 
     app.add_route("/config/exec", _page, methods=["GET"])
     app.add_route("/config/exec", _save, methods=["POST"])
+    # 2026-11-02：参数 markdown 快照（只读；页面「📋 复制参数」按钮取它）
+    app.add_route("/config/exec/params.md", _params_md, methods=["GET"])

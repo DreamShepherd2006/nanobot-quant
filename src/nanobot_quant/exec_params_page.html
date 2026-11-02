@@ -62,6 +62,11 @@
 {banner}
 {msg}
 
+<div class="actions" style="margin:0 0 12px;">
+  <button class="btn-outline" id="btn-md">📋 复制参数 Markdown</button>
+  <span id="md-msg" style="font-size:.85em;color:#666;"></span>
+</div>
+
 <div class="note">
   <strong>控制面设计</strong>：<code>portfolio_value</code> / <code>quantity</code> 属调用级参数（每次交易声明），保留在 MCP；
   此处系统级参数仅由本页修改。<code>max_position_pct</code> / <code>slippage</code> / <code>sol_buffer_pct</code> 实盘真实生效；
@@ -84,6 +89,27 @@
 <script>
 (function () {
   const msg = document.getElementById('msg');
+
+  // 2026-11-02：把当前配置渲染成 markdown 复制到剪贴板（排查时直接粘贴）。
+  // 取服务端渲染（PARAM_META 单一来源），不在前端拼字段——否则新增参数
+  // 要在两处维护，迟早漏。
+  const btnMd = document.getElementById('btn-md');
+  if (btnMd) {
+    btnMd.addEventListener('click', async function () {
+      const tip = document.getElementById('md-msg');
+      try {
+        const r = await fetch('/config/exec/params.md', { credentials: 'same-origin' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const t = await r.text();
+        await navigator.clipboard.writeText(t);
+        tip.textContent = '✅ 已复制 ' + t.length + ' 字符，可直接粘贴';
+        tip.style.color = '#2e7d32';
+      } catch (e) {
+        tip.textContent = '❌ 复制失败：' + e.message + '（可打开 /config/exec/params.md 手动复制）';
+        tip.style.color = '#c62828';
+      }
+    });
+  }
 
   function movePoolRow(row, dir) {
     // ↑↓ 调整标的池优先级：交换 pool-row DOM 位置，保存时 collect()
