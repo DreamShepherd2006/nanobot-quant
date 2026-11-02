@@ -1399,11 +1399,25 @@ class TdSequentialStrategy(Strategy):
                 elif price > _ema_val * (1.0 - _off / 100.0):
                     entry_ema_blocked = True
                     self._bump_skip("entry_ema")
+                    _need = _ema_val * (1.0 - _off / 100.0)
+                    _gap_pct = (1.0 - _need / price) * 100.0 if price > 0 else 0.0
                     print(
                         f"[TD] ENTRY EMA BLOCK | symbol={self.symbol} "
                         f"price={price} ema{_n}={_ema_val:.8f} "
-                        f"need<={_ema_val * (1.0 - _off / 100.0):.8f} (off={_off}%)",
+                        f"need<={_need:.8f} (off={_off}%)",
                         file=sys.stderr, flush=True,
+                    )
+                    # 2026-11-02：拦截原因写入事件（信号历史可见）。
+                    # 之前只有 stderr print——「有信号没买」在页面上完全看不到，
+                    # 与周期门控/波锁/资金不足（都写 WAIT/SKIP）不一致。
+                    # status 用 ema_blocked 单独开封，避免与其他 WAIT 共用
+                    # 降噪键（inst_id, type, status）而互相挤掉。
+                    self._record(
+                        "WAIT",
+                        f"EMA 折价门 price={price:.2f} ema{_n}={_ema_val:.2f} "
+                        f"需≤{_need:.2f}（还需跌 {_gap_pct:.2f}%）",
+                        symbol=self.symbol,
+                        status="ema_blocked",
                     )
             except Exception as e:  # noqa: BLE001 — 数据异常不拦单
                 self._bump_skip("entry_ema_na")
