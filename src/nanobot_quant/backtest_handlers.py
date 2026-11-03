@@ -91,6 +91,8 @@ _OV_FIELDS: dict[str, tuple] = {
     "entry_ema_enabled": ("scene", None, False),
     "entry_ema_period": ("scene", None, 610),
     "entry_ema_offset_pct": ("scene", None, 0.1),
+    # 加仓最小间距闸（2026-11-03）：场景级，0=关、只拦 BUY。
+    "entry_min_gap_pct": ("scene", None, 0.0),
 }
 
 
@@ -207,6 +209,8 @@ _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
     "stop_loss_pct", "take_profit_pct", "min_account_value",
     "entry_ema_offset_pct",
+    # 加仓最小间距闸（2026-11-03）
+    "entry_min_gap_pct",
 }
 _OV_BOOL = {
     "momentum_exit", "td_sell_all", "cd_exit_all",

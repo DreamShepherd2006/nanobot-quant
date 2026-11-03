@@ -198,6 +198,7 @@
       <div class="ov-item"><label for="entry_ema_enabled">📉 EMA 折价入场门</label><select id="entry_ema_enabled"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">只拦 BUY：收盘需低于 EMA×(1−偏移%)；与上面的趋势闸门判斜率不同口径</span></div>
       <div class="ov-item"><label for="entry_ema_period">折价门 EMA 周期</label><select id="entry_ema_period"><option value="">（跟随场景/610）</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option><option value="8">8</option><option value="13">13</option><option value="21">21</option><option value="34">34</option><option value="55">55</option><option value="89">89</option><option value="144">144</option><option value="233">233</option><option value="377">377</option><option value="610">610</option><option value="987">987</option><option value="1597">1597</option></select><span class="f-hint">斐波那契族；1/2/3 贴近现价、几乎恒拦（只适合调试）</span></div>
       <div class="ov-item"><label for="entry_ema_offset_pct">折价偏移(%)</label><input type="number" id="entry_ema_offset_pct" min="0" max="5" step="0.05" placeholder="场景值"><span class="f-hint">收盘 ≤ EMA×(1−x%) 才放行买9</span></div>
+      <div class="ov-item"><label for="entry_min_gap_pct">📐 加仓最小间距(%)</label><input type="number" id="entry_min_gap_pct" min="0" max="10" step="0.05" placeholder="场景值/0=关"><span class="f-hint">有持仓时新买价须比「最低成本」再低 x% 才建仓；只拦 BUY</span></div>
       <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
       <div class="ov-item"><label for="ema_compare">两臂对照</label><label style="display:flex;gap:4px;align-items:center;font-weight:400;"><input type="checkbox" id="ema_compare" checked> 同时跑无闸门基线</label><span class="f-hint">耗时 ×2；仅展示、禁配对推断</span></div>
     </div>
@@ -423,7 +424,8 @@ const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd
   "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
   "momentum_exit","td_sell_all","cd_exit_all",
   "gate_enabled","gate_red_min",
-  "entry_ema_enabled","entry_ema_period","entry_ema_offset_pct"];
+  "entry_ema_enabled","entry_ema_period","entry_ema_offset_pct",
+  "entry_min_gap_pct"];
 
 function sceneValue(scene, key) {
   const cfg = SCENES[scene] || {};
@@ -491,7 +493,8 @@ function collectOverrides() {
     "exit_setup","exit_countdown","min_hold_bars",
     "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
-    "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct"];
+    "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct",
+    "entry_min_gap_pct"];
   numKeys.forEach(id => {
     const el = $(id);
     if (!el) return;
@@ -631,6 +634,7 @@ function paramsRows(res) {
     ["建仓起始批次", cfg.td_start_slot ?? "—"],
     ["子账户最小资金", cfg.min_account_value != null ? `${cfg.min_account_value} USD` : "—"],
     ["EMA 折价入场门", cfg.entry_ema_enabled ? `开（n=${cfg.entry_ema_period ?? "—"}，偏移 ${cfg.entry_ema_offset_pct ?? "—"}%，预热 ${cfg.entry_ema_warmup ?? "—"} 根）` : "关"],
+    ["加仓最小间距", (cfg.entry_min_gap_pct ?? 0) > 0 ? `${cfg.entry_min_gap_pct}%（有持仓时新买价须比最低成本再低该幅度）` : "关"],
   ];
   return rows
     .map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`)

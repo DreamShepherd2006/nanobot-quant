@@ -236,6 +236,12 @@ class BacktestDriver:
             else 0
         )
         self.warmup_bars = max(self.ema_warmup, self.entry_ema_warmup)
+        # 加仓最小间距闸（2026-11-03）：纯判定、不需要额历史，默认 0=关。
+        # 覆盖优先级 = 本次回测覆盖 > 场景配置 > 全局默认（与其余入场门同规）。
+        _eg = self._merged_params.get("entry_min_gap_pct")
+        if _eg is None:
+            _eg = self.params.get("entry_min_gap_pct")
+        self.entry_min_gap_pct = float(_eg) if _eg is not None else 0.0
         # 进度写盘节流（2026-11-01）：重放循环曾每 bar 无条件把 payload（含
         # 逐 bar 明细）序列化写盘到 /data（FUSE 网络卷）——累计量 O(n²)，
         # 1440 根 bar 实测写 ~200MB、回测耗时翻倍以上。改为同一阶段内最多
@@ -397,6 +403,9 @@ class BacktestDriver:
                 "entry_ema_enabled": self.entry_ema_enabled,
                 "entry_ema_period": self.entry_ema_n,
                 "entry_ema_offset_pct": self.entry_ema_offset_pct,
+                # 加仓最小间距闸（2026-11-03，回测侧）——同样必须显式注入，
+                # 否则策略读类默认值 0 ⇒ 回测里恒关（死门缺陷）。
+                "entry_min_gap_pct": self.entry_min_gap_pct,
                 "channel_family": "cex",  # Step 3 回测撮合对齐 CexBroker（USDT）
                 # 与 td_live 同一桥接模式：数据源契约从 broker.data_source 读
                 "drops_in_progress_bars": bool(
@@ -983,6 +992,8 @@ class BacktestDriver:
                 "entry_ema_period": self.entry_ema_n,
                 "entry_ema_offset_pct": self.entry_ema_offset_pct,
                 "entry_ema_warmup": self.entry_ema_warmup,
+                # 加仓最小间距闸（2026-11-03）：0=关。
+                "entry_min_gap_pct": self.entry_min_gap_pct,
                 "bars_mode": self.bars_mode,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）
