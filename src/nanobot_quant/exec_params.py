@@ -95,6 +95,8 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "td_sell_all", "cd_exit_min_profit", "cd_exit_all", "cd_entry_setup_gap",
     # EMA 折价入场门（2026-11-01）——场景专属，无扁平键
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
+    # 加仓最小间距闸（2026-11-03）——场景专属、默认 0=关
+    "entry_min_gap_pct",
     # 共振错峰波锁容量（2026-11-01 用户拍板上实盘、默认 1）
     "wave_max_buys",
 )
@@ -107,6 +109,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "entry_setup", "entry_countdown", "cd_entry_setup_gap",
     # EMA 折价入场门（默认关；周期下拉 21~1597）
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
+    # 加仓最小间距闸（2026-11-03，默认 0=关）
+    "entry_min_gap_pct",
     "exit_setup", "exit_countdown",
     "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
@@ -130,6 +134,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
+        "entry_min_gap_pct": 0.0,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
@@ -148,6 +153,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
+        "entry_min_gap_pct": 0.0,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
@@ -166,6 +172,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
+        "entry_min_gap_pct": 0.0,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
@@ -471,6 +478,15 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "min": 0.0, "max": 5.0, "step": 0.01, "std": 0.1,
         "label": "EMA 折价偏移(%)",
         "hint": "要求收盘价低于 EMA 的幅度（%）：0=只要在均线下方即可，0.1=必须低 0.1% 以上",
+    },
+    # ── 加仓最小间距闸（2026-11-03，默认 0=关）──────────────────────
+    "entry_min_gap_pct": {
+        "group": "scene", "min": 0.0, "max": 10.0, "step": 0.05, "std": 0.0,
+        "label": "加仓最小间距(%)",
+        "hint": "该标的有 open 批次时，新买入价必须比「现有批次里最低成本」再低 N% 才建仓；"
+                "0=关闭（零行为变化）。只拦 BUY（setup 与 cd 两通道），SELL/止损/止盈不受影响；"
+                "无持仓时不受限。动因：缓跌中 setup 反复重置会让同价位反复建仓，"
+                "摊薄收益 < 手续费（2026-11-02 实盘 BTC 5 笔挤在 0.11% 带宽内）",
     },
     "wave_max_buys": {
         "group": "scene", "min": 1, "max": 10, "step": 1, "std": 1, "integer": True,

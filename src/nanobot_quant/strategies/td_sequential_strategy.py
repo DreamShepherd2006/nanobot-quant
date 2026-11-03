@@ -99,6 +99,10 @@ class TdSequentialStrategy(Strategy):
         "entry_ema_enabled": False,
         "entry_ema_period": 610,      # 斐波那契族，WebUI 下拉选择
         "entry_ema_offset_pct": 0.1,  # 折价偏移（%）：收盘必须低于 EMA 该幅度以上
+        # 加仓最小间距闸（2026-11-03）：默认 0=关 → 零行为变化。
+        # 开启后，该标的已有 open 批次时新买入价必须比「现有批次最低成本」
+        # 再低 N%（price ≤ min_cost × (1−N%)）才建仓；无持仓不受限。
+        "entry_min_gap_pct": 0.0,
         **DEFAULT_TD_PARAMS,
     }
 
@@ -838,6 +842,12 @@ class TdSequentialStrategy(Strategy):
         self._entry_ema_offset_pct = float(
             _sc_off if _sc_off is not None
             else self.parameters.get("entry_ema_offset_pct", 0.1) or 0.0
+        )
+        # 加仓最小间距闸（2026-11-03）：场景值优先，留空回退全局 parameters（默认 0=关）
+        _sc_gap = p.get("entry_min_gap_pct")
+        self._entry_min_gap_pct = float(
+            _sc_gap if _sc_gap is not None
+            else self.parameters.get("entry_min_gap_pct", 0.0) or 0.0
         )
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
         # 缺省 None → 保留全局 td_params（td_live 构造 parameters 时已 merge），
@@ -1594,6 +1604,49 @@ class TdSequentialStrategy(Strategy):
                 f"{','.join(sorted(_wgroup['symbols']))}；等重置后新周期）",
                 symbol=self.symbol,
             )
+        # ── 加仓最小间距闸（2026-11-03，实盘 + 回测同函数）──
+        # 语义：该标的已有 open 批次时，新买入价必须比「现有批次里最低的
+        # entry_price」再低 >= gap%（price <= min_cost * (1-gap%)）。
+        # 动因：缓跌中 setup 反复 9->0 重置，周期门控每次放行，同一价格带上
+        # 反复建仓；摊薄收益 < 手续费（11-02 实盘 BTC 5 笔挤在 0.11% 带宽内）。
+        # 边界：只拦 BUY（setup 与 cd 两通道走同一 if 链）；无持仓放行；
+        #       台账异常 fail-open + 计数；SELL/止损/止盈不碰。
+        entry_gap_blocked = False
+        if getattr(self, "_entry_min_gap_pct", 0.0) > 0 and buy_signal:
+            try:
+                _min_cost = self._min_open_cost(batch_manager)
+                if _min_cost and _min_cost > 0:
+                    _gap = float(self._entry_min_gap_pct)
+                    _need = _min_cost * (1.0 - _gap / 100.0)
+                    if price > _need:
+                        entry_gap_blocked = True
+                        self._bump_skip("entry_gap")
+                        _short_pct = (price / _need - 1.0) * 100.0
+                        print(
+                            f"[TD] ENTRY GAP BLOCK | symbol={self.symbol} "
+                            f"price={price} min_cost={_min_cost} "
+                            f"need<={_need:.8f} (gap={_gap}% "
+                            f"还需跌 {_short_pct:.3f}%)",
+                            file=sys.stderr, flush=True,
+                        )
+                        # 拦截写事件（不能只 print）：与周期门控/波锁/资金不足
+                        # 一致；status 单独开封，避开其他 WAIT 的降噪键互挤。
+                        self._record(
+                            "WAIT",
+                            f"加仓间距未到 price={price:.2f} "
+                            f"最低成本={_min_cost:.2f} 需<={_need:.2f}"
+                            f"（还需跌 {_short_pct:.2f}%）",
+                            symbol=self.symbol,
+                            status="entry_gap_blocked",
+                        )
+            except Exception as e:  # noqa: BLE001 - 台账异常不拦单
+                self._bump_skip("entry_gap_na")
+                print(
+                    f"[TD] ENTRY GAP NA | symbol={self.symbol} "
+                    f"{type(e).__name__}: {e}",
+                    file=sys.stderr, flush=True,
+                )
+
         if (
             buy_signal
             and score > score_threshold
@@ -1613,6 +1666,8 @@ class TdSequentialStrategy(Strategy):
             and not (ema_gate_blocked)
             # EMA 折价入场门（2026-11-01，实盘+回测，默认关）：只拦 BUY。
             and not (entry_ema_blocked)
+            # 加仓最小间距闸（2026-11-03，实盘+回测，默认 0=关）：只拦 BUY。
+            and not (entry_gap_blocked)
         ):
             # Actual order size (fixed quantity or pv × pct for value mode);
             # the risk gate must see the real position value, not the default.
@@ -2036,6 +2091,18 @@ class TdSequentialStrategy(Strategy):
     def _bump_skip(self, key: str) -> None:
         """SKIP 拦截计数（跨 bar/标的累计）。"""
         self._skip_counts[key] = self._skip_counts.get(key, 0) + 1
+
+    def _min_open_cost(self, bm) -> float | None:
+        """该标的现有 open 批次里的最低 entry_price（加仓间距闸用，2026-11-03）。"""
+        if bm is None:
+            return None
+        costs = []
+        for st in bm.open_slots():
+            lot = st.get("lot") or {}
+            ep = lot.get("entry_price")
+            if ep:
+                costs.append(float(ep))
+        return min(costs) if costs else None
 
     def _update_cd_stall(self, symbol: str, cd_sell: int) -> None:
         """动能停滞状态（2026-08-29）：cd_sell 连续 N 根无 +1 → 动能弱。
