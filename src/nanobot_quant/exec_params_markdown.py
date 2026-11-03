@@ -137,15 +137,41 @@ def _spot_pairs(symbols: list[str], quote: str | None) -> dict[str, tuple[str, s
     return out
 
 
+def _strategy_info(name: str | None = None) -> tuple[str, str, str, str] | None:
+    """当前策略的 ``(name, label, variant_of, description)``。
+
+    单一来源 = ``strategies.registry``（``strategy.json`` → ``StrategySpec``）：
+    新增策略或改口径说明只改注册表一处，快照自动跟随，不在这里维护第二份
+    清单。注册表不可用（依赖缺失等）时降级为 ``None``（或只留名字），绝不
+    让快照生成失败。
+
+    为什么快照必须带策略信息：``PARAM_META`` 是三个 TD 变体共用的全集，而
+    富途 NINE 只有 setup 计数（无 countdown/TDST/评分权重）。不带策略名时，
+    快照里大片「入场 Countdown 阈值 / 平仓 Countdown 阈值 / cd13 保本门 /
+    权重…」会被当成生效参数读——这是实际踩过的坑（2026-11-03）。
+    """
+    try:
+        from .strategies.registry import get_strategy, load_selected  # noqa: PLC0415
+
+        nm = name or load_selected()
+        spec = get_strategy(nm)
+        return nm, spec.label or "", str(spec.variant_of or ""), spec.description or ""
+    except Exception:  # noqa: BLE001 — 展示层降级，绝不让快照失败
+        return (name, "", "", "") if name else None
+
+
 def render_exec_params_md(
     params: dict,
     *,
     now: datetime | None = None,
     pairs: dict[str, tuple[str, str]] | None = None,
+    strategy: str | None = None,
 ) -> str:
     """把执行参数渲染成 markdown 文本（可直接粘贴）。
 
     ``pairs`` 可注入 ``{symbol: (gate_pair, okx_inst_id)}`` 以便测试零网络。
+    ``strategy`` 可注入策略名（默认从 ``strategy.json`` 读当前选择），同样
+    便于测试零磁盘 IO。
     """
     now = now or datetime.now(tz=timezone.utc)
     if now.tzinfo is None:
@@ -168,6 +194,19 @@ def render_exec_params_md(
         f"{cst.strftime('%Y-%m-%d %H:%M:%S')} CST（UTC+8）"
     )
     lines.append(f"- **执行通道**：`{channel or '（未设置）'}`（family=`{family}`）")
+
+    # ── 当前策略（2026-11-03）：PARAM_META 是全部 TD 变体的并集，缺这行会把
+    #    本策略不计算的参数（富途 NINE 的 countdown/TDST/权重）误读成生效值。──
+    info = _strategy_info(strategy)
+    if info:
+        sname, slabel, svariant, sdesc = info
+        title = f"{slabel} · `{sname}`" if slabel else f"`{sname}`"
+        if svariant:
+            title += f"（变体 of `{svariant}`）"
+        lines.append(f"- **当前策略**：{title}")
+        if sdesc:
+            lines.append(f"- **策略口径**：{sdesc}")
+
     lines.append("- **口径**：本快照只含**配置值**（`exec_params.json`），不含台账/持仓/资金；"
                  "标 ⚠️ 的字段改后需重启 TD 循环才生效。")
     lines.append("")
