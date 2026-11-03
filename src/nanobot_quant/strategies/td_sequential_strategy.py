@@ -103,6 +103,10 @@ class TdSequentialStrategy(Strategy):
         # 开启后，该标的已有 open 批次时新买入价必须比「现有批次最低成本」
         # 再低 N%（price ≤ min_cost × (1−N%)）才建仓；无持仓不受限。
         "entry_min_gap_pct": 0.0,
+        # 自适应加仓间距（2026-11-03 研究线）：按「新仓成功率」反馈动态调
+        # gap 档位（见 _adaptive_gap_observe）。默认关 → 零行为变化。
+        "adaptive_gap_enabled": False,
+        "adaptive_m": 30,
         **DEFAULT_TD_PARAMS,
     }
 
@@ -284,6 +288,12 @@ class TdSequentialStrategy(Strategy):
         # SKIP 统计（2026-08-29）：累计各类 SKIP 拦截次数（cd 时效门/盈利门/
         # min_hold/无持仓/周期门控），供回测 JSON 输出核对功能是否生效。
         self._skip_counts: dict[str, int] = {}
+        # 自适应间距闸状态（2026-11-03）：(scene, symbol) → 在途观测；
+        # scene → 已定案命中记录 / 当前档位 / 待切换档位计数器
+        self._adaptive_watch: dict[tuple[str, str], dict] = {}
+        self._adaptive_done: dict[str, list[bool]] = {}
+        self._adaptive_gap_cur: dict[str, float] = {}
+        self._adaptive_gap_pend: dict[str, dict] = {}
         self._td_sell_all = bool(
             self.parameters.get("td_sell_all", False) or False
         )
@@ -848,6 +858,17 @@ class TdSequentialStrategy(Strategy):
         self._entry_min_gap_pct = float(
             _sc_gap if _sc_gap is not None
             else self.parameters.get("entry_min_gap_pct", 0.0) or 0.0
+        )
+        # 自适应加仓间距（2026-11-03 研究线）：默认关 → 关闭时行为等同静态 gate
+        _sc_ad = p.get("adaptive_gap_enabled")
+        self._adaptive_gap_enabled = bool(
+            _sc_ad if _sc_ad is not None
+            else self.parameters.get("adaptive_gap_enabled", False)
+        )
+        _sc_am = p.get("adaptive_m")
+        self._adaptive_m = int(
+            _sc_am if _sc_am is not None
+            else self.parameters.get("adaptive_m", 30) or 30
         )
         # S3b-2：场景级 TD 阈值（entry_setup/exit_setup/exit_countdown）。
         # 缺省 None → 保留全局 td_params（td_live 构造 parameters 时已 merge），
@@ -1612,11 +1633,13 @@ class TdSequentialStrategy(Strategy):
         # 边界：只拦 BUY（setup 与 cd 两通道走同一 if 链）；无持仓放行；
         #       台账异常 fail-open + 计数；SELL/止损/止盈不碰。
         entry_gap_blocked = False
-        if getattr(self, "_entry_min_gap_pct", 0.0) > 0 and buy_signal:
+        # 自适应档位（2026-11-03）：未启用时返回静态 entry_min_gap_pct（零行为变化）
+        _gap_eff = self._adaptive_gap_observe(df, buy_signal, batch_manager)
+        if _gap_eff > 0 and buy_signal:
             try:
                 _min_cost = self._min_open_cost(batch_manager)
                 if _min_cost and _min_cost > 0:
-                    _gap = float(self._entry_min_gap_pct)
+                    _gap = float(_gap_eff)
                     _need = _min_cost * (1.0 - _gap / 100.0)
                     if price > _need:
                         entry_gap_blocked = True
@@ -2103,6 +2126,107 @@ class TdSequentialStrategy(Strategy):
             if ep:
                 costs.append(float(ep))
         return min(costs) if costs else None
+
+    # ── 自适应加仓间距（新仓成功率反馈，2026-11-03 研究线）──────────
+    _AD_K = 10            # 反馈窗口：最近 K 个已定案信号
+    _AD_TP_FLOOR_PCT = 0.3  # 「买对了」门槛（%）：M 根内最高价曾摸到 entry×(1+x)
+    _AD_HIT_HIGH = 0.50   # hit_rate ≥ 此值 → 放宽
+    _AD_HIT_LOW = 0.30    # hit_rate <  此值 → 收紧
+    _AD_GAP_LOOSE = 0.1
+    _AD_GAP_MID = 0.2
+    _AD_GAP_TIGHT = 0.4
+    _AD_SLOT_FLOOR = 0.80  # slot 占用 ≥ 此比例 → 强制再收紧一档（只收缩不扩张）
+    _AD_MIN_SAMPLES = 5    # 定案样本不足 → 回退静态档（fail-closed）
+    _AD_HYST = 2           # 档位切换需连续 N 次判定一致（防抖动）
+
+    def _slot_load(self, bm) -> float:
+        """该标的 slot 占用率（自适应间距闸的库存护栏，2026-11-03）。"""
+        if bm is None:
+            return 0.0
+        try:
+            total = len(getattr(bm, "slots", []) or [])
+            return (len(bm.open_slots()) / total) if total else 0.0
+        except Exception:  # noqa: BLE001 - 护栏异常不阻断交易
+            return 0.0
+
+    def _adaptive_gap_observe(self, df, buy_signal: bool, bm) -> float:
+        """自适应加仓间距：按「新仓成功率」反馈决定当前 gap 档位（2026-11-03）。
+
+        反馈量 = 最近 K 个已定案**信号**中，入场后 M 根内最高价曾摸到
+        entry×(1+0.3%) 的比例。用信号口径而非成交口径：被 gap 门拦掉的信号
+        同样计入——否则收紧 → 买得少 → 样本少 → 永不恢复的正反馈锁死
+        （2026-11-03 讨论定稿）。
+
+        档位：hit≥50% → 0.1%；30%~50% → 0.2%；<30% → 0.4%；滞回 2 次；
+        slot 占用 ≥80% 再 +0.1%（只收缩不扩张）。未启用 / 定案样本 <5 /
+        取不到 bar 价格 → 回退静态 entry_min_gap_pct（fail-closed 用默认档）。
+        """
+        static = float(getattr(self, "_entry_min_gap_pct", 0.0) or 0.0)
+        if not getattr(self, "_adaptive_gap_enabled", False):
+            return static
+        m = int(getattr(self, "_adaptive_m", 30) or 30)
+        scene = self._cur_scene()
+        high = close = None
+        try:
+            cols = df.columns
+            hi = "High" if "High" in cols else ("high" if "high" in cols else None)
+            cl = "Close" if "Close" in cols else ("close" if "close" in cols else None)
+            if hi and cl and len(df):
+                high = float(df[hi].iloc[-1])
+                close = float(df[cl].iloc[-1])
+        except Exception:  # noqa: BLE001 - 取价异常回退静态档
+            high = close = None
+        if high is None or close is None:
+            return static
+
+        key = (scene, self.symbol)
+        watch = self._adaptive_watch.get(key)
+        if watch is not None:
+            watch["n"] += 1
+            if high > watch["best"]:
+                watch["best"] = high
+            if watch["n"] >= m:
+                hit = watch["best"] >= watch["entry"] * (
+                    1.0 + self._AD_TP_FLOOR_PCT / 100.0
+                )
+                self._adaptive_done.setdefault(scene, []).append(bool(hit))
+                self._adaptive_watch.pop(key, None)
+                watch = None
+        if watch is None and buy_signal:
+            self._adaptive_watch[key] = {"entry": close, "best": high, "n": 0}
+
+        done = self._adaptive_done.get(scene) or []
+        recent = done[-self._AD_K:]
+        if len(recent) < self._AD_MIN_SAMPLES:
+            return static
+        hit_rate = sum(1 for h in recent if h) / len(recent)
+        if hit_rate >= self._AD_HIT_HIGH:
+            target = self._AD_GAP_LOOSE
+        elif hit_rate >= self._AD_HIT_LOW:
+            target = self._AD_GAP_MID
+        else:
+            target = self._AD_GAP_TIGHT
+        if self._slot_load(bm) >= self._AD_SLOT_FLOOR:
+            target = round(target + 0.1, 2)
+
+        cur = self._adaptive_gap_cur.get(scene)
+        if cur is None:
+            self._adaptive_gap_cur[scene] = target
+            return target
+        if target == cur:
+            self._adaptive_gap_pend.pop(scene, None)
+            return cur
+        pend = self._adaptive_gap_pend.get(scene) or {}
+        if pend.get("t") == target:
+            pend["n"] = int(pend.get("n", 0)) + 1
+        else:
+            pend = {"t": target, "n": 1}
+        self._adaptive_gap_pend[scene] = pend
+        if pend["n"] >= self._AD_HYST:
+            self._adaptive_gap_cur[scene] = target
+            self._adaptive_gap_pend.pop(scene, None)
+            return target
+        return cur
 
     def _update_cd_stall(self, symbol: str, cd_sell: int) -> None:
         """动能停滞状态（2026-08-29）：cd_sell 连续 N 根无 +1 → 动能弱。
