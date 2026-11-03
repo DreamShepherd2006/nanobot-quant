@@ -67,6 +67,10 @@ register(DataSourceSpec(
     order_book=okx_cex.order_book,
     ticker=okx_cex.ticker,
     bars=("1m", "5m", "15m", "1H", "4H", "1D", "1W"),
+    # 可回溯天数（2026-11-03 C103）：`history-candles` 用 after= 探到 260 天
+    # 仍返回数据（≥260 天），保守取 180 天 ⇒ 1m 259,200 根 / 5m 51,840 根。
+    # 回测显式区间上限由此换算，不再被全局 10,000 根护栏一刀切。
+    max_backfill_days=180,
 ))
 register(DataSourceSpec(
     name="eastmoney",

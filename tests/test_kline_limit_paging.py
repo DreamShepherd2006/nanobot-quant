@@ -32,8 +32,9 @@ def _patch_okx(monkeypatch):
         calls["single"] = (inst, bar, limit)
         return _df(min(limit, okx_cex._SINGLE_FETCH_MAX))
 
-    def fake_range(inst, start=None, end=None, bar="1D"):
+    def fake_range(inst, start=None, end=None, bar="1D", max_bars=None):
         calls["range"] = (inst, start, end, bar)
+        calls["max_bars"] = max_bars
         return _df(2500)  # 多给一点，验证 tail(limit) 截断
 
     monkeypatch.setattr(okx_cex, "_fetch_kline_okx", fake_single)

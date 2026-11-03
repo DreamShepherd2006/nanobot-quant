@@ -41,12 +41,18 @@ class DataSourceSpec:
         ticker: Optional[Callable] = None,
         bars: tuple = (),
         interval_map: Optional[dict] = None,
+        max_backfill_days: Optional[int] = None,
     ) -> None:
         self.name = name
         self.display = display
         self.kind = kind          # "executable" | "research"
         self.exchange = exchange  # "gate" | "okx" | None
         self.bars = tuple(bars)   # supported unified period names (empty = any)
+
+        # 该源可回溯天数（None = 用 kline_paging 的全局根数护栏）。
+        # 2026-11-03 C103：OKX 1m 实测 ≥260 天、Gate 1m 平台硬限 ≈6.9 天——
+        # 回测单次区间上限按此声明换算，不再用一个数字通吃两个交易所。
+        self.max_backfill_days = max_backfill_days
         # 统一周期名 → 该所 API interval 字符串（缺省 = 同名映射）
         self.interval_map = dict(interval_map) if interval_map else {
             p: p for p in self.bars
