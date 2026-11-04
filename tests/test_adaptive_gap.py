@@ -27,6 +27,13 @@ def _mk(*, enabled: bool = True, m: int = 2, static: float = 0.0) -> TdSequentia
     s._adaptive_done = {}
     s._adaptive_gap_cur = {}
     s._adaptive_gap_pend = {}
+    # 2026-11-04 夹具补齐：这三个属性在 initialize() 里初始化，而本夹具直接
+    # TdSequentialStrategy() 不走 initialize（lumibot 契约里由 executor 调用）
+    # ——缺 _adaptive_gap_src 会让 entry_gap 事件标注档位来源时 AttributeError
+    # （生产无影响，仅测试路径）。
+    s._adaptive_gap_src = {}
+    s._adaptive_last_stat = {}
+    s._adaptive_na_logged = set()
     # 缩小样本门槛/窗口便于用例构造
     s._AD_MIN_SAMPLES = 2
     s._AD_K = 4

@@ -72,7 +72,8 @@ def _spot_result() -> dict:
              "side": "sell", "quantity": 0.05, "strategy_price": 72.4,
              "avg_price": 72.3276, "state": "EXIT", "reason": "setup_sell=9"},
         ],
-        "skip_counts": {"batch_wait": 12, "sell_min_hold": 3},
+        "skip_counts": {"cycle_wait": 7, "wave_wait": 5, "batch_wait": 12,
+                        "sell_min_hold": 3},
         "capital_stats": {"turnover": 2.3, "turnover_two_side": 4.25,
                           "utilization": 0.224, "total_funds": 1000.0},
         "slots": {"open": [
@@ -108,9 +109,15 @@ def test_options_result_renders_core_sections():
 
 
 def test_skip_labels_are_translated_for_both_shapes():
-    """现货英文键 → 中文；期权中文前缀原样保留。"""
+    """现货英文键 → 中文；期权中文前缀原样保留。
+
+    2026-11-04 拆标签：cycle_wait（周期门控）与 wave_wait（波锁）分开；
+    batch_wait 仅旧回测记录里的合并口径，仍要能渲染。
+    """
     spot = render_markdown(_spot_result())
-    assert "| 周期门控/波锁等待 | 12 |" in spot
+    assert "| 周期门控等待（同标的未重置） | 7 |" in spot
+    assert "| 波锁拦截（共振组笔数上限） | 5 |" in spot
+    assert "| 周期门控/波锁等待（旧合并口径） | 12 |" in spot
     assert "| 高9 min_hold 拦 | 3 |" in spot
     opt = render_markdown(_opt_result())
     assert "| 周期门控 | 42 |" in opt
