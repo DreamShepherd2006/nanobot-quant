@@ -89,8 +89,9 @@ def test_make_fetcher_selects_per_source():
 def test_okx_fetcher_converts_ts_to_iso(monkeypatch):
     calls: dict = {}
 
-    def fake(ticker, start, end, bar="1D"):
-        calls.update(ticker=ticker, start=start, end=end, bar=bar)
+    def fake(ticker, start, end, bar="1D", max_bars=None):
+        calls.update(ticker=ticker, start=start, end=end, bar=bar,
+                     max_bars=max_bars)
         return pd.DataFrame()
 
     monkeypatch.setattr(F, "fetch_kline_range", fake)
@@ -107,8 +108,8 @@ def test_okx_fetcher_clamps_open_start_to_single_request_cap(monkeypatch):
     """start<=0（页面「拉满」）→ 按单次上限截最近窗口（并在结果里注明）。"""
     calls: dict = {}
 
-    def fake(ticker, start, end, bar="1D"):
-        calls.update(start=start, end=end, bar=bar)
+    def fake(ticker, start, end, bar="1D", max_bars=None):
+        calls.update(start=start, end=end, bar=bar, max_bars=max_bars)
         return pd.DataFrame()
 
     monkeypatch.setattr(F, "fetch_kline_range", fake)
@@ -123,7 +124,10 @@ def test_okx_fetcher_clamps_open_start_to_single_request_cap(monkeypatch):
 def test_max_bars_for_source():
     # Gate 由服务端 400 深度闸门兜底 —— 本地不设闸（零行为变化）
     assert max_bars_for_source("gate_cex", "1m") is None
-    assert max_bars_for_source("okx_cex", "1m") == max_bars_for("1m") == 10_000
+    # OKX 按声明的可回溯天数换算（2026-11-03 C103）：此前误用全局 10,000 根，
+    # 把 Gate 的「1m ≈ 6.9 天」当成 OKX 的上限（实测 OKX 1m ≥260 天）。
+    assert max_bars_for("1m", "okx_cex") == 180 * 86_400 // 60 == 259_200
+    assert max_bars_for_source("okx_cex", "1m") == 259_200
 
 
 # ── 启动前探测 ───────────────────────────────────────────────────────
