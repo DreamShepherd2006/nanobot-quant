@@ -522,3 +522,19 @@ def test_spot_md_open_slots_nested_per_symbol():
         }
     )
     assert "期末未平仓（1）" in md_old
+
+
+def test_spot_markdown_reports_wave_max_buys_zero_as_off():
+    """波锁关闭（wave_max_buys=0）在报告里显式写「关」，不静默省略（2026-11-04）。"""
+    r = _spot_result()
+    r["backtest_config"]["wave_max_buys"] = 0
+    md = render_markdown(r)
+    assert "| 每波建仓上限 | 关（不限笔数） |" in md
+
+
+def test_spot_markdown_reports_wave_max_buys_value():
+    """非 0 时写明笔数，且注明作用域是同一共振组。"""
+    r = _spot_result()
+    r["backtest_config"]["wave_max_buys"] = 2
+    md = render_markdown(r)
+    assert "| 每波建仓上限 | 2 笔（同一共振组内） |" in md

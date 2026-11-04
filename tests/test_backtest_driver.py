@@ -993,3 +993,20 @@ def test_ema_gate_no_signal_bars_not_marked(tmp_path):
         assert (r["cd_buy"] or 0) < entry_cd
         assert "EMA 趋势闸门" not in (r.get("action") or "")
 
+
+def test_backtest_config_wave_max_buys_zero_preserved(tmp_path):
+    """回测侧同批（2026-11-04）：wave_max_buys=0 必须原样进快照。
+
+    回归 `x or 1` 把合法值 0 吞成 1 的老坑——0 = 关闭波锁，不能被夹成「每波 1 笔」。
+    """
+    # 走 overrides（回测页覆盖层）：优先级 = 覆盖 > 场景配置 > 全局；
+    # 场景默认是 1，只有覆盖层能把它改成 0（与页面行为一致）。
+    driver = BacktestDriver(
+        scene="mid",
+        params=_params(),
+        overrides={"wave_max_buys": 0},
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["backtest_config"]["wave_max_buys"] == 0, "0=关闭波锁，不得被夹到 1"

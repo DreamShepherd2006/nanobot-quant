@@ -499,6 +499,11 @@ def _spot_md(res: dict) -> str:
         )),
         # 加仓最小间距 + 自适应（2026-11-03 / C102 2026-11-04）：静态闸与
         # 自适应都显式写行（关也写“关”，不静默省略）。
+        # 波锁容量（2026-11-04）：0 = 关闭，关也显式写。
+        ("每波建仓上限", (
+            f"{int(cfg.get('wave_max_buys') or 0)} 笔（同一共振组内）"
+            if (cfg.get("wave_max_buys") or 0) > 0 else "关（不限笔数）"
+        )),
         ("加仓最小间距", (
             f"{_num(cfg.get('entry_min_gap_pct'), 2)}%（新买价须比最低成本再低该幅度）"
             if (cfg.get("entry_min_gap_pct") or 0) > 0 else "关"
