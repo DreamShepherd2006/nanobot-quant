@@ -497,6 +497,17 @@ def _spot_md(res: dict) -> str:
             f"预热 {cfg.get('entry_ema_warmup')} 根）"
             if cfg.get("entry_ema_enabled") else "关"
         )),
+        # 加仓最小间距 + 自适应（2026-11-03 / C102 2026-11-04）：静态闸与
+        # 自适应都显式写行（关也写“关”，不静默省略）。
+        ("加仓最小间距", (
+            f"{_num(cfg.get('entry_min_gap_pct'), 2)}%（新买价须比最低成本再低该幅度）"
+            if (cfg.get("entry_min_gap_pct") or 0) > 0 else "关"
+        )),
+        ("自适应间距", (
+            f"开（反馈窗口 M={cfg.get('adaptive_m')} bar，档位 0.1/0.2/0.4%，"
+            f"滞回 2 次、slot≥80% 再 +0.1%）"
+            if cfg.get("adaptive_gap_enabled") else "关"
+        )),
         ("逐 bar 表", "全量" if cfg.get("bars_mode") == "full" else "精简"),
     ]))
     # 闸门效果（仅闸门开时输出；关时也不能静默——写一行说明）
@@ -511,6 +522,26 @@ def _spot_md(res: dict) -> str:
             f"通过 {_pass} / 拦截 {_block}（通过率 {_rate}，候选买入口径）· "
             f"预热不足 NA {int(_eg.get('na') or 0)}（fail-open）\n"
         )
+
+    # 自适应间距档位轨迹（C102 2026-11-04）：回测才看得到走向；空则不出块
+    _adt = res.get("adaptive_gap_trace") or []
+    if _adt:
+        md.append("\n**🔁 自适应间距档位轨迹**\n")
+        md.append(_table(
+            ["时间", "场景", "标的", "档位", "命中率", "样本", "slot 占用"],
+            [
+                [
+                    t.get("ts"), t.get("scene"), t.get("symbol"),
+                    f"{_pct(t.get('from'))} → {_pct(t.get('to'))}",
+                    (f"{float(t['hit_rate']) * 100:.1f}%"
+                     if t.get("hit_rate") is not None else "—"),
+                    t.get("n") if t.get("n") is not None else "—",
+                    (f"{float(t['slot_load']):.2f}"
+                     if t.get("slot_load") is not None else "—"),
+                ]
+                for t in _adt
+            ],
+        ))
 
     # 两臂对照（闸门开 vs 关）：仅展示，禁配对推断
     _arms = res.get("arms") or {}

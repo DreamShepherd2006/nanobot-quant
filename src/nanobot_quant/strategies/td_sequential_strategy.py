@@ -294,6 +294,11 @@ class TdSequentialStrategy(Strategy):
         self._adaptive_done: dict[str, list[bool]] = {}
         self._adaptive_gap_cur: dict[str, float] = {}
         self._adaptive_gap_pend: dict[str, dict] = {}
+        # C102 可观测性（2026-11-04）：档位来源（自适应/静态）给 entry_gap
+        # 事件标注用；最近一次统计快照给日志/回测 trace 共用；NA 日志降噪。
+        self._adaptive_gap_src: dict[str, str] = {}
+        self._adaptive_last_stat: dict[str, dict] = {}
+        self._adaptive_na_logged: set[str] = set()
         self._td_sell_all = bool(
             self.parameters.get("td_sell_all", False) or False
         )
@@ -1645,10 +1650,23 @@ class TdSequentialStrategy(Strategy):
                         entry_gap_blocked = True
                         self._bump_skip("entry_gap")
                         _short_pct = (price / _need - 1.0) * 100.0
+                        # 当前档位与来源（C102，2026-11-04）：事件里必须能读出
+                        # 「是谁拦的、拦在哪个间距上」——自适应档位是动态的，
+                        # 事后看信号历史若只有「间距未到」无法回溯档位。
+                        _gap_src = self._adaptive_gap_src.get(
+                            self._cur_scene()
+                        ) or (
+                            "自适应"
+                            if getattr(self, "_adaptive_gap_enabled", False)
+                            else "静态"
+                        )
+                        _stat = self._adaptive_last_stat.get(
+                            self._cur_scene()
+                        ) or {}
                         print(
                             f"[TD] ENTRY GAP BLOCK | symbol={self.symbol} "
                             f"price={price} min_cost={_min_cost} "
-                            f"need<={_need:.8f} (gap={_gap}% "
+                            f"need<={_need:.8f} (gap={_gap}%（{_gap_src}） "
                             f"还需跌 {_short_pct:.3f}%)",
                             file=sys.stderr, flush=True,
                         )
@@ -1658,7 +1676,15 @@ class TdSequentialStrategy(Strategy):
                             "WAIT",
                             f"加仓间距未到 price={price:.2f} "
                             f"最低成本={_min_cost:.2f} 需<={_need:.2f}"
-                            f"（还需跌 {_short_pct:.2f}%）",
+                            f"（还需跌 {_short_pct:.2f}%）"
+                            f"｜间距 {_gap}%（{_gap_src}"
+                            + (
+                                f" · hit_rate={float(_stat.get('hit_rate') or 0) * 100:.0f}%"
+                                f"/{_stat.get('n')} · slot {float(_stat.get('slot_load') or 0):.2f}"
+                                if _gap_src == "自适应"
+                                else ""
+                            )
+                            + "）",
                             symbol=self.symbol,
                             status="entry_gap_blocked",
                         )
@@ -2160,12 +2186,18 @@ class TdSequentialStrategy(Strategy):
         档位：hit≥50% → 0.1%；30%~50% → 0.2%；<30% → 0.4%；滞回 2 次；
         slot 占用 ≥80% 再 +0.1%（只收缩不扩张）。未启用 / 定案样本 <5 /
         取不到 bar 价格 → 回退静态 entry_min_gap_pct（fail-closed 用默认档）。
+
+        可观测性（C102，2026-11-04）：档位首次设定与滞回切换都必须落 stderr
+        日志（`[TD] ADAPT GAP`），回退静态时按 scene 只记一次
+        （`[TD] ADAPT GAP NA`）；同时把当前档位来源写进
+        ``_adaptive_gap_src``，供 entry_gap 事件标注「自适应 / 静态」。
         """
         static = float(getattr(self, "_entry_min_gap_pct", 0.0) or 0.0)
+        scene = self._cur_scene()
         if not getattr(self, "_adaptive_gap_enabled", False):
+            self._adaptive_gap_src[scene] = "静态"
             return static
         m = int(getattr(self, "_adaptive_m", 30) or 30)
-        scene = self._cur_scene()
         high = close = None
         try:
             cols = df.columns
@@ -2177,6 +2209,8 @@ class TdSequentialStrategy(Strategy):
         except Exception:  # noqa: BLE001 - 取价异常回退静态档
             high = close = None
         if high is None or close is None:
+            self._adaptive_gap_src[scene] = "自适应·回退静态"
+            self._adaptive_log_na(scene, "取不到 bar 价格", static)
             return static
 
         key = (scene, self.symbol)
@@ -2198,6 +2232,10 @@ class TdSequentialStrategy(Strategy):
         done = self._adaptive_done.get(scene) or []
         recent = done[-self._AD_K:]
         if len(recent) < self._AD_MIN_SAMPLES:
+            self._adaptive_gap_src[scene] = "自适应·回退静态"
+            self._adaptive_log_na(
+                scene, f"定案样本 {len(recent)}<{self._AD_MIN_SAMPLES}", static
+            )
             return static
         hit_rate = sum(1 for h in recent if h) / len(recent)
         if hit_rate >= self._AD_HIT_HIGH:
@@ -2206,12 +2244,22 @@ class TdSequentialStrategy(Strategy):
             target = self._AD_GAP_MID
         else:
             target = self._AD_GAP_TIGHT
-        if self._slot_load(bm) >= self._AD_SLOT_FLOOR:
+        load = self._slot_load(bm)
+        if load >= self._AD_SLOT_FLOOR:
             target = round(target + 0.1, 2)
+        # 统计快照：日志 / entry_gap 事件 / 回测 trace 三处共用一个来源
+        self._adaptive_last_stat[scene] = {
+            "hit_rate": round(hit_rate, 4),
+            "n": len(recent),
+            "slot_load": round(load, 4),
+            "target": target,
+        }
+        self._adaptive_gap_src[scene] = "自适应"
 
         cur = self._adaptive_gap_cur.get(scene)
         if cur is None:
             self._adaptive_gap_cur[scene] = target
+            self._adaptive_log_switch(scene, None, target)
             return target
         if target == cur:
             self._adaptive_gap_pend.pop(scene, None)
@@ -2223,10 +2271,37 @@ class TdSequentialStrategy(Strategy):
             pend = {"t": target, "n": 1}
         self._adaptive_gap_pend[scene] = pend
         if pend["n"] >= self._AD_HYST:
+            prev = cur
             self._adaptive_gap_cur[scene] = target
             self._adaptive_gap_pend.pop(scene, None)
+            self._adaptive_log_switch(scene, prev, target)
             return target
         return cur
+
+    def _adaptive_log_switch(self, scene: str, prev, target) -> None:
+        """档位设定/切换日志（C102）：首次与滞回确认切换都必须可见。"""
+        stat = self._adaptive_last_stat.get(scene) or {}
+        kind = "INIT" if prev is None else "SWITCH"
+        old = f"{float(prev):.2f}%" if prev is not None else "（无）"
+        print(
+            f"[TD] ADAPT GAP {kind} | scene={scene} {old}→{float(target):.2f}% "
+            f"hit_rate={float(stat.get('hit_rate') or 0) * 100:.1f}% "
+            f"({stat.get('n')}/{self._AD_K}) "
+            f"slot_load={float(stat.get('slot_load') or 0):.2f} "
+            f"symbol={self.symbol}",
+            file=sys.stderr, flush=True,
+        )
+
+    def _adaptive_log_na(self, scene: str, reason: str, static: float) -> None:
+        """样本/数据不足回退静态档的日志（C102）：按 scene 只打一次，不刷屏。"""
+        if scene in self._adaptive_na_logged:
+            return
+        self._adaptive_na_logged.add(scene)
+        print(
+            f"[TD] ADAPT GAP NA | scene={scene} {reason} → 回退静态 "
+            f"{float(static):.2f}%（自适应档位保持）",
+            file=sys.stderr, flush=True,
+        )
 
     def _update_cd_stall(self, symbol: str, cd_sell: int) -> None:
         """动能停滞状态（2026-08-29）：cd_sell 连续 N 根无 +1 → 动能弱。

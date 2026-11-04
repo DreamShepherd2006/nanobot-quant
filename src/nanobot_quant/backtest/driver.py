@@ -267,6 +267,19 @@ class BacktestDriver:
         if _eg is None:
             _eg = self.params.get("entry_min_gap_pct")
         self.entry_min_gap_pct = float(_eg) if _eg is not None else 0.0
+        # 自适应加仓间距（2026-11-03 / C102 2026-11-04）：必须在这里显式解析并
+        # 注入 strategy.parameters——否则策略读类默认 False ⇒ 回测里自适应恒关
+        # （死门，与 IV 闸门/EMA 折价门当初同型缺陷）。trace 记录档位变化轨迹。
+        _ad_on = self._merged_params.get("adaptive_gap_enabled")
+        if _ad_on is None:
+            _ad_on = self.params.get("adaptive_gap_enabled")
+        self.adaptive_gap_enabled = bool(_ad_on) if _ad_on is not None else False
+        _ad_m = self._merged_params.get("adaptive_m")
+        if _ad_m is None:
+            _ad_m = self.params.get("adaptive_m")
+        self.adaptive_m = int(_ad_m) if _ad_m is not None else 30
+        self._adaptive_gap_trace: list[dict] = []
+        self._adaptive_gap_last: dict[str, float] = {}
         # 进度写盘节流（2026-11-01）：重放循环曾每 bar 无条件把 payload（含
         # 逐 bar 明细）序列化写盘到 /data（FUSE 网络卷）——累计量 O(n²)，
         # 1440 根 bar 实测写 ~200MB、回测耗时翻倍以上。改为同一阶段内最多
@@ -431,6 +444,10 @@ class BacktestDriver:
                 # 加仓最小间距闸（2026-11-03，回测侧）——同样必须显式注入，
                 # 否则策略读类默认值 0 ⇒ 回测里恒关（死门缺陷）。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
+                # 自适应加仓间距（C102 2026-11-04）：同样必须显式注入，
+                # 否则回测里自适应恒关（与 IV/EMA 门同型死门）。
+                "adaptive_gap_enabled": self.adaptive_gap_enabled,
+                "adaptive_m": self.adaptive_m,
                 "channel_family": "cex",  # Step 3 回测撮合对齐 CexBroker（USDT）
                 # 与 td_live 同一桥接模式：数据源契约从 broker.data_source 读
                 "drops_in_progress_bars": bool(
@@ -640,6 +657,41 @@ class BacktestDriver:
             }
         return out
 
+    def _trace_adaptive_gap(self, ts: Any, strategy: Any, symbol: str) -> None:
+        """记录自适应间距的档位变化轨迹（C102，2026-11-04）。
+
+        只读采样：值全部来自策略自己的 ``_adaptive_gap_cur`` / ``_adaptive_last_stat``，
+        不另写判定逻辑（否则与实盘会漂移）。关闭自适应时零开销、零输出。
+        结果写进 ``adaptive_gap_trace``（结果顶层），实盘无此字段。
+        """
+        if not self.adaptive_gap_enabled:
+            return
+        cur = getattr(strategy, "_adaptive_gap_cur", None) or {}
+        val = cur.get(self.scene_name)
+        if val is None:
+            return
+        old = self._adaptive_gap_last.get(self.scene_name)
+        if old == val:
+            return
+        stat = (getattr(strategy, "_adaptive_last_stat", {}) or {}).get(
+            self.scene_name
+        ) or {}
+        self._adaptive_gap_trace.append(
+            {
+                "ts": (
+                    ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                ),
+                "scene": self.scene_name,
+                "symbol": symbol,
+                "from": old,
+                "to": float(val),
+                "hit_rate": stat.get("hit_rate"),
+                "n": stat.get("n"),
+                "slot_load": stat.get("slot_load"),
+            }
+        )
+        self._adaptive_gap_last[self.scene_name] = float(val)
+
     @staticmethod
     def _pick(series: Any, ts: Any) -> Optional[float]:
         """按时间戳从 Series 取值；缺值/NaN → None（不用 pandas 也能判 NaN）。"""
@@ -758,6 +810,7 @@ class BacktestDriver:
                 strategy._ema_gate_value = (ema_v, slope_v)
                 _bar_events.clear()
                 strategy._evaluate_symbol()
+                self._trace_adaptive_gap(ts, strategy, sym)
                 sig = getattr(strategy, "_last_signal", {}) or {}
                 # 闸门列 = 策略自己的判定结果（候选买入口径，2026-10-20）：
                 # ""=该 bar 无候选买信号（闸门未被问到）/pass/block/na。
@@ -939,6 +992,9 @@ class BacktestDriver:
             "batches": self.batches,
             "fills": fills,
             "fills_detail": fills_detail,
+            # 自适应间距档位变化轨迹（C102 2026-11-04）：每一行 = 一次首次
+            # 设定或滞回确认切换；关闭自适应时为空列表。
+            "adaptive_gap_trace": list(self._adaptive_gap_trace),
             "skip_counts": dict(getattr(strategy, "_skip_counts", {}) or {}),
             # 逐 bar 表（2026-10-20）：lean = 只存信号/成交/闸门翻转行；
             # full = 每根 bar 全存（体积≈2–3 MB/次，靠 cap 封顶）
@@ -1018,6 +1074,10 @@ class BacktestDriver:
                 "entry_ema_warmup": self.entry_ema_warmup,
                 # 加仓最小间距闸（2026-11-03）：0=关。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
+                # 自适应间距（C102 2026-11-04）：回测结果必须能读出开关与反馈窗口，
+                # 否则「跑了几小时却不知道自适应到底有没有生效」无法自查。
+                "adaptive_gap_enabled": self.adaptive_gap_enabled,
+                "adaptive_m": self.adaptive_m,
                 "bars_mode": self.bars_mode,
                 # 策略实际生效值（_activate_scene 每 bar 注入后；
                 # 2026-08-29 扩展：结果区先展示回测参数，与实盘同口径）
