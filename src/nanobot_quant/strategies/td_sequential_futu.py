@@ -59,31 +59,42 @@ class FutuDeMarkEngine(_DeMarkEngine):
         satisfying bar → count += 1 (no upper bound); non-satisfying
         bar (including equality) → count = 0.
         """
-        close = self.df["Close"]
+        n = len(self.df)
+        buy = np.zeros(n, dtype=np.int64)
+        sell = np.zeros(n, dtype=np.int64)
+        if n <= self._cmp:
+            self.df["buy_setup_count"] = buy
+            self.df["sell_setup_count"] = sell
+            return self.df
 
-        self.df["buy_setup_count"] = 0
-        self.df["sell_setup_count"] = 0
+        # numpy 数组逐下标读写：算法与语义和 pandas 逐格版逐位一致，
+        # 只是把 ~600 次 .at[] 写 + ~1200 次 .iloc[] 标量读换成数组下标
+        # （单次 calculate(300 根) 52.8 ms → ~2 ms）。
+        close = self.df["Close"].to_numpy()
+        cmp_ = self._cmp
 
         b_count = 0
         s_count = 0
 
         # 起点 = cmp（富途 a1 从第 cmp+1 根 K 线即可比较，无需翻转条件
         # 因此无 close[i-cmp-1] 越界问题——比原版/同花顺早一根参与计数）。
-        for i in range(self._cmp, len(self.df)):
+        for i in range(cmp_, n):
             # Buy Setup: close < close[i-cmp]
-            if close.iloc[i] < close.iloc[i - self._cmp]:
+            if close[i] < close[i - cmp_]:
                 b_count += 1
             else:
                 b_count = 0
-            self.df.at[self.df.index[i], "buy_setup_count"] = b_count
+            buy[i] = b_count
 
             # Sell Setup: close > close[i-cmp]
-            if close.iloc[i] > close.iloc[i - self._cmp]:
+            if close[i] > close[i - cmp_]:
                 s_count += 1
             else:
                 s_count = 0
-            self.df.at[self.df.index[i], "sell_setup_count"] = s_count
+            sell[i] = s_count
 
+        self.df["buy_setup_count"] = buy
+        self.df["sell_setup_count"] = sell
         return self.df
 
     def calculate_countdown(self) -> pd.DataFrame:
@@ -100,23 +111,37 @@ class FutuDeMarkEngine(_DeMarkEngine):
         self.df["tdst_resistance"] = np.nan
         return self.df
 
+    def calculate_bollinger_bands(self, period: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
+        """富途不用布林带——跳过计算。
+
+        富途变体权重全 0、信号只由 setup 计数决定，``bb_upper``/``bb_lower``
+        在基类里只有 recommendations / scoring 会读，而这两个方法本类均已覆盖
+        ⇒ 算出来没有任何消费者（原实现白算 4 次 rolling，占单次耗时的 ~35%）。
+        """
+        return self.df
+
     def calculate_recommendations(self) -> pd.DataFrame:
         """富途信号：仅当 setup count 恰好等于 setup_period 时触发一次。
 
         Mirrors ``tj11 = (nt == 9)`` — the signal fires on the exact bar
         where the run reaches ``setup_period``; longer runs (nt > 9) do
         NOT re-fire until the streak resets.
+
+        向量化实现：原版逐 bar 取整行 Series（``df.iloc[i]["col"]``，300 根
+        = 600 次 Series 构造）是最大瓶颈；这里用掩码一次写完。写入顺序
+        保持「SELL 覆盖 BUY」以复刻原 ``if s_9 / elif b_9`` 的优先级。
         """
-        self.df["recommendation"] = "HOLD"
+        n = len(self.df)
+        rec = np.full(n, "HOLD", dtype=object)
+        if n == 0:
+            self.df["recommendation"] = rec
+            return self.df
 
-        for i in range(len(self.df)):
-            b_9 = self.df.iloc[i]["buy_setup_count"] == self._setup
-            s_9 = self.df.iloc[i]["sell_setup_count"] == self._setup
-            if s_9:
-                self.df.at[self.df.index[i], "recommendation"] = "SELL (Setup Complete)"
-            elif b_9:
-                self.df.at[self.df.index[i], "recommendation"] = "BUY (Setup Complete)"
-
+        buy = self.df["buy_setup_count"].to_numpy()
+        sell = self.df["sell_setup_count"].to_numpy()
+        rec[buy == self._setup] = "BUY (Setup Complete)"
+        rec[sell == self._setup] = "SELL (Setup Complete)"
+        self.df["recommendation"] = rec
         return self.df
 
     def calculate_buy_scoring(self, news_count: int = 0) -> float:
@@ -137,8 +162,7 @@ class FutuDeMarkEngine(_DeMarkEngine):
         # rvol 中性（富途无量能概念）
         self.df["rvol"] = 1.0
 
-        last_idx = self.df.index[-1]
-        return float(self.df.at[last_idx, "combined_score"])
+        return float(self.df["combined_score"].to_numpy()[-1])
 
 
 def calculate(
