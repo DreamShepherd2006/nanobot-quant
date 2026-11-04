@@ -176,7 +176,7 @@ _ARCHIVE_SUMMARY_RE = re.compile(r"^归档共\s*\d+\s*天")
 
 
 # SKIP 原因键 → 展示名。与 ``backtest_page.html`` 的 ``SKIP_LABELS`` 保持同步。
-# 现货 driver 产出英文键（cd_stale / batch_wait ...）；期权侧 ``_count_skips``
+# 现货 driver 产出英文键（cd_stale / cycle_wait / wave_wait ...）；期权侧 ``_count_skips``
 # 产出的已是中文前缀（张数上限 / 周期门控 ...）—— 查不到映射就原样输出，
 # 一份表兼容两种来源。
 _SKIP_LABELS = {
@@ -187,7 +187,10 @@ _SKIP_LABELS = {
     "cd_exit_profit_gate": "cd13 保本门拦",
     "cd_exit_min_hold": "cd13 min_hold 拦",
     "cd_exit_no_open": "cd13 无持仓",
-    "batch_wait": "周期门控/波锁等待",
+    # 2026-11-04 拆标签：周期门控与波锁分开统计（batch_wait 仅旧记录兼容）
+    "cycle_wait": "周期门控等待（同标的未重置）",
+    "wave_wait": "波锁拦截（共振组笔数上限）",
+    "batch_wait": "周期门控/波锁等待（旧合并口径）",
     "gate_blocked": "贝叶斯闸门拦截",
     "gate_na": "闸门数据不足(NA)",
     "ema_gate": "EMA 趋势闸门拦（候选买入）",

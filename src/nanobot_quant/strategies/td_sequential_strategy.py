@@ -1463,7 +1463,8 @@ class TdSequentialStrategy(Strategy):
             and buy_signal
             and score > score_threshold
         ):
-            self._bump_skip("batch_wait")
+            # 2026-11-04 拆标签：cycle_wait = 同标的 setup/countdown 周期门控
+            self._bump_skip("cycle_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 同周期已建仓"
                 f"（setup_buy={setup_buy} cd_buy={cd_buy} 未重置），等新信号周期",
@@ -1600,7 +1601,8 @@ class TdSequentialStrategy(Strategy):
         round_used = max_buys > 0 and _wgroup is not None and _wcount >= max_buys
         if denied:
             # 本周期已被共振组额度拦过：setup 重置前不再尝试（等新周期）
-            self._bump_skip("batch_wait")
+            # 2026-11-04 拆标签：wave_wait = 波锁（共振组笔数上限）拦截
+            self._bump_skip("wave_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 本买9周期已错过"
                 f"（等 setup 重置后新周期）",
@@ -1617,7 +1619,8 @@ class TdSequentialStrategy(Strategy):
             and can_buy
             and not (cycle_blocked)
         ):
-            self._bump_skip("batch_wait")
+            # 2026-11-04 拆标签：wave_wait = 波锁（共振组笔数上限）拦截
+            self._bump_skip("wave_wait")
             print(
                 f"[TD] BATCH WAIT | symbol={self.symbol} 共振组已满"
                 f"（{_wcount}/{max_buys} 笔："
