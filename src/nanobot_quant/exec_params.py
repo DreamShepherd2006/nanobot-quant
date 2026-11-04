@@ -97,6 +97,8 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
     # 加仓最小间距闸（2026-11-03）——场景专属、默认 0=关
     "entry_min_gap_pct",
+    # 自适应加仓间距（2026-11-03 研究线）——场景专属、默认关
+    "adaptive_gap_enabled", "adaptive_m",
     # 共振错峰波锁容量（2026-11-01 用户拍板上实盘、默认 1）
     "wave_max_buys",
 )
@@ -111,6 +113,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
     # 加仓最小间距闸（2026-11-03，默认 0=关）
     "entry_min_gap_pct",
+    # 自适应加仓间距（2026-11-03 研究线，默认关）
+    "adaptive_gap_enabled", "adaptive_m",
     "exit_setup", "exit_countdown",
     "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
@@ -135,6 +139,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
         "entry_min_gap_pct": 0.0,
+        "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
@@ -154,6 +159,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
         "entry_min_gap_pct": 0.0,
+        "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
@@ -173,6 +179,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
         "entry_min_gap_pct": 0.0,
+        "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
@@ -489,11 +496,24 @@ PARAM_META: dict[str, dict[str, Any]] = {
                 "摊薄收益 < 手续费（2026-11-02 实盘 BTC 5 笔挤在 0.11% 带宽内）",
     },
     "wave_max_buys": {
-        "group": "scene", "min": 1, "max": 10, "step": 1, "std": 1, "integer": True,
-        "label": "每波建仓上限(笔)",
+        "group": "scene", "min": 1, "max": 10, "step": 1, "std": 1, "integer": True,        "label": "每波建仓上限(笔)",
         "hint": "共振错峰波锁容量：同一波内该场景最多建仓 N 笔（1=原行为，全局每波 1 笔）；"
                 "同标的仍受周期门控约束（setup 未重置不重建仓）；波结束（所有标的离开买9区）后清零。"
                 "标的池越大越适合调高——每波 1 笔会把大量同时到 9 的标的挡在门外",
+    },
+    "adaptive_gap_enabled": {
+        "group": "scene", "type": "bool", "std": False,
+        "label": "自适应加仓间距",
+        "hint": "开启后 gap 档位由「新仓成功率」反馈自动调整（最近 10 个已定案信号里，"
+                "入场后 M 根内摸到 +0.3% 的比例：≥50% → 0.1%、30~50% → 0.2%、"
+                "<30% → 0.4%，slot 占用 ≥80% 再收紧一档）；关闭 = 用静态加仓间距。"
+                "研究特性，默认关",
+    },
+    "adaptive_m": {
+        "group": "scene", "min": 5, "max": 240, "step": 5, "std": 30, "integer": True,
+        "label": "成功率观测窗口(根)",
+        "hint": "入场后多少根 bar 内摸到 +0.3% 算「买对了」；1m 上 30 根≈30 分钟，"
+                "过大则反馈滞后、难在 slot 打满前收紧",
     },
     "sub_accounts": {
         "group": "scene", "type": "list", "std": ["gate_bot1"],

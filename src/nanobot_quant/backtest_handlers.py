@@ -93,6 +93,9 @@ _OV_FIELDS: dict[str, tuple] = {
     "entry_ema_offset_pct": ("scene", None, 0.1),
     # 加仓最小间距闸（2026-11-03）：场景级，0=关、只拦 BUY。
     "entry_min_gap_pct": ("scene", None, 0.0),
+    # 自适应加仓间距（2026-11-03 研究线）：场景级，默认关。
+    "adaptive_gap_enabled": ("scene", None, False),
+    "adaptive_m": ("scene", None, 30),
 }
 
 
@@ -204,6 +207,8 @@ _OV_INT = {
     "ema_n", "ema_k",
     # EMA 折价入场门（2026-11-01，回测侧覆盖）
     "entry_ema_period",
+    # 自适应加仓间距（2026-11-03 研究线）
+    "adaptive_m",
 }
 _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
@@ -216,6 +221,8 @@ _OV_BOOL = {
     "momentum_exit", "td_sell_all", "cd_exit_all",
     "ema_gate_enabled", "ema_compare_baseline",
     "entry_ema_enabled",
+    # 自适应加仓间距（2026-11-03 研究线）
+    "adaptive_gap_enabled",
 }
 
 
