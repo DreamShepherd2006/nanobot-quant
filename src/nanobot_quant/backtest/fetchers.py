@@ -98,7 +98,10 @@ def _okx_fetch(ticker: str, start_ts: int, end_ts: int, bar: str) -> pd.DataFram
         start = end - max_bars_for(bar) * bar_seconds
     end_iso = datetime.fromtimestamp(end, tz=timezone.utc).isoformat()
     start_iso = datetime.fromtimestamp(start, tz=timezone.utc).isoformat()
-    return fetch_kline_range(ticker, start_iso, end_iso, bar=bar)
+    # 显式区间用本源可回溯上限（OKX 180 天 ⇒ 1m 259,200 根）；`start <= 0`
+    # 的「拉满」分支上面已按全局默认截窗，两者不混（2026-11-03 C103）。
+    return fetch_kline_range(ticker, start_iso, end_iso, bar=bar,
+                             max_bars=max_bars_for(bar, "okx_cex"))
 
 
 def _composite_fetch(
@@ -184,7 +187,12 @@ def unavailable_symbols(
 
 
 def max_bars_for_source(source: object, bar: str) -> Optional[int]:
-    """该源该周期的单次上限（Gate 由服务端深度闸门兜底 → 本地不设闸）。"""
+    """该源该周期的单次区间上限（用于页面/报告提示，不参与取数判定）。
+
+    OKX 按 ``max_backfill_days`` 换算；Gate 返回 None（平台自己会报 400，
+    本地不设闸）。2026-11-03 C103：此前 OKX 也返回全局 10,000 根，页面
+    因此把 Gate 的「1m ≈ 6.9 天」错挂在 OKX 头上。
+    """
     if normalize_source(source) == "okx_cex":
-        return max_bars_for(bar)
+        return max_bars_for(bar, "okx_cex")
     return None

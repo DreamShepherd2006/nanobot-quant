@@ -362,12 +362,14 @@ function onSourceChange() {
   if ($("bt-source-desc")) $("bt-source-desc").textContent = isOkx ? "OKX CEX" : "Gate CEX";
   if ($("source-hint")) {
     $("source-hint").textContent = isOkx
-      ? "跨所参考源：1m 历史远长于 Gate（Gate 1m ≈6.9 天）——仅作参数粗筛、不作裁决依据；池内无 OKX 交易对的标的会先报错"
+      ? "跨所参考源：OKX 1m 可回溯约 180 天（≈259,200 根），远长于 Gate（Gate 1m ≈6.9 天）——仅作参数粗筛、不作裁决依据；池内无 OKX 交易对的标的会先报错"
       : "与实盘执行同所（Gate 现货）——结果可直接用于参数裁决";
   }
   if ($("range-hint")) {
+    // 2026-11-03 C103：区间上限按源显示——「10,000 根 / 1m ≈7 天」是 Gate 的
+    // 平台深度，OKX 实测 1m ≥260 天，不能把 Gate 的数字挂在 OKX 头上。
     $("range-hint").textContent = isOkx
-      ? "留空 = 按单次上限取最近窗口；显式区间最多 10,000 根（1m ≈ 7 天 / 15m ≈ 104 天 / 1H ≈ 416 天）"
+      ? "留空 = 取最近 10,000 根；显式区间最多约 180 天（1m ≈ 259,200 根 / 5m ≈ 51,840 / 15m ≈ 17,280）——但抓取 ~0.6–3 分钟/标的、回放 ~0.04 s/标的·bar，90 天 1m 单标的约 1.4 小时，建议先单标的试跑"
       : "留空 = 拉满可用历史（Gate 1m ≈ 6.9 天 / 15m ≈ 104 天 / 1D 从上线起）";
   }
   const banner = $("cross-venue-banner");
@@ -535,10 +537,32 @@ function setMsg(text, kind) {
   if (!text) m.className = "banner msg";
 }
 
+// 长区间耗时预估（2026-11-03 C103）：只提示、不拦。
+// 抓取 ≈ bars/300 页 × 0.15s 节流 + 固定开销；回放 ≈ 0.04 s/标的·bar
+// （实测自 high 1m 多标的回测）。
+function estimateEta(body) {
+  if (!body.start || !body.end) return "";
+  const secs = { "1m":60,"2m":120,"3m":180,"4m":240,"5m":300,"6m":360,
+                 "10m":600,"15m":900,"20m":1200,"30m":1800,"45m":2700,
+                 "1H":3600,"2H":7200,"4H":14400,"6H":21600,"8H":28800,
+                 "12H":43200,"1D":86400,"3D":259200,"1W":604800,"7D":604800,
+                 "30D":2592000 };
+  const perEl = document.getElementById("period");
+  const per = (body.periods && body.periods.length) ? body.periods[0]
+            : (perEl && perEl.value) || "";
+  const s = secs[per];
+  if (!s) return "";
+  const bars = Math.floor((Date.parse(body.end) - Date.parse(body.start)) / 1000 / s);
+  if (!(bars > 20000)) return "";
+  const nSym = body.symbols.length;
+  const fetchMin = (bars / 300 * 0.15 + 30) / 60;
+  const replayH = bars * nSym * 0.04 / 3600;
+  return ` ⚠️ 约 ${bars.toLocaleString()} 根 × ${nSym} 标的 ≈ 抓取 ${fetchMin.toFixed(0)} 分钟 + 回放 ${replayH.toFixed(1)} 小时（长区间很慢，建议先单标的试跑）`;
+}
+
 async function startBacktest() {
   const symbols = selectedSymbols();
-  if (!symbols.length) { setMsg("至少选择一个标的", "err"); return; }
-  const body = {
+  if (!symbols.length) { setMsg("至少选择一个标的", "err"); return; }  const body = {
     source: $("source").value || "gate_cex",
     scene: $("scene").value,
     symbols,
@@ -562,7 +586,7 @@ async function startBacktest() {
     });
     const data = await r.json();
     if (!r.ok || !data.ok) { throw new Error(data.error || "启动失败"); }
-    setMsg(`已启动 run_id=${data.run_id}，等待结果…`);
+    setMsg(`已启动 run_id=${data.run_id}，等待结果…${estimateEta(body)}`);
     pollResult(data.run_id, 0);
   } catch (e) {
     setMsg("启动失败：" + e.message, "err");

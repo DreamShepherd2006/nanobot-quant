@@ -26,10 +26,15 @@ logger = logging.getLogger(__name__)
 # 每行第 0 个元素必须是毫秒时间戳（跨所统一约定）
 Row = list
 
-# 单次请求的区间上限（根）。超过即显式报错——**绝不静默截断**
+# 单次请求的区间上限（根，**默认值**）。超过即显式报错——**绝不静默截断**
 # （用户原则：采样/截断/覆盖率缺口必须如实标注）。
-# Gate 不传 max_bars（它自己有 HTTP 400 深度闸门，行为不变）；
-# OKX 没有深度闸门，1m 90 天要 433 页 / 177 秒，必须设闸。
+#
+# 2026-11-03（C103）定位修正：10,000 是**自家性能护栏，不是平台限制**。
+#   - Gate：平台自身有 HTTP 400 深度闸门（1m ≈ 最近 10,000 根 ≈ 6.9 天），
+#     数值巧合相同；本地护栏保留（超限报 400 更难懂）。
+#   - OKX：实测 1m 可回溯 ≥260 天（90 天 = 129,600 根），原护栏把 90 天
+#     回测一刀切死。现由数据源用 ``DataSourceSpec.max_backfill_days``
+#     声明可回溯天数，``max_bars_for(period, source)`` 按周期换算根数。
 MAX_BARS_PER_REQUEST = 10_000
 
 
@@ -37,8 +42,29 @@ class KlineRangeTooLarge(RuntimeError):
     """请求区间超过单次上限（fail-closed：报错，不截断、不静默降级）。"""
 
 
-def max_bars_for(period: str) -> int:
-    """某周期单次可请求的最大根数（当前所有周期统一 10,000 根）。"""
+def max_bars_for(period: str, source: Optional[str] = None) -> int:
+    """某周期单次可请求的最大根数。
+
+    ``source`` 给定时优先用该数据源声明的 :attr:`DataSourceSpec.max_backfill_days`
+    换算成根数（OKX = 180 天，即 1m 259,200 根），否则回退全局
+    :data:`MAX_BARS_PER_REQUEST`（Gate 等平台硬限收紧的源）。
+
+    注意：显式区间（回测/分页取数）才用源上限；「拉满」路径仍按全局默认
+    截最近窗口，避免一次请求误触几百页抓取（2026-11-03 C103）。
+    """
+    if source:
+        try:
+            from nanobot_quant.data_sources.base import get_data_source
+
+            days = getattr(get_data_source(source), "max_backfill_days", None)
+        except Exception:  # noqa: BLE001 — 源不存在/未注册：回退默认，不因诊断路径炸掉
+            days = None
+        if days:
+            from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+            sec = INTERVAL_SECONDS.get(period)
+            if sec:
+                return int(days * 86_400 / sec)
     return MAX_BARS_PER_REQUEST
 
 

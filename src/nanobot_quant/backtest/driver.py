@@ -114,6 +114,31 @@ def _timestep_for(sleeptime: str) -> str:
     return s
 
 
+def _insufficient_bars_error(timestep, start_ts, end_ts, bars, need,
+                             prefetch_errors=None) -> str:
+    """bars 不足时的错误文案（含 prefetch 真因）。
+
+    2026-11-03 C103：取数层的异常（如「OKX CEX 单次最多 10,000 根 1m，当前
+    区间 91 天超上限」）原先被 ``prefetch`` 吞掉，上层只报「bars=0 数据不足」
+    ——把真因拼进来，别让排查从猜开始。
+    """
+    cause = ""
+    errs = prefetch_errors or {}
+    if errs:
+        items = list(errs.items())
+        detail = "；".join(f"{sym}: {msg}" for sym, msg in items[:3])
+        more = "" if len(items) <= 3 else f"（共 {len(items)} 个标的失败）"
+        cause = f"。取数失败原因：{detail}{more}"
+    return (
+        f"历史数据不足回测窗口: bars={bars} < "
+        f"min_history={need}（数据源: {timestep}，"
+        f"区间 {start_ts} → {end_ts}；"
+        f"该粒度至少需要 {need} 根 K 线（如 15m 需 ≥{need * 15 // 60}h / "
+        f"1m 需 ≥{need}m / 1D 需 ≥{need} 天），请扩大区间后重试）"
+        f"{cause}"
+    )
+
+
 class BacktestDriver:
     """单场景历史回放驱动（Step 3：先单场景 mid 15m 跑通）。"""
 
@@ -648,13 +673,12 @@ class BacktestDriver:
         bar_times = self.data_source.bar_times
         start_idx = self.data_source.start_idx
         if len(bar_times) <= start_idx:
-            need = self.min_history
             raise RuntimeError(
-                f"历史数据不足回测窗口: bars={len(bar_times)} < "
-                f"min_history={need}（数据源: {self.timestep}，"
-                f"区间 {self.start_ts} → {self.end_ts}；"
-                f"该粒度至少需要 {need} 根 K 线（如 15m 需 ≥{need * 15 // 60}h / "
-                f"1m 需 ≥{need}m / 1D 需 ≥{need} 天），请扩大区间后重试）"
+                _insufficient_bars_error(
+                    self.timestep, self.start_ts, self.end_ts,
+                    len(bar_times), self.min_history,
+                    getattr(self.data_source, "prefetch_errors", None),
+                )
             )
 
         # 构造回测组件

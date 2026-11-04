@@ -44,10 +44,15 @@ def fetch_kline(symbol, bar="1D", limit=120,
         # 每轮只拿到当天第一根（或空），缓存从此卡死不动，且因为
         # 「无新 bar」是静默分支，页面数据冻结数小时也不会报错
         # （2026-10-30 实测：4 标的最后 bar 全部停在 00:00 UTC，滞后 3.7h）。
+        # 显式区间：上限按本源的 ``max_backfill_days`` 换算（2026-11-03 C103），
+        # 不能用全局 10,000 根——那是护栏而非平台限制，OKX 1m 实测 ≥260 天。
+        from nanobot_quant.kline_paging import max_bars_for
+
         return _fetch_kline_range_okx(inst,
                                       start=start.isoformat(),
                                       end=end.isoformat(),
-                                      bar=bar)
+                                      bar=bar,
+                                      max_bars=max_bars_for(bar, "okx_cex"))
     if limit > _SINGLE_FETCH_MAX:
         # 单次 `candles` 只回最近 ~300 根 ⇒ 超过时必须走 history-candles
         # 反向分页。2026-11-01 C95 实测：EMA 折价门 n=610 需 2137 根，

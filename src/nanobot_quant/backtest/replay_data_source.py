@@ -174,11 +174,16 @@ class ReplayDataSource:
         主标的（第一个）的完整时间轴存为 ``bar_times``（驱动循环用）。
         """
         end_ts = self._end_ts or int(time.time())
+        # 每个标的的取数异常（2026-11-03 C103）：原先只打一行日志、df 置空，
+        # 上层最终只能报「bars=0 历史数据不足」，真因（如「OKX CEX 单次最多
+        # 10,000 根 1m，当前区间 91 天超上限」）被吞掉。现收集给 driver 透传。
+        self.prefetch_errors: dict[str, str] = {}
         for symbol in self._symbols:
             pair = self._resolver(symbol)
             try:
                 df = self._fetcher(pair, self._prefetch_start_ts or 0, end_ts, self._bar)
             except Exception as exc:  # noqa: BLE001
+                self.prefetch_errors[symbol] = str(exc)
                 print(f"[BACKTEST] prefetch {symbol} failed: {exc}",
                       flush=True)
                 df = pd.DataFrame()
