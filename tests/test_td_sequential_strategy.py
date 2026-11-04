@@ -1281,6 +1281,25 @@ def test_wave_max_buys_two_allows_second_buy_in_same_wave(monkeypatch, tmp_path)
     assert s._denied_cycle.get(("default", "AAPL")) is not True
 
 
+def test_wave_max_buys_zero_disables_lock(monkeypatch, tmp_path):
+    """0 = 关闭波锁（2026-11-04 拍板 A）：组内已建 5 笔也不再按笔数拦截。"""
+    from types import SimpleNamespace
+
+    s = _resonance_strategy(tmp_path)
+    s._pending_buys = {}
+    s._is_cex = lambda: True
+    mo = SimpleNamespace(is_filled=lambda: False, custom_params=None, identifier="oid-0")
+    calls: list[int] = []
+    monkeypatch.setattr(
+        s, "_buy_on_slot", lambda slot, price, reason: (calls.append(slot) or (mo, 1.0))
+    )
+    _seed_full_group(s, count=5)
+    s._wave_max_buys = 0
+    s._evaluate_symbol()
+    assert calls, "0=关闭 → 组内笔数已满也应尝试建仓"
+    assert s._denied_cycle.get(("default", "AAPL")) is not True
+
+
 def test_wave_max_buys_three_blocks_fourth(tmp_path):
     """N=3：同组已有 3 笔 → 第 4 笔被拦。"""
     s = _resonance_strategy(tmp_path)
@@ -1334,8 +1353,15 @@ def test_activate_scene_reads_wave_max_buys_from_scene(tmp_path):
     assert s._wave_max_buys == 1, "场景留空应回退默认 1"
 
 
-def test_wave_max_buys_not_below_one(tmp_path):
-    """非法值（0/负数）一律夹到 1，不出现「永不建仓」。"""
+def test_wave_max_buys_zero_means_disabled(tmp_path):
+    """0 = 关闭波锁（2026-11-04 拍板 A）；负数夹到 0，不出现负值。
+
+    旧语义「非法值一律夹到 1」已作废——0 现在是合法关闭值，不能被 `or 1` 吞掉。
+    """
     s = _resonance_strategy(tmp_path)
     s._activate_scene("default", {"params": {"wave_max_buys": 0}})
-    assert s._wave_max_buys == 1
+    assert s._wave_max_buys == 0, "0 是合法的关闭值，不得被夹到 1"
+    s._activate_scene("default", {"params": {"wave_max_buys": -3}})
+    assert s._wave_max_buys == 0, "负数夹到 0（等同关闭）"
+    s._activate_scene("default", {"params": {"wave_max_buys": "0"}})
+    assert s._wave_max_buys == 0, "字符串 '0'（表单值）同样应关闭"

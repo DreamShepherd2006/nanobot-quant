@@ -266,10 +266,10 @@ class TdSequentialStrategy(Strategy):
         self._cd_stall_n = max(
             int(self.parameters.get("cd_stall_n", 3) or 3), 1
         )
-        # 共振错峰波锁容量（场景级可覆盖，见 _activate_scene）：默认 1 = 原行为
-        self._wave_max_buys = max(
-            int(self.parameters.get("wave_max_buys", 1) or 1), 1
-        )
+        # 共振错峰波锁容量（场景级可覆盖，见 _activate_scene）：默认 1 = 原行为；
+        # 0 = 关闭波锁（2026-11-04 拍板 A）——注意 0 是合法值，不能用 `or 1` 兜底。
+        _wmb0 = self.parameters.get("wave_max_buys", 1)
+        self._wave_max_buys = max(int(1 if _wmb0 is None else _wmb0), 0)
         # 2026-08-29 拍板 B：cd 入场时效门槛——setup 最近归零距当前 ≤ N 根才允许 cd 触发
         # （0=关闭，回归旧 cd 独立触发；场景级覆盖见 _activate_scene）。注意 0 是合法值，
         # 不能用 `or 5` 兜底（会把 0 顶成 5）。
@@ -823,14 +823,13 @@ class TdSequentialStrategy(Strategy):
         self._cd_exit_min_profit = float(p.get("cd_exit_min_profit") or 0.0)
         self._cd_exit_all = bool(p.get("cd_exit_all", True))
         self._td_sell_all = bool(p.get("td_sell_all") or False)
-        # 波锁容量（场景级；留空回退 parameters 默认值）
+        #[wave-lock-close] 0 = 关闭波锁（2026-11-04 拍板 A），不再强制 ≥1
         _wmb = p.get("wave_max_buys")
         if _wmb is not None and _wmb != "":
-            self._wave_max_buys = max(int(_wmb), 1)
+            self._wave_max_buys = max(int(_wmb), 0)
         else:
-            self._wave_max_buys = max(
-                int(self.parameters.get("wave_max_buys", 1) or 1), 1
-            )
+            _wmb0 = self.parameters.get("wave_max_buys", 1)
+            self._wave_max_buys = max(int(1 if _wmb0 is None else _wmb0), 0)
         mh = p.get("min_hold_bars")
         if mh is not None:
             self._min_hold_bars = int(mh)
@@ -1588,14 +1587,17 @@ class TdSequentialStrategy(Strategy):
         # 最多 wave_max_buys 笔。共振组 = setup 周期区间相交的标的分组；
         # 独立周期（区间不相交）自成一组、不受其他组已建仓影响。
         scene = self._cur_scene()
-        max_buys = max(int(getattr(self, "_wave_max_buys", 1) or 1), 1)
+        # 0 = 关闭波锁（2026-11-04）：`or 1` 会把 0 吞成 1，必须显式判 None
+        _mb = getattr(self, "_wave_max_buys", 1)
+        max_buys = max(int(1 if _mb is None else _mb), 0)
         denied = bool(getattr(self, "_denied_cycle", {}).get((scene, self.symbol), False))
         self._wave_groups = getattr(self, "_wave_groups", {})
         _wgroup = self._wave_group_at(
             scene, self.symbol, getattr(self, "_cur_bar_ts", None)
         )
         _wcount = int(_wgroup["count"]) if _wgroup else 0
-        round_used = _wgroup is not None and _wcount >= max_buys
+        # max_buys == 0 ⇒ 波锁关闭：不按组笔数拦截（另两道门仍在）
+        round_used = max_buys > 0 and _wgroup is not None and _wcount >= max_buys
         if denied:
             # 本周期已被共振组额度拦过：setup 重置前不再尝试（等新周期）
             self._bump_skip("batch_wait")

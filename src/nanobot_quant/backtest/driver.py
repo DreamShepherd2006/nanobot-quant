@@ -267,6 +267,12 @@ class BacktestDriver:
         if _eg is None:
             _eg = self.params.get("entry_min_gap_pct")
         self.entry_min_gap_pct = float(_eg) if _eg is not None else 0.0
+        # 波锁容量（2026-11-04，回测侧同批）：0 = 关闭波锁（不限笔数）。
+        # 注意 0 是合法值——用 `or 1` 会把它吞成 1（与策略侧同型坑）。
+        _wmb = self._merged_params.get("wave_max_buys")
+        if _wmb is None:
+            _wmb = self.params.get("wave_max_buys")
+        self.wave_max_buys = 1 if _wmb is None else int(_wmb)
         # 自适应加仓间距（2026-11-03 / C102 2026-11-04）：必须在这里显式解析并
         # 注入 strategy.parameters——否则策略读类默认 False ⇒ 回测里自适应恒关
         # （死门，与 IV 闸门/EMA 折价门当初同型缺陷）。trace 记录档位变化轨迹。
@@ -402,9 +408,12 @@ class BacktestDriver:
                 "exit_order": self._merged_params.get("exit_order", "fifo"),
                 "take_profit_pct": self._merged_params.get("take_profit_pct", 0.0),
                 # 共振错峰波锁容量（2026-11-01 实盘化）：每波每场景最多建仓 N 笔，
-                # 默认 1 = 原行为；场景级覆盖值已在 _merged_params 里（覆盖 > 场景 > 默认）
+                # 默认 1 = 原行为；**0 = 关闭波锁**（2026-11-04 拍板 A）。
+                # `or 1` 会把 0 吞成 1 ⇒ 显式判 None。
                 "wave_max_buys": int(
-                    self._merged_params.get("wave_max_buys", 1) or 1
+                    1
+                    if self._merged_params.get("wave_max_buys") is None
+                    else self._merged_params.get("wave_max_buys")
                 ),
                 # 贝叶斯闸门（2026-08-31，回测侧）：WebUI 回测页覆盖参数优先，
                 # 缺省回退 exec_params 平铺开关（/config/exec 持久化，默认 False=
@@ -444,6 +453,8 @@ class BacktestDriver:
                 # 加仓最小间距闸（2026-11-03，回测侧）——同样必须显式注入，
                 # 否则策略读类默认值 0 ⇒ 回测里恒关（死门缺陷）。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
+                # 波锁容量（2026-11-04）：0 = 关闭；不注入则回测读类默认 1。
+                "wave_max_buys": self.wave_max_buys,
                 # 自适应加仓间距（C102 2026-11-04）：同样必须显式注入，
                 # 否则回测里自适应恒关（与 IV/EMA 门同型死门）。
                 "adaptive_gap_enabled": self.adaptive_gap_enabled,
@@ -1074,6 +1085,8 @@ class BacktestDriver:
                 "entry_ema_warmup": self.entry_ema_warmup,
                 # 加仓最小间距闸（2026-11-03）：0=关。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
+                # 波锁容量（2026-11-04）：0=关闭波锁（不限笔数）。
+                "wave_max_buys": self.wave_max_buys,
                 # 自适应间距（C102 2026-11-04）：回测结果必须能读出开关与反馈窗口，
                 # 否则「跑了几小时却不知道自适应到底有没有生效」无法自查。
                 "adaptive_gap_enabled": self.adaptive_gap_enabled,

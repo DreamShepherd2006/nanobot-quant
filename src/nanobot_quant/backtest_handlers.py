@@ -96,6 +96,8 @@ _OV_FIELDS: dict[str, tuple] = {
     # 自适应加仓间距（2026-11-03 研究线）：场景级，默认关。
     "adaptive_gap_enabled": ("scene", None, False),
     "adaptive_m": ("scene", None, 30),
+    # 波锁容量（2026-11-04 回测侧补）：场景级，0 = 关闭波锁。
+    "wave_max_buys": ("scene", None, 1),
 }
 
 
@@ -209,6 +211,8 @@ _OV_INT = {
     "entry_ema_period",
     # 自适应加仓间距（2026-11-03 研究线）
     "adaptive_m",
+    # 波锁容量（2026-11-04，0 = 关闭）
+    "wave_max_buys",
 }
 _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
