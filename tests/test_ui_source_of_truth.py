@@ -205,3 +205,33 @@ def test_qty_zero_label_in_both_tables():
     assert "qty_zero" in bm._SKIP_LABELS
     assert "qty_zero" in page
     assert bm._SKIP_LABELS["qty_zero"] == page["qty_zero"]
+
+
+# ── 纳入失败构成的三个新键（2026-11-05）──────────────────────────────
+
+
+def test_slot_failure_labels_in_both_tables():
+    page = _page_skip_labels()
+    for k in ("no_slot", "slot_funds", "buy_fail"):
+        assert k in bm._SKIP_LABELS, f"{k} 缺 markdown 映射"
+        assert k in page, f"{k} 缺页面映射"
+        assert bm._SKIP_LABELS[k] == page[k]
+
+
+def test_buy_paths_count_slot_failures():
+    """资金类 / 下单失败 / 无可用 slot 三类都必须计数（此前均只 print）。"""
+    src = (Path(bm.__file__).resolve().parent
+           / "strategies" / "td_sequential_strategy.py").read_text(encoding="utf-8")
+    assert src.count('self._bump_skip("slot_funds")') >= 5, "DEX/CEX 资金类分支均需计数"
+    assert src.count('self._bump_skip("buy_fail")') >= 2, "DEX/CEX 下单失败均需计数"
+    assert 'self._bump_skip("no_slot")' in src
+
+
+def test_no_slot_event_reports_candidate_counts():
+    """「无可用 slot」事件要带候选数与实际尝试数，否则仍不可归因。"""
+    src = (Path(bm.__file__).resolve().parent
+           / "strategies" / "td_sequential_strategy.py").read_text(encoding="utf-8")
+    idx = src.index('self._bump_skip("no_slot")')
+    tail = src[idx: idx + 600]
+    assert "_candidates" in tail and "_tried" in tail
+    assert "slot_funds" in tail and "buy_fail" in tail
