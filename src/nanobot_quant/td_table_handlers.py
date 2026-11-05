@@ -691,6 +691,18 @@ def td_table_page(request: Request) -> HTMLResponse:
 
     strategy_name = load_selected()
     strategy_label = get_strategy(strategy_name).label
+    # C99（2026-11-05）：badge 不得无条件写「执行层同步使用」——strategy.json 只是
+    # 目标值，TD 循环在构造时读一次（td_live._run → load_selected），不重启就仍是
+    # 旧变体。运行中实际值由策略写入 LIVE_STATE["strategy_variant"]（td_live_state
+    # .set_strategy），这里读它得到真值；不一致时必须显式告警，否则页面会误导用户
+    # 用错误口径（如 countdown 类数值）解读盘面。
+    try:
+        from nanobot_quant import td_live_state as _tls
+
+        running_variant = str((_tls.get_state() or {}).get("strategy_variant") or "")
+    except Exception:  # 展示层异常不影响页面渲染
+        running_variant = ""
+    strategy_badge = _strategy_badge(strategy_name, strategy_label, running_variant)
     params = load_td_params(strategy_name)
     setup = int(params.get("setup_period", 9))
     entry_setup = int(params.get("entry_setup", 9))
@@ -722,7 +734,7 @@ def td_table_page(request: Request) -> HTMLResponse:
         return HTMLResponse(content)
 
     page = _load_template()
-    page = page.replace("{strategy_label}", _esc(strategy_label))
+    page = page.replace("{strategy_badge}", _esc(strategy_badge))
     page = page.replace("{snap_active}", "active" if tab not in ("history", "live") else "")
     page = page.replace("{hist_active}", "active" if tab == "history" else "")
     page = page.replace("{live_active}", "active" if tab == "live" else "")
@@ -964,6 +976,28 @@ def _pos_value_txt(qty, price, entry) -> str:
     if val <= 0:
         return "—"
     return f"{'≈' if approx else ''}${val:,.2f}"
+
+
+def _strategy_badge(strategy_name: str, strategy_label: str, running_variant: str) -> str:
+    """TD 页顶部徐标文案（C99，2026-11-05），纯函数便于三态单测。
+
+    必须区分「目标变体」（strategy.json）与「执行层运行中变体」
+    （LIVE_STATE["strategy_variant"]，td_live 启动时经 set_strategy 写入）
+    ——TD 循环构造时只读一次 strategy.json，改完不重启就仍是旧变体。
+    """
+    running_variant = str(running_variant or "")
+    if running_variant and running_variant != strategy_name:
+        try:
+            running_label = get_strategy(running_variant).label
+        except Exception:  # noqa: BLE001
+            running_label = running_variant
+        return (
+            f"⚠️ 目标：{strategy_label} ｜ 执行层仍为：{running_label}"
+            "（切换后需到 /config/exec 取消再勾选「启动 TD」）"
+        )
+    if running_variant:
+        return f"当前策略：{strategy_label}（执行层运行中）"
+    return f"当前策略：{strategy_label}（TD 循环未运行，此为下次启动将使用的变体）"
 
 
 def _slot_map_txt(sub_accounts) -> str:

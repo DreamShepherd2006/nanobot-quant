@@ -165,10 +165,15 @@ class OkxCexBroker(Broker):
                 )
         if not inst:
             inst = to_inst_id(base, quote=self._quote)
-        # 进程级节流：broker 在部分路径会被重建，实例级 set 会每轮重打一遍
+        # 进程级节流：broker 在部分路径会被重建，实例级 set 会每轮重打一遍。
+        # key 必须含**实际生效的计价币**——只按 symbol 节流时，把计价币从
+        # USDT 切到 USDC 后不再重打，日志会一直留着旧对（如 SOL → SOL-USDT
+        # 而实际下单走 SOL-USDC），排查时极易误判成「配置没生效」（C92）。
+        quote_eff = inst.rsplit("-", 1)[-1].upper() if "-" in inst else (self._quote or "")
         logged = _PAIR_LOGGED
-        if symbol not in logged:
-            logged.add(symbol)
+        key = (symbol.upper(), quote_eff)
+        if key not in logged:
+            logged.add(key)
             ids = spot_inst_ids() or frozenset()
             avail = sorted(
                 i for i in ids
