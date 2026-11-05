@@ -50,9 +50,9 @@ def test_arms_compare_deltas_and_no_paired_inference_note():
 
 
 def test_overrides_accept_two_arm_flag():
-    assert bh._coerce_overrides({"ema_compare_baseline": "on"}) == {
+    assert bh.coerce_overrides({"ema_compare_baseline": "on"}) == {
         "ema_compare_baseline": True
     }
-    assert bh._coerce_overrides({"ema_compare_baseline": False}) == {
+    assert bh.coerce_overrides({"ema_compare_baseline": False}) == {
         "ema_compare_baseline": False
     }

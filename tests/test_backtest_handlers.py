@@ -163,7 +163,7 @@ def test_start_passes_okx_source(client, monkeypatch):
 
 def test_coerce_overrides():
     """覆盖参数归一化：int/float/bool 按字段转换；空串/None 忽略。"""
-    assert bh._coerce_overrides(
+    assert bh.coerce_overrides(
         {
             "entry_setup": "10",
             "sell_only_profit_high": "0.005",
@@ -180,10 +180,10 @@ def test_coerce_overrides():
         "td_sell_all": False,
         "exit_order": "lifo",
     }
-    assert bh._coerce_overrides(None) == {}
-    assert bh._coerce_overrides({"exit_setup": "null", "min_hold_bars": ""}) == {}
+    assert bh.coerce_overrides(None) == {}
+    assert bh.coerce_overrides({"exit_setup": "null", "min_hold_bars": ""}) == {}
     with pytest.raises(ValueError):
-        bh._coerce_overrides({"entry_setup": "abc"})
+        bh.coerce_overrides({"entry_setup": "abc"})
 
 
 def test_coerce_overrides_accepts_ema_and_bars_mode():
@@ -192,7 +192,7 @@ def test_coerce_overrides_accepts_ema_and_bars_mode():
     白名单没收录的键会走直通分支——以前 f1_gate_enabled 就是因此
     「页面填了也不生效」，所以这里用显式断言锁住类型转换。
     """
-    assert bh._coerce_overrides(
+    assert bh.coerce_overrides(
         {
             "ema_gate_enabled": "on",
             "ema_n": "89",
@@ -205,7 +205,7 @@ def test_coerce_overrides_accepts_ema_and_bars_mode():
         "ema_k": 5,
         "bars_mode": "full",
     }
-    assert bh._coerce_overrides({"ema_gate_enabled": "off"}) == {
+    assert bh.coerce_overrides({"ema_gate_enabled": "off"}) == {
         "ema_gate_enabled": False
     }
 

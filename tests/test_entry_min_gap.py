@@ -244,7 +244,7 @@ def test_backtest_driver_injects_entry_min_gap():
 
 
 def test_overrides_coerced_for_entry_min_gap():
-    from nanobot_quant.backtest_handlers import _coerce_overrides
+    from nanobot_quant.tools.tools_backtest import coerce_overrides as _coerce_overrides
 
     assert _coerce_overrides({"entry_min_gap_pct": "0.3"}) == {
         "entry_min_gap_pct": 0.3
