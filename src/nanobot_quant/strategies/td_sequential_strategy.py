@@ -2265,6 +2265,27 @@ class TdSequentialStrategy(Strategy):
         """SKIP 拦截计数（跨 bar/标的累计）。"""
         self._skip_counts[key] = self._skip_counts.get(key, 0) + 1
 
+    def _skip_zero_qty(self, slot: dict, price: float, qty: float) -> None:
+        """买入手数为 0 的可见化（2026-11-05）。
+
+        DEX/CEX 两条 BUY 路径共用：此前 `if qty <= 0: return None` 完全静默，
+        4 个 slot 依次跳过只留一句「无可用 slot（资金不足或下单失败）」，
+        与真实原因无关，排查时会被带偏。
+        """
+        self._bump_skip("qty_zero")
+        detail = (
+            f"买入手数为 0（quantity_mode={self.quantity_mode} "
+            f"quantity={self.quantity} fixed_amount={self.fixed_amount} "
+            f"price={price:.6f}）"
+        )
+        self._record("SKIP", detail, symbol=self.symbol)
+        print(
+            f"[TD] BATCH SKIP | symbol={self.symbol} slot={slot.get('slot')} "
+            f"qty={qty} mode={self.quantity_mode} quantity={self.quantity} "
+            f"fixed_amount={self.fixed_amount} price={price:.6f}",
+            file=sys.stderr, flush=True,
+        )
+
     def _min_open_cost(self, bm) -> float | None:
         """该标的现有 open 批次里的最低 entry_price（加仓间距闸用，2026-11-03）。"""
         if bm is None:
@@ -3200,6 +3221,10 @@ class TdSequentialStrategy(Strategy):
             else:
                 qty = float(self.quantity or 0)
             if qty <= 0:
+                # 2026-11-05：qty=0 时静默 return 会让上层只留一句笼统的
+                # 「无可用 slot」，日志外无处可查（quantity_mode=fixed 但
+                # td_quantity 未配置即此情形）。按「门控必须落事件」补事件与计数。
+                self._skip_zero_qty(slot, price, qty)
                 return None
             if self.quantity_mode != "fixed_amount":
                 # 2026-08-19 拍板：fixed_amount 跳过单仓上限校验（金额即用户显式仓位），
@@ -3717,6 +3742,7 @@ class TdSequentialStrategy(Strategy):
             else:
                 qty = float(self.quantity or 0)
             if qty <= 0:
+                self._skip_zero_qty(slot, price, qty)
                 return None
             # 2026-08-30 买入对齐可卖步进数（用户拍板，替换 08-29 floor-优先逻辑）：
             # fixed_amount = 最小值语义——实际买入量按 amount_precision 向上
@@ -4167,6 +4193,14 @@ class TdSequentialStrategy(Strategy):
         else:
             if gated:
                 self._bump_skip("eod_hold")
+                # 2026-11-05：跳过也要在逐 bar 明细留痕（此前只有 skip_counts，
+                # bars_rows 里查不到 EOD 的任何动作）。
+                self._record(
+                    "SKIP",
+                    f"eod_hold:{prev.isoformat()} 候选 {len(candidates)} 批均未盈利"
+                    f"（mode={mode}）",
+                    symbol=self.symbol,
+                )
             print(
                 f"[TD] EOD SKIP | symbol={self.symbol} mode={mode} "
                 f"候选 {len(candidates)} 批均未盈利（日界={prev}）",

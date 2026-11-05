@@ -189,6 +189,7 @@ _SKIP_LABELS = {
     "cd_exit_no_open": "cd13 无持仓",
     # 2026-11-04 拆标签：周期门控与波锁分开统计（batch_wait 仅旧记录兼容）
     "cycle_wait": "周期门控等待（同标的未重置）",
+    "qty_zero": "买入手数为 0（数量参数未配置）",
     "wave_wait": "波锁拦截（共振组笔数上限）",
     "batch_wait": "周期门控/波锁等待（旧合并口径）",
     "gate_blocked": "贝叶斯闸门拦截",
