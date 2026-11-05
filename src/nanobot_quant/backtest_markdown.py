@@ -455,6 +455,11 @@ def _open_slots(slots: dict) -> list[dict]:
 
 def _spot_md(res: dict) -> str:
     cfg = res.get("backtest_config") or {}
+    # 入场多周期 OR（2026-11-05 Step 3）：从 backtest_config 读回；
+    # 缺失/非法 → [1]（与 exec_params.parse_entry_periods 同口径）。
+    from nanobot_quant.exec_params import parse_entry_periods as _parse_ep
+
+    _ep_list = _parse_ep(cfg.get("entry_periods"))
     cap = res.get("capital_stats") or {}
     detail = res.get("fills_detail") or []
     slots = res.get("slots") or {}
@@ -478,6 +483,12 @@ def _spot_md(res: dict) -> str:
         ("滑点", _pct(cfg.get("slippage"))),
         ("手续费率", _pctv(cfg.get("fee_rate"))),
         ("入场 setup", cfg.get("entry_setup")),
+        # 入场多周期 OR（2026-11-05 Step 3）：只有 [1] 才是「关」；
+        # 单元素 [8] 是「只吃 8 倍周期」，此前误显成「关」（静默误导）。
+        ("入场多周期", (
+            "关（只吃基础周期）" if _ep_list == [1] else
+            "/".join(str(x) for x in _ep_list) + " 倍（任一周期达阈值即建仓）"
+        )),
         ("入场 countdown", cfg.get("entry_countdown")),
         ("CD 入场时效门槛(bar)", cfg.get("cd_entry_setup_gap")),
         ("出场 setup", cfg.get("exit_setup")),

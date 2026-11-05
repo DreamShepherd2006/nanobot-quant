@@ -97,6 +97,8 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
     # 加仓最小间距闸（2026-11-03）——场景专属、默认 0=关
     "entry_min_gap_pct",
+    # 入场多周期 OR（2026-11-05 Step 3）——场景专属、默认 "1"=零行为变化
+    "entry_periods",
     # 自适应加仓间距（2026-11-03 研究线）——场景专属、默认关
     "adaptive_gap_enabled", "adaptive_m",
     # 共振错峰波锁容量（2026-11-01 用户拍板上实盘、默认 1）
@@ -142,7 +144,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
-        "entry_min_gap_pct": 0.0,
+        "entry_min_gap_pct": 0.0, "entry_periods": "1",
         "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
@@ -166,7 +168,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
-        "entry_min_gap_pct": 0.0,
+        "entry_min_gap_pct": 0.0, "entry_periods": "1",
         "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
@@ -190,7 +192,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
-        "entry_min_gap_pct": 0.0,
+        "entry_min_gap_pct": 0.0, "entry_periods": "1",
         "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
@@ -519,6 +521,19 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "label": "EMA 折价偏移(%)",
         "hint": "要求收盘价低于 EMA 的幅度（%）：0=只要在均线下方即可，0.1=必须低 0.1% 以上",
     },
+    # ── 入场多周期 OR（2026-11-05 Step 3，默认 "1"=零行为变化）────────
+    #    口径：以场景周期为基数的**整数倍**（1m 场景 → 1/2/3/4/5/8m），
+    #    各周期都吃 td_bars 根 bar；任一周期 setup_buy≥入场阈值 或
+    #    cd_buy≥入场 Countdown → 建仓（OR）。出场字段始终来自基础周期。
+    "entry_periods": {
+        "group": "scene", "type": "str", "std": "1",
+        "label": "入场多周期(倍数)",
+        "hint": "以场景周期为基数的倍数，逗号分隔（如 1 或 1,2,3,4,5,8；可选 1/2/3/4/5/8）。"
+                "任一周期 setup_buy 或 cd_buy 达阈值即建仓；默认 1 = 只吃基础周期（零行为变化）。"
+                "取数长度按最大倍数放大（8 倍 → 8×td_bars 根基础 K 线，1m/300 根时约 40 小时），"
+                "数据不足的周期会被跳过并记日志，不静默降级。研究口径 1/2/3/4/5/8："
+                "2026-11-05 对照（SOL/NEAR/DASH 104 天、单双号强平）多周期 +4.64% vs 单 1m +1.46%",
+    },
     # ── 加仓最小间距闸（2026-11-03，默认 0=关）──────────────────────
     "entry_min_gap_pct": {
         "group": "scene", "min": 0.0, "max": 10.0, "step": 0.05, "std": 0.0,
@@ -596,11 +611,54 @@ def exec_params_path() -> Path:
     return Path.home() / ".exec_params.json"
 
 
+#: 入场多周期可选倍数（2026-11-05 Step 3，研究口径）。
+_ENTRY_PERIOD_CHOICES: tuple[int, ...] = (1, 2, 3, 4, 5, 8)
+
+
+def parse_entry_periods(value: Any) -> list[int]:
+    """'1,2,3,4,5,8' / [1,2] → 排好序的合法倍数列表；非法项忽略。
+
+    空值、全非法、或“非 1 的多周期但全被剔除” → ``[1]``（基周期、零行为变化）。
+    合法但重复 → 去重。用 :data:`_ENTRY_PERIOD_CHOICES` 单一来源。
+    """
+    if isinstance(value, (list, tuple, set)):
+        raw = [str(v) for v in value]
+    else:
+        raw = str(value if value is not None else "").replace("，", ",").split(",")
+    out: list[int] = []
+    for tok in raw:
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            n = int(float(tok))
+        except (TypeError, ValueError):
+            continue
+        if n in _ENTRY_PERIOD_CHOICES and n not in out:
+            out.append(n)
+    return sorted(out) or [1]
+
+
 def validate_exec_param(key: str, value: Any) -> str | None:
     """Return an error message for an invalid value, or None if valid."""
     meta = PARAM_META.get(key)
     if meta is None:
         return "未知参数"
+    if key == "entry_periods":
+        _raw = str(value if value is not None else "").replace("，", ",").strip()
+        _toks = [t.strip() for t in _raw.split(",") if t.strip()]
+        if not _toks:
+            return "不能为空（填 1 = 只吃基础周期）"
+        _bad = [
+            t for t in _toks
+            if not t.isdigit() or int(t) not in _ENTRY_PERIOD_CHOICES
+        ]
+        if _bad:
+            return (
+                f"只能是 {'/'.join(map(str, _ENTRY_PERIOD_CHOICES))} 的逗号组合"
+                f"（非法：{','.join(_bad)}）"
+            )
+        return None
     vtype = meta.get("type", "float")
     if vtype == "bool":
         return None if isinstance(value, bool) else "必须是布尔值"

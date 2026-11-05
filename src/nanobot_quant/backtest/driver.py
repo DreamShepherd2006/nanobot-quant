@@ -66,7 +66,7 @@ from nanobot_quant.environment.sensors import (
 )
 from nanobot_quant.batches import BatchManager
 from nanobot_quant.brokers.backtest_broker import BacktestBroker
-from nanobot_quant.exec_params import load_exec_params
+from nanobot_quant.exec_params import load_exec_params, parse_entry_periods
 from nanobot_quant.gate_credentials import load_tokens_json
 from nanobot_quant.strategies.registry import load_selected
 from nanobot_quant.td_params import load_td_params
@@ -261,6 +261,15 @@ class BacktestDriver:
             else 0
         )
         self.warmup_bars = max(self.ema_warmup, self.entry_ema_warmup)
+
+        # 入场多周期 OR（2026-11-05 Step 3）：额外预热 = (max_mult - 1) × min_history 根，
+        # 让每个周期都能凑满 min_history 根 bar。默认 [1] → 0，零行为变化。
+        self.entry_periods = parse_entry_periods(
+            self._merged_params.get("entry_periods")
+            if self._merged_params.get("entry_periods") not in (None, "")
+            else self.params.get("entry_periods")
+        )
+        self.multi_warmup = (max(self.entry_periods) - 1) * self.min_history
         # 加仓最小间距闸（2026-11-03）：纯判定、不需要额历史，默认 0=关。
         # 覆盖优先级 = 本次回测覆盖 > 场景配置 > 全局默认（与其余入场门同规）。
         _eg = self._merged_params.get("entry_min_gap_pct")
@@ -331,7 +340,7 @@ class BacktestDriver:
                 else (lambda sym: resolve_symbol(sym, self.source, tokens))
             ),
             # EMA 长记忆变量需额外向前预热（C72：只拉长取数、不改评估起点）
-            extra_warmup_bars=self.warmup_bars,
+            extra_warmup_bars=self.warmup_bars + self.multi_warmup,
         )
 
         # 6. 撮合参数
@@ -457,6 +466,8 @@ class BacktestDriver:
                 "entry_ema_enabled": self.entry_ema_enabled,
                 "entry_ema_period": self.entry_ema_n,
                 "entry_ema_offset_pct": self.entry_ema_offset_pct,
+                # 入场多周期 OR（2026-11-05 Step 3）——同样显式注入，否则回测恒单周期。
+                "entry_periods": ",".join(str(x) for x in self.entry_periods),
                 # 加仓最小间距闸（2026-11-03，回测侧）——同样必须显式注入，
                 # 否则策略读类默认值 0 ⇒ 回测里恒关（死门缺陷）。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
@@ -999,6 +1010,16 @@ class BacktestDriver:
             "source_note": self.source_note,
             "bars": len(net_values),
             "fetched_bars": len(bar_times) if bar_times else 0,
+            # 入场多周期 OR（2026-11-05）：各周期实际拿到的 bar 数与窗口不足次数，
+            # 让「长周期窗口被数据源深度截断」在结果里可见（不靠日志找）。
+            "entry_periods": "|".join(
+                f"{m}:{n}" for m, n in sorted(
+                    (getattr(self.strategy, "_multi_bar_counts", None) or {}).items()
+                )
+            ) or None,
+            "multi_window_warnings": int(
+                getattr(self.strategy, "_multi_warn_count", 0) or 0
+            ),
             "start_ts": (
                 bar_times[start_idx].isoformat() if len(bar_times) > start_idx else None
             ),
@@ -1090,6 +1111,9 @@ class BacktestDriver:
                 "entry_ema_period": self.entry_ema_n,
                 "entry_ema_offset_pct": self.entry_ema_offset_pct,
                 "entry_ema_warmup": self.entry_ema_warmup,
+                # 入场多周期 OR（2026-11-05 Step 3）：快照必须含实际生效值，
+                # 否则 markdown/页面按缺省显示「关」——开了多周期也看不见（静默失真）。
+                "entry_periods": ",".join(str(x) for x in self.entry_periods),
                 # 加仓最小间距闸（2026-11-03）：0=关。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
                 # 波锁容量（2026-11-04）：0=关闭波锁（不限笔数）。
