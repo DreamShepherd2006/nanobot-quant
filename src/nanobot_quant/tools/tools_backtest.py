@@ -27,6 +27,74 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 
+# ── 回测覆盖参数归一化（MCP 与 WebUI 共用同一实现）──────────────────
+# 2026-11-05：实现原先只在 backtest_handlers._coerce_overrides，即只有
+# WebUI 路径做类型转换；MCP run_backtest 直连时 overrides 原样透传，
+# 字符串 "false" 在策略侧 `if parameters.get(...)` 里是真值 ⇒ 静默生效，
+# 两个入口可能跑出不同结果。现下沉到此文件，run_backtest 入口统一调用。
+
+#: 回测每 slot 初始资金默认值（页面输入框、MCP 默认、handler 兜底同源）
+DEFAULT_INITIAL_QUOTE = 100.0
+
+_OV_INT = {
+    "entry_setup", "entry_countdown", "cd_entry_setup_gap",
+    "exit_setup", "exit_countdown", "min_hold_bars",
+    "cd_stall_n", "td_start_slot",
+    # EMA 趋势变量（2026-10-20，C73/C74 研究线，回测侧）
+    "ema_n", "ema_k",
+    # EMA 折价入场门（2026-11-01，回测侧覆盖）
+    "entry_ema_period",
+    # 自适应加仓间距（2026-11-03 研究线）
+    "adaptive_m",
+    # 波锁容量（2026-11-04，0 = 关闭）
+    "wave_max_buys",
+    # EOD 日界小时（2026-11-05 Step 2）
+    "eod_hour_utc",
+}
+_OV_FLOAT = {
+    "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
+    "stop_loss_pct", "take_profit_pct", "min_account_value",
+    "entry_ema_offset_pct",
+    # 加仓最小间距闸（2026-11-03）
+    "entry_min_gap_pct",
+}
+_OV_BOOL = {
+    "momentum_exit", "td_sell_all", "cd_exit_all",
+    "ema_gate_enabled", "ema_compare_baseline",
+    "entry_ema_enabled",
+    # 自适应加仓间距（2026-11-03 研究线）
+    "adaptive_gap_enabled",
+    # EOD 单双号强平（2026-11-05 Step 2）
+    "eod_enabled",
+}
+
+
+def coerce_overrides(raw) -> dict:
+    """回测覆盖参数归一化（空串/None 忽略；int/float/bool 按字段转换）。
+
+    MCP ``run_backtest`` 与 WebUI ``/config/backtest/start`` 共用本实现，
+    保证两个入口对同一份 overrides 得到同一个 dict（尤其布尔：字符串
+    ``"false"`` 必须归一成 ``False``，否则策略侧按真值处理）。
+    仅作用于本次回测，绝不回写 exec_params（2026-08-30 拍板）。
+    """
+    out = {}
+    for k, v in (raw or {}).items():
+        if v is None or v == "" or v == "null":
+            continue
+        try:
+            if k in _OV_INT:
+                out[k] = int(v)
+            elif k in _OV_FLOAT:
+                out[k] = float(v)
+            elif k in _OV_BOOL:
+                out[k] = v is True or str(v).lower() in ("1", "true", "on", "yes")
+            else:
+                out[k] = v  # exit_order 等字符串透传
+        except (TypeError, ValueError):
+            raise ValueError(f"回测覆盖参数 {k}={v!r} 非法") from None
+    return out
+
+
 def _backtest_log(run_id: str, payload: dict) -> None:
     """Persist backtest outcome to ``{data_root}/legion/backtests``.
 
@@ -561,7 +629,7 @@ def run_backtest(
     engine: str = "backtest_runner",
     scene: str = "mid",
     symbols: list[str] | None = None,
-    initial_quote: float = 100.0,
+    initial_quote: float = DEFAULT_INITIAL_QUOTE,
     batches: int | None = None,
     slippage: float | None = None,
     fixed_amount: float | None = None,
@@ -619,6 +687,16 @@ def run_backtest(
         background thread (a real run exceeds the 30s MCP tool timeout);
         poll ``get_backtest_result(run_id)`` for the outcome.
     """
+    # 两个入口（MCP / WebUI）共用同一份归一化，字符串 "false"/"10"
+    # 在这里就转成正确类型，绝不再原样透传给策略层。
+    try:
+        overrides = coerce_overrides(overrides)
+    except ValueError as exc:
+        return {
+            "error": str(exc),
+            "hint": "overrides 需为 JSON 对象；int/float/bool 字段可传字符串但要能解析。",
+        }
+
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
     if engine == "options":
         # 前缀区分两套引擎的结果，页面历史分开列（见 _opt_runs）

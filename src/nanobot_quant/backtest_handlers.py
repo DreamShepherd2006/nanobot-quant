@@ -22,6 +22,10 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from nanobot_quant.data_sources.periods import COMPOSITE_PERIODS, PERIODS
+from nanobot_quant.tools.tools_backtest import (
+    DEFAULT_INITIAL_QUOTE,
+    coerce_overrides,
+)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -201,58 +205,9 @@ def _render_page(scenes: dict, symbols: list[str]) -> str:
     )
 
 
-_OV_INT = {
-    "entry_setup", "entry_countdown", "cd_entry_setup_gap",
-    "exit_setup", "exit_countdown", "min_hold_bars",
-    "cd_stall_n", "td_start_slot",
-    # EMA 趋势变量（2026-10-20，C73/C74 研究线，回测侧）
-    "ema_n", "ema_k",
-    # EMA 折价入场门（2026-11-01，回测侧覆盖）
-    "entry_ema_period",
-    # 自适应加仓间距（2026-11-03 研究线）
-    "adaptive_m",
-    # 波锁容量（2026-11-04，0 = 关闭）
-    "wave_max_buys",
-    # EOD 日界小时（2026-11-05 Step 2）
-    "eod_hour_utc",
-}
-_OV_FLOAT = {
-    "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
-    "stop_loss_pct", "take_profit_pct", "min_account_value",
-    "entry_ema_offset_pct",
-    # 加仓最小间距闸（2026-11-03）
-    "entry_min_gap_pct",
-}
-_OV_BOOL = {
-    "momentum_exit", "td_sell_all", "cd_exit_all",
-    "ema_gate_enabled", "ema_compare_baseline",
-    "entry_ema_enabled",
-    # 自适应加仓间距（2026-11-03 研究线）
-    "adaptive_gap_enabled",
-    # EOD 单双号强平（2026-11-05 Step 2）
-    "eod_enabled",
-}
-
-
-def _coerce_overrides(raw) -> dict:
-    """回测覆盖参数归一化（空串/None 忽略；int/float/bool 按字段转换）。
-    仅作用于本次回测，绝不回写 exec_params（2026-08-30 拍板）。"""
-    out = {}
-    for k, v in (raw or {}).items():
-        if v is None or v == "" or v == "null":
-            continue
-        try:
-            if k in _OV_INT:
-                out[k] = int(v)
-            elif k in _OV_FLOAT:
-                out[k] = float(v)
-            elif k in _OV_BOOL:
-                out[k] = v is True or str(v).lower() in ("1", "true", "on", "yes")
-            else:
-                out[k] = v  # exit_order 等字符串透传
-        except (TypeError, ValueError):
-            raise ValueError(f"回测覆盖参数 {k}={v!r} 非法")
-    return out
+# 覆盖参数归一化只有一份实现（tools_backtest.coerce_overrides），
+# WebUI 与 MCP 两个入口共用——此前实现只在本文件，MCP 直连时 overrides
+# 原样透传（字符串 "false" 被策略当真值）导致两入口结果可能不一致。
 
 
 def register_backtest_routes(app, gatekeeper) -> None:
@@ -295,7 +250,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         try:
-            overrides = _coerce_overrides(data.get("overrides"))
+            overrides = coerce_overrides(data.get("overrides"))
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         gatekeeper._log(
@@ -322,7 +277,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 symbols=symbols,
                 start=data.get("start") or None,
                 end=data.get("end") or None,
-                initial_quote=float(data.get("initial_quote") or 1000),
+                initial_quote=float(data.get("initial_quote") or DEFAULT_INITIAL_QUOTE),
                 batches=int(data["batches"]) if data.get("batches") else None,
                 slippage=float(data["slippage"]) if data.get("slippage") else None,
                 fixed_amount=float(data["fixed_amount"])

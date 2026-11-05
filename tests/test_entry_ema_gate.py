@@ -240,7 +240,7 @@ def test_backtest_driver_injects_entry_ema_params():
 # 面上三个字段：开关 / 周期 / 偏移；默认留空 = 跟随场景配置。
 
 def test_overrides_coerced_for_entry_ema_fields():
-    from nanobot_quant.backtest_handlers import _coerce_overrides
+    from nanobot_quant.tools.tools_backtest import coerce_overrides as _coerce_overrides
 
     got = _coerce_overrides({
         "entry_ema_enabled": "on",
