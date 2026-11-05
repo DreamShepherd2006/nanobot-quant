@@ -407,6 +407,13 @@ class BacktestDriver:
                 ),
                 "exit_order": self._merged_params.get("exit_order", "fifo"),
                 "take_profit_pct": self._merged_params.get("take_profit_pct", 0.0),
+                # EOD 单双号强平（2026-11-05 Step 2）：默认关。这里只是给参数
+                # 兜底（实际生效值由 _activate_scene 每 bar 从 rt["params"] 注入，
+                # 而 rt["params"] = self._merged_params ⇒ 已含场景值）。
+                "eod_enabled": self._merged_params.get("eod_enabled", False),
+                "eod_parity": self._merged_params.get("eod_parity", "even"),
+                "eod_mode": self._merged_params.get("eod_mode", "all"),
+                "eod_hour_utc": self._merged_params.get("eod_hour_utc", 0),
                 # 共振错峰波锁容量（2026-11-01 实盘化）：每波每场景最多建仓 N 笔，
                 # 默认 1 = 原行为；**0 = 关闭波锁**（2026-11-04 拍板 A）。
                 # `or 1` 会把 0 吞成 1 ⇒ 显式判 None。
@@ -1103,6 +1110,12 @@ class BacktestDriver:
                     "exit_countdown"
                 ),
                 "min_hold_bars": getattr(strategy, "_min_hold_bars", None),
+                # EOD 单双号强平（2026-11-05 Step 2）：实际生效值（_activate_scene 注入后），
+                # 不写快照就无法从结果判断「开了没」「按哪个奇偶/范围」。
+                "eod_enabled": getattr(strategy, "_eod_enabled", False),
+                "eod_parity": getattr(strategy, "_eod_parity", "even"),
+                "eod_mode": getattr(strategy, "_eod_mode", "all"),
+                "eod_hour_utc": getattr(strategy, "_eod_hour_utc", 0),
                 "exit_order": getattr(strategy, "_exit_order", None),
                 "stop_loss_pct": getattr(
                     getattr(strategy, "_risk", None), "stop_loss_pct", None

@@ -107,6 +107,14 @@ class TdSequentialStrategy(Strategy):
         # gap 档位（见 _adaptive_gap_observe）。默认关 → 零行为变化。
         "adaptive_gap_enabled": False,
         "adaptive_m": 30,
+        # EOD 单双号强平（2026-11-05 Step 2）：默认关 → 零行为变化。
+        # 研究口径§33.58：单号日 UTC 24:00 持仓不动、双号日 UTC 24:00 强平全部仓位。
+        # ⚠️ eod_mode=all 会**亏损平仓**，与「不设止损」铁律冲突，
+        # 开启属用户交易决策，不得由助手默认开启或自动代点。
+        "eod_enabled": False,
+        "eod_parity": "even",       # even=双号日结束 / odd=单号日结束 / both=每天
+        "eod_mode": "all",          # all=全平（含浮亏）/ profit_only=只平浮盈
+        "eod_hour_utc": 0,          # 日界小时（0=UTC 自然日 24:00）
         **DEFAULT_TD_PARAMS,
     }
 
@@ -857,6 +865,32 @@ class TdSequentialStrategy(Strategy):
             _sc_off if _sc_off is not None
             else self.parameters.get("entry_ema_offset_pct", 0.1) or 0.0
         )
+        # EOD 单双号强平（2026-11-05 Step 2）：场景值优先，留空回退全局 parameters。
+        # 默认关（False）——all 模式会亏损平仓，与「不设止损」铁律冲突。
+        _eod_on = p.get("eod_enabled")
+        self._eod_enabled = (
+            bool(_eod_on) if _eod_on is not None
+            else bool(self.parameters.get("eod_enabled", False))
+        )
+        _eod_par = p.get("eod_parity")
+        self._eod_parity = str(
+            _eod_par if _eod_par not in (None, "")
+            else (self.parameters.get("eod_parity", "even") or "even")
+        ).lower()
+        _eod_mode = p.get("eod_mode")
+        self._eod_mode = str(
+            _eod_mode if _eod_mode not in (None, "")
+            else (self.parameters.get("eod_mode", "all") or "all")
+        ).lower()
+        _eod_h = p.get("eod_hour_utc")
+        try:
+            _eod_h_v = int(
+                _eod_h if _eod_h is not None
+                else (self.parameters.get("eod_hour_utc", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            _eod_h_v = 0
+        self._eod_hour_utc = _eod_h_v % 24
         # 加仓最小间距闸（2026-11-03）：场景值优先，留空回退全局 parameters（默认 0=关）
         _sc_gap = p.get("entry_min_gap_pct")
         self._entry_min_gap_pct = float(
@@ -1406,6 +1440,11 @@ class TdSequentialStrategy(Strategy):
                 }, scene=getattr(self, "_current_scene", "") or "")
         except Exception:  # noqa: BLE001
             pass
+
+        # ── EOD 单双号强平（2026-11-05 Step 2，默认关）──
+        # 放在所有 BUY/SELL 判定之前：强平即结束本 bar，不在同一 bar 又开仓。
+        if self._maybe_eod_close(price, signal):
+            return
 
         has_position = self.get_position(self.symbol) is not None
 
@@ -4047,6 +4086,93 @@ class TdSequentialStrategy(Strategy):
             return -1
         remain = (until - self._current_bar_time).total_seconds()
         return max(int(remain // self._bar_seconds()) + 1, 0)
+
+    # ── EOD 单双号强平（2026-11-05 Step 2，默认关）──────────────────
+    # 研究口径（docs/quant-system.md §33.58）：单号日 24:00 持仓不动、
+    # 双号日 24:00 强平全部仓位。日界按 UTC 计算（换北京时区整轮差 ~1.66pp）。
+    # 与 v1 脚本的差异：本实现按标的独立判定（每个标的自己的 bar 时间跨日
+    # 才触发自己的全平），避免多标的共用一份状态时后评估的标的被漏掉。
+
+    def _eod_parity_match(self, day) -> bool:
+        """该「已结束的交易日」日期号是否符合 eod_parity。"""
+        parity = (getattr(self, "_eod_parity", "even") or "even").lower()
+        if parity == "both":
+            return True
+        odd = (day.day % 2) == 1
+        return odd if parity == "odd" else (not odd)
+
+    def _maybe_eod_close(self, price: float, signal: dict) -> bool:
+        """跨过日界且刚结束的那一天奇偶匹配 → 平掉该标的所有 open 批。
+
+        返回 True = 本轮已执行强平，调用方应跳过本 bar 的 BUY/SELL 评估
+        （强平即结束本 bar，不在同一 bar 又开仓）。
+
+        mode=all 绕过 min_hold 与高9 盈利门（日界强平不受它们约束）；
+        mode=profit_only 只平毛浮盈批（entry_price < price），其余计数跳过。
+        """
+        if not getattr(self, "_eod_enabled", False):
+            return False
+        ts = getattr(self, "_current_bar_time", None)
+        if ts is None:
+            return False
+        try:
+            import pandas as _pd
+            from datetime import timedelta as _td
+            hour = int(getattr(self, "_eod_hour_utc", 0) or 0)
+            day = (_pd.Timestamp(ts) - _td(hours=hour)).date()
+        except Exception:
+            return False
+        seen = self.__dict__.setdefault("_eod_last_day", {})
+        prev = seen.get(self.symbol)
+        seen[self.symbol] = day
+        if prev is None or day == prev:
+            return False
+        if not self._eod_parity_match(prev):
+            return False
+        bm = self.batch_manager
+        if bm is None:
+            return False
+        candidates = bm.pick_all_slots(self._exit_order, limit=self._sell_all_max)
+        if not candidates:
+            return False
+        mode = (getattr(self, "_eod_mode", "all") or "all").lower()
+        sold = 0
+        gated = 0
+        for s in candidates:
+            if mode == "profit_only":
+                # lot 字段在 slot["lot"] 下（batches.py 结构：{slot, status, lot:{...}}）
+                _lot = s.get("lot") or {}
+                try:
+                    entry = float(_lot.get("entry_price") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                if entry <= 0 or price <= entry:
+                    gated += 1
+                    continue
+            self._sell_lot(s, price, signal, f"eod_close:{prev.isoformat()}")
+            sold += 1
+        if sold:
+            print(
+                f"[TD] EOD CLOSE | symbol={self.symbol} 日界={prev} "
+                f"parity={getattr(self, '_eod_parity', 'even')} mode={mode} "
+                f"平 {sold} 批（候选 {len(candidates)}"
+                + (f"，未盈利跳过 {gated}" if gated else "")
+                + "）",
+                file=sys.stderr, flush=True,
+            )
+            self._record(
+                "EXIT", f"eod_close:{prev.isoformat()} 平 {sold} 批",
+                symbol=self.symbol,
+            )
+        else:
+            if gated:
+                self._bump_skip("eod_hold")
+            print(
+                f"[TD] EOD SKIP | symbol={self.symbol} mode={mode} "
+                f"候选 {len(candidates)} 批均未盈利（日界={prev}）",
+                file=sys.stderr, flush=True,
+            )
+        return sold > 0
 
     def _profit_gate_blocked(
         self, slot: dict, price: float, setup_sell: int = 0, cd_sell: int = 0

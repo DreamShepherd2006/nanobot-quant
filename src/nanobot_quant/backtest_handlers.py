@@ -213,6 +213,8 @@ _OV_INT = {
     "adaptive_m",
     # 波锁容量（2026-11-04，0 = 关闭）
     "wave_max_buys",
+    # EOD 日界小时（2026-11-05 Step 2）
+    "eod_hour_utc",
 }
 _OV_FLOAT = {
     "sell_only_profit_high", "sell_only_profit_low", "cd_exit_min_profit",
@@ -227,6 +229,8 @@ _OV_BOOL = {
     "entry_ema_enabled",
     # 自适应加仓间距（2026-11-03 研究线）
     "adaptive_gap_enabled",
+    # EOD 单双号强平（2026-11-05 Step 2）
+    "eod_enabled",
 }
 
 
