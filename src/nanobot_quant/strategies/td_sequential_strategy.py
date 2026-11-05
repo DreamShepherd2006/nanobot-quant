@@ -1941,6 +1941,35 @@ class TdSequentialStrategy(Strategy):
             )
 
     # ── 分批平仓（批次=子钱包，第一版）──────────────────────────────
+    def _pick_gated_slot(
+        self, bm, price: float, setup_sell: int, cd_sell: int,
+        *, cd_channel: bool = False,
+    ):
+        """min_entry 口径：按入场价升序遍历 open 批，返回第一个「过 min_hold + 过盈利门」的批。
+
+        与 fifo/lifo 的关键差异（2026-11-05）：
+          fifo/lifo = 「选一个 → 门拦则整轮 SKIP」（后面的批次不会再试）
+          min_entry = 「先筛门 → 再取入场价最低」，等价于
+                      每个 setup 周期都尽可能平掉「成本最低且已盈利」的那一仓。
+
+        返回 ``(slot, hold_skipped, gate_blocked)``：slot=None 且两者都为 0 表示无 open 批。
+        """
+        hold_skipped = 0
+        gate_blocked = 0
+        for cand in bm.pick_all_slots("min_entry"):
+            if self._min_hold_blocked(cand):
+                hold_skipped += 1
+                continue
+            blocked = (
+                self._cd_gate_blocked(cand, price) if cd_channel
+                else self._profit_gate_blocked(cand, price, setup_sell, cd_sell)
+            )
+            if blocked:
+                gate_blocked += 1
+                continue
+            return cand, hold_skipped, gate_blocked
+        return None, hold_skipped, gate_blocked
+
     def _handle_batch_exits(
         self,
         price: float,
@@ -2009,6 +2038,33 @@ class TdSequentialStrategy(Strategy):
                         + (f"，min_hold 跳过 {hold_skipped}" if hold_skipped else "")
                         + "）"
                     )
+            elif self._exit_order == "min_entry":
+                # min_entry（2026-11-05）：先筛门、再取入场价最低——与 fifo/lifo
+                # 的「选一个、门拦则整轮 SKIP」不同，后面的批次会被继续尝试。
+                s, hold_skipped, gate_blocked = self._pick_gated_slot(
+                    bm, price, setup_sell, cd_sell, cd_channel=False)
+                if s is not None:
+                    self._sell_lot(s, price, signal, reason)
+                elif gate_blocked:
+                    self._bump_skip("sell_profit_gate")
+                    self.logger.info(
+                        f"TD SELL SKIP | symbol={self.symbol} 无满足盈利门的批次"
+                        f"（min_entry，{gate_desc}，拦 {gate_blocked} 批"
+                        + (f"，min_hold 跳过 {hold_skipped}" if hold_skipped else "")
+                        + "）"
+                    )
+                elif hold_skipped:
+                    self._bump_skip("sell_min_hold")
+                    self.logger.info(
+                        f"TD SELL SKIP | symbol={self.symbol} min_hold"
+                        f"（全部 {hold_skipped} 批剩余 < {self._min_hold_bars} bar，min_entry）"
+                    )
+                else:
+                    self._bump_skip("sell_no_open")
+                    self.logger.info(
+                        f"TD SELL SKIP | symbol={self.symbol} 无 open 批次（setup_sell={setup_sell} "
+                        f"cd_sell={cd_sell}）"
+                    )
             else:
                 s = bm.pick_exit_slot(self._exit_order)
                 if s is not None:
@@ -2075,6 +2131,30 @@ class TdSequentialStrategy(Strategy):
                         f"浮盈批次（cd_sell={cd_sell}，open={len(candidates)}"
                         + (f"，min_hold 跳过 {hold_skipped}" if hold_skipped else "")
                         + "）"
+                    )
+            elif self._exit_order == "min_entry":
+                s, hold_skipped, gate_blocked = self._pick_gated_slot(
+                    bm, price, setup_sell, cd_sell, cd_channel=True)
+                if s is not None:
+                    self._sell_lot(s, price, signal, reason)
+                elif gate_blocked:
+                    self._bump_skip("cd_exit_profit_gate")
+                    self.logger.info(
+                        f"TD CD EXIT SKIP | symbol={self.symbol} 无 ≥{self._cd_exit_min_profit} "
+                        f"浮盈批次（min_entry，cd_sell={cd_sell}，拦 {gate_blocked} 批"
+                        + (f"，min_hold 跳过 {hold_skipped}" if hold_skipped else "")
+                        + "）"
+                    )
+                elif hold_skipped:
+                    self._bump_skip("cd_exit_min_hold")
+                    self.logger.info(
+                        f"TD CD EXIT SKIP | symbol={self.symbol} min_hold"
+                        f"（全部 {hold_skipped} 批剩余 < {self._min_hold_bars} bar，min_entry）"
+                    )
+                else:
+                    self._bump_skip("cd_exit_no_open")
+                    self.logger.info(
+                        f"TD CD EXIT SKIP | symbol={self.symbol} 无 open 批次（cd_sell={cd_sell}）"
                     )
             else:
                 s = bm.pick_exit_slot(self._exit_order)
