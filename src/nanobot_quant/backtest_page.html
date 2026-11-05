@@ -202,6 +202,10 @@
       <div class="ov-item"><label for="entry_min_gap_pct">📐 加仓最小间距(%)</label><input type="number" id="entry_min_gap_pct" min="0" max="10" step="0.05" placeholder="场景值/0=关"><span class="f-hint">有持仓时新买价须比「最低成本」再低 x% 才建仓；只拦 BUY</span></div>
        <div class="ov-item"><label for="adaptive_gap_enabled">🔁 自适应间距</label><select id="adaptive_gap_enabled"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">按最近 10 笔信号的 +0.3% 命中率反馈切档（0.1/0.2/0.4%，滞回 2 次、slot≥80% 再收紧）；关=用上面的静态间距</span></div>
        <div class="ov-item"><label for="adaptive_m">反馈窗口 M(bar)</label><input type="number" id="adaptive_m" min="1" max="300" step="1" placeholder="场景值/30"><span class="f-hint">入场后 M 根内摸到 +0.3% 记为命中；只在自适应开启时生效</span></div>
+      <div class="ov-item"><label for="eod_enabled">⏰ EOD 日界强平</label><select id="eod_enabled"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">每到日界按单双号决定是否清空该标的所有批；<b>all 模式会亏损平仓</b>，与「不设止损」铁律冲突，默认关</span></div>
+      <div class="ov-item"><label for="eod_parity">强平奇偶</label><select id="eod_parity"><option value="">（跟随场景/even）</option><option value="even">双号日结束</option><option value="odd">单号日结束</option><option value="both">每天</option></select><span class="f-hint">日期号取日界对齐后的 UTC 日期</span></div>
+      <div class="ov-item"><label for="eod_mode">强平范围</label><select id="eod_mode"><option value="">（跟随场景/all）</option><option value="all">全平（含浮亏）</option><option value="profit_only">只平浮盈</option></select><span class="f-hint">两种模式都绕过 min_hold 与高9 盈利门</span></div>
+      <div class="ov-item"><label for="eod_hour_utc">日界小时(UTC)</label><input type="number" id="eod_hour_utc" min="0" max="23" step="1" placeholder="场景值/0"><span class="f-hint">0=UTC 自然日 24:00；非 0 = 交易日起点平移到该小时</span></div>
       <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
       <div class="ov-item"><label for="ema_compare">两臂对照</label><label style="display:flex;gap:4px;align-items:center;font-weight:400;"><input type="checkbox" id="ema_compare" checked> 同时跑无闸门基线</label><span class="f-hint">耗时 ×2；仅展示、禁配对推断</span></div>
     </div>
@@ -430,7 +434,8 @@ const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd
   "momentum_exit","td_sell_all","cd_exit_all",
   "gate_enabled","gate_red_min",
   "entry_ema_enabled","entry_ema_period","entry_ema_offset_pct",
-  "entry_min_gap_pct","adaptive_gap_enabled","adaptive_m","wave_max_buys"];
+  "entry_min_gap_pct","adaptive_gap_enabled","adaptive_m","wave_max_buys",
+  "eod_enabled","eod_parity","eod_mode","eod_hour_utc"];
 
 function sceneValue(scene, key) {
   const cfg = SCENES[scene] || {};
@@ -499,14 +504,14 @@ function collectOverrides() {
     "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
     "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct",
-    "entry_min_gap_pct","adaptive_m","wave_max_buys"];
+    "entry_min_gap_pct","adaptive_m","wave_max_buys","eod_hour_utc"];
   numKeys.forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
     if (v !== "") overrides[id] = parseFloat(v);
   });
-  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled","adaptive_gap_enabled"].forEach(id => {
+  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled","adaptive_gap_enabled","eod_enabled"].forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
@@ -518,6 +523,11 @@ function collectOverrides() {
   if ($("ema_compare")) overrides.ema_compare_baseline = !!$("ema_compare").checked;
   const eo = $("exit_order").value;
   if (eo !== "") overrides.exit_order = eo;
+  // EOD 单双号强平（2026-11-05 Step 2）：两个枚举单独收（字符串直传）
+  ["eod_parity","eod_mode"].forEach(id => {
+    const el = $(id);
+    if (el && el.value !== "") overrides[id] = el.value;
+  });
   const st = $("sleeptime").value;
   if (st !== "") overrides.sleeptime = st;
   const qm = $("quantity_mode") ? $("quantity_mode").value : "";
@@ -664,6 +674,7 @@ function paramsRows(res) {
     ["每波建仓上限", (cfg.wave_max_buys ?? 1) > 0 ? `${cfg.wave_max_buys ?? 1} 笔（同一共振组内）` : "关（不限笔数）"],
     ["加仓最小间距", (cfg.entry_min_gap_pct ?? 0) > 0 ? `${cfg.entry_min_gap_pct}%（有持仓时新买价须比最低成本再低该幅度）` : "关"],
     ["自适应间距", cfg.adaptive_gap_enabled ? `开（反馈窗口 M=${cfg.adaptive_m ?? "—"} bar；基础档仍读上面的加仓最小间距）` : "关"],
+    ["EOD 日界强平", cfg.eod_enabled ? `开（${cfg.eod_parity === "odd" ? "单号日" : cfg.eod_parity === "both" ? "每天" : "双号日"}结束 ${cfg.eod_hour_utc ?? 0}:00 UTC 强平 · ${cfg.eod_mode === "profit_only" ? "只平浮盈" : "全平（含浮亏）"}）` : "关"],
   ];
   return rows
     .map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`)
@@ -690,6 +701,8 @@ const SKIP_LABELS = {
   gate_na: "闸门数据不足(NA)",
   ema_gate: "EMA 趋势闸门拦（候选买入）",
   ema_gate_na: "EMA 预热不足(NA，fail-open)",
+  // EOD 单双号强平（2026-11-05 Step 2）
+  eod_hold: "EOD 日界强平跳（profit_only 无浮盈批）",
 };
 // 自适应间距档位轨迹（C102 2026-11-04）：每一行 = 一次首次设定或滞回确认
 // 切换；由 driver 在每根 bar 后只读采样策略自身档位，不另写判定逻辑。

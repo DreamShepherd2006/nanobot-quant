@@ -101,6 +101,8 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "adaptive_gap_enabled", "adaptive_m",
     # 共振错峰波锁容量（2026-11-01 用户拍板上实盘、默认 1）
     "wave_max_buys",
+    # EOD 单双号强平（2026-11-05 Step 2）——场景专属、默认关
+    "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
 )
 
 #: 场景卡片字段渲染顺序。
@@ -121,6 +123,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
     "td_sell_all", "cd_exit_min_profit", "cd_exit_all",
     "td_start_slot", "min_account_value",
+    # EOD 单双号强平（2026-11-05，默认关）
+    "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
 )
 
 #: 默认 Gate 子账号池（S1 配置层默认值；S3 消费时按 gate.json 实际列表）。
@@ -149,6 +153,10 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
         "wave_max_buys": 1,
+        # EOD 单双号强平（2026-11-05 Step 2）：默认关。all 模式会亏损平仓
+        # （与「不设止损」铁律冲突）⇒ 必须由用户显式开启。
+        "eod_enabled": False, "eod_parity": "even",
+        "eod_mode": "all", "eod_hour_utc": 0,
     },
     "mid": {
         "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
@@ -169,6 +177,10 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
         "wave_max_buys": 1,
+        # EOD 单双号强平（2026-11-05 Step 2）：默认关。all 模式会亏损平仓
+        # （与「不设止损」铁律冲突）⇒ 必须由用户显式开启。
+        "eod_enabled": False, "eod_parity": "even",
+        "eod_mode": "all", "eod_hour_utc": 0,
     },
     "low": {
         "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
@@ -189,6 +201,10 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
         "wave_max_buys": 1,
+        # EOD 单双号强平（2026-11-05 Step 2）：默认关。all 模式会亏损平仓
+        # （与「不设止损」铁律冲突）⇒ 必须由用户显式开启。
+        "eod_enabled": False, "eod_parity": "even",
+        "eod_mode": "all", "eod_hour_utc": 0,
     },
 }
 
@@ -388,6 +404,23 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "exit_order": {
         "group": "scene", "type": "enum", "enum": list(EXIT_ORDERS), "std": "fifo",
         "label": "平仓顺序", "hint": "TD SELL 信号/止损/止盈命中多批时按此顺序平仓：fifo=先买先卖（默认）/ lifo=后买先卖 / min_entry=入场价最低的批优先（高9 会先筛过盈利门，即「最便宜的盈利批」）",
+    },
+    "eod_enabled": {
+        "group": "scene", "type": "bool", "std": False,
+        "label": "EOD 日界强平",
+        "hint": "每到日界（默认 UTC 24:00）按单双号决定是否清空该标的所有批次：单号不动 / 双号全平（研究口径，见 §33.58）。mode=all 会亏损平仓，与「不设止损」铁律冲突，默认关；只有明确拍板后才开。日界按 UTC 计算（换北京时区整轮差约 1.66pp）",
+    },
+    "eod_parity": {
+        "group": "scene", "type": "enum", "enum": ["even", "odd", "both"], "std": "even",
+        "label": "强平奇偶", "hint": "even=双号日结束时强平（研究口径，默认）/ odd=单号日结束时强平 / both=每天强平。日期号取日界对齐后的 UTC 日期",
+    },
+    "eod_mode": {
+        "group": "scene", "type": "enum", "enum": ["all", "profit_only"], "std": "all",
+        "label": "强平范围", "hint": "all=全平（含浮亏批，研究口径；会实现亏损平仓）/ profit_only=只平浮盈批（守住不亏本金，但亏损仓会持续占用 slot）。两种模式都绕过 min_hold 与高9 盈利门（日界强平不受它们约束）",
+    },
+    "eod_hour_utc": {
+        "group": "scene", "min": 0, "max": 23, "step": 1, "std": 0, "integer": True,
+        "label": "日界小时(UTC)", "hint": "日界所在小时（0=UTC 自然日 24:00）。日界对齐后取日期号判奇偶；非 0 时相当于把交易日起点平移到该小时",
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,

@@ -195,6 +195,8 @@ _SKIP_LABELS = {
     "gate_na": "闸门数据不足(NA)",
     "ema_gate": "EMA 趋势闸门拦（候选买入）",
     "ema_gate_na": "EMA 预热不足(NA，fail-open)",
+    # EOD 单双号强平（2026-11-05 Step 2）
+    "eod_hold": "EOD 日界强平跳（profit_only 无浮盈批）",
 }
 
 
