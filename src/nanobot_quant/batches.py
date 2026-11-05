@@ -27,7 +27,7 @@ AVAILABLE = "available"
 OPEN = "open"
 
 #: 平仓顺序
-EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
+EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo", "min_entry")
 
 
 def batches_path(
@@ -299,7 +299,9 @@ class BatchManager:
     def pick_exit_slot(self, order: str = "fifo") -> Optional[dict[str, Any]]:
         """平仓目标：open 批次按 exit_order 选一个。
 
-        fifo：entry_time 最早（先买先卖）；lifo：最新。
+        fifo：entry_time 最早（先买先卖）；lifo：最新；
+        min_entry：entry_price 最低（成本最低的批先平）——2026-11-05 新增，
+        与「High9 平入场价最低的盈利批」口径一致（策略层配合盈利门筛选用）。
         """
         open_lots = [
             s for s in self.slots
@@ -307,8 +309,13 @@ class BatchManager:
         ]
         if not open_lots:
             return None
-        key = lambda s: s["lot"]["entry_time"]  # noqa: E731
-        open_lots.sort(key=key, reverse=(order == "lifo"))
+        if order == "min_entry":
+            open_lots.sort(key=lambda s: s["lot"]["entry_price"])
+        else:
+            open_lots.sort(
+                key=lambda s: s["lot"]["entry_time"],
+                reverse=(order == "lifo"),
+            )
         return open_lots[0]
 
     def pick_all_slots(
@@ -316,7 +323,8 @@ class BatchManager:
     ) -> list[dict[str, Any]]:
         """返回全部 open 批次按 exit_order 排序（td_sell_all 高9 全平，2026-08-25）。
 
-        fifo：entry_time 最早在前（先买先卖）；lifo：最新在前。
+        fifo：entry_time 最早在前（先买先卖）；lifo：最新在前；
+        min_entry：entry_price 从低到高（2026-11-05，配合 High9 盈利门使用）。
 
         ``limit``（2026-10-29，P4 全平限流，docs/quant-system.md §33.52.6）：
         单轮最多平多少批——shared_pool 下 100 批齐平会连发 100 张市价单
@@ -329,8 +337,13 @@ class BatchManager:
         ]
         if not open_lots:
             return []
-        key = lambda s: s["lot"]["entry_time"]  # noqa: E731
-        open_lots.sort(key=key, reverse=(order == "lifo"))
+        if order == "min_entry":
+            open_lots.sort(key=lambda s: s["lot"]["entry_price"])
+        else:
+            open_lots.sort(
+                key=lambda s: s["lot"]["entry_time"],
+                reverse=(order == "lifo"),
+            )
         if limit is not None and int(limit) > 0:
             open_lots = open_lots[: int(limit)]
         return open_lots
@@ -428,10 +441,13 @@ class BatchManager:
             if reason:
                 s["_exit_reason"] = reason
                 hits.append(s)
-        hits.sort(
-            key=lambda s: s["lot"]["entry_time"],
-            reverse=(order == "lifo"),
-        )
+        if order == "min_entry":
+            hits.sort(key=lambda s: s["lot"]["entry_price"])
+        else:
+            hits.sort(
+                key=lambda s: s["lot"]["entry_time"],
+                reverse=(order == "lifo"),
+            )
         return hits
 
     # ── 展示 ────────────────────────────────────────────────────────

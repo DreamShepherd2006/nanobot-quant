@@ -245,7 +245,7 @@ TD_SLEEPTIME_LABELS: dict[str, str] = dict(DISPLAY_NAMES)
 QUANTITY_MODES: tuple[str, ...] = ("fixed", "value", "fixed_amount")
 
 #: Valid batch exit orders.
-EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo")
+EXIT_ORDERS: tuple[str, ...] = ("fifo", "lifo", "min_entry")
 
 #: Valid execution channels — concrete broker instances (spec names).
 #: 大类（dex/cex）由 spec.family 表达，UI 按大类分组显示（方案 C，2026-08-17）：
@@ -387,7 +387,7 @@ PARAM_META: dict[str, dict[str, Any]] = {
     },
     "exit_order": {
         "group": "scene", "type": "enum", "enum": list(EXIT_ORDERS), "std": "fifo",
-        "label": "平仓顺序", "hint": "TD SELL 信号/止损/止盈命中多批时按此顺序平仓：fifo=先买先卖（默认）/ lifo=后买先卖",
+        "label": "平仓顺序", "hint": "TD SELL 信号/止损/止盈命中多批时按此顺序平仓：fifo=先买先卖（默认）/ lifo=后买先卖 / min_entry=入场价最低的批优先（高9 会先筛过盈利门，即「最便宜的盈利批」）",
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
