@@ -192,6 +192,14 @@ class TdSequentialStrategy(Strategy):
         self._min_history = int(
             self.parameters.get("min_history", 120) or 120
         )
+        # 入场多周期 OR（2026-11-05 Step 3）：默认 [1] = 只吃基础周期，
+        # 零行为变化。运行时由 _activate_scene 从场景 entry_periods 注入。
+        self._entry_periods: list[int] = [1]
+        self._last_multi: dict = {}
+        # 多周期诊断（2026-11-05）：回测里不刷屏，但必须留下可查证据——
+        # 窗口不足次数与各周期实际 bar 数由 driver 写进结果。
+        self._multi_warn_count: int = 0
+        self._multi_bar_counts: dict = {}
         self._peak_portfolio = None  # track peak for drawdown calc
 
         # TD 循环日志可见性（2026-08-17）：gatekeeper 进程无 logging handler，
@@ -362,6 +370,110 @@ class TdSequentialStrategy(Strategy):
         else:
             fn = calculate  # 原版（模块级 import）
         return fn(df, news_count=news_count, params=self._td_params)
+
+    # ── 入场多周期 OR（2026-11-05 Step 3）─────────────────────────
+    def _base_bar_seconds(self) -> int:
+        """当前场景基础周期秒数（取不到时退回 60s = 1m）。"""
+        from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
+
+        return int(INTERVAL_SECONDS.get(str(self.sleeptime or "1m"), 60)) or 60
+
+    def _resample_bars(self, df, mult: int):
+        """把基础周期 df 聚合到 ``mult`` 倍周期（OHLCV，左对齐左闭合）。
+
+        返回 None 表示无法聚合（缺列/异常），调用方跳过该周期并记日志。
+        """
+        if df is None or len(df) == 0:
+            return None
+        sec = self._base_bar_seconds() * max(int(mult), 1)
+        agg = {
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum",
+        }
+        cols = {c: agg[c] for c in df.columns if c in agg}
+        if "Close" not in cols:
+            return None
+        try:
+            out = df.resample(f"{sec}s", label="left", closed="left").agg(cols)
+            return out.dropna(subset=["Close"])
+        except Exception as e:  # pragma: no cover - 防御，极少触发
+            print(
+                f"[TD] MULTI RESAMPLE FAIL | symbol={self.symbol} mult={mult} "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+
+    def _calc_multi(self, df) -> dict:
+        """多周期入场信号聚合（任意周期达阈值即触发，OR 语义）。
+
+        口径（2026-11-05 与研究脚本对齐）：
+        - 倍数以**场景周期**为基数（1m 场景 → 1/2/3/4/5/8m）；
+        - 各周期都吃 ``_min_history`` 根 bar（窗口口径统一）；
+        - 只有 ``setup_buy`` / ``cd_buy`` 取各周期 max（入场侧 OR）；
+          ``setup_sell`` / ``cd_sell`` / ``score`` / ``price`` 等出场字段
+          **始终来自基础周期**——出场侧多周期属另一批（拍板后才做）。
+        - 默认 ``[1]`` 时直接返回基础周期结果（零行为变化、无额外计算）。
+
+        诊断：参与聚合时打一行 ``[TD] MULTI``（各周期 setup_buy/cd_buy），
+        周期长度不足会被跳过并显式标注，不静默降级。
+        """
+        periods = getattr(self, "_entry_periods", None) or [1]
+        _need = self._min_history * max(periods)
+        if max(periods) > 1 and len(df) < _need:
+            self._multi_warn_count = int(getattr(self, "_multi_warn_count", 0)) + 1
+            # 回测不刷屏（与 [TD] BARS / [TD] HOLD 同规则，2026-09-02）；
+            # 可查证据走结果字段 entry_periods / multi_window_warnings。
+            if self.parameters.get("live_mode"):
+                print(
+                    f"[TD] MULTI WARN | symbol={self.symbol} 数据仅 {len(df)} 根 < "
+                    f"需求 {_need} 根（{self.sleeptime}×{max(periods)}）；"
+                    f"长周期会拿到短窗口，计数可能偏差",
+                    file=sys.stderr, flush=True,
+                )
+        base_df = df.tail(self._min_history) if len(df) > self._min_history else df
+        base = self._calc(base_df)
+        if max(periods) <= 1:
+            self._last_multi = {}
+            return base
+
+        out = dict(base)
+        detail: dict[int, tuple[int, int] | None] = {
+            1: (int(base.get("setup_buy", 0) or 0), int(base.get("cd_buy", 0) or 0))
+        }
+        for m in periods:
+            if m <= 1:
+                continue
+            sub = self._resample_bars(df, m)
+            if sub is None or len(sub) < 12:
+                detail[m] = None
+                continue
+            # 记录「截断前」的可用根数：截断后恒等于 min_history，
+            # 看不出长周期窗口是否真的够（2026-11-05 实测踩到）。
+            if getattr(self, "_multi_bar_counts", None) is None:
+                self._multi_bar_counts = {}
+            self._multi_bar_counts[int(m)] = int(len(sub))
+            if len(sub) > self._min_history:
+                sub = sub.tail(self._min_history)
+            s = self._calc(sub)
+            sb = int(s.get("setup_buy", 0) or 0)
+            cb = int(s.get("cd_buy", 0) or 0)
+            detail[m] = (sb, cb)
+            out["setup_buy"] = max(int(out.get("setup_buy", 0) or 0), sb)
+            out["cd_buy"] = max(int(out.get("cd_buy", 0) or 0), cb)
+        self._last_multi = detail
+        parts = [
+            f"{m}={'skip' if v is None else f'sb{v[0]}/cd{v[1]}'}"
+            for m, v in sorted(detail.items())
+        ]
+        if self.parameters.get("live_mode"):
+            print(
+                f"[TD] MULTI | symbol={self.symbol} base={self.sleeptime} "
+                f"periods={','.join(parts)} → setup_buy={out.get('setup_buy')} "
+                f"cd_buy={out.get('cd_buy')}",
+                file=sys.stderr, flush=True,
+            )
+        return out
 
     def _track_iteration(fn):
         """包裹 on_trading_iteration（2026-08-21 延迟停止方案）。
@@ -848,6 +960,14 @@ class TdSequentialStrategy(Strategy):
             self._min_hold_bars = int(self.parameters.get("min_hold_bars", 10) or 0)
         self._start_slot = int(p.get("td_start_slot") or 1)
         self._min_account_value = float(p.get("min_account_value") or 0)
+        # 入场多周期 OR（2026-11-05 Step 3）：场景值优先，留空回退全局；
+        # 非法/空 → [1]（零行为变化）。
+        _ep = p.get("entry_periods")
+        if _ep in (None, ""):
+            _ep = self.parameters.get("entry_periods")
+        from nanobot_quant.exec_params import parse_entry_periods as _parse_ep
+
+        self._entry_periods = _parse_ep(_ep)
         # EMA 折价入场门（2026-11-01）：场景值优先，留空回退全局 parameters。
         # 与 ema_gate（斜率符号闸门）是两个口径：本门判「价格相对 EMA 的位置」。
         _sc_on = p.get("entry_ema_enabled")
@@ -1131,7 +1251,8 @@ class TdSequentialStrategy(Strategy):
         """单标的 K 线拉取（线程池 worker）。异常不外抛，包装进返回值。"""
         _drops = bool(self.parameters.get("drops_in_progress_bars", False))
         drop_in_progress = self._is_live_broker and not _drops
-        fetch_len = max(self._min_history, self._ema_fetch_len()) + (
+        _mult = max(getattr(self, "_entry_periods", None) or [1])
+        fetch_len = max(self._min_history, self._ema_fetch_len()) * max(_mult, 1) + (
             1 if drop_in_progress else 0
         )
         timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
@@ -1209,7 +1330,9 @@ class TdSequentialStrategy(Strategy):
             _drops_in_progress = bool(self.parameters.get("drops_in_progress_bars", False))
             drop_in_progress = self._is_live_broker and not _drops_in_progress
 
-            fetch_len = max(self._min_history, self._ema_fetch_len())
+            fetch_len = max(self._min_history, self._ema_fetch_len()) * max(
+                max(getattr(self, "_entry_periods", None) or [1]), 1
+            )
             if drop_in_progress:
                 # live 数据源（OKX DEX kline）会返回进行中的最后一根 bar——
                 # TD 是收盘价状态机，未完成 bar 的 close 会导致 setup 虚增/虚减
@@ -1310,8 +1433,9 @@ class TdSequentialStrategy(Strategy):
 
         # EMA 折价门可能要求比 TD 窗口更长的历史（period + 5τ 预热）——
         # TD 计数口径必须保持完全不变：只喂最近 _min_history 根。
-        _td_df = df.tail(self._min_history) if len(df) > self._min_history else df
-        signal = self._calc(_td_df)
+        # 2026-11-05：多周期 OR 需要更长的 df（各周期都吃 _min_history 根 bar），
+        # tail 由 _calc_multi 按周期各自处理。
+        signal = self._calc_multi(df)
 
         # ── 4. Evaluate signals ──
         setup_buy = signal.get("setup_buy", 0) or 0
