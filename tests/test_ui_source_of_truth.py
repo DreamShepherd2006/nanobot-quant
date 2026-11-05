@@ -144,3 +144,64 @@ def test_entry_gate_skip_labels_present():
         assert k in bm._SKIP_LABELS, f"{k} 缺 markdown 映射"
         assert k in page, f"{k} 缺页面映射"
         assert re.search(r"[\u4e00-\u9fff]", bm._SKIP_LABELS[k]), f"{k} 应给中文文案"
+
+
+# ── 买入手数为 0 的可见化（2026-11-05）────────────────────────────────
+
+
+def _mk_strategy_for_skip():
+    """手工构造策略（绕过 lumibot 初始化），只测 SKIP 可见化路径。"""
+    from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
+
+    s = object.__new__(TdSequentialStrategy)
+    s.symbol = "SOL"
+    s.quantity_mode = "fixed"
+    s.quantity = None
+    s.fixed_amount = 10.0
+    s._skip_counts = {}
+    s.events = []
+    s._record = lambda ev, note="", **kw: s.events.append((ev, note, kw))
+    return s
+
+
+def test_zero_qty_emits_skip_event_and_count():
+    """qty=0 曾完全静默：4 个 slot 依次 return None，上层只报「无可用 slot」。"""
+    s = _mk_strategy_for_skip()
+    s._skip_zero_qty({"slot": 2}, 92.46, 0.0)
+
+    assert s._skip_counts == {"qty_zero": 1}
+    assert len(s.events) == 1
+    ev, note, kw = s.events[0]
+    assert ev == "SKIP"
+    assert "quantity_mode=fixed" in note and "price=92.460000" in note
+    assert kw.get("symbol") == "SOL"
+
+
+def test_both_buy_paths_use_zero_qty_helper():
+    """DEX 与 CEX 两条 BUY 路径都必须走同一 helper（不留第二套写法）。"""
+    src = (Path(bm.__file__).resolve().parent
+           / "strategies" / "td_sequential_strategy.py").read_text(encoding="utf-8")
+    assert src.count("self._skip_zero_qty(slot, price, qty)") == 2, (
+        "qty<=0 的静默 return 必须只在两处 BUY 路径统一改为 _skip_zero_qty"
+    )
+    assert "if qty <= 0:\n                return None" not in src, (
+        "仍有裸 `if qty <= 0: return None` 未补事件"
+    )
+
+
+def test_eod_hold_records_bar_level_event():
+    """EOD 跳过此前只有 skip_counts，bars_rows 里查不到任何 EOD 痕迹。"""
+    src = (Path(bm.__file__).resolve().parent
+           / "strategies" / "td_sequential_strategy.py").read_text(encoding="utf-8")
+    marker = 'self._bump_skip("eod_hold")'
+    idx = src.index(marker)
+    tail = src[idx: idx + 800]
+    assert 'self._record(' in tail and '"SKIP"' in tail
+    assert "eod_hold:" in tail, "SKIP 文案需带 eod_hold 前缀，便于逐 bar 表定位"
+
+
+def test_qty_zero_label_in_both_tables():
+    page = _page_skip_labels()
+    assert "qty_zero" in bm._SKIP_LABELS
+    assert "qty_zero" in page
+    assert bm._SKIP_LABELS["qty_zero"] == page["qty_zero"]
