@@ -1789,9 +1789,12 @@ class TdSequentialStrategy(Strategy):
                 # switch 失败/低于 min_account_value/风控拒绝/USDC 不足
                 # → 返回 None → 跳下一 slot（拍板 1）。
                 executed = False
-                for slot in batch_manager.scan_buy_slots(self._start_slot):
+                _candidates = batch_manager.scan_buy_slots(self._start_slot)
+                _tried = 0
+                for slot in _candidates:
                     if slot["slot"] in self._pending_buys:
                         continue  # 该 slot 已有买入待确认，防重复买
+                    _tried += 1
                     ret = self._buy_on_slot(slot, price, reason)
                     if ret is None:
                         continue
@@ -1888,11 +1891,19 @@ class TdSequentialStrategy(Strategy):
                     )
                     break
                 if not executed:
+                    # 2026-11-05：这条路径以前只 print 不计数，skip_counts 里查不到。
+                    # 口径：no_slot 按**信号**计（每个未成交的买入信号一次），
+                    # slot_funds / buy_fail 按**slot 尝试**计（一次信号可多次）。
+                    self._bump_skip("no_slot")
                     self.logger.info(
                         f"TD BATCH | symbol={self.symbol} 无可用 slot，跳过 BUY"
                         f"（资金不足见 TD SLOT SKIP、下单失败见 TD BATCH BUY FAIL）"
                     )
-                    self._record("SKIP", "无可用 slot，跳过 BUY（资金不足或下单失败）")
+                    self._record(
+                        "SKIP",
+                        f"无可用 slot，跳过 BUY（可用 {len(_candidates)} 个批次、"
+                        f"本次尝试 {_tried} 个；资金类见 slot_funds、下单失败见 buy_fail）",
+                    )
                 return
             else:
                 req = self._portfolio.build_buy_order(
@@ -2893,6 +2904,7 @@ class TdSequentialStrategy(Strategy):
                     self.logger.warning(
                         f"TD BATCH BUY FAIL | slot={slot_id} 链上确认失败 {status}"
                     )
+                    self._bump_skip("buy_fail")
                     self._record(
                         "BUY_FAIL",
                         f"slot={slot_id} 链上确认失败 {status}",
@@ -3053,6 +3065,7 @@ class TdSequentialStrategy(Strategy):
             self.logger.warning(
                 f"TD BATCH BUY FAIL | symbol={symbol} slot={slot_id} CEX 确认 {status} 零成交"
             )
+            self._bump_skip("buy_fail")
             self._record(
                 "BUY_FAIL",
                 f"slot={slot_id} CEX 确认 {status} 零成交",
@@ -3200,6 +3213,7 @@ class TdSequentialStrategy(Strategy):
                 self.logger.warning(
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 余额查询失败/为零"
                 )
+                self._bump_skip("slot_funds")
                 return None
             # 子账户最小资金门槛（BUY-only；SELL/止损/止盈平仓永远允许）
             min_v = float(self.parameters.get("min_account_value", 0) or 0)
@@ -3208,6 +3222,7 @@ class TdSequentialStrategy(Strategy):
                     f"TD SLOT SKIP (min_account_value) | symbol={self.symbol} slot={slot['slot']} "
                     f"pv=${pv_slot:.2f} < ${min_v:.2f}"
                 )
+                self._bump_skip("slot_funds")
                 return None
             # 数量：fixed=固定 td_quantity；value=pv_slot × max_position_pct / price；
             # fixed_amount=固定金额 td_fixed_amount / price（2026-08-19 新增）
@@ -3249,6 +3264,7 @@ class TdSequentialStrategy(Strategy):
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 资金不足 "
                     f"({bal:.4f} < {needed:.4f} USDC)"
                 )
+                self._bump_skip("slot_funds")
                 return None
             req = self._portfolio.build_buy_order(
                 self.symbol, price, reason, quantity=qty,
@@ -3263,6 +3279,7 @@ class TdSequentialStrategy(Strategy):
                         f"TD BATCH BUY FAIL | slot={slot['slot']} "
                         f"price={price:.2f} qty={qty} {err}"
                     )
+                    self._bump_skip("buy_fail")
                     self._record(
                         "BUY_FAIL", f"slot={slot['slot']} {err}",
                         slot=slot["slot"], qty=qty, price=price,
@@ -3727,6 +3744,7 @@ class TdSequentialStrategy(Strategy):
                 self.logger.warning(
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 余额查询失败/为零"
                 )
+                self._bump_skip("slot_funds")
                 return None
             min_v = float(self.parameters.get("min_account_value", 0) or 0)
             if min_v > 0 and pv_slot < min_v:
@@ -3734,6 +3752,7 @@ class TdSequentialStrategy(Strategy):
                     f"TD SLOT SKIP (min_account_value) | symbol={self.symbol} slot={slot['slot']} "
                     f"pv=${pv_slot:.2f} < ${min_v:.2f}"
                 )
+                self._bump_skip("slot_funds")
                 return None
             if self.quantity_mode == "value":
                 qty = pv_slot * self._risk.max_position_pct / price if price > 0 else 0.0
@@ -3771,6 +3790,7 @@ class TdSequentialStrategy(Strategy):
                                 f"> 一个步进 ${_step * price:.2f}（该币需 "
                                 f"fixed_amount ≥ ${_need:.2f}），跳过"
                             )
+                            self._bump_skip("slot_funds")
                             return None
                         print(
                             f"[TD] BUY ALIGN | symbol={self.symbol} "
@@ -3802,6 +3822,7 @@ class TdSequentialStrategy(Strategy):
                     f"TD SLOT SKIP | symbol={self.symbol} slot={slot['slot']} 资金不足 "
                     f"({bal:.4f} < {needed:.4f} {quote})"
                 )
+                self._bump_skip("slot_funds")
                 return None
             req = self._portfolio.build_buy_order(
                 self.symbol, price, reason, quantity=qty,
@@ -3813,6 +3834,7 @@ class TdSequentialStrategy(Strategy):
                     f"TD BATCH BUY FAIL | symbol={self.symbol} slot={slot['slot']} "
                     f"price={price:.2f} qty={qty} {err}"
                 )
+                self._bump_skip("buy_fail")
                 self._record(
                     "BUY_FAIL", f"slot={slot['slot']} {err}",
                     slot=slot["slot"], qty=qty, price=price,
