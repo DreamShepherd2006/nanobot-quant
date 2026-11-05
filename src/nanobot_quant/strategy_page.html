@@ -52,7 +52,7 @@
 
 <div class="info">
   <p><strong>当前策略</strong>：{current_label}</p>
-  <p><strong>生效范围</strong>：Quant 路线（<code>mode.json</code> 为 <code>quant</code>）下，下一次 <code>run_td_sequential</code> / 信号生成调用即生效，无需重启。</p>
+  <p><strong>生效范围</strong>：Quant 路线（<code>mode.json</code> 为 <code>quant</code>）下分两条路径——<strong>MCP 单次调用</strong>（<code>run_td_sequential</code> / 信号生成）下一次调用即生效，无需重启；<strong>TD 自动循环</strong>（<code>td_enabled</code>）在循环启动时读取一次，切换后需到 <code>/config/exec</code> 取消再勾选「启动 TD」才生效（td-table 页顶部徽标会显示两者是否一致）。</p>
   <p><strong>路线与策略分离</strong>：<code>mode.json</code> 管流程形态（quant 确定性 / research AI 辩论），本页管 quant 路线用哪个策略。Research 路线固定走 VT Swarm 辩论流程，不受本页影响。</p>
   <p><strong>参数</strong>：TD 参数见「TD 策略参数」页（<code>/config/td-params</code>），两变体共享同一参数集。</p>
 </div>
