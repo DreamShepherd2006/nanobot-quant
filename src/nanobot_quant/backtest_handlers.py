@@ -290,6 +290,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 overrides=overrides,
                 source=source,
                 periods=periods,
+                shared_cash=data.get("shared_cash") is True,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")

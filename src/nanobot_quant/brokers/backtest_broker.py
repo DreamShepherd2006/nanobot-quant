@@ -34,6 +34,23 @@ from nanobot_quant.gate_credentials import gate_pair
 _CASH_CURRENCIES = frozenset({"USDT", "USDC", "USDG", "USD", "TUSD"})
 
 
+class CashPool:
+    """多 slot 共用的模拟现金池（回测层 ``shared_cash``，2026-11-06）。
+
+    对应真实交易所账户语义：同一个子账号的余额是一个池，多个「逻辑 slot」
+    只是记账标签。池额与独立模式同口径（``initial_quote × batches``），
+    因此 ``initial_total`` / ROI 分母不变、两组可直接对照。
+
+    注意：共享池下**净值聚合必须去重**（现金只能计一次），否则会重演
+    2026-10-31 那次「逐 slot 累加同一份池余额 ⇒ 虚假 +33% ROI」。
+    """
+
+    __slots__ = ("amount",)
+
+    def __init__(self, amount: float) -> None:
+        self.amount = float(amount)
+
+
 class _DummyDataSource:
     """Placeholder so Broker.__init__ does not require a real data source."""
 
@@ -67,6 +84,7 @@ class BacktestBroker(Broker):
         min_quote_amount: float = 3.0,
         price_source: Optional[Callable[[str], float]] = None,
         tokens_json: Optional[list[dict]] = None,
+        cash_pool: Optional["CashPool"] = None,
         **kwargs,
     ):
         if "data_source" not in kwargs:
@@ -75,7 +93,12 @@ class BacktestBroker(Broker):
         # Crypto is a 24/7 continuous market: keeps the StrategyExecutor loop
         # running (same as CexBroker).
         self.market = "24/7"
-        self._cash = float(initial_quote)           # quote 币（USDT）可用
+        # 共享现金池（2026-11-06 shared_cash）：多 slot 共用一份 quote 余额，
+        # 池由 BacktestDriver 建好传入；None = slot 级独立资金（现有行为）。
+        self._cash_pool = cash_pool
+        self._own_cash = 0.0
+        if cash_pool is None:
+            self._own_cash = float(initial_quote)   # quote 币（USDT）可用
         self._positions: dict[str, float] = {}      # symbol → base 持仓量
         self._fee_rate = float(fee_rate)
         self._slippage = float(slippage)
@@ -84,6 +107,20 @@ class BacktestBroker(Broker):
         self._tokens_json = tokens_json or []
         self._tracked: dict[str, dict] = {}         # oid → meta
         self._order_seq = 0
+
+    @property
+    def _cash(self) -> float:
+        """可用 quote 余额：有共享池时读池（多 slot 同一份钱）。"""
+        if self._cash_pool is not None:
+            return self._cash_pool.amount
+        return self._own_cash
+
+    @_cash.setter
+    def _cash(self, value: float) -> None:
+        if self._cash_pool is not None:
+            self._cash_pool.amount = float(value)
+        else:
+            self._own_cash = float(value)
 
     # ═══════════════════════════════════════════════════════════
     #  Helpers
