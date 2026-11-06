@@ -255,3 +255,13 @@ def test_mcp_exposes_list_backtest_presets():
     assert "list_backtest_presets" in srv._TOOL_DISPATCH
     out = srv._TOOL_DISPATCH["list_backtest_presets"]()
     assert out["presets"] and out["presets"][0]["name"]
+
+
+def test_backtest_page_reads_created_not_version():
+    """页面曾读 p.version 导致下拉显示「（undefined）」——锁定不得回退。"""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "src/nanobot_quant/backtest_page.html").read_text()
+    assert "p.version" not in src, "页面不得再读 p.version"
+    assert "preset_version" not in src, "页面不得再读 preset_version"
+    assert "p.created" in src, "页面应读 p.created"
