@@ -421,12 +421,12 @@ _SIDE_SPOT = {"buy": "🟢 买入", "sell": "🔴 卖出"}
 
 def _source_txt(res: dict) -> str:
     """数据源说明：跨所必须把「不作裁决依据」写进报告（2026-10-20 拍板）。"""
-    src = res.get("source") or "gate_cex"
+    src = res.get("source") or "okx_cex"
     label = res.get("source_label") or ("OKX CEX" if src == "okx_cex" else "Gate CEX")
     if res.get("cross_venue"):
-        note = res.get("cross_venue_note") or "数据源 ≠ 执行所（Gate 现货）"
+        note = res.get("cross_venue_note") or "数据源 ≠ 执行通道的数据源"
         return f"{label}（⚠ 跨所参考 — {note}）"
-    return f"{label}（与执行同所）"
+    return f"{label}（与执行同源）"
 
 
 def _open_slots(slots: dict) -> list[dict]:

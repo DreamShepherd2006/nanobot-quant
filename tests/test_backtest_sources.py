@@ -26,9 +26,11 @@ from nanobot_quant.backtest import driver as drv
 from nanobot_quant.backtest import fetchers as F
 from nanobot_quant.backtest.driver import BacktestDriver
 from nanobot_quant.backtest.fetchers import (
-    CROSS_VENUE_NOTE,
     DEFAULT_SOURCE,
     SOURCE_LABELS,
+    cross_venue_note,
+    execution_source,
+    execution_venue,
     is_cross_venue,
     make_fetcher,
     max_bars_for_source,
@@ -45,11 +47,12 @@ from nanobot_quant.kline_paging import KlineRangeTooLarge, max_bars_for
 # ── 注册表 ───────────────────────────────────────────────────────────
 
 
-def test_default_source_is_gate_and_labels():
-    assert DEFAULT_SOURCE == "gate_cex"
-    assert normalize_source(None) == "gate_cex"
-    assert normalize_source("") == "gate_cex"
+def test_default_source_is_okx_and_labels():
+    assert DEFAULT_SOURCE == "okx_cex"
+    assert normalize_source(None) == "okx_cex"
+    assert normalize_source("") == "okx_cex"
     assert normalize_source(" OKX_CEX ") == "okx_cex"
+    assert normalize_source(" gate_cex ") == "gate_cex"
     assert source_label("okx_cex") == "OKX CEX"
     assert set(SOURCE_LABELS) == {"gate_cex", "okx_cex"}
 
@@ -63,10 +66,26 @@ def test_unknown_source_fail_closed():
 
 
 def test_cross_venue_flag_and_note():
-    assert is_cross_venue("gate_cex") is False
-    assert is_cross_venue("okx_cex") is True
-    # 强制标注：必须写明「不作参数裁决依据」
-    assert "不作参数裁决依据" in CROSS_VENUE_NOTE
+    """跨所判定跟随执行通道（2026-11-06 拍板），不写死任何一家交易所。"""
+    # 执行通道 = okx_cex：OKX 数据同源、Gate 数据跨所
+    assert is_cross_venue("okx_cex", exec_channel="okx_cex") is False
+    assert is_cross_venue("gate_cex", exec_channel="okx_cex") is True
+    # 执行通道 = gate：反之亦然
+    assert is_cross_venue("gate_cex", exec_channel="gate") is False
+    assert is_cross_venue("okx_cex", exec_channel="gate") is True
+    # 执行所经 brokers.registry 解析（单一事实源）
+    assert execution_source("okx_cex") == "okx_cex"
+    assert execution_source("gate") == "gate_cex"
+    # 执行通道是 DEX 时数据源不在回测源注册表内 ⇒ 一律判跨所（正确行为）
+    assert execution_source("okx_dex") == "onchainos"
+    assert is_cross_venue("okx_cex", exec_channel="okx_dex") is True
+    # 未知通道 fail-soft 回退默认源，不抛异常
+    assert execution_source("not-a-channel") == DEFAULT_SOURCE
+    # 强制标注：必须写明「不作参数裁决依据」，且不得硬编码执行所名
+    note = cross_venue_note("okx_cex")
+    assert "不作参数裁决依据" in note
+    assert execution_venue("okx_cex") in note
+    assert "Gate" not in note
 
 
 def test_resolve_symbol_per_source():
@@ -220,10 +239,11 @@ def test_driver_rejects_unknown_source():
 
 
 def test_driver_records_source_fields(tmp_path, monkeypatch):
-    """默认 Gate：结果带 source/source_label/cross_venue，均非跨所。"""
+    """默认源 = okx_cex，执行通道也是 okx_cex ⇒ 同源、无跨所标注。"""
+    monkeypatch.setattr(drv, "unavailable_symbols", lambda *a, **k: [])
     d = BacktestDriver(
         scene="mid",
-        params=_params(),
+        params=_params(execution_channel="okx_cex"),
         symbols=["CRCLX"],
         start_ts=datetime(2026, 8, 1, tzinfo=timezone.utc),
         end_ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
@@ -232,19 +252,19 @@ def test_driver_records_source_fields(tmp_path, monkeypatch):
         progress_path=tmp_path / "p.json",
     )
     res = d.run()
-    assert res["source"] == "gate_cex"
-    assert res["source_label"] == "Gate CEX"
+    assert res["source"] == "okx_cex"
+    assert res["source_label"] == "OKX CEX"
     assert res["cross_venue"] is False
     assert res["cross_venue_note"] is None
-    assert res["backtest_config"]["source"] == "gate_cex"
+    assert res["backtest_config"]["source"] == "okx_cex"
 
 
 def test_driver_okx_source_marks_cross_venue(tmp_path, monkeypatch):
-    """OKX 源：结果必须带跨所警告 + source_note（留空 = 取上限窗口）。"""
+    """OKX 源 + 执行通道 gate ⇒ 必须带跨所警告 + source_note。"""
     monkeypatch.setattr(drv, "unavailable_symbols", lambda *a, **k: [])
     d = BacktestDriver(
         scene="mid",
-        params=_params(),
+        params=_params(execution_channel="gate"),
         symbols=["CRCLX"],
         start_ts=None,
         end_ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
@@ -287,9 +307,10 @@ def test_page_has_source_selector_and_cross_venue_warning():
         encoding="utf-8"
     )
     assert 'id="source"' in html
-    assert "OKX CEX（跨所参考）" in html
+    assert "OKX CEX" in html
     assert "cross-venue-banner" in html
     assert "不作参数裁决依据" in html
+    assert "与执行通道同源" in html
     assert "source: $(\"source\")" in html  # 请求体带上源
     assert "onSourceChange" in html
 
@@ -303,7 +324,7 @@ def test_markdown_marks_cross_venue():
         "source": "okx_cex",
         "source_label": "OKX CEX",
         "cross_venue": True,
-        "cross_venue_note": CROSS_VENUE_NOTE,
+        "cross_venue_note": cross_venue_note("okx_cex"),
         "source_note": "未指定起始时间 → 按 OKX CEX 单次上限取最近窗口",
         "bars": 10,
         "fetched_bars": 12,

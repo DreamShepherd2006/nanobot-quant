@@ -22,9 +22,14 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
+import functools
+
 import pytest
 
 from nanobot_quant.backtest.driver import BacktestDriver
+
+# 用例沿用 Gate 语义（默认源已改为 okx_cex，2026-11-06）；显式固定源避免联网探测
+_mk_driver = functools.partial(BacktestDriver, source="gate_cex")
 from nanobot_quant.backtest_markdown import render_markdown
 from nanobot_quant.batches import BatchManager
 from nanobot_quant.exec_params import DEFAULT_EXEC_PARAMS
@@ -242,7 +247,7 @@ def _params(**scene_overrides) -> dict:
 
 def _driver(tmp_path, **scene_overrides) -> BacktestDriver:
     closes = [100.0] * 60 + [100.0 + i * 0.5 for i in range(1, 41)]
-    return BacktestDriver(
+    return _mk_driver(
         scene="mid",
         params=_params(**scene_overrides),
         fetcher=_fake_fetcher(closes),
@@ -338,3 +343,4 @@ def test_markdown_marks_adaptive_off():
     )
     assert "自适应间距 | 关" in md or "自适应间距" in md
     assert "自适应间距档位轨迹" not in md
+
