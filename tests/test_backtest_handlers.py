@@ -120,7 +120,8 @@ def test_start_dispatch_driver_engine(client, monkeypatch):
     assert started["symbols"] == ["SOL"]
     assert started["initial_quote"] == 50.0
     assert started["batches"] == 2
-    # 数据源：请求未带 → 默认 Gate（与执行同所，零行为变化）
+    # 数据源：请求未带 → 默认 OKX CEX（2026-11-06 拍板；是否与执行同源由
+    # execution_channel 经 brokers.registry 解析决定，不在此写死）
     assert started["source"] == "okx_cex"
     # 诊断日志覆盖请求摘要
     assert any("📈 回测启动" in line for line in gk._log_calls)
