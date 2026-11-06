@@ -140,6 +140,18 @@ def test_driver_trend_down_triggers_buy(tmp_path):
     assert out["net_values"][-1]["net"] > 0
     assert out["net_values"][-1]["net"] < 2000.0
 
+    # C125 指标汇总：结构齐全、与净值/成交自洽（不静默）
+    met = out["metrics"]
+    assert met["final_equity"] == pytest.approx(out["final_net"])
+    assert met["entries"] == sum(1 for f in out["fills_detail"] if f["side"] == "buy")
+    assert met["exits"] == sum(1 for f in out["fills_detail"] if f["side"] == "sell")
+    assert met["entries"] + met["exits"] == out["fills"]
+    assert met["consistency"]["ok"] is True, met["consistency"]
+    for key in ("roi_pct", "realized_pnl", "unrealized_pnl", "cash_end",
+                "positions_market_value", "positions_cost", "open_lots",
+                "missed", "missed_rate_pct", "max_drawdown_pct", "exit_reason"):
+        assert key in met
+
 
 # ── 数量模式覆盖（2026-10-20） ────────────────────────────────────
 

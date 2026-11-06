@@ -648,16 +648,71 @@ def _spot_md(res: dict) -> str:
     if res.get("source_note"):
         md.append(f"\n> ℹ️ {res['source_note']}\n")
 
-    md.append("\n**📊 结果**\n")
-    md.append(_kv_table([
-        ("期末净值", _num(res.get("final_net"), 4)),
-        ("ROI", _pct((res.get("roi") or 0) * 100, 4)),
-        ("成交笔数", res.get("fills", 0)),
-        ("单边周转率", _num(cap.get("turnover"), 2)),
-        ("双边周转率", _num(cap.get("turnover_two_side"), 2)),
-        ("平均资金利用率", _pct((cap.get("utilization") or 0) * 100)),
-        ("总资金", _num(cap.get("total_funds"), 2)),
-    ]))
+    # 对外指标表（C125，2026-11-06）：优先用 driver 算好的 metrics；
+    # 旧记录无该字段时回退旧口径，不报错。
+    met = res.get("metrics") if isinstance(res.get("metrics"), dict) else None
+    if met:
+        cons = met.get("consistency") or {}
+        md.append("\n**📊 指标汇总**\n")
+        pairs: list[tuple[str, Any]] = [
+            ("最终权益（市值）", f"{_num(met.get('final_equity'), 2)} USD"),
+            ("总收益率", _pct(met.get("roi_pct"), 4)),
+            ("实现 PnL", f"{_num(met.get('realized_pnl'), 2)} USD"),
+            ("未实现 PnL", f"{_num(met.get('unrealized_pnl'), 2)} USD"),
+            ("期末现金", f"{_num(met.get('cash_end'), 2)} USD"),
+            ("期末持仓市值", f"{_num(met.get('positions_market_value'), 2)} USD"),
+            ("期末持仓占用资金", f"{_num(met.get('positions_cost'), 2)} USD"),
+            ("期末持仓手数", met.get("open_lots", 0)),
+            ("总开仓数", met.get("entries", 0)),
+            ("平仓笔数", met.get("exits", 0)),
+            ("错过次数 / 错过率", f"{met.get('missed', 0)} / {_pct(met.get('missed_rate_pct'), 2)}"),
+            ("最大回撤", f"{_pct(-(met.get('max_drawdown_pct') or 0), 2)} · "
+                       f"-{_num(met.get('max_drawdown_usd'), 2)} USD"),
+            ("Calmar（ROI / 最大回撤）", _num(met.get("calmar"), 3)),
+            ("手续费合计", f"{_num(met.get('fees_total'), 2)} USD"
+                        f"（占毛利 {_pct(met.get('fees_pct_of_gross'), 2)}）"),
+            ("资金利用率 / 空仓", f"{_pct(met.get('utilization_pct'), 2)} / "
+                             f"{_pct(met.get('idle_pct'), 2)}"),
+            ("单边 / 双边周转率", f"{_num(met.get('turnover'), 2)} / "
+                            f"{_num(met.get('turnover_two_side'), 2)}"),
+            ("胜率 / 盈亏比", f"{_pct(met.get('win_rate_pct'), 2)} / "
+                          f"{_num(met.get('profit_factor'), 3)}"),
+            ("单笔均盈 / 均亏", f"{_num(met.get('avg_win_usd'), 4)} / "
+                           f"{_num(met.get('avg_loss_usd'), 4)} USD"),
+            ("持有时间 中位/均值/最长",
+             f"{_num(met.get('hold_hours_median'), 2)} / {_num(met.get('hold_hours_mean'), 2)} / "
+             f"{_num(met.get('hold_hours_max'), 2)} h"),
+        ]
+        if not cons.get("ok", True):
+            pairs.append((
+                "⚠ 口径校验",
+                f"现金+持仓市值 {_num(cons.get('cash_plus_positions_mv'), 4)} "
+                f"≠ 净值 {_num(cons.get('final_net'), 4)}",
+            ))
+        md.append(_kv_table(pairs))
+        if met.get("exit_reason"):
+            md.append("\n**🚪 出场结构**\n")
+            md.append(_table(
+                ["原因", "笔数", "盈亏(USD)", "均笔(USD)"],
+                [[k, v.get("count", 0), _num(v.get("pnl"), 4), _num(v.get("avg_pnl"), 4)]
+                 for k, v in sorted(
+                     (met.get("exit_reason") or {}).items(),
+                     key=lambda kv: -abs(float(kv[1].get("pnl") or 0)),
+                 )],
+            ))
+        if met.get("method_note"):
+            md.append(f"\n> ℹ️ {met['method_note']}\n")
+    else:
+        md.append("\n**📊 结果**\n")
+        md.append(_kv_table([
+            ("期末净值", _num(res.get("final_net"), 4)),
+            ("ROI", _pct((res.get("roi") or 0) * 100, 4)),
+            ("成交笔数", res.get("fills", 0)),
+            ("单边周转率", _num(cap.get("turnover"), 2)),
+            ("双边周转率", _num(cap.get("turnover_two_side"), 2)),
+            ("平均资金利用率", _pct((cap.get("utilization") or 0) * 100)),
+            ("总资金", _num(cap.get("total_funds"), 2)),
+        ]))
 
     md.append(f"\n**📒 成交明细（{len(detail)}）**\n")
     md.append(_table(

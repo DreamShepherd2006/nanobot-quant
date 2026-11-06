@@ -1307,6 +1307,7 @@ function _periodView(res, runId, period) {
       <div class="kpi"><div class="v">${res.fills || 0}</div><div class="k">成交笔数</div></div>
       <div class="kpi"><div class="v">${res.fetched_bars != null ? `拉取 ${res.fetched_bars} 根 · 评估 ${res.bars || 0} 根` : `评估 ${res.bars || 0} 根`}</div><div class="k">K 线</div></div>
     </div>
+    ${metricsBox(res.metrics)}
     ${capitalBox(res.capital_stats)}
     ${skipBox(res.skip_counts)}
     ${adaptiveGapBox(res.adaptive_gap_trace)}
@@ -1348,6 +1349,49 @@ function renderProgress(runId, prog) {
 }
 
 // 资金效率指标（周转率/利用率，2026-08-29）
+function metricsBox(met) {
+  if (!met) return "";
+  const sgn = (v) => v === null || v === undefined ? "—" : (v >= 0 ? "+" : "") + fmtN(v, 2);
+  const rows = [
+    ["最终权益（市值）", fmtN(met.final_equity, 2) + " USDT"],
+    ["总收益率", (met.roi_pct >= 0 ? "+" : "") + fmtN(met.roi_pct, 4) + "%"],
+    ["实现 PnL（含费）", sgn(met.realized_pnl) + " USDT"],
+    ["未实现 PnL", sgn(met.unrealized_pnl) + " USDT"],
+    ["期末现金", fmtN(met.cash_end, 2) + " USDT"],
+    ["期末持仓市值", fmtN(met.positions_market_value, 2) + " USDT"],
+    ["期末持仓占用资金", fmtN(met.positions_cost, 2) + " USDT"],
+    ["期末持仓手数", met.open_lots],
+    ["总开仓数", met.entries],
+    ["平仓笔数", met.exits],
+    ["错过次数 / 错过率", `${met.missed || 0} / ${fmtN(met.missed_rate_pct, 2)}%`],
+    ["最大回撤", `-${fmtN(met.max_drawdown_pct, 2)}% · -${fmtN(met.max_drawdown_usd, 2)} USDT`],
+    ["Calmar（ROI / 最大回撤）", fmtN(met.calmar, 3)],
+    ["手续费合计", `${fmtN(met.fees_total, 2)} USDT（占毛利 ${fmtN(met.fees_pct_of_gross, 2)}%）`],
+    ["资金利用率 / 空仓", `${fmtN(met.utilization_pct, 2)}% / ${fmtN(met.idle_pct, 2)}%`],
+    ["单边 / 双边周转率", `${fmtN(met.turnover, 2)} / ${fmtN(met.turnover_two_side, 2)}`],
+    ["胜率 / 盈亏比", `${fmtN(met.win_rate_pct, 2)}% / ${fmtN(met.profit_factor, 3)}`],
+    ["单笔均盈 / 均亏", `${fmtN(met.avg_win_usd, 4)} / ${fmtN(met.avg_loss_usd, 4)} USDT`],
+    ["持有时间 中位/均值/最长", `${fmtN(met.hold_hours_median, 2)} / ${fmtN(met.hold_hours_mean, 2)} / ${fmtN(met.hold_hours_max, 2)} h`],
+  ];
+  if (met.consistency && met.consistency.ok === false) {
+    rows.push(["⚠ 口径校验", "现金 + 持仓市值 ≠ 期末净值，见运行备注"]);
+  }
+  const trs = rows.map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`).join("");
+  let exit = "";
+  const er = met.exit_reason || {};
+  if (Object.keys(er).length) {
+    const ers = Object.entries(er)
+      .sort((a, b) => Math.abs(b[1].pnl || 0) - Math.abs(a[1].pnl || 0))
+      .map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v.count} 笔</td>` +
+        `<td class="pv">${sgn(v.pnl)}</td><td class="pv">${sgn(v.avg_pnl)}</td></tr>`).join("");
+    exit = `<div class="bt-params"><div class="bt-params-title">🚪 出场结构</div>` +
+      `<table class="bt-params-table"><tr><th>原因</th><th>笔数</th><th>盈亏(USDT)</th><th>均笔(USDT)</th></tr>${ers}</table></div>`;
+  }
+  const note = met.method_note ? `<div class="f-hint" style="margin:4px 0 8px;">ℹ️ ${escapeHtml(met.method_note)}</div>` : "";
+  return `<div class="bt-params"><div class="bt-params-title">📊 指标汇总（回测期）</div>` +
+    `<table class="bt-params-table">${trs}</table></div>` + exit + note;
+}
+
 function capitalBox(cs) {
   if (!cs) return "";
   return `

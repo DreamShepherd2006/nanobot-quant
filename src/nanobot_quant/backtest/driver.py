@@ -59,6 +59,7 @@ from nanobot_quant.backtest.fetchers import (
     unavailable_symbols,
 )
 from nanobot_quant.backtest.replay_data_source import ReplayDataSource
+from nanobot_quant.backtest.metrics import compute_metrics
 from nanobot_quant.environment.sensors import (
     EMA_TREND_N,
     ema_trend,
@@ -1084,6 +1085,40 @@ class BacktestDriver:
         initial_total = self.initial_quote * self.batches
         roi = (final_net / initial_total - 1.0) if initial_total > 0 else 0.0
 
+        # 期末现金与持仓市值（C125，2026-11-06）：直接读 broker 快照，与
+        # net_values 同口径。shared_cash 下现金只读池一次（去重），
+        # 独立模式按 slot 相加——否则会重现「同一份池余额被记 N 次」。
+        cash_end = 0.0
+        positions_value_end = 0.0
+        if getattr(self, "_cash_pool", None) is not None:
+            cash_end = float(self._cash_pool.amount)
+            positions_value_end = sum(
+                float(b.snapshot()["positions_value"]) for b in slot_brokers.values()
+            )
+        else:
+            for _broker in slot_brokers.values():
+                _snap = _broker.snapshot()
+                cash_end += float(_snap["cash"])
+                positions_value_end += float(_snap["positions_value"])
+
+        capital_stats = self._capital_stats(
+            fills_detail,
+            initial_total,
+            bar_times[-1].isoformat() if bar_times else None,
+        )
+        metrics = compute_metrics(
+            fills_detail=fills_detail,
+            slots_summary=slots_summary,
+            initial_total=initial_total,
+            final_net=final_net,
+            cash_end=cash_end,
+            positions_value_end=positions_value_end,
+            net_values=net_values,
+            skip_counts=getattr(strategy, "_skip_counts", {}) or {},
+            capital_stats=capital_stats,
+            fee_rate=float(getattr(self, "fee_rate", 0.0) or 0.0),
+        )
+
         result = {
             "scene": self.scene_name,
             "symbols": self.symbols,
@@ -1166,9 +1201,10 @@ class BacktestDriver:
                     )
                 ),
             },
-            "capital_stats": self._capital_stats(
-                fills_detail, initial_total, bar_times[-1].isoformat() if bar_times else None
-            ),
+            "capital_stats": capital_stats,
+            # 对外指标表（C125，2026-11-06）：最终权益 / 总收益率 / 实现与未实现
+            # PnL / 期末现金与持仓 / 开仓数 / 错过率 + 回撤、成本、成交结构
+            "metrics": metrics,
             "net_values": net_values,
             "slots": slots_summary,
             "ledger_dir": str(self.ledger_dir),
