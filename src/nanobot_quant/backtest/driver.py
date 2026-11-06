@@ -1069,8 +1069,21 @@ class BacktestDriver:
             # 入场多周期 OR（2026-11-05）：各周期实际拿到的 bar 数与窗口不足次数，
             # 让「长周期窗口被数据源深度截断」在结果里可见（不靠日志找）。
             "entry_periods": "|".join(
-                f"{m}:{n}" for m, n in sorted(
-                    (getattr(self.strategy, "_multi_bar_counts", None) or {}).items()
+                f"{m}:{n}"
+                for m, n in sorted(
+                    {
+                        # base 档（倍数 1）= 评估 bar 数，必须一起列出
+                        # （2026-11-06）：否则核对「1:<根数> vs fetched_bars」
+                        # 时无据可查，多周期预热截断只能靠猜。
+                        1: len(net_values),
+                        **{
+                            m: n
+                            for m, n in (
+                                getattr(self.strategy, "_multi_bar_counts", None)
+                                or {}
+                            ).items()
+                        },
+                    }.items()
                 )
             ) or None,
             "multi_window_warnings": int(
@@ -1195,6 +1208,15 @@ class BacktestDriver:
                 "entry_min_gap_pct": self.entry_min_gap_pct,
                 # 波锁容量（2026-11-04）：0=关闭波锁（不限笔数）。
                 "wave_max_buys": self.wave_max_buys,
+                # TDST 方向过滤（2026-11-06，C119）：富途变体不产生 TDST，
+                # 该键必须显式为 False，否则入场被永久拦截；快照缺它就无法
+                # 从结果确认（preset 依赖这条）。
+                "tdst_filter": bool(
+                    (getattr(strategy, "_td_params", None) or {}).get("tdst_filter")
+                ),
+                # 周期实际生效值（2026-11-06，C119）：此前只有 timestep，
+                # 场景 sleeptime 不可见 ⇒ 无法确认到底跑的 1m 还是 15m。
+                "sleeptime": str(self.scene_cfg.get("sleeptime", "15m")),
                 # 自适应间距（C102 2026-11-04）：回测结果必须能读出开关与反馈窗口，
                 # 否则「跑了几小时却不知道自适应到底有没有生效」无法自查。
                 "adaptive_gap_enabled": self.adaptive_gap_enabled,

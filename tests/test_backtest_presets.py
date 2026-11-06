@@ -209,6 +209,25 @@ def test_driver_config_records_preset_and_shared_cash():
         assert marker in src, f"backtest_config 缺 {marker}"
 
 
+def test_driver_config_records_visibility_keys():
+    """上线实测发现的两个静默项（2026-11-06）：都已生效、但快照里没有。
+
+    - ``tdst_filter``：富途变体必须关，开了会永久拦入场，看不到就无从确认；
+    - ``sleeptime``：只有 ``timestep``，场景周期不可见；
+    - 运行时 ``entry_periods``：只列非 base 档，「1:<根数>」缺失 ⇒
+      无法核对多周期预热是否被数据源深度截断。
+    """
+    import inspect
+
+    from nanobot_quant.backtest import driver as drv
+
+    src = inspect.getsource(drv)
+    for marker in ('"tdst_filter": bool(',
+                   '"sleeptime": str(self.scene_cfg.get("sleeptime"',
+                   "1: len(net_values),"):
+        assert marker in src, f"缺 {marker}"
+
+
 def test_mcp_exposes_list_backtest_presets():
     from nanobot_quant import signal_mcp_server as srv
 
