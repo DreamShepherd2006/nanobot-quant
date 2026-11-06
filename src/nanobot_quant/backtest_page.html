@@ -124,12 +124,12 @@
   <div class="field">
     <span class="f-label">数据源</span>
     <select id="source" onchange="onSourceChange()">
-      <option value="gate_cex" selected>Gate CEX（与执行同所）</option>
-      <option value="okx_cex">OKX CEX（跨所参考）</option>
+      <option value="gate_cex">Gate CEX</option>
+      <option value="okx_cex" selected>OKX CEX</option>
     </select>
-    <span class="f-hint" id="source-hint">与实盘执行同所（Gate 现货）——结果可直接用于参数裁决</span>
+    <span class="f-hint" id="source-hint">与执行通道同源——结果可直接用于参数裁决</span>
   </div>
-  <div class="banner warn hide" id="cross-venue-banner">⚠️ 数据源 ≠ 执行所（Gate 现货）：跨所回测仅用于参数粗筛，<b>不作参数裁决依据</b>。1m TD 九连事件的跨所一致率仅 0.23–0.59（实测），事件级收益归属不成立；闸门通过率/暴露度这类状态量可参考。裁决请切回 Gate CEX。</div>
+  <div class="banner warn hide" id="cross-venue-banner">⚠️ 数据源 ≠ 执行通道的数据源：跨所回测仅用于参数粗筛，<b>不作参数裁决依据</b>。1m TD 九连事件的跨所一致率仅 0.23–0.59（实测），事件级收益归属不成立；闸门通过率/暴露度这类状态量可参考。裁决请改用与执行通道同源的数据源。</div>
   <div class="field">
     <span class="f-label">场景</span>
     <select id="scene"></select>
@@ -362,17 +362,19 @@ function escapeHtml(s) {
 }
 
 // ── 场景/标的表单 ───────────────────────────────────────────────────────
-// 数据源切换（2026-10-20）：默认 Gate（与执行同所）；OKX = 跨所参考
+// 数据源切换（2026-11-06）：默认 OKX CEX（与执行通道同源）；Gate = 跨所参考
 // 跨所必须显式提醒「不作参数裁决依据」——同一份策略在两家的 1m TD 九连
 // 事件一致率仅 0.23–0.59（实测），事件级收益归属不成立。
+// 哪个才是「同源」不写死：显示层用结果里的 res.cross_venue / cross_venue_note
+// （后端经 brokers.registry 从 execution_channel 解析）。
 function onSourceChange() {
-  const src = $("source") ? $("source").value : "gate_cex";
+  const src = $("source") ? $("source").value : "okx_cex";
   const isOkx = src === "okx_cex";
   if ($("bt-source-desc")) $("bt-source-desc").textContent = isOkx ? "OKX CEX" : "Gate CEX";
   if ($("source-hint")) {
     $("source-hint").textContent = isOkx
-      ? "跨所参考源：OKX 1m 可回溯约 180 天（≈259,200 根），远长于 Gate（Gate 1m ≈6.9 天）——仅作参数粗筛、不作裁决依据；池内无 OKX 交易对的标的会先报错"
-      : "与实盘执行同所（Gate 现货）——结果可直接用于参数裁决";
+      ? "OKX 1m 可回溯约 180 天（≈259,200 根），远长于 Gate（Gate 1m ≈6.9 天）；是否与执行同源以结果里的「跨所」标记为准"
+      : "Gate 1m 深度仅 ≈6.9 天；是否与执行同源以结果里的「跨所」标记为准";
   }
   if ($("range-hint")) {
     // 2026-11-03 C103：区间上限按源显示——「10,000 根 / 1m ≈7 天」是 Gate 的
@@ -648,8 +650,8 @@ function onOff(v) { return v ? "开" : "关"; }
 // 回测参数块：结果区顶部先展示本次实际生效参数（2026-08-29）
 function paramsRows(res) {
   const cfg = res.backtest_config || {};
-  const sourceName = cfg.source || res.source || "gate_cex";
-  const sourceText = sourceName === "okx_cex" ? "OKX CEX（跨所参考）" : "Gate CEX（与执行同所）";
+  const sourceName = cfg.source || res.source || "okx_cex";
+  const sourceText = sourceName === "okx_cex" ? "OKX CEX" : "Gate CEX";
   const rows = [
     ["数据源", `<code>${sourceText}</code>${res.cross_venue ? ' <span style="color:#b45309;font-weight:600;">⚠ 跨所</span>' : ''}`],
     ["场景", `<code>${cfg.scene ?? res.scene ?? "—"}</code>`],
@@ -1165,7 +1167,7 @@ function _periodView(res, runId, period) {
   const fills = res.fills_detail || [];
   const rows = fills.map(fillRow).join("");
   return mdButton(res, runId) + `
-    ${res.cross_venue ? `<div class="banner warn show" style="margin-bottom:8px;">⚠️ 数据源 ≠ 执行所（Gate 现货）：跨所结果仅作参数粗筛，<b>不作参数裁决依据</b>。${escapeHtml(res.cross_venue_note || "")}</div>` : ""}
+    ${res.cross_venue ? `<div class="banner warn show" style="margin-bottom:8px;">⚠️ ${escapeHtml(res.cross_venue_note || "数据源 ≠ 执行通道的数据源：跨所结果仅作参数粗筛，不作参数裁决依据")}</div>` : ""}
     ${res.source_note ? `<div class="f-hint" style="margin-bottom:6px;">ℹ️ ${escapeHtml(res.source_note)}</div>` : ""}
     ${paramsBox(res)}
     <div class="kpis">

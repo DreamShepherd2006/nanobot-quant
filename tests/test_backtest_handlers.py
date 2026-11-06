@@ -121,7 +121,7 @@ def test_start_dispatch_driver_engine(client, monkeypatch):
     assert started["initial_quote"] == 50.0
     assert started["batches"] == 2
     # 数据源：请求未带 → 默认 Gate（与执行同所，零行为变化）
-    assert started["source"] == "gate_cex"
+    assert started["source"] == "okx_cex"
     # 诊断日志覆盖请求摘要
     assert any("📈 回测启动" in line for line in gk._log_calls)
     # 诊断日志覆盖请求摘要

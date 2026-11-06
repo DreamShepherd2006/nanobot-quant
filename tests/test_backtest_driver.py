@@ -12,9 +12,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import functools
+
 import pytest
 
 from nanobot_quant.backtest.driver import BacktestDriver
+
+# 用例沿用 Gate 语义（默认源已改为 okx_cex，2026-11-06）；显式固定源避免联网探测
+_mk_driver = functools.partial(BacktestDriver, source="gate_cex")
 from nanobot_quant.batches import BatchManager
 from nanobot_quant.exec_params import DEFAULT_EXEC_PARAMS
 from nanobot_quant.strategies.td_sequential_strategy import TdSequentialStrategy
@@ -91,7 +96,7 @@ def _flat_then_rising(flat: int = 60, rise: int = 40,
 
 def test_driver_run_structure(tmp_path):
     """平盘→上涨（无 TD 买入信号、高9 无持仓）：结构完整、零成交、SKIP 计数。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_rising(60, 40)),
@@ -122,7 +127,7 @@ def test_driver_trend_down_triggers_buy(tmp_path):
     下跌持续 → 每批独立止损（A1 stop_loss 场景化）可能已平仓，open 不硬
     断言——验证点 = 成交发生 + 决策链（BUY→止损/SELL）走实盘同一代码。
     """
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
@@ -152,7 +157,7 @@ def test_quantity_mode_fixed_blocks_small_slot(tmp_path):
 
     这就是 2026-10-20 线上那轮「0 成交 + position_limit BLOCK」的口径根因。
     """
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_fixed_qty_params(),
         initial_quote=100.0,
@@ -170,7 +175,7 @@ def test_quantity_mode_override_reaches_strategy(tmp_path):
 
     回测覆盖只作用于本次进程（不回写实盘），策略侧读 merged params。
     """
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_fixed_qty_params(),
         initial_quote=100.0,
@@ -192,7 +197,7 @@ def test_backtest_config_snapshots_fee_rate(tmp_path):
     此前快照缺该键 → markdown/页面回退 0，把「手续费率」误显示为 0.00%，
     而撑合实际按 0.1% 扣（买入成交价 103.77 → 103.884261 反推 1.0011 可验）。
     """
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
@@ -207,7 +212,7 @@ def test_backtest_config_fee_rate_follows_params(tmp_path):
     """exec_params 里的 fee_rate 应原样进快照（不写死默认值）。"""
     p = _params()
     p["fee_rate"] = 0.0005
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=p,
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
@@ -220,7 +225,7 @@ def test_backtest_config_fee_rate_follows_params(tmp_path):
 
 def test_bars_rows_captured_in_lean_mode(tmp_path):
     """默认精简模式：逐 bar 表非空、字段齐全、**成交行必进表**。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
@@ -244,7 +249,7 @@ def test_bars_rows_captured_in_lean_mode(tmp_path):
 def test_bars_rows_full_mode_keeps_every_bar(tmp_path):
     """全量模式：行数 = 评估 bar × 标的数。"""
     p = _params(bars_mode="full")
-    out = BacktestDriver(
+    out = _mk_driver(
         scene="mid", params=p,
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
     ).run()
@@ -257,7 +262,7 @@ def test_bars_rows_full_mode_keeps_every_bar(tmp_path):
 def test_ema_gate_blocks_buy_in_downtrend(tmp_path):
     """EMA 闸门开：下跌趋势下 slope ≤ 0 → 拦 BUY（只拦不买），并计数。"""
     closes = _flat_then_falling(60, 40)
-    base = BacktestDriver(
+    base = _mk_driver(
         scene="mid", params=_params(),
         fetcher=_FakeFetcher(closes), ledger_dir=tmp_path,
     ).run()
@@ -267,7 +272,7 @@ def test_ema_gate_blocks_buy_in_downtrend(tmp_path):
     p = _params()
     p["ema_gate_enabled"] = True
     p["ema_n"] = 20
-    gated = BacktestDriver(
+    gated = _mk_driver(
         scene="mid", params=p,
         fetcher=_FakeFetcher(closes), ledger_dir=tmp_path,
     ).run()
@@ -284,7 +289,7 @@ def test_progress_payload_carries_bars_rows(tmp_path):
     """运行中进度也要带逐 bar 行（否则 26 分钟的回测只能跑完才看）。"""
     import json as _json
 
-    drv = BacktestDriver(
+    drv = _mk_driver(
         scene="mid", params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
     )
@@ -330,7 +335,7 @@ def test_hooks_default_none_keeps_live_path():
 
 def test_ledger_isolation(tmp_path):
     """台账写入独立目录（回测干净重放），不碰实盘 batches 文件。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),  # 成交 → 台账落盘
@@ -353,7 +358,7 @@ def test_ledger_isolation(tmp_path):
 def test_scene_missing_fail_closed():
     """不存在的场景 → ValueError（绝不静默回退到其他场景配置）。"""
     with pytest.raises(ValueError, match="场景"):
-        BacktestDriver(scene="nope", params=_params())
+        _mk_driver(scene="nope", params=_params())
 
 
 def test_scene_period_override(tmp_path):
@@ -361,21 +366,21 @@ def test_scene_period_override(tmp_path):
     不留覆盖时跟随场景周期；非法周期 fail-closed（2026-09-03）。"""
     # 覆盖周期：仅本次回测生效（driver.scene_cfg 是 exec_params scenes 的副本，
     # 修改不落盘；实盘 exec_params 不变）
-    driver = BacktestDriver(scene="mid", params=_params(), overrides={"sleeptime": "5m"})
+    driver = _mk_driver(scene="mid", params=_params(), overrides={"sleeptime": "5m"})
     assert driver.timestep == "5m"
     assert driver.scene_cfg["sleeptime"] == "5m"
     # 不留覆盖 → 场景周期（_params() 的 mid 场景为 15m）
-    d2 = BacktestDriver(scene="mid", params=_params())
+    d2 = _mk_driver(scene="mid", params=_params())
     assert d2.timestep == "15m"
     assert d2.scene_cfg["sleeptime"] == "15m"
     # 非法周期 → ValueError（_timestep_for fail-closed）
     with pytest.raises(ValueError, match="周期"):
-        BacktestDriver(scene="mid", params=_params(), overrides={"sleeptime": "foo"})
+        _mk_driver(scene="mid", params=_params(), overrides={"sleeptime": "foo"})
 
 
 def test_symbols_and_batches_override(tmp_path):
     """CLI 覆盖：symbols/batches 覆盖场景配置，不影响实盘文件。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         symbols=["RENDER"],
@@ -393,7 +398,7 @@ def test_symbols_and_batches_override(tmp_path):
 
 def test_fixed_amount_override(tmp_path):
     """回测覆盖 TD 固定金额（quantity_mode=fixed_amount 时生效），不回写实盘。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         symbols=["RENDER"],
@@ -427,7 +432,7 @@ def test_fixed_amount_override(tmp_path):
 
 def test_overrides_merged_into_merged_params():
     """overrides 合并进 _merged_params（覆盖 > 场景配置）。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid", params=_params(), fetcher=_FakeFetcher(_rising_closes(200)),
         overrides={"exit_setup": 12, "sell_only_profit_high": 0.005,
                    "td_sell_all": True, "min_hold_bars": 30, "stop_loss_pct": 0.05},
@@ -444,7 +449,7 @@ def test_overrides_merged_into_merged_params():
 
 def test_overrides_none_and_empty_filtered():
     """None 值过滤，不影响场景配置。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid", params=_params(), fetcher=_FakeFetcher(_rising_closes(200)),
         overrides={"exit_setup": None, "sell_only_profit_high": None,
                    "exit_order": "lifo"},
@@ -458,7 +463,7 @@ def test_overrides_none_and_empty_filtered():
 def test_overrides_reach_strategy_parameters(tmp_path):
     """覆盖值进入策略构造参数（_build_strategy 读 _merged_params），
     并出现在结果的实际生效配置中（回测页展示用）。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid", params=_params(), fetcher=_FakeFetcher(_rising_closes(200)),
         overrides={"exit_order": "lifo", "min_hold_bars": 25,
                    "stop_loss_pct": 0.03, "take_profit_pct": 0.05,
@@ -480,7 +485,7 @@ def test_overrides_reach_strategy_parameters(tmp_path):
 
 def test_insufficient_history_fail_closed(tmp_path):
     """数据不足 min_history（120）→ 明确报错（不静默空跑）。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_rising_closes(30)),  # < min_history 40
@@ -494,7 +499,7 @@ def test_insufficient_history_fail_closed(tmp_path):
 
 def test_driver_result_roi_and_fills_detail(tmp_path):
     """结构化结果：initial_total / final_net / roi / fills_detail。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
@@ -533,7 +538,7 @@ def _two_cycles_closes() -> list[float]:
 
 def test_driver_capital_stats_zero_fills(tmp_path):
     """零成交（上涨行情无买入）→ 周转率/利用率全 0，结构完整。"""
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_rising_closes(100)),
@@ -555,7 +560,7 @@ def test_driver_capital_stats_turnover(tmp_path):
     单边 = Σ买入 ÷ 总资金；双边 = Σ(买入+卖出) ÷ 总资金；
     利用率 = 时间加权平均在途 ÷ 总资金 ∈ (0,1)。
     """
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
@@ -591,7 +596,7 @@ def test_driver_multi_slot_fills_detail(tmp_path):
     params = _params()
     # 关闭价格出场（SL/TP），只保留 TD 信号驱动，保证两个信号周期各成交 1 笔
     params["scenes"]["mid"].update({"stop_loss_pct": 0.0, "take_profit_pct": 0.0})
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=params,
         fetcher=_FakeFetcher(_two_cycles_closes()),
@@ -829,7 +834,7 @@ def test_driver_cd13_loss_holds(tmp_path):
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "sell_only_profit_high": 0.003, "td_sell_all": True,
     })
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid", params=params,
         fetcher=_FakeFetcher(closes, bar="1m"),
         ledger_dir=tmp_path,
@@ -890,7 +895,7 @@ def test_driver_min_hold_follows_exec_params(tmp_path):
     # 场景 A：表单无 min_hold_bars 键 → 回退 exec_params 全局（隔离路径无文件 → 默认 10）
     p = _params()
     p.pop("min_hold_bars", None)
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid", params=p, fetcher=_FakeFetcher(_rising_closes(100)),
         ledger_dir=tmp_path,
     )
@@ -903,7 +908,7 @@ def test_driver_min_hold_follows_exec_params(tmp_path):
     (tmp_path / "exec_params.json").write_text(json.dumps(raw), encoding="utf-8")
     p2 = _params()
     p2.pop("min_hold_bars", None)  # 模拟回测表单无该键
-    driver2 = BacktestDriver(
+    driver2 = _mk_driver(
         scene="mid", params=p2, fetcher=_FakeFetcher(_rising_closes(100)),
         ledger_dir=tmp_path,
     )
@@ -911,7 +916,7 @@ def test_driver_min_hold_follows_exec_params(tmp_path):
 
     # 场景 C：表单显式覆盖优先（回测页未来加字段时）
     p3 = _params(min_hold_bars=25)
-    driver3 = BacktestDriver(
+    driver3 = _mk_driver(
         scene="mid", params=p3, fetcher=_FakeFetcher(_rising_closes(100)),
         ledger_dir=tmp_path,
     )
@@ -929,7 +934,7 @@ def test_ema_gate_pass_counts_only_candidate_bars(tmp_path):
     p = _params(bars_mode="full")
     p["ema_gate_enabled"] = True
     p["ema_n"] = 20
-    out = BacktestDriver(
+    out = _mk_driver(
         scene="mid", params=p,
         fetcher=_FakeFetcher(_rising_closes(100)), ledger_dir=tmp_path,
     ).run()
@@ -947,7 +952,7 @@ def test_ema_gate_block_counts_only_candidate_bars(tmp_path):
     p = _params(bars_mode="full")
     p["ema_gate_enabled"] = True
     p["ema_n"] = 20
-    drv = BacktestDriver(
+    drv = _mk_driver(
         scene="mid", params=p,
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
     )
@@ -978,7 +983,7 @@ def test_ema_gate_no_signal_bars_not_marked(tmp_path):
     p = _params(bars_mode="full")
     p["ema_gate_enabled"] = True
     p["ema_n"] = 20
-    drv = BacktestDriver(
+    drv = _mk_driver(
         scene="mid", params=p,
         fetcher=_FakeFetcher(_flat_then_falling(60, 40)), ledger_dir=tmp_path,
     )
@@ -1001,7 +1006,7 @@ def test_backtest_config_wave_max_buys_zero_preserved(tmp_path):
     """
     # 走 overrides（回测页覆盖层）：优先级 = 覆盖 > 场景配置 > 全局；
     # 场景默认是 1，只有覆盖层能把它改成 0（与页面行为一致）。
-    driver = BacktestDriver(
+    driver = _mk_driver(
         scene="mid",
         params=_params(),
         overrides={"wave_max_buys": 0},
@@ -1010,3 +1015,4 @@ def test_backtest_config_wave_max_buys_zero_preserved(tmp_path):
     )
     out = driver.run()
     assert out["backtest_config"]["wave_max_buys"] == 0, "0=关闭波锁，不得被夹到 1"
+

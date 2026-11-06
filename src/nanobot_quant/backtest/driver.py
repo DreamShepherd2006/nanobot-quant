@@ -48,9 +48,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from nanobot_quant.backtest.fetchers import (
-    CROSS_VENUE_NOTE,
     DEFAULT_SOURCE,
     SOURCE_LABELS,
+    cross_venue_note,
     is_cross_venue,
     make_fetcher,
     normalize_source,
@@ -323,13 +323,22 @@ class BacktestDriver:
             self.bars_mode = "lean"
 
         # 5. 数据源
-        #    默认 Gate CEX（与执行同所，零行为变化）；``okx_cex`` 为跨所参考源
-        #    （2026-10-20 拍板：放行 + 强制标注，不参与参数裁决）。
+        #    默认与执行通道同源（2026-11-06 拍板：DEFAULT_SOURCE=okx_cex）；
+        #    「是否跨所」不写死任何一家，一律经 brokers.registry 从当前
+        #    execution_channel 解析（单一事实源），本处只缓存一次供 note 复用。
         tokens = load_tokens_json() or []
         self.tokens_json = tokens
         self.source = normalize_source(source)
         self.source_label = source_label(self.source)
-        self.cross_venue = is_cross_venue(self.source)
+        self.exec_channel = (
+            self.params.get("execution_channel")
+            or self._exec_params.get("execution_channel")
+            or None
+        )
+        self.cross_venue = is_cross_venue(self.source, self.exec_channel)
+        self.cross_venue_note: Optional[str] = (
+            cross_venue_note(self.exec_channel) if self.cross_venue else None
+        )
         self.source_note: Optional[str] = None
         if self.cross_venue and self.start_ts is None:
             self.source_note = (
@@ -759,7 +768,7 @@ class BacktestDriver:
             detail = "；".join(f"{sym}（{why}）" for sym, why in bad)
             raise RuntimeError(
                 f"数据源 {self.source_label} 取不到以下标的的行情：{detail}。"
-                f"请从标的池剔除它们，或改用 Gate CEX 数据源"
+                f"请从标的池剔除它们，或改用与执行通道同源的数据源"
             )
         # 预取（网络只发生在此处）
         self.data_source.prefetch()
@@ -1014,11 +1023,11 @@ class BacktestDriver:
             "scene": self.scene_name,
             "symbols": self.symbols,
             "timestep": self.timestep,
-            # 数据源（2026-10-20）：gate_cex = 与执行同所；okx_cex = 跨所参考
+            # 数据源（2026-11-06）：执行所从 execution_channel 解析，同源可直接裁决
             "source": self.source,
             "source_label": self.source_label,
             "cross_venue": self.cross_venue,
-            "cross_venue_note": CROSS_VENUE_NOTE if self.cross_venue else None,
+            "cross_venue_note": self.cross_venue_note,
             "source_note": self.source_note,
             "bars": len(net_values),
             "fetched_bars": len(bar_times) if bar_times else 0,
@@ -1188,7 +1197,7 @@ class BacktestDriver:
             f"[BACKTEST] 完成 source={self.source} scene={self.scene_name} "
             f"bars={len(net_values)} fills={fills} 期末净值={final_net:.4f} "
             f"ROI={roi * 100:.2f}%"
-            + (f" · {CROSS_VENUE_NOTE}" if self.cross_venue else ""),
+            + (f" · {self.cross_venue_note}" if self.cross_venue else ""),
             file=sys.stderr, flush=True,
         )
         return result

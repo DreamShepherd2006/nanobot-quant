@@ -414,8 +414,9 @@ def _auto_backtest_driver(
     construction, BacktestBroker for simulated fills).  Same run_id +
     poll contract as the legacy engine.
 
-    ``source``: ``gate_cex``（默认，与执行同所）/ ``okx_cex``（跨所参考，
-    仅作参数粗筛，不作裁决依据）。
+    ``source``: ``okx_cex``（默认，与执行通道同源）/ ``gate_cex``（是否跨所以
+    ``exec_params.execution_channel`` 解析结果为准；跨所仅作参数粗筛，
+    不作裁决依据）。
     """
     from datetime import datetime
 
@@ -663,8 +664,9 @@ def run_backtest(
         source: 数据源（按 engine 语义不同）：
                 - legacy engine: registry name "onchainos"（默认）/
                   "okx_cex" / "yfinance"(alias "yahoo")
-                - engine="driver": "gate_cex"（默认，与执行同所）或
-                  "okx_cex"（跨所参考 —— 仅作参数粗筛、不作裁决依据）
+                - engine="driver": "okx_cex"（默认，与执行通道同源）或
+                  "gate_cex"（是否跨所由 execution_channel 解析结果决定；
+                  跨所仅作参数粗筛、不作裁决依据）
         engine: "backtest_runner" (legacy lumibot engine, default — zero
                 behaviour change), "driver" (Step 3 replay driver:
                 scene-based replay on gate_cex/okx_cex history, same decision

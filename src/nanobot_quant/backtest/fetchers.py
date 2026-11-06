@@ -2,24 +2,29 @@
 
 为什么需要这一层：场景回放引擎此前把数据源写死成 Gate
 （``gate_pair`` + ``fetch_gate_kline_range_paged``）。OKX CEX 有长得多的
-1m 历史（Gate 1m 仅 ≈6.9 天），可用来做**参数粗筛**。两个源共用同一套
+1m 历史（Gate 1m 仅 ≈6.9 天），也可用来做**参数粗筛**。两个源共用同一套
 反向分页器（``kline_paging.paginate_backwards``），差异只在两处：
 
 1. 符号解析：Gate 用 ``gate_pair``（``CRCLX`` → ``CRCLX_USDT``），
    OKX 用 ``okx_ticker``（``CRCLX`` → ``XCRCL``，无该交易对则不可用）。
 2. 请求形态：Gate 收 unix 秒区间，OKX 收 ISO 字符串区间。
 
+**「执行所」口径（2026-11-06 拍板：跟随执行通道，不写死任何一家）**
+
+执行所在哪里不写在本模块：一律从 ``exec_params.execution_channel`` 经
+``brokers.registry.spec_for_channel(ch).data_source`` 解析（单一事实源，
+新增通道零改动）。回测 ``source`` 与它相同 = 同源，可直接作参数裁决依据；
+不同 = 跨所，只能作粗筛、强制标注 :func:`cross_venue_note`。
+
 **跨所回测的语义边界（2026-10-20 拍板：放行 + 强制标注）**
 
-执行通道仍是 Gate 现货。用 OKX 数据回测 = 「数据源 ≠ 执行所」：
-
 - 可回答：参数在另一家行情下的方向、闸门通过率/暴露度这类**状态量**；
-- 不可回答：本次参数在 Gate 实盘会出多少笔、每笔赚多少（**事件级收益归属
+- 不可回答：本次参数在真实执行所会出多少笔、每笔赚多少（**事件级收益归属
   不成立**）——同日实测（C73）：1m TD 九连事件的跨所 Jaccard 仅
   0.227–0.591，而 EMA 斜率符号一致率 97.7–99.3%。
 
-因此跨所结果一律标注 :data:`CROSS_VENUE_NOTE`，只能作参考、不作参数
-裁决依据；裁决必须用与执行同所的数据（Gate）。
+因此跨所结果一律标注 :func:`cross_venue_note`，只能作参考、不作参数裁决
+依据；裁决必须用与执行通道同源的数据源。
 """
 
 from __future__ import annotations
@@ -41,17 +46,16 @@ from nanobot_quant.gate_credentials import gate_pair, okx_ticker
 from nanobot_quant.kline_paging import max_bars_for
 from nanobot_quant.okx_cex_data import fetch_kline_range, fetch_ticker
 
-DEFAULT_SOURCE = "gate_cex"
+# 回测默认数据源。与执行通道同源（2026-11-06 拍板：实盘执行通道为 okx_cex）。
+DEFAULT_SOURCE = "okx_cex"
 
 SOURCE_LABELS: dict[str, str] = {
     "gate_cex": "Gate CEX",
     "okx_cex": "OKX CEX",
 }
 
-CROSS_VENUE_NOTE = (
-    "数据源 ≠ 执行所（Gate 现货）：本结果为跨所参考，仅用于参数粗筛，"
-    "不作参数裁决依据"
-)
+# 执行通道解析失败/未配置时的中性兜底展示名（绝不硬编码某一家交易所）。
+_EXEC_VENUE_FALLBACK = "执行通道"
 
 
 def normalize_source(source: object) -> str:
@@ -68,9 +72,55 @@ def source_label(source: object) -> str:
     return SOURCE_LABELS[normalize_source(source)]
 
 
-def is_cross_venue(source: object) -> bool:
-    """该数据源是否与执行所（Gate）不同源。"""
-    return normalize_source(source) != DEFAULT_SOURCE
+def execution_spec(exec_channel: object = None):
+    """当前执行通道的 ``BrokerSpec``；解析失败返回 ``None``。
+
+    执行所只在 ``brokers.registry`` 里定义（单一事实源）。本模块不维护
+    第二份「通道 → 数据源」映射，避免两处漂移。
+    """
+    channel = exec_channel
+    if not channel:
+        try:
+            from nanobot_quant.exec_params import load_exec_params
+
+            channel = (load_exec_params() or {}).get("execution_channel")
+        except Exception:
+            channel = None
+    if not channel:
+        return None
+    try:
+        from nanobot_quant.brokers.registry import spec_for_channel
+
+        return spec_for_channel(str(channel))
+    except Exception:
+        return None
+
+
+def execution_source(exec_channel: object = None) -> str:
+    """执行通道绑定的数据源名（解析失败回退 :data:`DEFAULT_SOURCE`）。"""
+    spec = execution_spec(exec_channel)
+    if spec is None or not spec.data_source:
+        return DEFAULT_SOURCE
+    return spec.data_source
+
+
+def execution_venue(exec_channel: object = None) -> str:
+    """执行通道的展示名（用于跨所提示，如「OKX CEX（现货）」）。"""
+    spec = execution_spec(exec_channel)
+    return spec.display if spec is not None else _EXEC_VENUE_FALLBACK
+
+
+def is_cross_venue(source: object, exec_channel: object = None) -> bool:
+    """该数据源是否与**当前执行通道**不同源（执行所从 exec_params 解析）。"""
+    return normalize_source(source) != execution_source(exec_channel)
+
+
+def cross_venue_note(exec_channel: object = None) -> str:
+    """跨所警示文案——动态带出当前执行所展示名，不硬编码任何一家。"""
+    return (
+        f"数据源 ≠ 执行所（{execution_venue(exec_channel)}）：本结果为跨所参考，"
+        "仅用于参数粗筛，不作参数裁决依据"
+    )
 
 
 def resolve_symbol(

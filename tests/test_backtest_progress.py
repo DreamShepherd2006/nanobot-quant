@@ -9,15 +9,20 @@
 import json
 from pathlib import Path
 
+import functools
+
 import pytest
 
 from nanobot_quant.backtest.driver import BacktestDriver
+
+# 用例沿用 Gate 语义（默认源已改为 okx_cex，2026-11-06）；显式固定源避免联网探测
+_mk_driver = functools.partial(BacktestDriver, source="gate_cex")
 
 from test_backtest_driver import _FakeFetcher, _flat_then_falling, _params
 
 
 def _driver(progress_path, closes=None, ledger_dir=None, **kw):
-    return BacktestDriver(
+    return _mk_driver(
         scene="mid",
         params=_params(),
         fetcher=_FakeFetcher(closes or _flat_then_falling(60, 40)),
@@ -92,3 +97,4 @@ def test_progress_write_error_silent(tmp_path):
     driver = _driver(tmp_path / "no_such_dir" / "run.json", ledger_dir=tmp_path)
     out = driver.run()
     assert out["bars"] > 0  # 进度写失败不影响回测结果
+
