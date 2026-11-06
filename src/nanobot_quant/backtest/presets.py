@@ -104,7 +104,7 @@ _LEGACY_NAMES: dict[str, str] = {
 _PRESETS: dict[str, dict] = {
     "low9_multi_h9_minentry_eod_20261106": {
         "created": "2026-11-06",
-        "label": "低9多周期 + 高9 min_entry + 双号强平",
+        "label": "低9多周期 + 高9 + min_entry + 双号强平",
         "description": (
             "EMA610 折价 ≤ −1.3% 过滤 + 1/2/3/4/5/8m 多周期 Low9（整根）建仓；"
             "High9 每轮平掉入场价最低且盈利的一仓；双号日 UTC 24:00 全平；"

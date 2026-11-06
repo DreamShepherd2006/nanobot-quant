@@ -135,7 +135,7 @@
     <select id="preset" onchange="applyPreset()">
       <option value="">（不使用预设）</option>
     </select>
-    <span class="f-hint" id="preset-hint">预设 = 一次性把全套参数填进下方表单（<b>只读、带版本号</b>）；填完可任意改字段，改动会在结果里记成「本次覆盖」。改口径请新增预设版本（发版），不要原地改旧版本。</span>
+    <span class="f-hint" id="preset-hint">预设 = 一次性把全套参数填进下方表单（<b>只读、名字带日期</b>）；填完可任意改字段，改动会在结果里记成「本次覆盖」。改口径请新增一条带新日期的预设，不要原地改旧名字。</span>
   </div>
   <div class="field">
     <span class="f-label">场景</span>
@@ -420,7 +420,7 @@ function initForm() {
     (PRESETS || []).forEach(p => {
       const opt = document.createElement("option");
       opt.value = p.name;
-      opt.textContent = `${p.label}（${p.version}）`;
+      opt.textContent = `${p.label}（${p.created || "—"}）`;
       psel.appendChild(opt);
     });
   }
@@ -648,7 +648,7 @@ function applyPreset() {
   if (typeof syncFixedAmountField === "function") syncFixedAmountField();
   if (typeof updateOverridesPlaceholders === "function") updateOverridesPlaceholders();
   if (hint) {
-    let txt = `已应用 <b>${p.name}@${p.version}</b>：${p.label}。`+
+    let txt = `已应用 <b>${p.name}</b>（${p.created || "—"}）：${p.label}。`+
       `改任意字段即「本次覆盖」（结果里会列出覆盖项）；改口径请加新版本。`;
     if (missed.length) txt += ` <span style="color:#b45309">⚠️ 以下键无对应控件、仅由后端预设生效: ${missed.join(", ")}</span>`;
     hint.innerHTML = txt;
@@ -774,7 +774,7 @@ function paramsRows(res) {
     ["变体口径提示", (cfg.strategy_variant_notes || []).length
       ? cfg.strategy_variant_notes.map(n => `• ${n}`).join("<br>")
       : "—"],
-    // 规则预设（C118）：name@version + 本次显式覆盖的键——
+    // 规则预设（C118）：名字（已含日期）+ 本次显式覆盖的键——
     // 让「这轮到底跑了什么口径」在结果区一眼可见。
     ["规则预设", cfg.preset ? `<code>${cfg.preset}${cfg.preset_created ? " · " + cfg.preset_created : ""}</code>` : "—"],
     ["本次覆盖", (() => {
