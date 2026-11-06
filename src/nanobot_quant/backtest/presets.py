@@ -15,10 +15,15 @@
    那次 ``quantity_mode`` 漏传导致「以为在跑 A、实际跑 B」的同型缺陷。
 5. 不做「页面另存为 preset」「用户自定义 preset 文件」「我的默认覆盖」——
    参数入口只留两条：preset + 本次覆盖（简单优先）。
+6. **策略变体是规则的一部分**（2026-11-06 追加）——``run.strategy_variant``
+   必填，回测强制按它构造 TD 引擎，不再跟随空间 ``strategy.json``。理由：
+   原版 / 同花顺 / 富途三变体的 setup 累加、countdown、score 量纲完全不同，
+   同一个 preset 换个策略页面就会跑出完全不同的结果，而旧快照里连变体名
+   都没有 ⇒ 不可复现、事后无法归因。
 
 字段分两段：
 
-* ``run`` —— run 级参数（场景/标的/区间/周期/数据源/资金/滑点/共享池）。
+* ``run`` —— run 级参数（策略变体/场景/标的/区间/周期/数据源/资金/滑点/共享池）。
   页面填了就以页面为准；未填由本段兜底。
 * ``overrides`` —— 策略参数（影响决策的全部键，见 ``REQUIRED_OVERRIDE_KEYS``）。
 """
@@ -99,6 +104,11 @@ _PRESETS: dict[str, dict] = {
             "共享现金池 10,000U（200×50），单笔 200U；不设止损/止盈。"
         ),
         "run": {
+            # 策略变体（2026-11-06，必填）：规则的一部分，回测强制按它构造 TD
+            # 引擎、不跟随 strategy.json。富途 NINE 下 cd_buy/cd_sell 恒 0 ⇒
+            # entry_countdown / cd_entry_setup_gap / cd_exit_* / cd_stall_n /
+            # countdown_* / weight_* 均为死参数（不报错、也不生效）。
+            "strategy_variant": "td_sequential_futu",
             "scene": "high",
             "symbols": ["ZEC", "NEAR", "DASH"],
             "start": "2026-08-01",
@@ -221,6 +231,14 @@ def get_preset(name: str) -> dict:
         raise ValueError(
             f"preset {key}@{p.get('version')} 缺少必填键: {', '.join(missing)}"
             "（preset 必须自包含，缺键会静默回退场景值）"
+        )
+    # 策略变体必填（2026-11-06）：缺它会让回测静默跟随空间 strategy.json，
+    # 同一 preset 换策略页面就跑出不同结果（且旧快照看不出用了哪个引擎）。
+    variant = str((p.get("run") or {}).get("strategy_variant") or "").strip()
+    if not variant:
+        raise ValueError(
+            f"preset {key}@{p.get('version')} 缺少 run.strategy_variant"
+            "（策略变体是规则的一部分，必须由 preset 固定）"
         )
     return copy.deepcopy(p)
 

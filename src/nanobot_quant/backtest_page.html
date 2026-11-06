@@ -765,6 +765,15 @@ function paramsRows(res) {
   const rows = [
     ["数据源", `<code>${sourceText}</code>${res.cross_venue ? ' <span style="color:#b45309;font-weight:600;">⚠ 跨所</span>' : ''}`],
     ["场景", `<code>${cfg.scene ?? res.scene ?? "—"}</code>`],
+    // 策略变体（2026-11-06）：三变体的 setup 累加 / countdown / score 量纲
+    // 完全不同——不显示就无法解释「同一 preset 为何结果不同」。
+    ["策略变体", cfg.strategy_variant
+      ? `<code>${cfg.strategy_variant}</code>` +
+        (cfg.strategy_variant_source === "preset" ? "（preset 固定）" : "（跟随 strategy.json）")
+      : "—（旧记录未记录）"],
+    ["变体口径提示", (cfg.strategy_variant_notes || []).length
+      ? cfg.strategy_variant_notes.map(n => `• ${n}`).join("<br>")
+      : "—"],
     // 规则预设（C118）：name@version + 本次显式覆盖的键——
     // 让「这轮到底跑了什么口径」在结果区一眼可见。
     ["规则预设", cfg.preset ? `<code>${cfg.preset}@${cfg.preset_version || ""}</code>` : "—"],

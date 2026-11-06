@@ -446,6 +446,7 @@ def _auto_backtest_driver(
     periods: list[str] | None = None,
     shared_cash: bool = False,
     preset_meta: dict | None = None,
+    strategy_variant: str | None = None,
 ) -> None:
     """New engine (backtest.driver): scene-based replay.
 
@@ -483,6 +484,7 @@ def _auto_backtest_driver(
                 progress_extra=extra,
                 shared_cash=shared_cash,
                 preset_meta=preset_meta,
+                strategy_variant=strategy_variant,
             )
 
         # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
@@ -838,11 +840,14 @@ def run_backtest(
         _bad_req = _validate_periods(_periods)
         if _bad_req:
             return _bad_req
+        # 策略变体（2026-11-06）：preset 固定则强制生效；未用 preset 时
+        # 传 None，由 driver 跟随空间 strategy.json（保持旧行为）。
+        _variant = ((preset_meta or {}).get("run") or {}).get("strategy_variant")
         threading.Thread(
             target=_auto_backtest_driver,
             args=(run_id, scene, syms, start, end, initial_quote, batches,
                   slippage, fixed_amount, overrides, driver_source, _periods,
-                  shared_cash, preset_meta),
+                  shared_cash, preset_meta, _variant),
             daemon=True,
         ).start()
     else:

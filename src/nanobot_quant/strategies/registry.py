@@ -167,6 +167,39 @@ def list_strategies_names(enabled_only: bool = True) -> list[str]:
     return [s.name for s in list_strategies(enabled_only=enabled_only)]
 
 
+# ── 变体参数有效性（2026-11-06）────────────────────────────────────────
+#
+# 三个 TD 变体的参数集是共用的（PARAM_META 全局 16 项），但变体引擎会忽略
+# 其中一部分：富途 NINE 无 countdown、无评分体系、无 TDST；同花顺九转无
+# countdown。这些参数在页面上照常可填、不报错、也不生效——不标出来就会被
+# 误认为「已配置生效」（读回测结果时尤其容易误判）。
+#
+# 单一来源：只在这里维护，driver 写进 backtest_config
+# ``strategy_variant_notes``，页面与 markdown 都读它。
+_VARIANT_NOTES: dict[str, list[str]] = {
+    "td_sequential_futu": [
+        "无 countdown（cd_buy/cd_sell 恒 0）⇒ entry_countdown / exit_countdown / "
+        "cd_entry_setup_gap / cd_exit_min_profit / cd_exit_all / cd_stall_n / "
+        "countdown_period / countdown_strict / recycle_threshold 均不生效",
+        "无评分体系（score = setup_count / setup_period）⇒ 全部 weight_* 不生效，"
+        "score_threshold 须为 0",
+        "无 TDST ⇒ tdst_filter 须为 false（true 会因 support=None 永久拦 BUY）",
+        "高9 双档门退化为单档：低档靠 cd_sell 连续无 +1 判停滞，cd_sell 恒 0 "
+        "⇒ sell_only_profit_low / momentum_exit 实际不参与决策（一律走 0.8% 高门）",
+    ],
+    "td_sequential_cycle": [
+        "无 countdown ⇒ entry_countdown / exit_countdown / cd_entry_setup_gap / "
+        "cd_exit_min_profit / cd_exit_all / cd_stall_n / countdown_period / "
+        "countdown_strict / recycle_threshold / weight_countdown 均不生效",
+    ],
+}
+
+
+def variant_notes(name: str | None) -> list[str]:
+    """返回该变体下「可填但不生效」的参数提示（无提示时返回空列表）。"""
+    return list(_VARIANT_NOTES.get(str(name or ""), []))
+
+
 # ── strategy.json 持久化 ──────────────────────────────────────────────
 
 def strategy_paths() -> list[str]:

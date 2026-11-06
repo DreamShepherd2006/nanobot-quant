@@ -120,7 +120,8 @@ def test_preset_fills_run_level_params(monkeypatch):
     res = tb.run_backtest(engine="driver", preset="low9_multi_h9_minentry_eod")
     assert done.wait(10), f"driver 未启动: {res}"
     (run_id, scene, syms, start, end, initial_quote, batches, slippage,
-     fixed_amount, overrides, source, periods, shared_cash, preset_meta) = seen["args"]
+     fixed_amount, overrides, source, periods, shared_cash, preset_meta,
+     strategy_variant) = seen["args"]
     assert scene == "high"
     assert syms == ["ZEC", "NEAR", "DASH"]
     assert start == "2026-08-01" and end == "2026-10-31"
@@ -133,6 +134,9 @@ def test_preset_fills_run_level_params(monkeypatch):
     assert periods == ["1m"]
     assert overrides["entry_ema_enabled"] is True
     assert overrides["quantity_mode"] == "fixed_amount"
+    # 策略变体（2026-11-06）：preset 固定富途 NINE，必须一路传到 driver，
+    # 否则 preset 写死不生效、回测又退回跟随 strategy.json。
+    assert strategy_variant == "td_sequential_futu"
     assert preset_meta["name"] == "low9_multi_h9_minentry_eod"
     assert preset_meta["version"] == "v1"
 
