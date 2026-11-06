@@ -102,6 +102,8 @@ _OV_FIELDS: dict[str, tuple] = {
     "adaptive_m": ("scene", None, 30),
     # 波锁容量（2026-11-04 回测侧补）：场景级，0 = 关闭波锁。
     "wave_max_buys": ("scene", None, 1),
+    # 入场多周期 OR（2026-11-05 Step 3 批 2）：场景级，"1" = 只吃基础周期。
+    "entry_periods": ("scene", None, "1"),
 }
 
 
