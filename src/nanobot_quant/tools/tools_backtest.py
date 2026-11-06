@@ -88,6 +88,19 @@ def coerce_overrides(raw) -> dict:
                 out[k] = float(v)
             elif k in _OV_BOOL:
                 out[k] = v is True or str(v).lower() in ("1", "true", "on", "yes")
+            elif k == "entry_periods":
+                # 多周期倍数：非法值 fail-closed。策略侧 parse_entry_periods 会
+                # 静默忽略非法项并回退 [1]，若不在入口拦住，页面填错就等于
+                # 「以为开了多周期、实际只跑单周期」。
+                from nanobot_quant.exec_params import (
+                    parse_entry_periods,
+                    validate_exec_param,
+                )
+
+                _err = validate_exec_param(k, v)
+                if _err:
+                    raise ValueError(f"回测覆盖参数 {k}={v!r} 非法：{_err}")
+                out[k] = ",".join(str(x) for x in parse_entry_periods(v))
             else:
                 out[k] = v  # exit_order 等字符串透传
         except (TypeError, ValueError):
