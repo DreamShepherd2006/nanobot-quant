@@ -65,7 +65,7 @@ from nanobot_quant.environment.sensors import (
     ema_warmup_bars,
 )
 from nanobot_quant.batches import BatchManager
-from nanobot_quant.brokers.backtest_broker import BacktestBroker
+from nanobot_quant.brokers.backtest_broker import BacktestBroker, CashPool
 from nanobot_quant.exec_params import load_exec_params, parse_entry_periods
 from nanobot_quant.gate_credentials import load_tokens_json
 from nanobot_quant.strategies.registry import load_selected
@@ -159,6 +159,7 @@ class BacktestDriver:
         ledger_dir: Optional[Path | str] = None,
         progress_path: Optional[Path | str] = None,
         progress_extra: Optional[dict[str, Any]] = None,
+        shared_cash: bool = False,
     ) -> None:
         # 1. 参数：默认复用 exec_params 当前配置（场景参数默认复用、可临时覆盖，
         #    覆盖不影响实盘——2026-08-23 拍板）
@@ -168,6 +169,10 @@ class BacktestDriver:
         # 读全局值，否则 min_hold_bars 等恒用类默认、与实盘不一致。
         self._exec_params = load_exec_params() if params is not None else self.params
         self.scene_name = scene
+        # 共享现金池（2026-11-06）：True = 所有 slot 共用 initial_quote×batches
+        # 一个池（真实账户语义）；False = slot 级资金隔离（现有行为）
+        self.shared_cash = bool(shared_cash)
+        self._cash_pool: Optional[CashPool] = None
         self.scenes = self.params.get("scenes") or {}
         scene_cfg = self.scenes.get(scene)
         if not scene_cfg:
@@ -376,7 +381,16 @@ class BacktestDriver:
     # ── 构造 ──────────────────────────────────────────────────────────
 
     def _build_slot_brokers(self) -> dict[int, BacktestBroker]:
-        """每 slot 独立 BacktestBroker 实例（slot 级资金隔离）。"""
+        """每 slot 一个 BacktestBroker。
+
+        ``shared_cash=True``（2026-11-06）时所有 slot 共用一个 ``CashPool``，
+        池额 = ``initial_quote × batches``（与独立模式同一 initial_total，
+        ROI 可比）；默认 False = slot 级资金隔离（现有行为，零变化）。
+        """
+        pool = None
+        if self.shared_cash:
+            pool = CashPool(self.initial_quote * self.batches)
+        self._cash_pool = pool
         return {
             i: BacktestBroker(
                 initial_quote=self.initial_quote,
@@ -385,6 +399,7 @@ class BacktestDriver:
                 min_quote_amount=self.min_quote,
                 price_source=self.data_source.price_of,
                 tokens_json=self.tokens_json,
+                cash_pool=pool,
             )
             for i in range(1, self.batches + 1)
         }
@@ -945,10 +960,18 @@ class BacktestDriver:
                             "slope": (_row or {}).get("slope"),
                         }
                     )
-            # 净值快照（mark-to-market，各 slot 独立账本）
-            total = 0.0
-            for b in slot_brokers.values():
-                total += b.snapshot()["total"]
+            # 净值快照（mark-to-market）。shared_cash 下现金只计一次：
+            # 各 slot broker 读的是同一份池余额，逐 slot 相加会重复计 N 次
+            #（2026-10-31 曾因此跑出虚假 +33.2% ROI）。
+            if self._cash_pool is not None:
+                positions_value = 0.0
+                for b in slot_brokers.values():
+                    positions_value += b.snapshot()["positions_value"]
+                total = self._cash_pool.amount + positions_value
+            else:
+                total = 0.0
+                for b in slot_brokers.values():
+                    total += b.snapshot()["total"]
             net_values.append({"ts": ts.isoformat(), "net": round(total, 6)})
 
             # 进度（每 bar 写一次：平滑推进；几百次小 I/O 开销可忽略）
@@ -1050,6 +1073,8 @@ class BacktestDriver:
             "final_net": round(final_net, 6),
             "roi": round(roi, 6),
             "batches": self.batches,
+            # 共享现金池实际生效值（2026-11-06）：默认 False = slot 级独立资金
+            "shared_cash": bool(self.shared_cash),
             "fills": fills,
             "fills_detail": fills_detail,
             # 自适应间距档位变化轨迹（C102 2026-11-04）：每一行 = 一次首次
@@ -1235,6 +1260,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="闸门禁买阈值（0.05-0.9，默认 0.45=red-only；0.20=yellow+red）")
     ap.add_argument("--source", default=DEFAULT_SOURCE,
                     help=f"回测数据源（{', '.join(SOURCE_LABELS)}；默认 {DEFAULT_SOURCE}）")
+    ap.add_argument("--shared-cash", action="store_true",
+                    help="所有 slot 共用一份现金池（池额 = initial_quote × batches；默认每 slot 独立资金）")
     ap.add_argument("--output", default=None, help="结果 JSON 落盘路径（可选）")
     args = ap.parse_args(argv)
 
@@ -1260,6 +1287,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         initial_quote=args.initial_quote,
         overrides=overrides or None,
         source=args.source,
+        shared_cash=bool(args.shared_cash),
     )
     result = driver.run()
     print(json.dumps(result, ensure_ascii=False, indent=2))

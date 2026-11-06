@@ -409,6 +409,7 @@ def _auto_backtest_driver(
     overrides: dict | None = None,
     source: str | None = None,
     periods: list[str] | None = None,
+    shared_cash: bool = False,
 ) -> None:
     """New engine (backtest.driver): scene-based replay.
 
@@ -444,6 +445,7 @@ def _auto_backtest_driver(
                 source=source or DEFAULT_SOURCE,
                 progress_path=progress_path,
                 progress_extra=extra,
+                shared_cash=shared_cash,
             )
 
         # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
@@ -655,6 +657,7 @@ def run_backtest(
     initial_cash: float | None = None,
     td_bars: int | None = None,
     periods: list[str] | None = None,
+    shared_cash: bool = False,
 ) -> dict:
     """Start a full backtest in the background (run_id + poll contract).
 
@@ -745,7 +748,8 @@ def run_backtest(
         threading.Thread(
             target=_auto_backtest_driver,
             args=(run_id, scene, syms, start, end, initial_quote, batches,
-                  slippage, fixed_amount, overrides, driver_source, _periods),
+                  slippage, fixed_amount, overrides, driver_source, _periods,
+                  shared_cash),
             daemon=True,
         ).start()
     else:
