@@ -1253,7 +1253,7 @@ class BacktestDriver:
                 # 规则预设（C118）：name@version + 本次显式覆盖的键，
                 # 让任何一份 run 都能被复现与审计，无需猜当时用了什么口径。
                 "preset": self.preset_meta.get("name"),
-                "preset_version": self.preset_meta.get("version"),
+                "preset_created": self.preset_meta.get("created"),
                 "preset_overrides": dict(
                     self.preset_meta.get("overridden") or {}
                 ),

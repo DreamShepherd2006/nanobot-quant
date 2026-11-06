@@ -21,7 +21,7 @@ from nanobot_quant.backtest import driver as drv
 from nanobot_quant.backtest import presets as ps
 
 
-PRESET = "low9_multi_h9_minentry_eod"
+PRESET = "low9_multi_h9_minentry_eod_20261106"
 
 
 def _params(**kw):
@@ -58,7 +58,7 @@ def test_preset_without_variant_is_rejected(monkeypatch):
     good = ps.get_preset(PRESET)
     broken = {
         PRESET: {
-            "version": good["version"],
+            "created": good["created"],
             "description": good["description"],
             "run": {"scene": good["run"]["scene"]},  # 故意去掉变体
             "overrides": good["overrides"],
@@ -74,7 +74,7 @@ def test_preset_variant_must_be_non_empty(monkeypatch):
     run = dict(good["run"], strategy_variant="   ")
     broken = {
         PRESET: {
-            "version": good["version"],
+            "created": good["created"],
             "description": good["description"],
             "run": run,
             "overrides": good["overrides"],

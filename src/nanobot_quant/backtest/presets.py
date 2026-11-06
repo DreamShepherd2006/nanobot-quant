@@ -4,9 +4,10 @@
 
 1. **preset 是模板，不是锁** —— 选 preset 只是把一套键一次性填满（防漏参），
    页面 / MCP 传的显式覆盖优先级永远高于 preset。
-2. **版本只增不改（append-only）** —— 同一 preset 名的历史版本 NEVER 原地改
-   数值：改口径就新增一个版本（v1 → v2），v1 保留。这样半年前写在结果里的
-   ``preset=xxx@v1`` 今天仍然逐位可复现。
+2. **名字唯一、日期后缀（append-only）** —— 命名规则 ``<测试主题>_<关键规则缩写>_<YYYYMMDD>``，
+   改口径就新增一条带新日期的条目，旧条目原地不动。名字本身已含日期，因此
+   不存在「新版覆盖旧版」，也不需要 ``name@version`` 这类版本寻址：半年后看到
+   结果里的 ``preset=xxx_20261106`` 就知道是哪套规则、哪天定的。
 3. **复现不靠 preset，靠落盘快照** —— 每个 run 的 ``backtest_config`` 记录
    全部实际生效值 + ``preset`` / ``preset_overrides``；preset 只是"少手打
    30 个键 + 便于口头引用"。
@@ -93,10 +94,16 @@ REQUIRED_OVERRIDE_KEYS: frozenset[str] = frozenset({
 })
 
 
-#: 预设定义表。**已发布版本禁止原地修改**（见 docstring 第 2 条）。
+#: 旧名 → 新名，仅供报错时提示，不做静默别名解析（避免“以为在跑 A、实际跑 B”）。
+_LEGACY_NAMES: dict[str, str] = {
+    "low9_multi_h9_minentry_eod": "low9_multi_h9_minentry_eod_20261106",
+}
+
+#: 预设定义表。**已发布的条目禁止原地修改**（见 docstring 第 2 条）：
+#: 改口径 = 新增一条带新日期的 key，旧的留着。
 _PRESETS: dict[str, dict] = {
-    "low9_multi_h9_minentry_eod": {
-        "version": "v1",
+    "low9_multi_h9_minentry_eod_20261106": {
+        "created": "2026-11-06",
         "label": "低9多周期 + 高9 min_entry + 双号强平",
         "description": (
             "EMA610 折价 ≤ −1.3% 过滤 + 1/2/3/4/5/8m 多周期 Low9（整根）建仓；"
@@ -181,7 +188,7 @@ def presets_meta() -> list[dict]:
     return [
         {
             "name": name,
-            "version": p.get("version"),
+            "created": p.get("created"),
             "label": p.get("label", name),
             "description": p.get("description", ""),
         }
@@ -200,7 +207,7 @@ def presets_full() -> list[dict]:
         out.append(
             {
                 "name": name,
-                "version": p.get("version"),
+                "created": p.get("created"),
                 "label": p.get("label", name),
                 "description": p.get("description", ""),
                 "run": copy.deepcopy(p.get("run") or {}),
@@ -222,6 +229,11 @@ def get_preset(name: str) -> dict:
         raise ValueError("preset 名称不能为空")
     p = _PRESETS.get(key)
     if p is None:
+        alias = _LEGACY_NAMES.get(key)
+        if alias:
+            raise ValueError(
+                f"preset {key!r} 已更名为 {alias!r}（命名规则：<主题>_<规则>_<YYYYMMDD>）"
+            )
         raise ValueError(
             f"未知 preset {key!r}（可用: {', '.join(_PRESETS) or '无'}）"
         )
@@ -258,7 +270,7 @@ def expand_preset(name: str, overrides: dict | None = None) -> tuple[dict, dict]
     diff = {k: v for k, v in explicit.items() if base.get(k) != v}
     meta = {
         "name": str(name).strip(),
-        "version": p.get("version"),
+        "created": p.get("created"),
         "label": p.get("label", name),
         "run": dict(p.get("run") or {}),
         "overridden": diff,

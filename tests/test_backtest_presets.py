@@ -39,9 +39,26 @@ def test_unknown_preset_fails_closed():
     assert "未知 preset" in str(ei.value)
 
 
+def test_legacy_name_points_to_dated_name():
+    """旧名不静默别名解析，只提示新名（防「以为跑 A、实际跑 B」）。"""
+    with pytest.raises(ValueError) as ei:
+        get_preset("low9_multi_h9_minentry_eod")
+    msg = str(ei.value)
+    assert "已更名为" in msg and "low9_multi_h9_minentry_eod_20261106" in msg
+
+
+def test_preset_names_carry_creation_date():
+    """命名规则：<主题>_<规则>_<YYYYMMDD>，从名字能看出哪套规则、哪天定的。"""
+    import re
+
+    for name in preset_names():
+        assert re.search(r"_\d{8}$", name), f"{name} 缺少日期后缀"
+        assert get_preset(name).get("created"), f"{name} 缺少 created 字段"
+
+
 def test_presets_meta_and_full_shapes():
     meta = presets_meta()
-    assert meta and {"name", "version", "label"} <= set(meta[0])
+    assert meta and {"name", "created", "label"} <= set(meta[0])
     assert "overrides" not in meta[0]  # 下拉只要轻量元信息
 
     full = presets_full()
@@ -49,7 +66,7 @@ def test_presets_meta_and_full_shapes():
 
 
 def test_expand_preset_explicit_override_wins():
-    merged, meta = expand_preset("low9_multi_h9_minentry_eod", {"entry_setup": 8})
+    merged, meta = expand_preset("low9_multi_h9_minentry_eod_20261106", {"entry_setup": 8})
     assert merged["entry_setup"] == 8
     # 未被覆盖的键仍来自 preset
     assert merged["exit_order"] == "min_entry"
@@ -58,8 +75,8 @@ def test_expand_preset_explicit_override_wins():
 
 
 def test_expand_preset_no_diff_when_same_value():
-    base = get_preset("low9_multi_h9_minentry_eod")["overrides"]
-    _, meta = expand_preset("low9_multi_h9_minentry_eod", {"entry_setup": base["entry_setup"]})
+    base = get_preset("low9_multi_h9_minentry_eod_20261106")["overrides"]
+    _, meta = expand_preset("low9_multi_h9_minentry_eod_20261106", {"entry_setup": base["entry_setup"]})
     assert meta["overridden"] == {}
 
 
@@ -117,7 +134,7 @@ def _capture_driver_call(monkeypatch):
 
 def test_preset_fills_run_level_params(monkeypatch):
     seen, done = _capture_driver_call(monkeypatch)
-    res = tb.run_backtest(engine="driver", preset="low9_multi_h9_minentry_eod")
+    res = tb.run_backtest(engine="driver", preset="low9_multi_h9_minentry_eod_20261106")
     assert done.wait(10), f"driver 未启动: {res}"
     (run_id, scene, syms, start, end, initial_quote, batches, slippage,
      fixed_amount, overrides, source, periods, shared_cash, preset_meta,
@@ -137,15 +154,15 @@ def test_preset_fills_run_level_params(monkeypatch):
     # 策略变体（2026-11-06）：preset 固定富途 NINE，必须一路传到 driver，
     # 否则 preset 写死不生效、回测又退回跟随 strategy.json。
     assert strategy_variant == "td_sequential_futu"
-    assert preset_meta["name"] == "low9_multi_h9_minentry_eod"
-    assert preset_meta["version"] == "v1"
+    assert preset_meta["name"] == "low9_multi_h9_minentry_eod_20261106"
+    assert preset_meta["created"] == "2026-11-06"
 
 
 def test_preset_run_level_params_can_be_overridden(monkeypatch):
     seen, done = _capture_driver_call(monkeypatch)
     tb.run_backtest(
         engine="driver",
-        preset="low9_multi_h9_minentry_eod",
+        preset="low9_multi_h9_minentry_eod_20261106",
         symbols=["SOL"],
         start="2026-11-01",
         initial_quote=1000.0,
@@ -174,7 +191,7 @@ def test_top_level_quantity_mode_illegal_fails_closed():
 
 def test_preset_with_bad_override_returns_error(monkeypatch):
     _capture_driver_call(monkeypatch)
-    res = tb.run_backtest(engine="driver", preset="low9_multi_h9_minentry_eod",
+    res = tb.run_backtest(engine="driver", preset="low9_multi_h9_minentry_eod_20261106",
                           overrides={"eod_parity": "wild"})
     assert "error" in res and "eod_parity" in res["error"]
 
@@ -207,7 +224,7 @@ def test_driver_config_records_preset_and_shared_cash():
 
     src = inspect.getsource(drv)
     for marker in ('"preset": self.preset_meta.get("name")',
-                   '"preset_version": self.preset_meta.get("version")',
+                   '"preset_created": self.preset_meta.get("created")',
                    '"preset_overrides": dict(',
                    '"shared_cash": bool(self.shared_cash)'):
         assert marker in src, f"backtest_config 缺 {marker}"

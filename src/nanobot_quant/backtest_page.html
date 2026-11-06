@@ -776,7 +776,7 @@ function paramsRows(res) {
       : "—"],
     // 规则预设（C118）：name@version + 本次显式覆盖的键——
     // 让「这轮到底跑了什么口径」在结果区一眼可见。
-    ["规则预设", cfg.preset ? `<code>${cfg.preset}@${cfg.preset_version || ""}</code>` : "—"],
+    ["规则预设", cfg.preset ? `<code>${cfg.preset}${cfg.preset_created ? " · " + cfg.preset_created : ""}</code>` : "—"],
     ["本次覆盖", (() => {
       if (!cfg.preset) return "—";
       const ov = cfg.preset_overrides || {};
