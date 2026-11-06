@@ -472,6 +472,18 @@ def _spot_md(res: dict) -> str:
     md.append(_kv_table([
         ("数据源", _source_txt(res)),
         ("场景", res.get("scene")),
+        # 规则预设（C118）：name@version + 本次显式覆盖的键，缺省写「—」，
+        # 避免「同一份 preset 名、不同时间跑出不同结果」无从归因。
+        ("规则预设", (
+            f"{cfg.get('preset')}@{cfg.get('preset_version') or ''}"
+            if cfg.get("preset") else "—"
+        )),
+        ("本次覆盖", (
+            ", ".join(
+                f"{k}={v}"
+                for k, v in (cfg.get("preset_overrides") or {}).items()
+            ) or "无（与预设一致）"
+        ) if cfg.get("preset") else "—"),
         ("标的", ", ".join(res.get("symbols") or [])),
         ("周期", period_label(res.get("timestep"))),
         ("区间", f"{_ts_local(res.get('start_ts'))} → {_ts_local(res.get('end_ts'))}"),

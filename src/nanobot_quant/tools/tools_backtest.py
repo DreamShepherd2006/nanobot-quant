@@ -57,6 +57,8 @@ _OV_FLOAT = {
     "entry_ema_offset_pct",
     # 加仓最小间距闸（2026-11-03）
     "entry_min_gap_pct",
+    # 贝叶斯闸门阈值 / 手续费率 / 固定金额（C118，2026-11-06）
+    "gate_red_min", "fee_rate", "td_fixed_amount",
 }
 _OV_BOOL = {
     "momentum_exit", "td_sell_all", "cd_exit_all",
@@ -68,6 +70,23 @@ _OV_BOOL = {
     "eod_enabled",
     # 出场首穿（2026-11-06）：高9/cd13 只在首次跨过阈值那根触发
     "exit_first_cross",
+    # 多周期信号口径（2026-11-06）：bool 必须走本表，否则字符串 "false"
+    # 在策略侧 `if parameters.get(...)` 里是真值 ⇒ 静默按 partial 跑
+    "entry_periods_partial",
+    # 富途变体无 TDST：该键必须能显式关掉（C119，2026-11-06）
+    "tdst_filter",
+    # 贝叶斯闸门开关（C119）
+    "gate_enabled",
+}
+
+#: 枚举类覆盖参数（C119，2026-11-06）——非法值 fail-closed。
+#: 此前这些键走 `else: 原样透传`：填错拼写会被策略当默认分支处理
+#: （如 eod_parity="evan" 被当 even `or` 回退），结果与参数表不符。
+_OV_ENUM: dict[str, set] = {
+    "quantity_mode": {"fixed", "fixed_amount", "value"},
+    "exit_order": {"fifo", "lifo", "min_entry"},
+    "eod_parity": {"even", "odd", "both"},
+    "eod_mode": {"all", "profit_only"},
 }
 
 
@@ -90,6 +109,16 @@ def coerce_overrides(raw) -> dict:
                 out[k] = float(v)
             elif k in _OV_BOOL:
                 out[k] = v is True or str(v).lower() in ("1", "true", "on", "yes")
+            elif k in _OV_ENUM:
+                # 枚举类：非法值 fail-closed（C119）——填错拼写不能被静默
+                # 当默认分支跑，否则参数表与实际行为不符。
+                _s = str(v).strip()
+                if _s not in _OV_ENUM[k]:
+                    raise ValueError(
+                        f"回测覆盖参数 {k}={v!r} 非法（可选: "
+                        f"{', '.join(sorted(_OV_ENUM[k]))}）"
+                    )
+                out[k] = _s
             elif k == "entry_periods":
                 # 多周期倍数：非法值 fail-closed。策略侧 parse_entry_periods 会
                 # 静默忽略非法项并回退 [1]，若不在入口拦住，页面填错就等于
@@ -105,7 +134,13 @@ def coerce_overrides(raw) -> dict:
                 out[k] = ",".join(str(x) for x in parse_entry_periods(v))
             else:
                 out[k] = v  # exit_order 等字符串透传
-        except (TypeError, ValueError):
+        except ValueError as exc:
+            # 保留分支里已经写好的详细原因（枚举可选值 / entry_periods
+            # 校验器返回的说明），不要统一压成一句话丢上下文。
+            if str(exc).startswith("回测覆盖参数"):
+                raise
+            raise ValueError(f"回测覆盖参数 {k}={v!r} 非法") from None
+        except TypeError:
             raise ValueError(f"回测覆盖参数 {k}={v!r} 非法") from None
     return out
 
@@ -410,6 +445,7 @@ def _auto_backtest_driver(
     source: str | None = None,
     periods: list[str] | None = None,
     shared_cash: bool = False,
+    preset_meta: dict | None = None,
 ) -> None:
     """New engine (backtest.driver): scene-based replay.
 
@@ -446,6 +482,7 @@ def _auto_backtest_driver(
                 progress_path=progress_path,
                 progress_extra=extra,
                 shared_cash=shared_cash,
+                preset_meta=preset_meta,
             )
 
         # 进度文件 = 结果文件（<run_id>.json）：运行期间 driver 写
@@ -645,9 +682,9 @@ def run_backtest(
     quantity: int = 10,
     source: str | None = None,
     engine: str = "backtest_runner",
-    scene: str = "mid",
+    scene: str | None = None,
     symbols: list[str] | None = None,
-    initial_quote: float = DEFAULT_INITIAL_QUOTE,
+    initial_quote: float | None = None,
     batches: int | None = None,
     slippage: float | None = None,
     fixed_amount: float | None = None,
@@ -657,7 +694,9 @@ def run_backtest(
     initial_cash: float | None = None,
     td_bars: int | None = None,
     periods: list[str] | None = None,
-    shared_cash: bool = False,
+    shared_cash: bool | None = None,
+    preset: str | None = None,
+    quantity_mode: str | None = None,
 ) -> dict:
     """Start a full backtest in the background (run_id + poll contract).
 
@@ -701,6 +740,15 @@ def run_backtest(
                 传 1 个 = 单周期覆盖（等价于 overrides.sleeptime）。
                 同参数 = **同根数**，不是同时间（min_hold_bars=10 在 1m 是 10 分钟、
                 在 5m 是 50 分钟）。跨周期结论不可互推，对比表只作并列展示。
+        preset: 规则预设名（C118，2026-11-06），见
+                ``nanobot_quant.backtest.presets``。选中后先用 preset 的
+                ``overrides`` 填满一套键，再用本次显式 overrides 覆盖；
+                ``run`` 段（scene/symbols/区间/周期/数据源/资金/滑点/
+                共享池）只在对应参数未传时兜底。实际生效的 preset 名 +
+                版本 + 本次覆盖键写入 ``backtest_config``，保证可复现。
+        quantity_mode: 数量模式覆盖（C119）：fixed/fixed_amount/value。
+                传了会并入 overrides（与 overrides 里的同名字段等价），
+                避免「顶层传了但静默忽略、实际跑的是场景值」。
 
     Returns:
         dict with status=started and run_id. The backtest runs in a
@@ -711,11 +759,56 @@ def run_backtest(
     # 在这里就转成正确类型，绝不再原样透传给策略层。
     try:
         overrides = coerce_overrides(overrides)
+        # 数量模式：顶层显式传入优先（C119）——此前顶层根本没有该参数，
+        # 调用方传了会被静默忽略，结果按场景值跑，与参数表不符。
+        if quantity_mode is not None:
+            overrides = {
+                **overrides,
+                **coerce_overrides({"quantity_mode": quantity_mode}),
+            }
     except ValueError as exc:
         return {
             "error": str(exc),
             "hint": "overrides 需为 JSON 对象；int/float/bool 字段可传字符串但要能解析。",
         }
+
+    preset_meta: dict | None = None
+    if preset:
+        # 规则预设（C118）：preset 打底、显式覆盖优先；run 级参数只在
+        # 对应值未传时兜底（「页面填了就以页面为准」）。
+        try:
+            from nanobot_quant.backtest.presets import expand_preset
+
+            overrides, preset_meta = expand_preset(preset, overrides)
+            # preset 内部值也要过一遍类型/枚举校验，防 preset 本身写错。
+            overrides = coerce_overrides(overrides)
+        except ValueError as exc:
+            return {
+                "error": str(exc),
+                "hint": "preset 需为已注册名称；用 presets_meta() 查看可用列表。",
+            }
+        _run = preset_meta.get("run") or {}
+        scene = scene or _run.get("scene")
+        symbols = symbols or _run.get("symbols")
+        start = start or _run.get("start")
+        end = end or _run.get("end")
+        periods = periods or _run.get("periods")
+        source = source or _run.get("source")
+        if initial_quote is None:
+            initial_quote = _run.get("initial_quote")
+        if batches is None:
+            batches = _run.get("batches")
+        if fixed_amount is None:
+            fixed_amount = _run.get("fixed_amount")
+        if slippage is None:
+            slippage = _run.get("slippage")
+        if shared_cash is None:
+            shared_cash = _run.get("shared_cash")
+
+    scene = scene or "mid"
+    if initial_quote is None:
+        initial_quote = DEFAULT_INITIAL_QUOTE
+    shared_cash = bool(shared_cash)
 
     run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
     if engine == "options":
@@ -749,7 +842,7 @@ def run_backtest(
             target=_auto_backtest_driver,
             args=(run_id, scene, syms, start, end, initial_quote, batches,
                   slippage, fixed_amount, overrides, driver_source, _periods,
-                  shared_cash),
+                  shared_cash, preset_meta),
             daemon=True,
         ).start()
     else:
@@ -774,6 +867,23 @@ def run_backtest(
             "{data_root}/legion/backtests/<run_id>.json."
         ),
     }
+
+
+def list_backtest_presets() -> dict:
+    """List rule presets available to ``run_backtest(preset=…)``（C118）。
+
+    Returns ``{"presets": [{name, version, label, description}, …]}``.
+    Preset 是**只读**的代码内置口径：改口径 = 新增版本（v1 → v2），旧版本
+    保留，所以写在历史结果里的 ``preset=xxx@v1`` 永远可复现。要临时改
+    单个参数，请直接在 ``run_backtest(overrides={…})`` 里覆盖——显式覆盖
+    优先级永远高于 preset。
+    """
+    try:
+        from nanobot_quant.backtest.presets import presets_meta
+
+        return {"presets": presets_meta()}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"读取 preset 表失败: {exc}", "presets": []}
 
 
 def get_backtest_result(run_id: str) -> dict:

@@ -68,7 +68,11 @@ from nanobot_quant.tools.tools_wallet import (
     wallet_login_status,
 )
 from nanobot_quant.tools.tools_analysis import run_td_sequential
-from nanobot_quant.tools.tools_backtest import get_backtest_result, run_backtest
+from nanobot_quant.tools.tools_backtest import (
+    get_backtest_result,
+    list_backtest_presets,
+    run_backtest,
+)
 from nanobot_quant.tools.tools_cex import cex_sub_order
 from nanobot_quant.tools.tools_options import (
     analyze_option_spread,
@@ -137,6 +141,16 @@ _TOOL_DESCRIPTIONS = {
         "strategy → Lumibot backtest engine. Returns status=started + run_id "
         "immediately (a non-trivial range exceeds the 30s MCP tool timeout); "
         "poll get_backtest_result(run_id) for the performance metrics."
+        "\nFor engine=driver you can pass **preset** (see list_backtest_presets) "
+        "to load a frozen rule set in one shot; explicit ``overrides`` win over "
+        "the preset for any key, so tweak one value without touching the rest."
+    ),
+    "list_backtest_presets": (
+        "List the built-in backtest rule presets (name + version + description). "
+        "A preset is a **read-only, versioned** parameter set: changing a value "
+        "for exploration = pass overrides to run_backtest; changing the ruling "
+        "口径 = add a new preset version in code. Values are never edited in "
+        "place, so ``preset@v1`` in an old result stays reproducible."
     ),
     "get_backtest_result": (
         "Return the persisted outcome of a background backtest started by "
@@ -323,6 +337,7 @@ _TOOL_DISPATCH = {
     "get_chain_result": get_chain_result,
     "get_execution_outcome": get_execution_outcome,
     "run_backtest": run_backtest,
+    "list_backtest_presets": list_backtest_presets,
     "get_backtest_result": get_backtest_result,
     "cex_sub_order": cex_sub_order,
     "options_broker_selftest": options_broker_selftest,

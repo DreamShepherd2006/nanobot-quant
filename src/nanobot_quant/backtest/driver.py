@@ -160,6 +160,7 @@ class BacktestDriver:
         progress_path: Optional[Path | str] = None,
         progress_extra: Optional[dict[str, Any]] = None,
         shared_cash: bool = False,
+        preset_meta: Optional[dict[str, Any]] = None,
     ) -> None:
         # 1. 参数：默认复用 exec_params 当前配置（场景参数默认复用、可临时覆盖，
         #    覆盖不影响实盘——2026-08-23 拍板）
@@ -172,6 +173,10 @@ class BacktestDriver:
         # 共享现金池（2026-11-06）：True = 所有 slot 共用 initial_quote×batches
         # 一个池（真实账户语义）；False = slot 级资金隔离（现有行为）
         self.shared_cash = bool(shared_cash)
+        # 规则预设元信息（C118，2026-11-06）：preset 名 + 版本 + 本次显式
+        # 覆盖了哪些键。只作审计/展示，不参与任何决策——决策只看
+        # ``self.overrides``（preset 已在那里展开，显式覆盖优先）。
+        self.preset_meta = dict(preset_meta or {})
         self._cash_pool: Optional[CashPool] = None
         self.scenes = self.params.get("scenes") or {}
         scene_cfg = self.scenes.get(scene)
@@ -367,7 +372,14 @@ class BacktestDriver:
         )
 
         # 6. 撮合参数
-        self.fee_rate = float(self.params.get("fee_rate", DEFAULT_FEE_RATE) or 0.0)
+        # fee_rate 允许被回测覆盖（C118）：preset 要自包含成本参数，否则
+        # 「同一个 preset」会随实盘 exec_params 的费率变动而漂移。
+        self.fee_rate = float(
+            self.overrides.get(
+                "fee_rate", self.params.get("fee_rate", DEFAULT_FEE_RATE)
+            )
+            or 0.0
+        )
         self.min_quote = DEFAULT_MIN_QUOTE
 
         # 7. 台账目录：独立临时目录（干净重放，不回写实盘批次文件）
@@ -1145,6 +1157,17 @@ class BacktestDriver:
                     getattr(strategy, "quantity_mode", None)
                     or self._merged_params.get("quantity_mode")
                     or "fixed"
+                ),
+                # 资金模型实际生效值（C119，2026-11-06）：shared_cash 此前
+                # 只在结果顶层出现、不进快照 ⇒ 页面「实际生效参数」看不到
+                # 资金模型，看完结果也无从确认是不是共享池。
+                "shared_cash": bool(self.shared_cash),
+                # 规则预设（C118）：name@version + 本次显式覆盖的键，
+                # 让任何一份 run 都能被复现与审计，无需猜当时用了什么口径。
+                "preset": self.preset_meta.get("name"),
+                "preset_version": self.preset_meta.get("version"),
+                "preset_overrides": dict(
+                    self.preset_meta.get("overridden") or {}
                 ),
                 "slippage": self.slippage,
                 # 手续费率实际生效值（2026-10-20）：此前快照缺该键，报告回退 0
