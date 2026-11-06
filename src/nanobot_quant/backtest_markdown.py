@@ -498,7 +498,7 @@ def _spot_md(res: dict) -> str:
         # 规则预设（C118）：name@version + 本次显式覆盖的键，缺省写「—」，
         # 避免「同一份 preset 名、不同时间跑出不同结果」无从归因。
         ("规则预设", (
-            f"{cfg.get('preset')}@{cfg.get('preset_version') or ''}"
+            f"{cfg.get('preset')} · {cfg.get('preset_created') or ''}"
             if cfg.get("preset") else "—"
         )),
         ("本次覆盖", (
