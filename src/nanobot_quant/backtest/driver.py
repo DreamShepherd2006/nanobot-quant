@@ -270,6 +270,15 @@ class BacktestDriver:
             else self.params.get("entry_periods")
         )
         self.multi_warmup = (max(self.entry_periods) - 1) * self.min_history
+        # 多周期信号口径（2026-11-06）：False=只吃已收盘倍数 bar（整根，默认）→
+        # 信号序列与重放窗口无关，可预计算；True=保留 partial（旧行为）。
+        _epp = self._merged_params.get("entry_periods_partial")
+        if _epp is None:
+            _epp = self.params.get("entry_periods_partial", False)
+        # 单一实现解析（避免与策略侧漂移）：bool("false") 在 Python 里是 True
+        from nanobot_quant.strategies.td_sequential_strategy import as_bool_flag
+
+        self.entry_periods_partial = as_bool_flag(_epp, False)
         # 加仓最小间距闸（2026-11-03）：纯判定、不需要额历史，默认 0=关。
         # 覆盖优先级 = 本次回测覆盖 > 场景配置 > 全局默认（与其余入场门同规）。
         _eg = self._merged_params.get("entry_min_gap_pct")
@@ -468,6 +477,9 @@ class BacktestDriver:
                 "entry_ema_offset_pct": self.entry_ema_offset_pct,
                 # 入场多周期 OR（2026-11-05 Step 3）——同样显式注入，否则回测恒单周期。
                 "entry_periods": ",".join(str(x) for x in self.entry_periods),
+                # 多周期信号口径（2026-11-06）：不注入则策略读类默认 False，
+                # 跑 partial 对照时看不到差异（与其余参数同型的死门）。
+                "entry_periods_partial": self.entry_periods_partial,
                 # 加仓最小间距闸（2026-11-03，回测侧）——同样必须显式注入，
                 # 否则策略读类默认值 0 ⇒ 回测里恒关（死门缺陷）。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
@@ -1114,6 +1126,9 @@ class BacktestDriver:
                 # 入场多周期 OR（2026-11-05 Step 3）：快照必须含实际生效值，
                 # 否则 markdown/页面按缺省显示「关」——开了多周期也看不见（静默失真）。
                 "entry_periods": ",".join(str(x) for x in self.entry_periods),
+                # 多周期信号口径实际生效值（2026-11-06）：False=整根（默认），
+                # True=partial（resample 最后一根含未走完 bar）。
+                "entry_periods_partial": self.entry_periods_partial,
                 # 加仓最小间距闸（2026-11-03）：0=关。
                 "entry_min_gap_pct": self.entry_min_gap_pct,
                 # 波锁容量（2026-11-04）：0=关闭波锁（不限笔数）。

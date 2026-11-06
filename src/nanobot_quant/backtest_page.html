@@ -175,6 +175,7 @@
       <div class="ov-item"><label for="entry_countdown">入场 Countdown 阈值</label><input type="number" id="entry_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="cd_entry_setup_gap">CD 入场时效门槛(bar)</label><input type="number" id="cd_entry_setup_gap" min="0" max="300" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="entry_periods">🔀 入场多周期(倍数)</label><input type="text" id="entry_periods" placeholder="场景值/1" autocomplete="off"><span class="f-hint">逗号分隔，可选 1/2/3/4/5/8（倍数的基数是场景周期，1m 场景填 8 = 8m）；任一周期达阈值即建仓；1=只吃基础周期。长窗口回测请用 OKX 数据源（Gate 1m 仅约 6.9 天）</span></div>
+      <div class="ov-item"><label for="entry_periods_partial">多周期信号口径</label><select id="entry_periods_partial"><option value="">（跟随场景）</option><option value="closed">整根（倍数 bar 收盘，默认）</option><option value="partial">进行中 bar（旧行为）</option></select><span class="f-hint">整根 = 8m 的买9/卖9 只在 8m 跑完后才成立（与研究工作脚本同口径，信号序列可预计算 → 回测快）；partial = 每根 1m 都按当前 8m 窗口进度算，窗口内会 9→8→9 抖动、可提前触发</span></div>
       <div class="ov-item"><label for="exit_setup">平仓 Setup 阈值</label><input type="number" id="exit_setup" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="exit_countdown">平仓 Countdown 阈值</label><input type="number" id="exit_countdown" min="1" max="20" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="min_hold_bars">最短持有期(bar)</label><input type="number" id="min_hold_bars" min="0" max="300" step="1" placeholder="场景值"></div>
@@ -437,6 +438,7 @@ const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd
   "entry_ema_enabled","entry_ema_period","entry_ema_offset_pct",
   "entry_min_gap_pct","adaptive_gap_enabled","adaptive_m","wave_max_buys",
   "entry_periods",
+  "entry_periods_partial",
   "eod_enabled","eod_parity","eod_mode","eod_hour_utc"];
 
 function sceneValue(scene, key) {
@@ -528,6 +530,9 @@ function collectOverrides() {
   // 入场多周期（2026-11-05 Step 3）：text 输入、字符串直传（后端 coerce 校验规范化）
   const ep = $("entry_periods") ? $("entry_periods").value.trim() : "";
   if (ep !== "") overrides.entry_periods = ep;
+  // 多周期信号口径（2026-11-06）：closed → false（整根）、partial → true
+  const epp = $("entry_periods_partial") ? $("entry_periods_partial").value : "";
+  if (epp !== "") overrides.entry_periods_partial = epp === "partial";
   // EOD 单双号强平（2026-11-05 Step 2）：两个枚举单独收（字符串直传）
   ["eod_parity","eod_mode"].forEach(id => {
     const el = $(id);

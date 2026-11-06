@@ -99,6 +99,8 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "entry_min_gap_pct",
     # 入场多周期 OR（2026-11-05 Step 3）——场景专属、默认 "1"=零行为变化
     "entry_periods",
+    # 多周期信号口径（2026-11-06）：False=只吃已收盘倍数 bar（整根，默认）
+    "entry_periods_partial",
     # 自适应加仓间距（2026-11-03 研究线）——场景专属、默认关
     "adaptive_gap_enabled", "adaptive_m",
     # 共振错峰波锁容量（2026-11-01 用户拍板上实盘、默认 1）
@@ -117,6 +119,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "entry_ema_enabled", "entry_ema_period", "entry_ema_offset_pct",
     # 加仓最小间距闸（2026-11-03，默认 0=关）
     "entry_min_gap_pct",
+    # 入场多周期 OR + 信号口径（2026-11-05 / 2026-11-06）
+    "entry_periods", "entry_periods_partial",
     # 自适应加仓间距（2026-11-03 研究线，默认关）
     "adaptive_gap_enabled", "adaptive_m",
     "exit_setup", "exit_countdown",
@@ -145,6 +149,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
         "entry_min_gap_pct": 0.0, "entry_periods": "1",
+        "entry_periods_partial": False,
         "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
@@ -169,6 +174,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
         "entry_min_gap_pct": 0.0, "entry_periods": "1",
+        "entry_periods_partial": False,
         "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
@@ -193,6 +199,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "entry_ema_enabled": False, "entry_ema_period": "610",
         "entry_ema_offset_pct": 0.1,
         "entry_min_gap_pct": 0.0, "entry_periods": "1",
+        "entry_periods_partial": False,
         "adaptive_gap_enabled": False, "adaptive_m": 30,
         "exit_setup": None, "exit_countdown": None,
         "min_hold_bars": None,
@@ -533,6 +540,15 @@ PARAM_META: dict[str, dict[str, Any]] = {
                 "取数长度按最大倍数放大（8 倍 → 8×td_bars 根基础 K 线，1m/300 根时约 40 小时），"
                 "数据不足的周期会被跳过并记日志，不静默降级。研究口径 1/2/3/4/5/8："
                 "2026-11-05 对照（SOL/NEAR/DASH 104 天、单双号强平）多周期 +4.64% vs 单 1m +1.46%",
+    },
+    # ── 多周期信号口径（2026-11-06）：倍数 bar 收盘 vs 进行中 bar ──────
+    "entry_periods_partial": {
+        "group": "scene", "type": "bool", "std": False,
+        "label": "多周期用进行中 bar",
+        "hint": "false（默认）=只吃已收盘的倍数 bar：8m 的买9/卖9 只在 8m 跑完后成立，"
+                "与研究脚本 close_idx = sub.index + minutes 口径一致，且信号序列可预计算（回测提速）；"
+                "true=保留旧行为（resample 最后一根含未走完的 base bar，8m 窗口内计数会 9→8→9 抖动、"
+                "可提前触发）。仅作对照/回滚用；默认 false，开多周期时才生效",
     },
     # ── 加仓最小间距闸（2026-11-03，默认 0=关）──────────────────────
     "entry_min_gap_pct": {

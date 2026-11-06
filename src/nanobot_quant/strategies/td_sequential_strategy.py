@@ -39,6 +39,19 @@ def _parse_sleeptime_seconds(value: str) -> int:
     return INTERVAL_SECONDS.get(str(value).strip(), 60)
 
 
+def as_bool_flag(value, default: bool = False) -> bool:
+    """bool 型参数解析（场景值可能是 bool / "true" / "false" / 0 / 1）。
+
+    单一实现：策略 ``_activate_scene`` 与回测 driver 共用，避免两处解析漂移——
+    ``bool("false")`` 在 Python 里是 True，直接强转会静默把「关」读成「开」。
+    """
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off", "none")
+    return bool(value)
+
+
 #: 美元锚稳定币：估值时按 1:1 计入总资产（不取价——取不到价会算成 0）
 _STABLE_CCY = frozenset({"USDT", "USDC", "USD", "USDG"})
 
@@ -195,6 +208,9 @@ class TdSequentialStrategy(Strategy):
         # 入场多周期 OR（2026-11-05 Step 3）：默认 [1] = 只吃基础周期，
         # 零行为变化。运行时由 _activate_scene 从场景 entry_periods 注入。
         self._entry_periods: list[int] = [1]
+        # 多周期信号口径（2026-11-06）：False=只吃已收盘倍数 bar（整根，默认）。
+        # True 保留旧行为（resample 最后一根含未走完的 base bar）。
+        self._entry_periods_partial: bool = False
         self._last_multi: dict = {}
         # 多周期诊断（2026-11-05）：回测里不刷屏，但必须留下可查证据——
         # 窗口不足次数与各周期实际 bar 数由 driver 写进结果。
@@ -395,7 +411,7 @@ class TdSequentialStrategy(Strategy):
             return None
         try:
             out = df.resample(f"{sec}s", label="left", closed="left").agg(cols)
-            return out.dropna(subset=["Close"])
+            return self._drop_partial_bar(df, out.dropna(subset=["Close"]), sec)
         except Exception as e:  # pragma: no cover - 防御，极少触发
             print(
                 f"[TD] MULTI RESAMPLE FAIL | symbol={self.symbol} mult={mult} "
@@ -403,6 +419,34 @@ class TdSequentialStrategy(Strategy):
                 file=sys.stderr, flush=True,
             )
             return None
+
+    def _drop_partial_bar(self, df, out, sec: int):
+        """只保留「已收盘」的倍数 bar（``entry_periods_partial=false``，2026-11-06）。
+
+        倍数 bar 完整 ⟺ ``bar_start + mult×base_sec ≤ 当前 base bar 的收盘时刻``。
+        用户定调：8m 周期的买9/卖9 必须等 8m 跑完才成立——TD 计数判据是
+        ``close[i] vs close[i-cmp]``，未收盘 bar 的 close 是瞬时值，
+        partial bar 会让同一个 8m 窗口内计数 9→8→9 反复、提前触发。
+
+        实现上不能用「丢最后一行」：最后一根若刚好走完（base bar 落在倍数边界上）
+        必须保留，否则会白滞后一整根。
+        """
+        if getattr(self, "_entry_periods_partial", False):
+            return out
+        if out is None or len(out) == 0 or df is None or len(df) == 0:
+            return out
+        try:
+            base_sec = self._base_bar_seconds()
+            cur_close = df.index[-1] + pd.Timedelta(seconds=base_sec)
+            keep = out.index + pd.Timedelta(seconds=sec) <= cur_close
+            return out[keep]
+        except Exception as e:  # pragma: no cover - 防御（索引类型不一致等）
+            print(
+                f"[TD] MULTI CLOSED FILTER FAIL | symbol={self.symbol} sec={sec} "
+                f"{type(e).__name__}: {e}（本轮回退 partial）",
+                file=sys.stderr, flush=True,
+            )
+            return out
 
     def _calc_multi(self, df) -> dict:
         """多周期入场信号聚合（任意周期达阈值即触发，OR 语义）。
@@ -968,6 +1012,11 @@ class TdSequentialStrategy(Strategy):
         from nanobot_quant.exec_params import parse_entry_periods as _parse_ep
 
         self._entry_periods = _parse_ep(_ep)
+        # 多周期信号口径（2026-11-06）：场景值优先，留空回退全局；默认 False=整根。
+        _pp = p.get("entry_periods_partial")
+        if _pp is None:
+            _pp = self.parameters.get("entry_periods_partial", False)
+        self._entry_periods_partial = as_bool_flag(_pp, False)
         # EMA 折价入场门（2026-11-01）：场景值优先，留空回退全局 parameters。
         # 与 ema_gate（斜率符号闸门）是两个口径：本门判「价格相对 EMA 的位置」。
         _sc_on = p.get("entry_ema_enabled")
