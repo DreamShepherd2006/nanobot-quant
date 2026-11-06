@@ -93,6 +93,8 @@ _OV_FIELDS: dict[str, tuple] = {
     # EMA 折价入场门（2026-11-01）：场景级。与上面的趋势闸门（判斜率符号）
     # 是两个口径，互不干扰；只拦 BUY，默认关。
     "entry_ema_enabled": ("scene", None, False),
+    # 多周期信号口径（2026-11-06）：False=整根（默认、可预计算）/ True=partial。
+    "entry_periods_partial": ("scene", None, False),
     "entry_ema_period": ("scene", None, 610),
     "entry_ema_offset_pct": ("scene", None, 0.1),
     # 加仓最小间距闸（2026-11-03）：场景级，0=关、只拦 BUY。

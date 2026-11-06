@@ -489,6 +489,12 @@ def _spot_md(res: dict) -> str:
             "关（只吃基础周期）" if _ep_list == [1] else
             "/".join(str(x) for x in _ep_list) + " 倍（任一周期达阈值即建仓）"
         )),
+        # 多周期信号口径（2026-11-06）：缺省=整根；partial 必须显式写出，
+        # 否则两份报告差异无从归因（旧行为 vs 整根）。
+        ("多周期信号口径", (
+            "进行中 bar（partial，旧行为）"
+            if cfg.get("entry_periods_partial") else "整根（倍数 bar 收盘）"
+        )),
         ("入场 countdown", cfg.get("entry_countdown")),
         ("CD 入场时效门槛(bar)", cfg.get("cd_entry_setup_gap")),
         ("出场 setup", cfg.get("exit_setup")),
