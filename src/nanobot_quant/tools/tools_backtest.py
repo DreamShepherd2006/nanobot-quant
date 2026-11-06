@@ -66,6 +66,8 @@ _OV_BOOL = {
     "adaptive_gap_enabled",
     # EOD 单双号强平（2026-11-05 Step 2）
     "eod_enabled",
+    # 出场首穿（2026-11-06）：高9/cd13 只在首次跨过阈值那根触发
+    "exit_first_cross",
 }
 
 

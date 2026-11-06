@@ -190,6 +190,7 @@
       <div class="ov-item"><label for="min_account_value">子账户最小资金</label><input type="number" id="min_account_value" min="0" max="100000" step="1" placeholder="场景值"></div>
       <div class="ov-item"><label for="momentum_exit">高9动能判断</label><select id="momentum_exit"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="td_sell_all">高9全平</label><select id="td_sell_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
+      <div class="ov-item"><label for="exit_first_cross">出场首穿</label><select id="exit_first_cross"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">开=高9/cd13 只在首次跨过阈值那根触发，累加期 10/11/12 不再重复平仓；默认关</span></div>
       <div class="ov-item"><label for="cd_exit_all">cd13全平</label><select id="cd_exit_all"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="gate_enabled">贝叶斯闸门</label><select id="gate_enabled"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select></div>
       <div class="ov-item"><label for="gate_red_min">闸门禁买阈值</label><input type="number" id="gate_red_min" min="0.05" max="0.9" step="0.05" placeholder="0.45"></div>
@@ -435,7 +436,7 @@ const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd
   "exit_setup","exit_countdown","min_hold_bars",
   "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
   "stop_loss_pct","take_profit_pct","exit_order","td_start_slot","min_account_value",
-  "momentum_exit","td_sell_all","cd_exit_all",
+  "momentum_exit","td_sell_all","exit_first_cross","cd_exit_all",
   "gate_enabled","gate_red_min",
   "entry_ema_enabled","entry_ema_period","entry_ema_offset_pct",
   "entry_min_gap_pct","adaptive_gap_enabled","adaptive_m","wave_max_buys",
@@ -517,7 +518,7 @@ function collectOverrides() {
     const v = el.value;
     if (v !== "") overrides[id] = parseFloat(v);
   });
-  ["momentum_exit","td_sell_all","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled","adaptive_gap_enabled","eod_enabled"].forEach(id => {
+  ["momentum_exit","td_sell_all","exit_first_cross","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled","adaptive_gap_enabled","eod_enabled"].forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
@@ -683,6 +684,7 @@ function paramsRows(res) {
     ["高9动能判断", onOff(cfg.momentum_exit)],
     ["动能停滞阈值(bar)", cfg.cd_stall_n ?? "—"],
     ["高9全平", onOff(cfg.td_sell_all)],
+    ["出场首穿", onOff(cfg.exit_first_cross)],
     ["cd13保本门(毛)", pctFmt(cfg.cd_exit_min_profit)],
     ["cd13全平", onOff(cfg.cd_exit_all)],
     ["平仓顺序", cfg.exit_order ?? "—"],

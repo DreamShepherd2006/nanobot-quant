@@ -509,6 +509,7 @@ def _spot_md(res: dict) -> str:
         ("高9动能判断", _on_off(cfg.get("momentum_exit"))),
         ("动能停滞阈值(bar)", cfg.get("cd_stall_n")),
         ("高9全平", _on_off(cfg.get("td_sell_all"))),
+        ("出场首穿", _on_off(cfg.get("exit_first_cross"))),
         ("cd13保本门(毛)", _pctv(cfg.get("cd_exit_min_profit"))),
         ("cd13全平", _on_off(cfg.get("cd_exit_all"))),
         ("平仓顺序", cfg.get("exit_order")),
