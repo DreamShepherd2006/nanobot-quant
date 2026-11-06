@@ -86,6 +86,12 @@ class TdSequentialStrategy(Strategy):
     #: ``_min_hold_bars`` 尚未赋值——2026-10-29 实盘 SOL 因 AttributeError
     #: 整个对账失败。类属性只作兜底，initialize() 会按参数覆盖实例属性。
     _min_hold_bars = 0
+    # 出场首穿（2026-11-06）：高9/cd13 只在首次跨过阈值那根触发一次。
+    # 默认 False = 现有行为（每根满足条件的 bar 都触发）。prev 状态按 symbol
+    # 记录上一根计数，实盘逐轮推进、回测逐 bar 重放，共用同一实现。
+    _exit_first_cross = False
+    _exit_prev_setup: dict = {}
+    _exit_prev_cd: dict = {}
 
     parameters = {
         "symbol": "AAPL",
@@ -334,6 +340,12 @@ class TdSequentialStrategy(Strategy):
         self._td_sell_all = bool(
             self.parameters.get("td_sell_all", False) or False
         )
+        # 出场首穿（2026-11-06，默认关）：实例级 prev 状态，避免类属性 dict 共享
+        self._exit_first_cross = as_bool_flag(
+            self.parameters.get("exit_first_cross", False), False
+        )
+        self._exit_prev_setup = {}
+        self._exit_prev_cd = {}
         # 全平限流（P4，2026-10-29，docs/quant-system.md §33.52.6）：高9/cd13
         # 全平单轮最多平 N 批，剩余下一轮继续——shared_pool 下 100 批齐平会
         # 连发 100 张市价单（打穿薄盘口 + 撞交易所限频）。
@@ -987,6 +999,11 @@ class TdSequentialStrategy(Strategy):
         self._cd_exit_min_profit = float(p.get("cd_exit_min_profit") or 0.0)
         self._cd_exit_all = bool(p.get("cd_exit_all", True))
         self._td_sell_all = bool(p.get("td_sell_all") or False)
+        # 出场首穿（2026-11-06）：场景值优先，留空回退全局/类默认；默认关=现有行为
+        _efc = p.get("exit_first_cross")
+        if _efc is None:
+            _efc = self.parameters.get("exit_first_cross", False)
+        self._exit_first_cross = as_bool_flag(_efc, False)
         #[wave-lock-close] 0 = 关闭波锁（2026-11-04 拍板 A），不再强制 ≥1
         _wmb = p.get("wave_max_buys")
         if _wmb is not None and _wmb != "":
@@ -1630,6 +1647,10 @@ class TdSequentialStrategy(Strategy):
         entry_countdown = int(self._td_params.get("entry_countdown", 13))
         exit_setup = int(self._td_params.get("exit_setup", 9))
         exit_countdown = int(self._td_params.get("exit_countdown", 13))
+        # 出场首穿（2026-11-06）：每根 bar 推进一次 prev 状态，并返回本次是否触发
+        h9_exit, cd_exit = self._exit_triggers(
+            setup_sell, cd_sell, exit_setup, exit_countdown
+        )
         score_threshold = float(self._td_params.get("score_threshold", 0.0))
 
         # 同周期已建仓 → 跳过 BUY（信号级：slot 平仓释放也不建，等 setup
@@ -2111,16 +2132,17 @@ class TdSequentialStrategy(Strategy):
         elif batch_mode or has_position:
             if batch_mode:
                 self._handle_batch_exits(price, signal, setup_sell, cd_sell,
-                                         exit_setup, exit_countdown)
+                                         exit_setup, exit_countdown,
+                                         h9_exit, cd_exit)
                 return
 
             position = self.get_position(self.symbol)
             exit_reason = ""
 
             # Check TD exit signal
-            if setup_sell >= exit_setup:
+            if h9_exit:
                 exit_reason = f"setup_sell={setup_sell}"
-            elif cd_sell >= exit_countdown:
+            elif cd_exit:
                 exit_reason = f"cd_sell={cd_sell}"
 
             # Check stop-loss
@@ -2193,6 +2215,38 @@ class TdSequentialStrategy(Strategy):
             return cand, hold_skipped, gate_blocked
         return None, hold_skipped, gate_blocked
 
+    def _exit_triggers(
+        self,
+        setup_sell: int,
+        cd_sell: int,
+        exit_setup: int,
+        exit_countdown: int,
+    ) -> tuple[bool, bool]:
+        """返回 (高9 触发, cd13 触发)；``_exit_first_cross`` 开启时只取首穿。
+
+        首穿 = 本根跨过阈值、上一根未跨过（每进入一次「≥阈值」区间只触发一次）。
+        prev 状态**无论开关都更新**：否则中途开启开关会拿陈旧 prev 误判首穿。
+        状态按 symbol 隔离（多标的共用同一策略对象）。
+        """
+        prev_h9 = self.__dict__.get("_exit_prev_setup")
+        if prev_h9 is None:
+            prev_h9 = self._exit_prev_setup = {}
+        prev_cd = self.__dict__.get("_exit_prev_cd")
+        if prev_cd is None:
+            prev_cd = self._exit_prev_cd = {}
+        raw_h9 = setup_sell >= exit_setup
+        raw_cd = cd_sell >= exit_countdown
+        first = bool(getattr(self, "_exit_first_cross", False))
+        h9 = raw_h9 and (
+            not first or prev_h9.get(self.symbol, 0) < exit_setup
+        )
+        cd = raw_cd and (
+            not first or prev_cd.get(self.symbol, 0) < exit_countdown
+        )
+        prev_h9[self.symbol] = setup_sell
+        prev_cd[self.symbol] = cd_sell
+        return h9, cd
+
     def _handle_batch_exits(
         self,
         price: float,
@@ -2201,6 +2255,8 @@ class TdSequentialStrategy(Strategy):
         cd_sell: int,
         exit_setup: int,
         exit_countdown: int,
+        h9_exit: bool | None = None,
+        cd_exit: bool | None = None,
     ) -> None:
         """分批模式下的平仓逻辑：先逐批止损/止盈，再处理 TD SELL 信号。
 
@@ -2224,7 +2280,12 @@ class TdSequentialStrategy(Strategy):
         #     pnl ≥ high 无条件卖；pnl < low 死扛；[low, high) 动能判断
         #     （momentum_exit=true：强动能持有至 high、停滞弱动能 low 落袋、未知持有）。
         #     td_sell_all=true 一次平掉所有通过盈利门的批；false 每轮只平一个（现有）。
-        if setup_sell >= exit_setup:
+        if h9_exit is None or cd_exit is None:
+            # 兼容直接调用（测试/旧路径）：未传入时按当前开关现算一次
+            h9_exit, cd_exit = self._exit_triggers(
+                setup_sell, cd_sell, exit_setup, exit_countdown
+            )
+        if h9_exit:
             reason = f"setup_sell={setup_sell}"
             gate_desc = (
                 f"high={self._sell_only_profit_high} low={self._sell_only_profit_low}"
@@ -2322,7 +2383,7 @@ class TdSequentialStrategy(Strategy):
         #     互斥语义（高9 优先）：同 bar 高9 触发时（无论卖出或被门拦）cd13 不再评估
         #     ——高9 盈利门「让利润奔跑」不被 cd13 保本门绕过；cd13 仅在高9 未触发
         #     （setup 回落、cd 持续累积）时独立起作用。
-        elif cd_sell >= exit_countdown:
+        elif cd_exit:
             reason = f"cd_sell={cd_sell}"
             if self._cd_exit_all:
                 _open_n = self._count_open_lots(bm)

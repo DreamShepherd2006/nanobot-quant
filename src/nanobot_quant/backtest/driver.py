@@ -1109,6 +1109,11 @@ class BacktestDriver:
                 "initial_quote": self.initial_quote,
                 "initial_total": round(initial_total, 6),
                 "td_fixed_amount": self._merged_params.get("td_fixed_amount"),
+                # 出场首穿（2026-11-06）：只写进注入 dict 而漏快照会让报告
+                # 显示「关」而实际已开——与 entry_periods 同型失真，锁定在此。
+                "exit_first_cross": self._merged_params.get(
+                    "exit_first_cross", False
+                ),
                 # 数量模式实际生效值（2026-10-20）：fixed/fixed_amount/value
                 # —— 报告里必须可见，否则 0 成交（position_limit 拦截）无从自查
                 "quantity_mode": (
@@ -1183,6 +1188,10 @@ class BacktestDriver:
                     strategy, "_cd_entry_setup_gap", None
                 ),
                 "td_sell_all": getattr(strategy, "_td_sell_all", None),
+                # 出场首穿（2026-11-06）：_activate_scene 注入后的实际生效值
+                "exit_first_cross": getattr(
+                    strategy, "_exit_first_cross", False
+                ),
                 "cd_exit_min_profit": getattr(
                     strategy, "_cd_exit_min_profit", None
                 ),

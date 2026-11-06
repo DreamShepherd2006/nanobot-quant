@@ -107,6 +107,9 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "wave_max_buys",
     # EOD 单双号强平（2026-11-05 Step 2）——场景专属、默认关
     "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
+    # 出场首穿（2026-11-06）——场景专属、默认关：高9/cd13 只在首次跨过
+    # 阈值那根触发，累加期 10/11/12 不再重复平仓
+    "exit_first_cross",
 )
 
 #: 场景卡片字段渲染顺序。
@@ -124,6 +127,7 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     # 自适应加仓间距（2026-11-03 研究线，默认关）
     "adaptive_gap_enabled", "adaptive_m",
     "exit_setup", "exit_countdown",
+    "exit_first_cross",
     "min_hold_bars",
     "exit_order", "stop_loss_pct", "take_profit_pct",
     "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
@@ -156,7 +160,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "exit_order": "fifo", "stop_loss_pct": 0.05, "take_profit_pct": 0.03,
         "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
         "momentum_exit": True, "cd_stall_n": 3,
-        "td_sell_all": False,
+        "td_sell_all": False, "exit_first_cross": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
         "wave_max_buys": 1,
@@ -181,7 +185,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "exit_order": "fifo", "stop_loss_pct": 0.10, "take_profit_pct": 0.05,
         "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
         "momentum_exit": True, "cd_stall_n": 3,
-        "td_sell_all": False,
+        "td_sell_all": False, "exit_first_cross": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
         "wave_max_buys": 1,
@@ -206,7 +210,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "exit_order": "fifo", "stop_loss_pct": 0.15, "take_profit_pct": 0.10,
         "sell_only_profit_high": 0.0, "sell_only_profit_low": 0.002,
         "momentum_exit": True, "cd_stall_n": 3,
-        "td_sell_all": False,
+        "td_sell_all": False, "exit_first_cross": False,
         "cd_exit_min_profit": 0.0, "cd_exit_all": True,
         "td_start_slot": 1, "min_account_value": 0,
         "wave_max_buys": 1,
@@ -493,6 +497,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "type": "bool", "std": False,
         "label": "高9全平",
         "hint": "true=高9 一次平掉所有满足盈利门的 open 批次；false=每轮只平一个（现有行为）",
+    },
+    "exit_first_cross": {
+        "group": "scene", "type": "bool", "std": False,
+        "label": "出场首穿",
+        "hint": "true=高9 / cd13 出场只在 setup_sell（或 cd_sell）首次跨过阈值的那一根触发，累加期 10/11/12 不再重复平仓（2026-11-06 用户规则回测新增）；false=每根满足条件的 bar 都触发（现有行为）。默认关，零行为变化",
     },
     "cd_exit_min_profit": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.001, "std": 0.0,
