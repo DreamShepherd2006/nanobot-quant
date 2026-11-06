@@ -68,7 +68,7 @@ from nanobot_quant.batches import BatchManager
 from nanobot_quant.brokers.backtest_broker import BacktestBroker, CashPool
 from nanobot_quant.exec_params import load_exec_params, parse_entry_periods
 from nanobot_quant.gate_credentials import load_tokens_json
-from nanobot_quant.strategies.registry import load_selected
+from nanobot_quant.strategies.registry import get_strategy, load_selected, variant_notes
 from nanobot_quant.td_params import load_td_params
 
 # 回测撮合默认值（docs/quant-system.md §25.3 拍板）
@@ -160,6 +160,8 @@ class BacktestDriver:
         progress_path: Optional[Path | str] = None,
         progress_extra: Optional[dict[str, Any]] = None,
         shared_cash: bool = False,
+        preset_meta: Optional[dict[str, Any]] = None,
+        strategy_variant: Optional[str] = None,
     ) -> None:
         # 1. 参数：默认复用 exec_params 当前配置（场景参数默认复用、可临时覆盖，
         #    覆盖不影响实盘——2026-08-23 拍板）
@@ -172,6 +174,39 @@ class BacktestDriver:
         # 共享现金池（2026-11-06）：True = 所有 slot 共用 initial_quote×batches
         # 一个池（真实账户语义）；False = slot 级资金隔离（现有行为）
         self.shared_cash = bool(shared_cash)
+        # 规则预设元信息（C118，2026-11-06）：preset 名 + 版本 + 本次显式
+        # 覆盖了哪些键。只作审计/展示，不参与任何决策——决策只看
+        # ``self.overrides``（preset 已在那里展开，显式覆盖优先）。
+        self.preset_meta = dict(preset_meta or {})
+        # 策略变体（2026-11-06，C118 补丁）：默认跟随空间 strategy.json；
+        # preset 指定时强制按它构造引擎——三变体的 setup 累加 / countdown /
+        # score 量纲完全不同，不固定就无法复现，也无法从结果判断用了哪个引擎。
+        _selected = load_selected()
+        _want = str(strategy_variant or "").strip()
+        if _want:
+            try:
+                self.strategy_variant = get_strategy(_want).name
+            except KeyError as exc:
+                from nanobot_quant.strategies.registry import list_strategies
+
+                raise ValueError(
+                    f"未知策略变体 {_want!r}（可用: "
+                    f"{', '.join(s.name for s in list_strategies())}）"
+                ) from exc
+            self.strategy_variant_source = "preset"
+            if self.strategy_variant != _selected:
+                # 不报错（回测是实验场），但必须显式可见——否则「空间切了策略
+                # 而回测还按 preset 跑」会被误读成「策略切换没有影响」。
+                print(
+                    f"[BACKTEST] 策略变体与空间当前选择不一致："
+                    f"preset={self.strategy_variant} / strategy.json={_selected}"
+                    f" → 按 preset 执行",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        else:
+            self.strategy_variant = _selected
+            self.strategy_variant_source = "strategy.json"
         self._cash_pool: Optional[CashPool] = None
         self.scenes = self.params.get("scenes") or {}
         scene_cfg = self.scenes.get(scene)
@@ -367,7 +402,14 @@ class BacktestDriver:
         )
 
         # 6. 撮合参数
-        self.fee_rate = float(self.params.get("fee_rate", DEFAULT_FEE_RATE) or 0.0)
+        # fee_rate 允许被回测覆盖（C118）：preset 要自包含成本参数，否则
+        # 「同一个 preset」会随实盘 exec_params 的费率变动而漂移。
+        self.fee_rate = float(
+            self.overrides.get(
+                "fee_rate", self.params.get("fee_rate", DEFAULT_FEE_RATE)
+            )
+            or 0.0
+        )
         self.min_quote = DEFAULT_MIN_QUOTE
 
         # 7. 台账目录：独立临时目录（干净重放，不回写实盘批次文件）
@@ -421,7 +463,7 @@ class BacktestDriver:
             TdSequentialStrategy,
         )
 
-        strategy_name = load_selected()
+        strategy_name = self.strategy_variant
         td_params = load_td_params(strategy_name)
 
         strategy = TdSequentialStrategy(
@@ -1057,8 +1099,21 @@ class BacktestDriver:
             # 入场多周期 OR（2026-11-05）：各周期实际拿到的 bar 数与窗口不足次数，
             # 让「长周期窗口被数据源深度截断」在结果里可见（不靠日志找）。
             "entry_periods": "|".join(
-                f"{m}:{n}" for m, n in sorted(
-                    (getattr(self.strategy, "_multi_bar_counts", None) or {}).items()
+                f"{m}:{n}"
+                for m, n in sorted(
+                    {
+                        # base 档（倍数 1）= 评估 bar 数，必须一起列出
+                        # （2026-11-06）：否则核对「1:<根数> vs fetched_bars」
+                        # 时无据可查，多周期预热截断只能靠猜。
+                        1: len(net_values),
+                        **{
+                            m: n
+                            for m, n in (
+                                getattr(self.strategy, "_multi_bar_counts", None)
+                                or {}
+                            ).items()
+                        },
+                    }.items()
                 )
             ) or None,
             "multi_window_warnings": int(
@@ -1146,6 +1201,26 @@ class BacktestDriver:
                     or self._merged_params.get("quantity_mode")
                     or "fixed"
                 ),
+                # 资金模型实际生效值（C119，2026-11-06）：shared_cash 此前
+                # 只在结果顶层出现、不进快照 ⇒ 页面「实际生效参数」看不到
+                # 资金模型，看完结果也无从确认是不是共享池。
+                "shared_cash": bool(self.shared_cash),
+                # 策略引擎实际生效值（2026-11-06，C118 补丁）：三个 TD 变体的
+                # setup 累加 / countdown / score 量纲完全不同，快照不记录就无法
+                # 区分「同一 preset 为何两次结果不同」。source 标明它来自
+                # preset（强制）还是空间 strategy.json（默认跟随）。
+                "strategy_variant": self.strategy_variant,
+                "strategy_variant_source": self.strategy_variant_source,
+                # 该变体下可填但不生效的参数（单一来源在 strategies.registry），
+                # 页面与 markdown 直接渲染——避免「以为在生效」。
+                "strategy_variant_notes": variant_notes(self.strategy_variant),
+                # 规则预设（C118）：name@version + 本次显式覆盖的键，
+                # 让任何一份 run 都能被复现与审计，无需猜当时用了什么口径。
+                "preset": self.preset_meta.get("name"),
+                "preset_version": self.preset_meta.get("version"),
+                "preset_overrides": dict(
+                    self.preset_meta.get("overridden") or {}
+                ),
                 "slippage": self.slippage,
                 # 手续费率实际生效值（2026-10-20）：此前快照缺该键，报告回退 0
                 # → 误显示「手续费率 0.00%」，而撮合其实按 0.1% 扣（成交价可反推）
@@ -1172,6 +1247,15 @@ class BacktestDriver:
                 "entry_min_gap_pct": self.entry_min_gap_pct,
                 # 波锁容量（2026-11-04）：0=关闭波锁（不限笔数）。
                 "wave_max_buys": self.wave_max_buys,
+                # TDST 方向过滤（2026-11-06，C119）：富途变体不产生 TDST，
+                # 该键必须显式为 False，否则入场被永久拦截；快照缺它就无法
+                # 从结果确认（preset 依赖这条）。
+                "tdst_filter": bool(
+                    (getattr(strategy, "_td_params", None) or {}).get("tdst_filter")
+                ),
+                # 周期实际生效值（2026-11-06，C119）：此前只有 timestep，
+                # 场景 sleeptime 不可见 ⇒ 无法确认到底跑的 1m 还是 15m。
+                "sleeptime": str(self.scene_cfg.get("sleeptime", "15m")),
                 # 自适应间距（C102 2026-11-04）：回测结果必须能读出开关与反馈窗口，
                 # 否则「跑了几小时却不知道自适应到底有没有生效」无法自查。
                 "adaptive_gap_enabled": self.adaptive_gap_enabled,

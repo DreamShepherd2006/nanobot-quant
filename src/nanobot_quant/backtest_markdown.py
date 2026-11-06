@@ -419,6 +419,29 @@ def _options_md(res: dict) -> str:
 _SIDE_SPOT = {"buy": "🟢 买入", "sell": "🔴 卖出"}
 
 
+def _variant_txt(cfg: dict) -> str:
+    """策略变体（2026-11-06）：三变体行为完全不同，报告必须写明用哪个。
+
+    旧快照没有这两个字段（回测结果只有策略参数），显示「—（旧记录）」
+    而不是猜一个值。
+    """
+    name = cfg.get("strategy_variant")
+    if not name:
+        return "—（旧记录未记录）"
+    src = cfg.get("strategy_variant_source")
+    if src == "preset":
+        return f"{name}（preset 固定）"
+    return f"{name}（跟随 strategy.json）"
+
+
+def _variant_notes_txt(cfg: dict) -> str:
+    """变体下「可填但不生效」的参数提示（来自 strategies.registry，单一来源）。"""
+    notes = cfg.get("strategy_variant_notes") or []
+    if not notes:
+        return "—"
+    return "<br>".join(f"• {n}" for n in notes)
+
+
 def _source_txt(res: dict) -> str:
     """数据源说明：跨所必须把「不作裁决依据」写进报告（2026-10-20 拍板）。"""
     src = res.get("source") or "okx_cex"
@@ -472,6 +495,20 @@ def _spot_md(res: dict) -> str:
     md.append(_kv_table([
         ("数据源", _source_txt(res)),
         ("场景", res.get("scene")),
+        # 规则预设（C118）：name@version + 本次显式覆盖的键，缺省写「—」，
+        # 避免「同一份 preset 名、不同时间跑出不同结果」无从归因。
+        ("规则预设", (
+            f"{cfg.get('preset')}@{cfg.get('preset_version') or ''}"
+            if cfg.get("preset") else "—"
+        )),
+        ("本次覆盖", (
+            ", ".join(
+                f"{k}={v}"
+                for k, v in (cfg.get("preset_overrides") or {}).items()
+            ) or "无（与预设一致）"
+        ) if cfg.get("preset") else "—"),
+        ("策略变体", _variant_txt(cfg)),
+        ("变体口径提示", _variant_notes_txt(cfg)),
         ("标的", ", ".join(res.get("symbols") or [])),
         ("周期", period_label(res.get("timestep"))),
         ("区间", f"{_ts_local(res.get('start_ts'))} → {_ts_local(res.get('end_ts'))}"),

@@ -195,9 +195,16 @@ def _recent_runs(limit: int = 20) -> list[dict]:
 # ── Page rendering ───────────────────────────────────────────────────────
 
 def _render_page(scenes: dict, symbols: list[str]) -> str:
+    try:
+        from nanobot_quant.backtest.presets import presets_full
+
+        _presets = presets_full()
+    except Exception:  # noqa: BLE001  # preset 表坏了不该拖垮整页
+        _presets = []
     return (
         _PAGE_HTML.replace("__SCENES__", json.dumps(scenes, ensure_ascii=False))
         .replace("__SYMBOLS__", json.dumps(symbols, ensure_ascii=False))
+        .replace("__PRESETS__", json.dumps(_presets, ensure_ascii=False))
         .replace("__PERIODS__", json.dumps(list(PERIODS), ensure_ascii=False))
         .replace(
             "__COMPOSITE_PERIODS__",
@@ -245,7 +252,7 @@ def register_backtest_routes(app, gatekeeper) -> None:
         if data is None:
             gatekeeper._log("[BACKTEST-PAGE] start 请求体无效（非 JSON）")
             return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
-        scene = data.get("scene") or "mid"
+        scene = data.get("scene") or None  # preset 可提供；最终兜底在 run_backtest
         symbols = data.get("symbols") or []
         try:
             from nanobot_quant.backtest.fetchers import normalize_source
@@ -257,11 +264,23 @@ def register_backtest_routes(app, gatekeeper) -> None:
             overrides = coerce_overrides(data.get("overrides"))
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        # 数量模式顶层字段（C119）：与 overrides.quantity_mode 等价，
+        # 传了就必须生效——不能再出现「传了但静默忽略」。
+        _qm = data.get("quantity_mode")
+        if _qm:
+            try:
+                overrides.update(coerce_overrides({"quantity_mode": _qm}))
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        _preset = (data.get("preset") or "").strip() or None
         gatekeeper._log(
             f"[BACKTEST-PAGE] 启动请求 source={source} scene={scene} symbols={symbols} "
+            f"preset={_preset} "
             f"range={data.get('start') or '拉满'}→{data.get('end') or '现在'} "
             f"initial_quote={data.get('initial_quote')} batches={data.get('batches')} "
             f"slippage={data.get('slippage')} fixed_amount={data.get('fixed_amount')} "
+            f"shared_cash={data.get('shared_cash') is True} "
+            f"quantity_mode={_qm or '跟随场景'} "
             f"overrides={overrides}"
         )
         if not symbols:
@@ -281,7 +300,9 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 symbols=symbols,
                 start=data.get("start") or None,
                 end=data.get("end") or None,
-                initial_quote=float(data.get("initial_quote") or DEFAULT_INITIAL_QUOTE),
+                initial_quote=float(data["initial_quote"])
+                if data.get("initial_quote") not in (None, "")
+                else None,
                 batches=int(data["batches"]) if data.get("batches") else None,
                 slippage=float(data["slippage"]) if data.get("slippage") else None,
                 fixed_amount=float(data["fixed_amount"])
@@ -291,6 +312,8 @@ def register_backtest_routes(app, gatekeeper) -> None:
                 source=source,
                 periods=periods,
                 shared_cash=data.get("shared_cash") is True,
+                preset=_preset,
+                quantity_mode=_qm or None,
             )
         except Exception as exc:  # noqa: BLE001
             gatekeeper._log(f"[BACKTEST-PAGE] 启动回测异常: {exc}")

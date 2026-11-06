@@ -131,6 +131,13 @@
   </div>
   <div class="banner warn hide" id="cross-venue-banner">⚠️ 数据源 ≠ 执行通道的数据源：跨所回测仅用于参数粗筛，<b>不作参数裁决依据</b>。1m TD 九连事件的跨所一致率仅 0.23–0.59（实测），事件级收益归属不成立；闸门通过率/暴露度这类状态量可参考。裁决请改用与执行通道同源的数据源。</div>
   <div class="field">
+    <span class="f-label">📋 规则预设</span>
+    <select id="preset" onchange="applyPreset()">
+      <option value="">（不使用预设）</option>
+    </select>
+    <span class="f-hint" id="preset-hint">预设 = 一次性把全套参数填进下方表单（<b>只读、带版本号</b>）；填完可任意改字段，改动会在结果里记成「本次覆盖」。改口径请新增预设版本（发版），不要原地改旧版本。</span>
+  </div>
+  <div class="field">
     <span class="f-label">场景</span>
     <select id="scene"></select>
     <span class="f-hint">high=1m 短线 · mid=15m/1H 波段 · low=1D 趋势；未启用场景需先到 /config/exec 启用</span>
@@ -217,6 +224,8 @@
       <div class="ov-item"><label for="eod_parity">强平奇偶</label><select id="eod_parity"><option value="">（跟随场景/even）</option><option value="even">双号日结束</option><option value="odd">单号日结束</option><option value="both">每天</option></select><span class="f-hint">日期号取日界对齐后的 UTC 日期</span></div>
       <div class="ov-item"><label for="eod_mode">强平范围</label><select id="eod_mode"><option value="">（跟随场景/all）</option><option value="all">全平（含浮亏）</option><option value="profit_only">只平浮盈</option></select><span class="f-hint">两种模式都绕过 min_hold 与高9 盈利门</span></div>
       <div class="ov-item"><label for="eod_hour_utc">日界小时(UTC)</label><input type="number" id="eod_hour_utc" min="0" max="23" step="1" placeholder="场景值/0"><span class="f-hint">0=UTC 自然日 24:00；非 0 = 交易日起点平移到该小时</span></div>
+      <div class="ov-item"><label for="tdst_filter">TDST 方向过滤</label><select id="tdst_filter"><option value="">（跟随场景）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint"><b>富途变体必须关</b>：该变体不产生 TDST，开着会永久拦截入场</span></div>
+      <div class="ov-item"><label for="fee_rate">手续费率(单边)</label><input type="number" id="fee_rate" min="0" max="0.01" step="0.0001" placeholder="跟随全局/0.001"><span class="f-hint">0.001 = 0.1%（OKX 现货 taker）；属通道属性，预设会写死以保证可复现</span></div>
       <div class="ov-item"><label for="bars_mode">逐 bar 表</label><select id="bars_mode"><option value="">精简（默认）</option><option value="full">全量</option></select><span class="f-hint">精简=只存信号/成交/闸门翻转弯</span></div>
       <div class="ov-item"><label for="ema_compare">两臂对照</label><label style="display:flex;gap:4px;align-items:center;font-weight:400;"><input type="checkbox" id="ema_compare" checked> 同时跑无闸门基线</label><span class="f-hint">耗时 ×2；仅展示、禁配对推断</span></div>
     </div>
@@ -343,6 +352,12 @@ const PERIODS = __PERIODS__;
 // 合成周期（2026-10-22）：[[周期, 源周期, 因子], ...]——官方不提供、由原生聚合。
 // **仅回测可选**，默认不勾选；td-table / 实盘调度不受影响。
 const COMPOSITE_PERIODS = __COMPOSITE_PERIODS__;
+// 规则预设（C118，2026-11-06）：完整参数表，选中后**逐项填进下方表单**。
+// 只读且版本化（改口径 = 新增 v2）；本次改动以 overrides 形式在结果里
+// 记为 preset_overrides，所以「页面看到的」= 「实际跑的」。
+const PRESETS = __PRESETS__;
+const PRESET_MAP = {};
+(PRESETS || []).forEach(p => { PRESET_MAP[p.name] = p; });
 
 // datetime-local（浏览器本地时区）→ UTC ISO。回测区间按 UTC 语义，
 // 避免服务器时区与用户本地时区不一致导致区间错位（2026-08-28 实测）。
@@ -398,6 +413,17 @@ function onSourceChange() {
 
 function initForm() {
   onSourceChange();
+  // 规则预设下拉（C118）
+  const psel = $("preset");
+  if (psel) {
+    psel.innerHTML = '<option value="">（不使用预设）</option>';
+    (PRESETS || []).forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = `${p.label}（${p.version}）`;
+      psel.appendChild(opt);
+    });
+  }
   const sel = $("scene");
   sel.innerHTML = "";
   for (const [name, cfg] of Object.entries(SCENES)) {
@@ -450,7 +476,7 @@ const OV_KEYS = ["sleeptime","quantity_mode","entry_setup","entry_countdown","cd
   "entry_min_gap_pct","adaptive_gap_enabled","adaptive_m","wave_max_buys",
   "entry_periods",
   "entry_periods_partial",
-  "eod_enabled","eod_parity","eod_mode","eod_hour_utc"];
+  "eod_enabled","eod_parity","eod_mode","eod_hour_utc","tdst_filter","fee_rate"];
 
 function sceneValue(scene, key) {
   const cfg = SCENES[scene] || {};
@@ -519,14 +545,15 @@ function collectOverrides() {
     "sell_only_profit_high","sell_only_profit_low","cd_stall_n","cd_exit_min_profit",
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
     "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct",
-    "entry_min_gap_pct","adaptive_m","wave_max_buys","eod_hour_utc"];
+    "entry_min_gap_pct","adaptive_m","wave_max_buys","eod_hour_utc",
+    "fee_rate"];
   numKeys.forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
     if (v !== "") overrides[id] = parseFloat(v);
   });
-  ["momentum_exit","td_sell_all","exit_first_cross","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled","adaptive_gap_enabled","eod_enabled"].forEach(id => {
+  ["momentum_exit","td_sell_all","exit_first_cross","cd_exit_all","gate_enabled","ema_gate_enabled","entry_ema_enabled","adaptive_gap_enabled","eod_enabled","tdst_filter"].forEach(id => {
     const el = $(id);
     if (!el) return;
     const v = el.value;
@@ -554,6 +581,78 @@ function collectOverrides() {
   const qm = $("quantity_mode") ? $("quantity_mode").value : "";
   if (qm !== "") overrides.quantity_mode = qm;
   return overrides;
+}
+
+// ── 规则预设（C118，2026-11-06）────────────────────────────────────────
+// UTC 日期（preset.run.start/end，如 "2026-08-01"）→ 本地 datetime-local
+// 字符串。页面提交走 toUtc() 按浏览器本地时区反算，直接写 "T00:00" 会
+// 在北京时区变成前一天 16:00Z，区间静默错位。
+function utcDayToLocalInput(day) {
+  const d = new Date(String(day) + "T00:00:00Z");
+  if (isNaN(d)) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+const PRESET_HINT_DEFAULT =
+  "预设 = 一次性把全套参数填进下方表单（<b>只读、带版本号</b>）；填完可任意改字段，"+
+  "改动会在结果里记成「本次覆盖」。改口径请新增预设版本（发版），不要原地改旧版本。";
+
+function setCtl(id, val) {
+  const el = $(id);
+  if (!el) return false;
+  if (el.type === "checkbox") { el.checked = !!val; return true; }
+  if (el.tagName === "SELECT") {
+    el.value = (typeof val === "boolean") ? (val ? "on" : "off") : String(val);
+    return el.value !== "";
+  }
+  el.value = String(val);
+  return true;
+}
+
+function applyPreset() {
+  const name = $("preset") ? $("preset").value : "";
+  const hint = $("preset-hint");
+  if (!name) { if (hint) hint.innerHTML = PRESET_HINT_DEFAULT; return; }
+  const p = PRESET_MAP[name];
+  if (!p) return;
+  const run = p.run || {};
+  // ── run 段（场景/数据源/标的/区间/周期/资金）──
+  if (run.scene && $("scene")) $("scene").value = run.scene;
+  if (run.source && $("source")) { $("source").value = run.source; onSourceChange(); }
+  if (run.start && $("start")) $("start").value = utcDayToLocalInput(run.start);
+  if (run.end && $("end")) $("end").value = utcDayToLocalInput(run.end);
+  if (Array.isArray(run.symbols)) {
+    const want = new Set(run.symbols);
+    document.querySelectorAll("#symbols input").forEach(cb => { cb.checked = want.has(cb.value); });
+  }
+  if (run.initial_quote !== undefined && $("initial_quote")) $("initial_quote").value = run.initial_quote;
+  if (run.batches !== undefined && $("batches")) $("batches").value = run.batches;
+  if (run.fixed_amount !== undefined && $("fixed_amount")) $("fixed_amount").value = run.fixed_amount;
+  if (run.slippage !== undefined && $("slippage")) $("slippage").value = run.slippage;
+  if (run.shared_cash !== undefined && $("shared_cash")) $("shared_cash").checked = !!run.shared_cash;
+  if (Array.isArray(run.periods) && run.periods.length) {
+    const multi = $("periods");
+    if (multi) Array.from(multi.options).forEach(o => { o.selected = run.periods.includes(o.value); });
+    if (run.periods.length === 1 && $("sleeptime")) $("sleeptime").value = run.periods[0];
+  }
+  // ── overrides 段：逐键填进同名控件（控件缺失就记下来，不静默）──
+  const missed = [];
+  Object.entries(p.overrides || {}).forEach(([k, v]) => {
+    if (k === "entry_periods_partial") {
+      if (!setCtl("entry_periods_partial", v ? "partial" : "closed")) missed.push(k);
+      return;
+    }
+    if (!setCtl(k, v)) missed.push(k);
+  });
+  if (typeof syncFixedAmountField === "function") syncFixedAmountField();
+  if (typeof updateOverridesPlaceholders === "function") updateOverridesPlaceholders();
+  if (hint) {
+    let txt = `已应用 <b>${p.name}@${p.version}</b>：${p.label}。`+
+      `改任意字段即「本次覆盖」（结果里会列出覆盖项）；改口径请加新版本。`;
+    if (missed.length) txt += ` <span style="color:#b45309">⚠️ 以下键无对应控件、仅由后端预设生效: ${missed.join(", ")}</span>`;
+    hint.innerHTML = txt;
+  }
 }
 
 // 多周期选择（2026-10-21）：≥2 档 → 各档独立回放 + 对比表
@@ -607,6 +706,7 @@ async function startBacktest() {
     shared_cash: $("shared_cash").checked,
     slippage: $("slippage").value ? parseFloat($("slippage").value) : null,
     fixed_amount: $("fixed_amount").value ? parseFloat($("fixed_amount").value) : null,
+    preset: $("preset") ? ($("preset").value || null) : null,
     overrides: collectOverrides(),
     periods: selectedPeriods(),
   };
@@ -665,6 +765,24 @@ function paramsRows(res) {
   const rows = [
     ["数据源", `<code>${sourceText}</code>${res.cross_venue ? ' <span style="color:#b45309;font-weight:600;">⚠ 跨所</span>' : ''}`],
     ["场景", `<code>${cfg.scene ?? res.scene ?? "—"}</code>`],
+    // 策略变体（2026-11-06）：三变体的 setup 累加 / countdown / score 量纲
+    // 完全不同——不显示就无法解释「同一 preset 为何结果不同」。
+    ["策略变体", cfg.strategy_variant
+      ? `<code>${cfg.strategy_variant}</code>` +
+        (cfg.strategy_variant_source === "preset" ? "（preset 固定）" : "（跟随 strategy.json）")
+      : "—（旧记录未记录）"],
+    ["变体口径提示", (cfg.strategy_variant_notes || []).length
+      ? cfg.strategy_variant_notes.map(n => `• ${n}`).join("<br>")
+      : "—"],
+    // 规则预设（C118）：name@version + 本次显式覆盖的键——
+    // 让「这轮到底跑了什么口径」在结果区一眼可见。
+    ["规则预设", cfg.preset ? `<code>${cfg.preset}@${cfg.preset_version || ""}</code>` : "—"],
+    ["本次覆盖", (() => {
+      if (!cfg.preset) return "—";
+      const ov = cfg.preset_overrides || {};
+      const ks = Object.keys(ov);
+      return ks.length ? ks.map(k => `${k}=${JSON.stringify(ov[k])}`).join(", ") : "无（与预设一致）";
+    })()],
     ["标的", `<code>${(cfg.symbols || res.symbols || []).join(", ")}</code>`],
     ["周期", `<code>${cfg.timestep ?? res.timestep ?? "—"}</code>`],
     ["评估区间", `${fmtTs(cfg.start_ts ?? res.start_ts)} → ${fmtTs(cfg.end_ts ?? res.end_ts)}`],
