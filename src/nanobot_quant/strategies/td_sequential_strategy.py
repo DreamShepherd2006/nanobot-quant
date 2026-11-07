@@ -1318,7 +1318,13 @@ class TdSequentialStrategy(Strategy):
         _drops = bool(self.parameters.get("drops_in_progress_bars", False))
         drop_in_progress = self._is_live_broker and not _drops
         _mult = max(getattr(self, "_entry_periods", None) or [1])
-        fetch_len = max(self._min_history, self._ema_fetch_len()) * max(_mult, 1) + (
+        # 2026-11-07 修复：EMA 预热长度（610 → 2137 根）只服务**基础周期**的
+        # 折价门判定（见下方 EMA 门，用 base df），不需要按多周期倍数放大。
+        # 旧写法 max(min_history, ema_fetch_len) × mult 在
+        #   entry_periods=1,2,3,4,5,8 + EMA610 时得 2137×8 = 17096 根，
+        # 超过数据源单次上限（10,000，OKX 1m ≈6.9 天）⇒ 每轮
+        # KlineRangeTooLarge、TD 整体停摆（2026-11-07 实盘实证）。
+        fetch_len = max(self._min_history * max(_mult, 1), self._ema_fetch_len()) + (
             1 if drop_in_progress else 0
         )
         timestep = f"bar:{self._timestep}" if self._is_live_broker else self._timestep
@@ -1396,8 +1402,11 @@ class TdSequentialStrategy(Strategy):
             _drops_in_progress = bool(self.parameters.get("drops_in_progress_bars", False))
             drop_in_progress = self._is_live_broker and not _drops_in_progress
 
-            fetch_len = max(self._min_history, self._ema_fetch_len()) * max(
-                max(getattr(self, "_entry_periods", None) or [1]), 1
+            # 同 _fetch_bars_worker：EMA 预热不乘多周期倍数（2026-11-07 修复）。
+            fetch_len = max(
+                self._min_history
+                * max(max(getattr(self, "_entry_periods", None) or [1]), 1),
+                self._ema_fetch_len(),
             )
             if drop_in_progress:
                 # live 数据源（OKX DEX kline）会返回进行中的最后一根 bar——
