@@ -161,6 +161,10 @@ class _TdLiveRunner:
         _spec = spec_for_channel(channel)
         family = _spec.family
         slot_model = _spec.slot_model
+        # C129：启动期 broker 与运行期 slot broker 必须用同一个计价币，否则同一
+        # 进程内并存两套交易对口径——启动诊断打印 XCRCL-USDT，而 TD 循环实际
+        # 用 XCRCL-USDC（2026-11-07 实测日志）。
+        _quote_ccy = _exec_quote(channel, params)
         strategy_name = load_selected()
         td_params = load_td_params(strategy_name)
 
@@ -216,6 +220,7 @@ class _TdLiveRunner:
             tokens_json=tokens,
             slippage=str(params["slippage"]),
             sol_buffer_pct=float(params["sol_buffer_pct"]),
+            quote=_quote_ccy,
         )
         strategy = TdSequentialStrategy(
             broker=broker,
@@ -320,6 +325,7 @@ class _TdLiveRunner:
                 tokens_json=tokens,
                 slippage=str(params["slippage"]),
                 sol_buffer_pct=float(params["sol_buffer_pct"]),
+                quote=_quote_ccy,
             )
             bms: dict[str, Any] = {}
             scene_ok = True
@@ -1480,6 +1486,28 @@ def _channel_of(params: dict[str, Any]) -> str:
 
 # 场景周期 → 秒：统一走 data_sources.periods.INTERVAL_SECONDS（16 周期全量，
 # 方案 C），本地不再维护重复映射（保持函数名供调用方兼容）。
+def _exec_quote(channel: str, params: dict[str, Any]) -> str:
+    """执行通道的计价币（C129）。
+
+    ``okx_cex`` 支持 USDT/USDC、由 WebUI ``quote_ccy`` 决定（默认 USDT）；其余
+    通道取注册表声明的固定 quote（Gate 恒 USDT，不读 quote_ccy）。
+
+    启动期的「主 broker / 场景 broker」若不传 quote，会落到 broker 默认
+    USDT，而运行期 slot broker 按 quote_ccy 解析 —— 同一进程两套交易对口径
+    （启动诊断实例报 `-USDT`、TD 循环报 `-USDC`），混淆对账排查。
+    """
+    try:
+        from nanobot_quant.brokers.registry import spec_for_channel
+
+        spec = spec_for_channel(channel)
+    except Exception:  # noqa: BLE001  # 未知通道由调用方 fail-closed，这里只取计价币
+        return "USDT"
+    if getattr(spec, "name", "") != "okx_cex":
+        return str(getattr(spec, "quote", "") or "USDT")
+    q = str((params or {}).get("quote_ccy") or "USDT").upper()
+    return q if q in ("USDT", "USDC") else "USDT"
+
+
 def _parse_sleeptime_seconds(value: str) -> int:
     from nanobot_quant.data_sources.periods import INTERVAL_SECONDS
 

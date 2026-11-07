@@ -997,6 +997,7 @@ class BacktestDriver:
                             "strategy_price": meta.get("strategy_price"),
                             "avg_price": meta.get("avg_price"),
                             "reason": meta.get("reason"),
+                            "entry_period": meta.get("entry_period"),
                             "state": "LONG" if meta.get("side") == "buy" else "EXIT",
                             # EMA 趋势变量（2026-10-20）：逐笔可核对闸门当时状态
                             "ema": (_row or {}).get("ema"),

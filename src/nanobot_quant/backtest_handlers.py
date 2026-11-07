@@ -194,6 +194,23 @@ def _recent_runs(limit: int = 20) -> list[dict]:
 
 # ── Page rendering ───────────────────────────────────────────────────────
 
+def _exec_source_name() -> str:
+    """当前执行通道绑定的数据源名（C127：跨所判定按它，不硬编码任何交易所）。
+
+    单一事实源 = brokers.registry.spec_for_channel(...).data_source；读不到
+    exec_params 时回退 gate_cex（**不能**回退到 okx_cex——那会把默认数据源
+    当成执行源，跨所提示直接失效）。
+    """
+    try:
+        from nanobot_quant.brokers.registry import spec_for_channel
+        from nanobot_quant.exec_params import load_exec_params
+
+        channel = (load_exec_params() or {}).get("execution_channel") or "gate"
+        return spec_for_channel(channel).data_source or "gate_cex"
+    except Exception:  # noqa: BLE001  # 展示层判定失败不得拖垮整页
+        return "gate_cex"
+
+
 def _render_page(scenes: dict, symbols: list[str]) -> str:
     try:
         from nanobot_quant.backtest.presets import presets_full
@@ -206,6 +223,7 @@ def _render_page(scenes: dict, symbols: list[str]) -> str:
         .replace("__SYMBOLS__", json.dumps(symbols, ensure_ascii=False))
         .replace("__PRESETS__", json.dumps(_presets, ensure_ascii=False))
         .replace("__PERIODS__", json.dumps(list(PERIODS), ensure_ascii=False))
+        .replace("__EXEC_SOURCE__", json.dumps(_exec_source_name(), ensure_ascii=False))
         .replace(
             "__COMPOSITE_PERIODS__",
             json.dumps(

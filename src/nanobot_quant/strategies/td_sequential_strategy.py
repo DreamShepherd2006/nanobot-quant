@@ -3976,6 +3976,36 @@ class TdSequentialStrategy(Strategy):
         except Exception:  # noqa: BLE001
             return ""
 
+    def _entry_period_hit(self) -> int | None:
+        """本次 BUY 由哪个倍数周期触发（C120，回测逐笔可核验）。
+
+        多周期入场是 OR 聚合（``setup_buy``/``cd_buy`` 取各周期最大值）——
+        这里回看 ``_last_multi`` 把「达到当前生效阈值」的周期列出来，取**最小**
+        的倍数（最快那一档）。单周期返回 1；无聚合数据返回 None（字段缺省，
+        不写空字符串）。
+
+        纯记录、不参与任何决策。
+        """
+        periods = list(getattr(self, "_entry_periods", None) or [1])
+        if len(periods) <= 1:
+            return 1
+        detail = getattr(self, "_last_multi", None) or {}
+        if not detail:
+            return None
+        try:
+            es = int(self._td_params.get("entry_setup", 9) or 9)
+            ec = int(self._td_params.get("entry_countdown", 13) or 13)
+        except Exception:  # noqa: BLE001  # 参数异常不得影响下单
+            es, ec = 9, 13
+        hits = []
+        for m, v in detail.items():
+            if not v:
+                continue
+            sb, cb = int(v[0] or 0), int(v[1] or 0)
+            if sb >= es or cb >= ec:
+                hits.append(int(m))
+        return min(hits) if hits else None
+
     def _cex_submit(self, slot: dict, req) -> Any:
         """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。
 
@@ -3987,6 +4017,15 @@ class TdSequentialStrategy(Strategy):
         if req.reason:
             order.custom_params = order.custom_params or {}
             order.custom_params["entry_reason" if req.action == "buy" else "exit_reason"] = req.reason
+        if req.action == "buy":
+            # C120：记录触发的入场周期（多周期 OR 聚合时能逐笔核对规则）
+            try:
+                _ep_hit = self._entry_period_hit()
+            except Exception:  # noqa: BLE001  # 纯记录，失败不影响下单
+                _ep_hit = None
+            if _ep_hit is not None:
+                order.custom_params = order.custom_params or {}
+                order.custom_params["entry_period"] = _ep_hit
         return self._cex_slot_broker(slot).submit_order(order)
 
     def _buy_on_slot_cex(self, slot: dict, price: float, reason: str):
