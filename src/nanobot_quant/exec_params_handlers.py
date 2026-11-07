@@ -302,6 +302,82 @@ def _field_html(
     )
 
 
+def _scene_capital_rows(scene_key: str) -> tuple[list[dict] | None, str]:
+    """场景资金快照（2026-11-07）：读 LIVE_STATE 的资金小表。
+
+    ``rows`` 为空 → 返回 ``(None, 默认计价币)``，页面显示「TD 未运行」。
+    shared_pool 下同账号多 slot 已合并为一行（策略侧 ``_write_shared_pool_funds``），
+    故逐行 ``floor(可用 / 单仓)`` 求和即为真实可建笔数。
+    """
+    quote = "USDT"
+    try:
+        from .exec_params import load_exec_params
+
+        quote = str((load_exec_params() or {}).get("quote_ccy") or "USDT")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .td_live_state import get_state
+
+        rows = (get_state().get("funds") or {}).get(scene_key) or []
+    except Exception:  # noqa: BLE001
+        rows = []
+    if not rows:
+        return None, quote
+    for r in rows:
+        q = str((r or {}).get("quote") or "")
+        if q:
+            quote = q
+            break
+    return rows, quote
+
+
+def _capital_block_html(scene_key: str, scene: dict) -> str:
+    """场景卡内的「资金自洽」展示条（2026-11-07）。
+
+    四个数：计划总资金（用户填）、单仓金额、满仓占用、按当前余额可建笔数。
+    纯展示：不参与任何决策，公式与页面 JS ``applyCapital()`` 保持一致。
+    """
+    rows, quote = _scene_capital_rows(scene_key)
+    fixed = float(scene.get("td_fixed_amount") or 0)
+    batches = int(scene.get("batches") or 1)
+    total = float(scene.get("capital_total") or 0)
+    mode = str(scene.get("quantity_mode") or "fixed")
+    avail_attr = "" if rows is None else f"{sum(float(r.get('usdt_available') or 0) for r in rows):.6f}"
+    avail_txt = "—" if rows is None else f"{float(avail_attr):.2f}"
+    if rows is not None and fixed > 0:
+        can = sum(int(float(r.get("usdt_available") or 0) // fixed) for r in rows)
+        can_txt = str(can)
+    else:
+        can_txt = "—"
+    if mode != "fixed_amount" or fixed <= 0:
+        pct_txt = full_txt = "—"
+        note = "单仓金额仅在「数量模式 = 固定金额」时确定；其它模式的单仓随仓位上限浮动"
+        warn_cls = "cap-warn-gray"
+    else:
+        pct_txt = f"{(fixed / total * 100):.2f}%" if total > 0 else "—"
+        full_txt = f"{fixed * batches:.2f}"
+        note = ""
+        warn_cls = ""
+    extra = ""
+    if rows is None:
+        extra = "TD 未运行，暂无余额快照（启动后显示可建笔数）"
+    elif fixed > 0 and can_txt == "0":
+        extra = f"当前可用 {avail_txt} {quote} < 单仓 {fixed:.2f}，信号来了也建不了仓"
+        warn_cls = "cap-warn-red"
+    return (
+        f'<div class="cap-box" data-capital="{scene_key}"'
+        f' data-avail="{avail_attr}" data-quote="{html.escape(quote)}">'
+        f'<div class="cap-line">单仓占比 <b data-cap-pct>{pct_txt}</b>'
+        f' · 满仓占用 <b data-cap-full>{full_txt}</b> {html.escape(quote)}'
+        f'（单仓 {fixed:.2f} × 批次 {batches}）'
+        f' · 按当前余额可建 <b data-cap-can>{can_txt}</b> 笔'
+        f'（可用 <span data-cap-avail>{avail_txt}</span> {html.escape(quote)}）</div>'
+        f'<div class="cap-note {warn_cls}" data-cap-warn>{html.escape(note or extra)}</div>'
+        f'</div>'
+    )
+
+
 def _scene_card_html(
     scene_key: str,
     scene: dict,
@@ -349,6 +425,7 @@ def _scene_card_html(
         f'<div class="card scene-card" data-scene="{scene_key}">'
         f'<h3>④-{idx} {sdef["label"]}（{sdef["freq"]} · {sdef["desc"]}）　{badge}</h3>'
         f'{"".join(fields)}'
+        f'{_capital_block_html(scene_key, scene)}'
         f'{warn}'
         f'</div>'
     )
