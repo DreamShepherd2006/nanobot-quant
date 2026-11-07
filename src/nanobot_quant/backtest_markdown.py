@@ -716,7 +716,7 @@ def _spot_md(res: dict) -> str:
 
     md.append(f"\n**📒 成交明细（{len(detail)}）**\n")
     md.append(_table(
-        ["时间", "标的", "方向", "数量", "策略价", "成交价", "EMA", "slope3", "slot", "状态", "原因"],
+        ["时间", "标的", "方向", "数量", "策略价", "成交价", "EMA", "slope3", "slot", "状态", "入场周期", "原因"],
         [[_ts_local(f.get("ts")), f.get("symbol", ""),
           _SIDE_SPOT.get(str(f.get("side") or ""), f.get("side", "")),
           _num(f.get("quantity"), 6), _num(f.get("strategy_price"), 6),
@@ -724,7 +724,9 @@ def _spot_md(res: dict) -> str:
           _num(f.get("ema"), 2),
           (f"{float(f.get('slope')):+.3f}" if f.get("slope") is not None else "—"),
           f.get("slot", ""),
-          f.get("state", ""), f.get("reason", "")] for f in detail],
+          f.get("state", ""),
+          (f"{f.get('entry_period')}m" if f.get("entry_period") else "—"),
+          f.get("reason", "")] for f in detail],
     ))
 
     md.append(f"\n**📌 期末未平仓（{len(open_slots)}）**\n")

@@ -269,6 +269,8 @@ class BacktestBroker(Broker):
             "avg_price": avg,
             "reason": (order.custom_params or {}).get("entry_reason")
                       or (order.custom_params or {}).get("exit_reason"),
+            # C120：多周期入场时记录触发的周期（1m 基准=1），逐笔可核验
+            "entry_period": (order.custom_params or {}).get("entry_period"),
             "ts": time.time(),
         }
         return order

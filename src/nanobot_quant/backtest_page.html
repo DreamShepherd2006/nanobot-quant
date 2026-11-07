@@ -356,6 +356,9 @@ const COMPOSITE_PERIODS = __COMPOSITE_PERIODS__;
 // 只读且版本化（改口径 = 新增 v2）；本次改动以 overrides 形式在结果里
 // 记为 preset_overrides，所以「页面看到的」= 「实际跑的」。
 const PRESETS = __PRESETS__;
+// C127：执行通道绑定的数据源（后端按 execution_channel 经注册表解析）。
+// 跨所提示只看「所选源是否等于它」，不得把某个交易所硬编码成同源。
+const EXEC_SOURCE = __EXEC_SOURCE__;
 const PRESET_MAP = {};
 (PRESETS || []).forEach(p => { PRESET_MAP[p.name] = p; });
 
@@ -392,13 +395,14 @@ function escapeHtml(s) {
 // 哪个才是「同源」不写死：显示层用结果里的 res.cross_venue / cross_venue_note
 // （后端经 brokers.registry 从 execution_channel 解析）。
 function onSourceChange() {
-  const src = $("source") ? $("source").value : "okx_cex";
+  const src = $("source") ? $("source").value : EXEC_SOURCE;
   const isOkx = src === "okx_cex";
+  const sameVenue = src === EXEC_SOURCE;
   if ($("bt-source-desc")) $("bt-source-desc").textContent = isOkx ? "OKX CEX" : "Gate CEX";
   if ($("source-hint")) {
-    $("source-hint").textContent = isOkx
-      ? "OKX 1m 可回溯约 180 天（≈259,200 根），远长于 Gate（Gate 1m ≈6.9 天）；是否与执行同源以结果里的「跨所」标记为准"
-      : "Gate 1m 深度仅 ≈6.9 天；是否与执行同源以结果里的「跨所」标记为准";
+    $("source-hint").textContent = sameVenue
+      ? "与执行通道同源——结果可直接用于参数裁决"
+      : "数据源 ≠ 执行通道的数据源（跨所）——仅作参数粗筛，不作裁决依据";
   }
   if ($("range-hint")) {
     // 2026-11-03 C103：区间上限按源显示——「10,000 根 / 1m ≈7 天」是 Gate 的
@@ -408,7 +412,8 @@ function onSourceChange() {
       : "留空 = 拉满可用历史（Gate 1m ≈ 6.9 天 / 15m ≈ 104 天 / 1D 从上线起）";
   }
   const banner = $("cross-venue-banner");
-  if (banner) banner.classList.toggle("hide", !isOkx);
+  // C127：方向曾经写反（选 OKX 反而隐藏、选 Gate 才提示）。判据只看是否同源。
+  if (banner) banner.classList.toggle("hide", sameVenue);
 }
 
 function initForm() {
@@ -1512,7 +1517,8 @@ function fillRow(f) {
     `<td>${f.slot}</td><td>${f.state === "LONG" ? "✅ LONG" : "✅ EXIT"}</td>` +
     `<td>${f.ema != null ? fmtN(f.ema, 2) : "—"}</td>` +
     `<td class="${f.slope != null && f.slope < 0 ? "sl-neg" : ""}">${f.slope != null ? (f.slope >= 0 ? "+" : "") + Number(f.slope).toFixed(3) : "—"}</td>` +
-    `<td>slot=${f.slot} ${reason}qty=${fmtN(f.quantity, 6)} price=${sp ? fmtN(sp, 4) : "—"}</td></tr>`;
+    `<td>slot=${f.slot} ${reason}qty=${fmtN(f.quantity, 6)} price=${sp ? fmtN(sp, 4) : "—"}</td>` +
+    `<td>${f.entry_period ? f.entry_period + "m" : "—"}</td></tr>`;
 }
 
 // 成交明细表格容器（运行中 / 完成后共用）
@@ -1520,7 +1526,7 @@ function fillsBox(fills, note) {
   const rows = (fills || []).map(fillRow).join("");
   if (!rows) return "";
   return `<h3 style="font-size:.95em;margin:8px 0 2px;">成交明细${note ? `（${note}）` : ""}</h3>` +
-    `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>EMA</th><th>slope3</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    `<div style="overflow-x:auto;"><table><thead><tr><th>时间</th><th>场景</th><th>标的</th><th>方向</th><th>数量</th><th>策略价</th><th>成交价</th><th>滑点</th><th>slot</th><th>状态</th><th>EMA</th><th>slope3</th><th>原因</th><th>入场周期</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 // ══════════════════════════════════════════════════════
 // 分栏切换
