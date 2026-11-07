@@ -1151,6 +1151,11 @@ class TdSequentialStrategy(Strategy):
                 f"stop_loss={sl_diag} "
                 f"wave_max={getattr(self, '_wave_max_buys', 1)} "
                 f"eod={getattr(self, '_eod_enabled', False)} "
+                # 2026-11-08：parity/mode/hour 此前无处可见——不到日界动作就无法
+                # 确认当前是 all 还是 profit_only、even 还是 both（静默生效不可接受）。
+                f"eod_parity={getattr(self, '_eod_parity', '?')} "
+                f"eod_mode={getattr(self, '_eod_mode', '?')} "
+                f"eod_hour={getattr(self, '_eod_hour_utc', '?')} "
                 f"eod_exempt={','.join(sorted(getattr(self, '_eod_exempt', ()) or ())) or '-'} "
                 f"family={self.parameters.get('channel_family')} "
                 f"slot_model={self._slot_model} "

@@ -848,6 +848,10 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         _scene_diag = " ".join(
             f"{_sn}.wave_max={_sc.get('wave_max_buys')}"
             f" {_sn}.eod={_sc.get('eod_enabled')}"
+            f" {_sn}.eod_parity={_sc.get('eod_parity') or '-'}"
+            f" {_sn}.eod_mode={_sc.get('eod_mode') or '-'}"
+            # 0 是合法的小时值（UTC 00:00），不能用 `or '-'` 吞掉（2026-11-08）
+            f" {_sn}.eod_hour={_sc.get('eod_hour_utc') if _sc.get('eod_hour_utc') is not None else '-'}"
             f" {_sn}.eod_exempt={','.join(_sc.get('eod_exempt_symbols') or []) or '-'}"
             for _sn, _sc in (result["params"].get("scenes") or {}).items()
             if isinstance(_sc, dict) and _sc.get("enabled")
