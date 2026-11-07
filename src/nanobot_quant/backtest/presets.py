@@ -178,22 +178,55 @@ _PRESETS: dict[str, dict] = {
 }
 
 
-def preset_names() -> list[str]:
-    """Return preset names in declaration order."""
+def _user_presets() -> dict[str, dict]:
+    """实盘快照（2026-11-07）：持久卷上的用户快照，读取失败当作无。
+
+    延迟 import 避免与 :mod:`nanobot_quant.exec_presets` 循环依赖
+    （后者需要本模块的 ``REQUIRED_OVERRIDE_KEYS``）。
+    """
+    try:
+        from ..exec_presets import load_user_presets
+
+        return load_user_presets()
+    except Exception:  # noqa: BLE001 - 快照层故障不得拖垮内置 preset
+        return {}
+
+
+def builtin_names() -> list[str]:
+    """内置 preset 名单（不含实盘快照）——快照保存时用它判重名。"""
     return list(_PRESETS)
+
+
+def preset_names() -> list[str]:
+    """Return preset names: builtin first, then user snapshots."""
+    return list(_PRESETS) + [n for n in _user_presets() if n not in _PRESETS]
 
 
 def presets_meta() -> list[dict]:
     """Light metadata for the WebUI dropdown (no full parameter dump)."""
-    return [
+    out = [
         {
             "name": name,
             "created": p.get("created"),
             "label": p.get("label", name),
             "description": p.get("description", ""),
+            "source": "builtin",
         }
         for name, p in _PRESETS.items()
     ]
+    for name, p in _user_presets().items():
+        if name in _PRESETS:
+            continue
+        out.append(
+            {
+                "name": name,
+                "created": p.get("created"),
+                "label": p.get("label", name),
+                "description": p.get("description", ""),
+                "source": "user",
+            }
+        )
+    return out
 
 
 def presets_full() -> list[dict]:
@@ -202,14 +235,17 @@ def presets_full() -> list[dict]:
     页面选预设时要把每个值**填进可见表单**，否则会出现「页面显示场景值、
     实际按预设跑」的静默不一致——这与「页面显示必须等于实际执行」相悖。
     """
+    merged = dict(_user_presets())
+    merged.update(_PRESETS)  # 内置优先（重名时以代码为准）
     out = []
-    for name, p in _PRESETS.items():
+    for name, p in merged.items():
         out.append(
             {
                 "name": name,
                 "created": p.get("created"),
                 "label": p.get("label", name),
                 "description": p.get("description", ""),
+                "source": "builtin" if name in _PRESETS else "user",
                 "run": copy.deepcopy(p.get("run") or {}),
                 "overrides": copy.deepcopy(p.get("overrides") or {}),
             }
@@ -228,6 +264,8 @@ def get_preset(name: str) -> dict:
     if not key:
         raise ValueError("preset 名称不能为空")
     p = _PRESETS.get(key)
+    if p is None:  # 实盘快照（2026-11-07）：内置找不到再查持久卷
+        p = _user_presets().get(key)
     if p is None:
         alias = _LEGACY_NAMES.get(key)
         if alias:
@@ -235,13 +273,13 @@ def get_preset(name: str) -> dict:
                 f"preset {key!r} 已更名为 {alias!r}（命名规则：<主题>_<规则>_<YYYYMMDD>）"
             )
         raise ValueError(
-            f"未知 preset {key!r}（可用: {', '.join(_PRESETS) or '无'}）"
+            f"未知 preset {key!r}（可用: {', '.join(preset_names()) or '无'}）"
         )
     ov = p.get("overrides") or {}
     missing = sorted(REQUIRED_OVERRIDE_KEYS - set(ov))
     if missing:
         raise ValueError(
-            f"preset {key}@{p.get('version')} 缺少必填键: {', '.join(missing)}"
+            f"preset {key}@{p.get('created')} 缺少必填键: {', '.join(missing)}"
             "（preset 必须自包含，缺键会静默回退场景值）"
         )
     # 策略变体必填（2026-11-06）：缺它会让回测静默跟随空间 strategy.json，
@@ -249,7 +287,7 @@ def get_preset(name: str) -> dict:
     variant = str((p.get("run") or {}).get("strategy_variant") or "").strip()
     if not variant:
         raise ValueError(
-            f"preset {key}@{p.get('version')} 缺少 run.strategy_variant"
+            f"preset {key}@{p.get('created')} 缺少 run.strategy_variant"
             "（策略变体是规则的一部分，必须由 preset 固定）"
         )
     return copy.deepcopy(p)

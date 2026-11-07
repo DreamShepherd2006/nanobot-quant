@@ -417,11 +417,22 @@ function initForm() {
   const psel = $("preset");
   if (psel) {
     psel.innerHTML = '<option value="">（不使用预设）</option>';
-    (PRESETS || []).forEach(p => {
-      const opt = document.createElement("option");
-      opt.value = p.name;
-      opt.textContent = `${p.label}（${p.created || "—"}）`;
-      psel.appendChild(opt);
+    // 2026-11-07（PR 2）：内置 preset 与实盘快照分组展示，避免混成一锅
+    const groups = [
+      ["内置预设", (PRESETS || []).filter(p => (p.source || "builtin") === "builtin")],
+      ["我的快照", (PRESETS || []).filter(p => p.source === "user")],
+    ];
+    groups.forEach(([label, items]) => {
+      if (!items.length) return;
+      const g = document.createElement("optgroup");
+      g.label = label;
+      items.forEach(p => {
+        const opt = document.createElement("option");
+        opt.value = p.name;
+        opt.textContent = `${p.label}（${p.created || "—"}）`;
+        g.appendChild(opt);
+      });
+      psel.appendChild(g);
     });
   }
   const sel = $("scene");
