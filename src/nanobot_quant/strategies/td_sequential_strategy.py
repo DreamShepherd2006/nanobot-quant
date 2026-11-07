@@ -2014,6 +2014,9 @@ class TdSequentialStrategy(Strategy):
                             # 供重启逐批对账（shared_pool 无法靠余额反推批次）
                             ord_id=self._cex_ord_id(order),
                             fill_px=self._cex_avg_price(order),
+                            # 2026-11-07：兼记下单时的交易对，避免换计价币后
+                            # 对账用当前 quote 查错对（51603）
+                            inst_id=self._cex_inst_of(slot),
                         )
                         # 最短持有期（2026-08-28）：买入后 min_hold_bars 根 bar 内
                         # TD SELL（高9/cd13）不触发——避免震荡市双向 countdown
@@ -3210,8 +3213,7 @@ class TdSequentialStrategy(Strategy):
         if broker is None:
             return
         try:
-            from nanobot_quant.gate_credentials import gate_pair
-            pair = gate_pair(symbol, self.parameters.get("tokens_json") or [])
+            pair = broker.inst_id_of(symbol)
             status, filled, left, avg = broker._query_order(order_id, pair)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
@@ -3270,8 +3272,7 @@ class TdSequentialStrategy(Strategy):
         if broker is None:
             return
         try:
-            from nanobot_quant.gate_credentials import gate_pair
-            pair = gate_pair(symbol, self.parameters.get("tokens_json") or [])
+            pair = broker.inst_id_of(symbol)
             status, filled, left, avg = broker._query_order(order_id, pair)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
@@ -3289,7 +3290,9 @@ class TdSequentialStrategy(Strategy):
                         entry_price=float(info.get("price") or avg or 0),
                         # P4：订单号来自 pending 记录（该笔已查单确认成交）
                         ord_id=str(info.get("order_id") or "") or None,
-                        fill_px=avg or None)
+                        fill_px=avg or None,
+                        # 2026-11-07：记下单对，重启对账用台账值而非当前 quote
+                        inst_id=pair or None)
             bm.save()
             self.logger.info(
                 f"TD BATCH LONG (CEX CONFIRM) | symbol={symbol} slot={slot_id} "
@@ -3960,6 +3963,18 @@ class TdSequentialStrategy(Strategy):
                 "（本轮 BUY 跳过，实时监控显示 balances_error）",
                 file=sys.stderr, flush=True,
             )
+
+    def _cex_inst_of(self, slot: dict) -> str:
+        """当前标的在该 slot 子账号上的交易对（写台账用，2026-11-07）。
+
+        与下单同一映射（``broker.inst_id_of``）：OKX 按 SPOT 清单解析
+        （``SOL-USDC``）、Gate 走 ``gate_pair``（``SOL_USDT``）。
+        失败返回空串——台账不写该字段，对账回退旧行为，不影响交易。
+        """
+        try:
+            return self._cex_slot_broker(slot).inst_id_of(self.symbol) or ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _cex_submit(self, slot: dict, req) -> Any:
         """子账号 broker 下单（绕过策略主 broker——子账号必须用自己的 key）。

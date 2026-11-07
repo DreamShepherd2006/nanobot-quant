@@ -447,3 +447,15 @@ def test_scene_migrate_idempotent_target_exists(monkeypatch, tmp_path):
 
 
 
+
+
+def test_open_lot_records_inst_id(bm):
+    """2026-11-07：台账兼记下单时的交易对（对账防换计价币后查错对）。"""
+    slot = bm.open_lot(qty=1, entry_price=100.0, ord_id="o1", inst_id="SOL-USDC")
+    assert slot["lot"]["inst_id"] == "SOL-USDC"
+
+
+def test_open_lot_omits_inst_id_when_absent(bm):
+    """不传时不写字段——旧台账/其他通道字节级不变。"""
+    slot = bm.open_lot(qty=1, entry_price=100.0)
+    assert "inst_id" not in slot["lot"]
