@@ -221,6 +221,8 @@ def presets_meta() -> list[dict]:
             {
                 "name": name,
                 "created": p.get("created"),
+                # 快照的时间标签（UTC ISO）：下拉用它区分同名/同日多个快照
+                "created_at": p.get("created_at"),
                 "label": p.get("label", name),
                 "description": p.get("description", ""),
                 "source": "user",
