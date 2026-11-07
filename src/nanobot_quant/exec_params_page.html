@@ -393,6 +393,12 @@
       diffBox.style.display = 'block';
     }
 
+    function snapTime(p) {
+      const t = p.created_at || '';
+      if (t) return t.slice(0, 16).replace('T', ' ') + ' UTC';
+      return p.created || '—';
+    }
+
     function loadList() {
       fetch('/config/exec-presets' + q)
         .then(r => r.json())
@@ -423,7 +429,10 @@
           mine.forEach(p => {
             const o = document.createElement('option');
             o.value = 'user:' + p.name;
-            o.textContent = `${p.label}（${p.created || '—'}）`;
+            // 显示**唯一名字 + 时间**：多份快照的 label 都是「实盘快照 · high」，
+            // 只显示 label 会让用户以为刚存的那份不见了（2026-11-07 实测反馈）
+            o.textContent = `${p.name}（${snapTime(p)}）`;
+            o.title = p.description || '';
             g2.appendChild(o);
           });
           sel.appendChild(g2);
@@ -500,7 +509,7 @@
   document.querySelectorAll('[data-snap-scene]').forEach(function (btn) {
     btn.addEventListener('click', async function () {
       const sc = btn.dataset.snapScene;
-      const name = prompt('快照名（留空 = 自动 live_' + sc + '_日期_时分）\n\n自动快照保留最近 10 个，超出自动清理最旧的；手填名字的长期保留。', '');
+      const name = prompt('快照名（留空 = 自动 live_' + sc + '_日期_时分，UTC）\n\n自动快照保留最近 10 个，超出自动清理最旧的；手填名字的长期保留。', '');
       if (name === null) return;  // 取消
       const tok = new URLSearchParams(location.search).get('token');
       const url = '/config/exec-presets/save' + (tok ? '?token=' + encodeURIComponent(tok) : '');
@@ -520,6 +529,7 @@
           if (d.pruned && d.pruned.length) {
             alert('已保存 ' + d.name + '\n自动快照超过 10 个，已清理最旧：' + d.pruned.join('、'));
           }
+          loadList();  // 保存后立刻刷新下拉，否则新快照要刷新整页才看得到
           setTimeout(function () { btn.textContent = old; btn.disabled = false; }, 2500);
         } else {
           alert('保存失败：' + (d.error || '未知错误'));

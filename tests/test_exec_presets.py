@@ -549,3 +549,30 @@ def test_is_auto_preset_backward_compat():
     # 显式字段优先
     assert is_auto_preset("live_high_20261107", {"auto": True})
     assert not is_auto_preset("live_high_20261107", {"auto": False})
+
+
+def test_presets_meta_exposes_created_at_for_user_snapshots():
+    """下拉要能区分同名/同日快照：meta 必须带 created_at。"""
+    from nanobot_quant.backtest.presets import presets_meta
+    from nanobot_quant.exec_presets import build_snapshot, save_user_preset
+
+    _seed_scene()
+    name = save_user_preset("live_high_20261107_1417", build_snapshot("high"), auto=True)
+    mine = [p for p in presets_meta() if p["source"] == "user"]
+    assert [p["name"] for p in mine] == [name]
+    assert mine[0]["created_at"], "user 快照 meta 缺 created_at"
+
+
+def test_exec_page_shows_snapshot_name_and_refreshes_dropdown():
+    """页面：快照下拉显示唯一名字+时间，且保存成功后立刻刷新下拉。"""
+    from pathlib import Path
+
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "src/nanobot_quant/exec_params_page.html"
+    ).read_text(encoding="utf-8")
+
+    assert "function snapTime(p)" in html
+    assert "o.textContent = `${p.name}（${snapTime(p)}）`" in html, "快照项必须显示名字+时间"
+    save_block = html.split("if (d.ok) {", 1)[1].split("} else {", 1)[0]
+    assert "loadList();" in save_block, "保存成功后必须刷新下拉，否则新快照要整页刷新才可见"
