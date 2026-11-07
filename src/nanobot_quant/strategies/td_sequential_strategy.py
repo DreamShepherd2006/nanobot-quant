@@ -134,6 +134,9 @@ class TdSequentialStrategy(Strategy):
         "eod_parity": "even",       # even=双号日结束 / odd=单号日结束 / both=每天
         "eod_mode": "all",          # all=全平（含浮亏）/ profit_only=只平浮盈
         "eod_hour_utc": 0,          # 日界小时（0=UTC 自然日 24:00）
+        # EOD 强平豁免标的（2026-11-07）：列出的标的在日界强平时完全跳过，
+        # 空 = 全部参与（零行为变化）。用于保留想长期持有/等解套的仓位。
+        "eod_exempt_symbols": [],
         **DEFAULT_TD_PARAMS,
     }
 
@@ -1077,6 +1080,14 @@ class TdSequentialStrategy(Strategy):
         except (TypeError, ValueError):
             _eod_h_v = 0
         self._eod_hour_utc = _eod_h_v % 24
+        # 2026-11-07：EOD 强平豁免名单（场景 → 全局 → 空）
+        _eod_ex = p.get("eod_exempt_symbols")
+        if _eod_ex is None:
+            _eod_ex = self.parameters.get("eod_exempt_symbols") or []
+        self._eod_exempt = frozenset(
+            str(_x).strip() for _x in ([] if not isinstance(_eod_ex, list) else _eod_ex)
+            if str(_x).strip()
+        )
         # 加仓最小间距闸（2026-11-03）：场景值优先，留空回退全局 parameters（默认 0=关）
         _sc_gap = p.get("entry_min_gap_pct")
         self._entry_min_gap_pct = float(
@@ -1139,6 +1150,8 @@ class TdSequentialStrategy(Strategy):
                 f"symbols={self.symbols} mode={self.quantity_mode} "
                 f"stop_loss={sl_diag} "
                 f"wave_max={getattr(self, '_wave_max_buys', 1)} "
+                f"eod={getattr(self, '_eod_enabled', False)} "
+                f"eod_exempt={','.join(sorted(getattr(self, '_eod_exempt', ()) or ())) or '-'} "
                 f"family={self.parameters.get('channel_family')} "
                 f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
@@ -4473,6 +4486,21 @@ class TdSequentialStrategy(Strategy):
         if prev is None or day == prev:
             return False
         if not self._eod_parity_match(prev):
+            return False
+        # 2026-11-07：标的豁免——该标的完全跳过日界强平（不看 mode、不碰 min_hold）。
+        # 拦截类逻辑必须留痕：skip 计数 + 事件（逐 bar 明细可见），不静默。
+        if self.symbol in getattr(self, "_eod_exempt", frozenset()):
+            self._bump_skip("eod_exempt")
+            print(
+                f"[TD] EOD SKIP | symbol={self.symbol} 豁免标的"
+                f"（eod_exempt_symbols）日界={prev}",
+                file=sys.stderr, flush=True,
+            )
+            self._record(
+                "SKIP",
+                f"eod_exempt:{prev.isoformat()} 豁免标的，不参与日界强平",
+                symbol=self.symbol,
+            )
             return False
         bm = self.batch_manager
         if bm is None:

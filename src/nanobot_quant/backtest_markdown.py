@@ -201,6 +201,7 @@ _SKIP_LABELS = {
     "ema_gate_na": "EMA 预热不足(NA，fail-open)",
     # EOD 单双号强平（2026-11-05 Step 2）
     "eod_hold": "EOD 日界强平跳（profit_only 无浮盈批）",
+    "eod_exempt": "EOD 日界强平跳（豁免标的）",
     # 入场门四键（2026-11-05 C108）：此前只存在于策略 `_bump_skip`，两张表
     # 都漏映射 ⇒ 页面/SKIP 统计里原样显示英文键名。
     "entry_gap": "加仓间距未达标",
