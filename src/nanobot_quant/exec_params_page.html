@@ -500,7 +500,7 @@
   document.querySelectorAll('[data-snap-scene]').forEach(function (btn) {
     btn.addEventListener('click', async function () {
       const sc = btn.dataset.snapScene;
-      const name = prompt('快照名（留空 = 自动 live_' + sc + '_日期）', '');
+      const name = prompt('快照名（留空 = 自动 live_' + sc + '_日期_时分）\n\n自动快照保留最近 10 个，超出自动清理最旧的；手填名字的长期保留。', '');
       if (name === null) return;  // 取消
       const tok = new URLSearchParams(location.search).get('token');
       const url = '/config/exec-presets/save' + (tok ? '?token=' + encodeURIComponent(tok) : '');
@@ -515,7 +515,11 @@
         });
         const d = await r.json();
         if (d.ok) {
-          btn.textContent = '✅ 已保存 ' + d.name;
+          var tail = (d.pruned && d.pruned.length) ? '（已清理最旧 ' + d.pruned.length + ' 个）' : '';
+          btn.textContent = '✅ 已保存 ' + d.name + tail;
+          if (d.pruned && d.pruned.length) {
+            alert('已保存 ' + d.name + '\n自动快照超过 10 个，已清理最旧：' + d.pruned.join('、'));
+          }
           setTimeout(function () { btn.textContent = old; btn.disabled = false; }, 2500);
         } else {
           alert('保存失败：' + (d.error || '未知错误'));

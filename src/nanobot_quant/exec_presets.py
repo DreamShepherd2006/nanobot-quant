@@ -27,6 +27,18 @@
 解析优先级 = 场景值 → 全局 exec_params → td_params 全局 → ``PARAM_META.std``。
 最后一级是「策略类默认值」的代理：``PARAM_META`` 与策略默认值必须保持一致，
 两边同时改（有测试锁定 parm meta 的关键默认值）。
+
+**自动快照的命名与保留策略（2026-11-07 用户拍板）**
+
+* 默认名 = ``live_<场景>_<YYYYMMDD>_<HHMM>``，**时间标签用 UTC**（与回测/事件
+  时间同口径，不随容器时区漂移）；页面展示时再转本地时间。
+* 同一分钟内重复保存不报错：服务端在默认名后面自动加序号（``_2``、``_3``…）——
+  **仅对自动命名的快照生效**；用户手填的名字撞名仍然拒绝（不擅自改用户选的名字）。
+* 上限 :data:`MAX_AUTO_PRESETS` = **10 个自动快照**，超出时按时间删最旧的；
+  **手填名字的快照不受上限约束、也永不被自动删**（它们是用户显式留的资产）。
+* 历史快照没有 ``auto`` 字段时按名字判（``live_<场景>_<8位日期>[_HHMM]``）。
+* 恢复前自动生成的 ``before_restore_<时间>`` 是 exec_params 的备份文件，
+  **不属于**快照、不计入上述 10 个。
 """
 
 from __future__ import annotations
@@ -34,17 +46,20 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 __all__ = [
     "EXEC_PRESETS_FILENAME",
+    "MAX_AUTO_PRESETS",
     "apply_snapshot",
     "EXCLUDED_SCENE_KEYS",
     "exec_presets_path",
+    "is_auto_preset",
     "load_user_presets",
     "get_user_preset",
+    "prune_auto_presets",
     "save_user_preset",
     "build_snapshot",
     "default_snapshot_name",
@@ -53,10 +68,16 @@ __all__ = [
 
 EXEC_PRESETS_FILENAME = "exec_presets.json"
 
+#: 自动快照（名字留空、服务端生成）的保留上限；手填名字的快照不受限制
+MAX_AUTO_PRESETS = 10
+
 #: 明确排除在快照之外的字段（见模块 docstring）
 EXCLUDED_SCENE_KEYS: frozenset[str] = frozenset({"enabled", "execution_channel", "sub_accounts"})
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_\-\u4e00-\u9fa5]{1,60}$")
+
+#: 自动快照的命名形态：``live_<场景>_<YYYYMMDD>[_HHMM]``（可带自动序号）
+_AUTO_NAME_RE = re.compile(r"^live_[A-Za-z0-9]+_\d{8}(?:_\d{4,6})?(?:_\d+)?$")
 
 #: 回测专属键的默认值——它们不在 ``PARAM_META`` / exec_params 里，
 #: 取值口径必须与回测侧一致，否则快照会静默换掉闸门状态：
@@ -110,16 +131,66 @@ def _check_name(name: str) -> str:
     name = (name or "").strip()
     if not _NAME_RE.match(name):
         raise ValueError(
-            "快照名只能包含中文/字母/数字/下划线/连字符，长度 1–60（建议 <主题>_<YYYYMMDD>）"
+            "快照名只能包含中文/字母/数字/下划线/连字符，长度 1–60（建议 <主题>_<YYYYMMDD>_<HHMM>）"
         )
     return name
 
 
-def save_user_preset(name: str, snapshot: dict) -> str:
-    """写入快照；重名（含内置 preset）直接拒绝，保留历史、不覆盖。
+def is_auto_preset(name: str, snapshot: dict | None = None) -> bool:
+    """是否「自动生成」的快照（受 :data:`MAX_AUTO_PRESETS` 约束）。
+
+    优先看 ``auto`` 字段；历史快照没有该字段时按命名形态回退判断
+    （2026-11-07 之前的快照名是 ``live_<场景>_<YYYYMMDD>``）。
+    """
+    flag = (snapshot or {}).get("auto")
+    if isinstance(flag, bool):
+        return flag
+    return bool(_AUTO_NAME_RE.match(name or ""))
+
+
+def _sort_key(name: str, snapshot: dict) -> tuple:
+    """裁剪排序键：``created_at`` → 名字里的时间戳 → ``created``（越早越前）。"""
+    ca = (snapshot or {}).get("created_at")
+    if isinstance(ca, str) and ca:
+        return (0, ca)
+    m = re.search(r"_(\d{8})(?:_(\d{4,6}))?", name or "")
+    if m:
+        return (1, f"{m.group(1)}{(m.group(2) or '0000').ljust(6, '0')}")
+    return (2, str((snapshot or {}).get("created") or ""))
+
+
+def prune_auto_presets(presets: dict | None = None) -> list[str]:
+    """把自动快照裁到 :data:`MAX_AUTO_PRESETS` 个（删最旧的），返回被删名字。
+
+    ``presets`` 为 ``None`` 时自行读文件、裁剪后写回；传入 dict 时就地裁剪
+    （供 :func:`save_user_preset` 在同一次原子写里完成）。
+    手填名字的快照不参与统计、也永不被删。
+    """
+    owns = presets is None
+    data = load_user_presets() if owns else presets
+    autos = [(n, p) for n, p in data.items() if is_auto_preset(n, p)]
+    overflow = len(autos) - MAX_AUTO_PRESETS
+    if overflow <= 0:
+        return []
+    autos.sort(key=lambda kv: _sort_key(kv[0], kv[1]))
+    dropped = [n for n, _ in autos[:overflow]]
+    for n in dropped:
+        data.pop(n, None)
+    if owns:
+        _write_json(exec_presets_path(), {"presets": data})
+    return dropped
+
+
+def save_user_preset(name: str, snapshot: dict, *, auto: bool = False) -> str:
+    """写入快照，返回**最终**名字。
+
+    * ``auto=False``（用户手填名字）：重名（含内置 preset）直接拒绝，保留历史、不覆盖。
+    * ``auto=True``（名字留空、服务端生成）：重名时自动加 ``_2``、``_3``… 序号；
+      标注 ``auto=True``、补 ``created_at``，并在同一次写盘里把自动快照裁到
+      :data:`MAX_AUTO_PRESETS` 个。
 
     Raises:
-        ValueError: 名字非法、重名、快照不自包含。
+        ValueError: 名字非法、重名（仅非自动）、快照不自包含。
     """
     from .backtest.presets import REQUIRED_OVERRIDE_KEYS, builtin_names
 
@@ -131,15 +202,30 @@ def save_user_preset(name: str, snapshot: dict) -> str:
     if missing:
         raise ValueError(f"快照不自包含，缺少 {len(missing)} 个决策键：{', '.join(missing[:6])}…")
     all_presets = load_user_presets()
-    if name in all_presets:
+    if auto:
+        snapshot = dict(snapshot)
+        snapshot["auto"] = True
+        snapshot.setdefault("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        base, i = name, 2
+        while name in all_presets:
+            name = f"{base}_{i}"
+            i += 1
+    elif name in all_presets:
         raise ValueError(f"快照「{name}」已存在，请换一个名字（快照只追加、不覆盖）")
     all_presets[name] = snapshot
+    prune_auto_presets(all_presets)
     _write_json(exec_presets_path(), {"presets": all_presets})
     return name
 
 
 def default_snapshot_name(scene_key: str) -> str:
-    return f"live_{scene_key}_{date.today():%Y%m%d}"
+    """自动快照默认名：``live_<场景>_<YYYYMMDD>_<HHMM>``（**UTC**）。
+
+    时间标签取 UTC（与回测/事件时间同口径、不随容器时区漂移）；页面展示时
+    再转本地时间。分钟精度不够时由 :func:`save_user_preset` 自动加序号。
+    """
+    now = datetime.now(timezone.utc)
+    return f"live_{scene_key}_{now:%Y%m%d}_{now:%H%M}"
 
 
 def _resolve(key: str, scene: dict, flat: dict, td_defaults: dict) -> Any:
@@ -215,6 +301,8 @@ def build_snapshot(scene_key: str = "high") -> dict:
     }
     return {
         "created": date.today().isoformat(),
+        # 精确时刻（UTC）：自动快照裁剪按它排序；created 保留日期语义（与回测 preset 同构）
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "label": f"实盘快照 · {scene_key}",
         "description": (
             f"从实盘场景 {scene_key} 冻结（{date.today().isoformat()}）；"

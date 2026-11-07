@@ -888,28 +888,43 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         err, ok = _authorized(request, gatekeeper)
         if not ok:
             return PlainTextResponse(f"🔒 {err}", status_code=403 if "Commander" in err else 401)
-        from .exec_presets import build_snapshot, default_snapshot_name, save_user_preset
+        from .exec_presets import (
+            build_snapshot,
+            default_snapshot_name,
+            is_auto_preset,
+            load_user_presets,
+            save_user_preset,
+        )
 
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
         scene = str((body or {}).get("scene") or "high")
-        name = str((body or {}).get("name") or "").strip() or default_snapshot_name(scene)
+        raw_name = str((body or {}).get("name") or "").strip()
+        # 名字留空 = 自动快照（受 MAX_AUTO_PRESETS 约束，撞名自动加序号）
+        auto = not raw_name
+        name = raw_name or default_snapshot_name(scene)
+        before: set[str] = set()
         try:
             snap = build_snapshot(scene)
-            save_user_preset(name, snap)
+            if auto:
+                before = {n for n, p in load_user_presets().items() if is_auto_preset(n, p)}
+            saved = save_user_preset(name, snap, auto=auto)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:  # noqa: BLE001
             gatekeeper._log(f"⚠️ 快照保存异常: {e}")
             return JSONResponse({"ok": False, "error": f"保存失败: {e}"}, status_code=500)
+        pruned = sorted(before - set(load_user_presets())) if auto else []
         gatekeeper._log(
-            f"💾 实盘快照已保存: {name} (场景={scene}, "
+            f"💾 实盘快照已保存: {saved} (场景={scene}, auto={auto}, "
             f"{len(snap.get('overrides') or {})} 个决策键, "
             f"标的={snap.get('run', {}).get('symbols')})"
         )
-        return JSONResponse({"ok": True, "name": name, "snapshot": snap})
+        if pruned:
+            gatekeeper._log(f"🧹 自动快照超上限，已清理最旧 {len(pruned)} 个: {', '.join(pruned)}")
+        return JSONResponse({"ok": True, "name": saved, "auto": auto, "pruned": pruned, "snapshot": snap})
 
     app.add_route("/config/exec", _page, methods=["GET"])
     app.add_route("/config/exec", _save, methods=["POST"])
