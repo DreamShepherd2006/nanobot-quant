@@ -248,8 +248,161 @@ def _scene_keys() -> set[str]:
 
     return set(DEFAULT_SCENES["high"]) - EXCLUDED_SCENE_KEYS - {"sub_accounts"}
 
+# 内置 preset（回测口径）里这几项只作建议、绝不写入实盘（2026-11-07 用户拍板）：
+# - symbols：换池会重建台账（有 open lot 即被拒），由用户自己选
+# - batches：与台账 slot 强绑定
+# - fixed_amount：回测常用 200U/笔，实盘资金尺度完全不同，由用户自己填
+BUILTIN_HINT_KEYS: dict[str, str] = {
+    "symbols": "标的池",
+    "batches": "批次数",
+    "fixed_amount": "单仓金额（回测口径，仅建议）",
+}
 
-def apply_snapshot(name: str, include_sub_accounts: bool = False) -> dict:
+
+def _same_value(a, b) -> bool:
+    """比较时容忍 int/float/数字字符串（场景默认值可能是字符串）。"""
+    if a is None or b is None:
+        return a is b
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _coerce_scene_value(key: str, val):
+    """把预设里的值转成 exec_params 校验期望的类型。
+
+    2026-11-07 实测：内置预设的 ``entry_ema_period`` 是 int 610，而实盘
+    enum 校验只接受字符串 ⇒ 保存整批失败（且当时未检查返回值，静默丢弃）。
+    """
+    from .exec_params import PARAM_META
+
+    kind = (PARAM_META.get(key) or {}).get("type")
+    if kind == "bool":
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on")
+        return bool(val)
+    if kind == "int":
+        try:
+            return int(float(val))
+        except (TypeError, ValueError):
+            return val
+    if kind in ("float", "number"):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return val
+    if kind in ("enum", "str"):
+        if isinstance(val, bool):
+            return "true" if val else "false"
+        return str(val)
+    return val
+
+
+def _scene_label(key: str) -> str:
+    from .exec_params import PARAM_META
+
+    return str((PARAM_META.get(key) or {}).get("label") or key)
+
+
+def resolve_preset(name: str, kind: str = "user") -> tuple[dict, str]:
+    """按来源取预设内容（内置 preset 或用户快照），两者结构同构。"""
+    if kind == "builtin":
+        from .backtest.presets import get_preset
+
+        preset = get_preset(name)
+        if preset is None:
+            raise ValueError(f"内置预设「{name}」不存在")
+        return preset, "builtin"
+    snap = get_user_preset(name)
+    if snap is None:
+        raise ValueError(f"快照「{name}」不存在（只允许恢复自己保存的快照）")
+    return snap, "user"
+
+
+def preview_preset(name: str, kind: str = "user") -> dict:
+    """只读 diff：列出「将写入 / 仅提示 / 跳过」三类字段，不落盘。
+
+    内置 preset 的 ``run.symbols`` / ``run.batches`` / ``run.fixed_amount``
+    属于「只提示」——由用户在页面上自行决定（2026-11-07 拍板）。
+    """
+    from .exec_params import load_exec_params
+
+    snap, kind = resolve_preset(name, kind)
+    run = snap.get("run") or {}
+    scene_key = str(run.get("scene") or "high")
+    overrides = dict(snap.get("overrides") or {})
+    # 旧 user 快照：标的只存在 run.symbols（兼容第 2 批保存的快照）
+    if kind == "user" and "symbols" not in overrides:
+        legacy = [str(s) for s in (run.get("symbols") or [])]
+        if legacy:
+            overrides["symbols"] = legacy
+
+    ep = load_exec_params() or {}
+    scene_cfg = dict((ep.get("scenes") or {}).get(scene_key) or {})
+    writable = _scene_keys()
+
+    changes: list[dict] = []
+    skipped: list[dict] = []
+    for key, new in overrides.items():
+        if key == "batches":
+            continue
+        if kind == "builtin" and key in BUILTIN_HINT_KEYS:
+            continue  # 内置预设的标的/批次/单仓只作建议，由 hints 展示
+        if key not in writable:
+            skipped.append({
+                "key": key,
+                "label": _scene_label(key),
+                "value": new,
+                "reason": "跨场景 / 回测专属参数，实盘不写入",
+            })
+            continue
+        new = _coerce_scene_value(key, new)
+        old = scene_cfg.get(key)
+        if _same_value(old, new):
+            continue  # 未变化不展示
+        changes.append({"key": key, "label": _scene_label(key), "old": old, "new": new})
+
+    hints: list[dict] = []
+    if kind == "builtin":
+        for key, label in BUILTIN_HINT_KEYS.items():
+            preset_value = run.get(key)
+            if preset_value in (None, "", [], 0):
+                continue
+            current = scene_cfg.get("td_fixed_amount") if key == "fixed_amount" else scene_cfg.get(key)
+            hints.append({
+                "key": key,
+                "label": label,
+                "preset": preset_value,
+                "current": current,
+                "note": "预设只作建议，请自行决定是否填写",
+            })
+
+    warnings: list[str] = []
+    current_channel = str(ep.get("execution_channel") or "")
+    preset_source = str(run.get("source") or "")
+    if preset_source and current_channel and preset_source != current_channel:
+        warnings.append(
+            f"执行通道不一致：预设记录 {preset_source}、当前 {current_channel}，"
+            "应用会被拒绝（换所涉及台账/账户池/Key 白名单，须单独走流程）"
+        )
+
+    return {
+        "ok": True,
+        "kind": kind,
+        "name": name,
+        "label": snap.get("label") or name,
+        "scene": scene_key,
+        "changes": changes,
+        "hints": hints,
+        "skipped": skipped,
+        "warnings": warnings,
+    }
+
+
+def apply_snapshot(name: str, include_sub_accounts: bool = False, kind: str = "user") -> dict:
     """把快照写回实盘某场景（2026-11-07 PR 3）。
 
     顺序约束由调用方保证不了，所以在服务端**硬性**拦截：
@@ -266,16 +419,14 @@ def apply_snapshot(name: str, include_sub_accounts: bool = False) -> dict:
     from .exec_params import SCENE_FIELD_MAP, load_exec_params, save_exec_params
     from .backtest.presets import REQUIRED_OVERRIDE_KEYS
 
-    snap = get_user_preset(name)
-    if snap is None:
-        raise ValueError(f"快照「{name}」不存在（只允许恢复自己保存的快照）")
+    snap, kind = resolve_preset(name, kind)
 
     run = snap.get("run") or {}
     scene_key = str(run.get("scene") or "high")
     overrides = dict(snap.get("overrides") or {})
     # 兼容本次之前的快照：标的只存在 run.symbols 里（旧版 build_snapshot 未写进
     # overrides）⇒ 回退读取，避免"新快照能恢复、旧快照静默丢标的"。
-    if "symbols" not in overrides:
+    if kind == "user" and "symbols" not in overrides:
         _legacy = [str(s) for s in (run.get("symbols") or [])]
         if _legacy:
             overrides["symbols"] = _legacy
@@ -324,13 +475,20 @@ def apply_snapshot(name: str, include_sub_accounts: bool = False) -> dict:
     applied: dict[str, dict] = {}
     global_skipped: dict[str, Any] = {}
     for key, val in overrides.items():
+        # 内置 preset 的标的池/批次/单仓只作建议、绝不写实盘（2026-11-07 拍板）；
+        # batches 对任何来源都不写（与台账 slot 强绑定）。
+        if key == "batches":
+            continue
+        if kind == "builtin" and key in BUILTIN_HINT_KEYS:
+            continue
         if key not in writable:
             # ema_* / tdst_filter 属回测专属或 TD 全局参数，不进 exec_params
             if key not in _BACKTEST_ONLY_DEFAULTS:
                 global_skipped[key] = val
             continue
+        val = _coerce_scene_value(key, val)
         old = scene_cfg.get(key)
-        if old != val:
+        if not _same_value(old, val):
             applied[key] = {"old": old, "new": val}
         scene_cfg[key] = val
         # 扁平键必须同步（save_exec_params 里「扁平值覆盖 scenes.high」）——
@@ -355,7 +513,11 @@ def apply_snapshot(name: str, include_sub_accounts: bool = False) -> dict:
 
     scene_cfg["enabled"] = False  # 恢复后必须由用户显式启动
     ep.setdefault("scenes", {})[scene_key] = scene_cfg
-    save_exec_params(ep)
+    save_ret = save_exec_params(ep) or {}
+    if not save_ret.get("ok", True):
+        # 2026-11-07：此前忽略返回值 ⇒ 校验失败时整批静默丢弃（实测被
+        # entry_ema_period 的类型校验拦下，页面却显示"已恢复 17 项"）。
+        raise ValueError(f"参数写入失败（未做任何变更）：{save_ret.get('error') or '未知错误'}")
 
     return {
         "ok": True,

@@ -18,6 +18,9 @@ import asyncio
 import html
 import json
 import os
+import secrets
+import threading
+import time
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -913,11 +916,49 @@ def register_exec_params_routes(app, gatekeeper) -> None:
     # 2026-11-02：参数 markdown 快照（只读；页面「📋 复制参数」按钮取它）
     app.add_route("/config/exec/params.md", _params_md, methods=["GET"])
     # 2026-11-07：实盘参数快照（保存 / 列表；恢复在后续批次）
+    # 2026-11-07（PR 4）：两步确认 —— prepare 出 diff + 一次性 token（30s），
+    # apply 必须带 token。参数恢复会一次性改十几项，可逆但影响面大。
+    _apply_tokens: dict[str, tuple[str, str, float]] = {}
+    _token_lock = threading.Lock()
+
+    async def _presets_prepare(request: Request):
+        """返回 diff 预览 + 一次性确认 token（不落盘）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return PlainTextResponse(f"🔒 {err}", status_code=403 if "Commander" in err else 401)
+        from .exec_presets import preview_preset
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
+        name = str((body or {}).get("name") or "").strip()
+        kind = str((body or {}).get("kind") or "user").strip()
+        if not name:
+            return JSONResponse({"ok": False, "error": "缺少预设名"}, status_code=400)
+        try:
+            preview = preview_preset(name, kind=kind)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            gatekeeper._log(f"⚠️ 预设预览异常: {e}")
+            return JSONResponse({"ok": False, "error": f"预览失败: {e}"}, status_code=500)
+        token = secrets.token_urlsafe(18)
+        now = time.time()
+        with _token_lock:
+            # 顺手清理过期 token，避免无限增长
+            for k, (_, _, exp) in list(_apply_tokens.items()):
+                if exp < now:
+                    _apply_tokens.pop(k, None)
+            _apply_tokens[token] = (kind, name, now + 30.0)
+        return JSONResponse({"ok": True, "token": token, "preview": preview})
+
     async def _presets_apply(request: Request):
-        """把快照写回实盘（2026-11-07 PR 3）。
+        """把快照 / 内置预设写回实盘（2026-11-07 PR 3 + PR 4）。
 
         服务端硬性顺序约束：TD 运行中拒绝、通道不一致拒绝、残缺拒绝；
         恢复前自动备份；恢复后场景保持未启用，由用户显式启动。
+        token 由 ``/config/exec-presets/prepare`` 下发，30s 过期、一次性。
         """
         err, ok = _authorized(request, gatekeeper)
         if not ok:
@@ -931,20 +972,39 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         name = str((body or {}).get("name") or "").strip()
         if not name:
             return JSONResponse({"ok": False, "error": "缺少快照名"}, status_code=400)
+        kind = str((body or {}).get("kind") or "user").strip()
+        token = str((body or {}).get("token") or "").strip()
+        if not token:
+            return JSONResponse(
+                {"ok": False, "error": "缺少确认 token，请先点「预览差异」再确认应用"}, status_code=400
+            )
+        now = time.time()
+        with _token_lock:
+            rec = _apply_tokens.pop(token, None)
+        if rec is None:
+            return JSONResponse({"ok": False, "error": "确认已失效（token 无效或已使用），请重新预览"}, status_code=400)
+        t_kind, t_name, exp = rec
+        if exp < now:
+            return JSONResponse({"ok": False, "error": "确认已过期（30 秒），请重新预览"}, status_code=400)
+        if (t_kind, t_name) != (kind, name):
+            return JSONResponse(
+                {"ok": False, "error": "token 与所选预设不匹配，请重新预览"}, status_code=400
+            )
         include_sub = bool((body or {}).get("include_sub_accounts"))
         try:
-            res = apply_snapshot(name, include_sub_accounts=include_sub)
+            res = apply_snapshot(name, include_sub_accounts=include_sub, kind=kind)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:  # noqa: BLE001
             gatekeeper._log(f"⚠️ 快照恢复异常: {e}")
             return JSONResponse({"ok": False, "error": f"恢复失败: {e}"}, status_code=500)
         gatekeeper._log(
-            f"↩️ 实盘快照已恢复: {name} → 场景 {res.get('scene')}，"
+            f"↩️ 实盘参数已恢复: {name}（{kind}）→ 场景 {res.get('scene')}，"
             f"改动 {len(res.get('applied') or {})} 项，备份 {res.get('backup')}"
         )
         return JSONResponse(res)
 
     app.add_route("/config/exec-presets", _presets_list, methods=["GET"])
     app.add_route("/config/exec-presets/save", _presets_save, methods=["POST"])
+    app.add_route("/config/exec-presets/prepare", _presets_prepare, methods=["POST"])
     app.add_route("/config/exec-presets/apply", _presets_apply, methods=["POST"])

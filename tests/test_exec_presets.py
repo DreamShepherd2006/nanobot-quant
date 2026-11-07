@@ -337,3 +337,102 @@ def test_apply_never_restores_batches():
     res = apply_snapshot("batch_snapshot")
     assert "batches" not in res["applied"]
     assert load_exec_params()["scenes"]["high"]["batches"] == 3  # 保持人工设定
+
+
+# ---------------------------------------------------------------- 内置预设应用
+
+def _seed_okx():
+    from nanobot_quant.exec_params import DEFAULT_SCENES, save_exec_params
+
+    sc = dict(DEFAULT_SCENES["high"])
+    sc.update({"enabled": False, "symbols": ["SOL"], "batches": 4, "td_fixed_amount": 4.0,
+               "entry_setup": 9, "entry_periods": "1", "eod_enabled": False})
+    save_exec_params({"execution_channel": "okx_cex", "scenes": {"high": sc}})
+
+
+def test_preview_builtin_separates_changes_hints_skipped():
+    """内置预设：决策参数进 changes，标的/批次/单仓只进 hints，跨场景进 skipped。"""
+    from nanobot_quant.exec_presets import preview_preset
+
+    _seed_okx()
+    pv = preview_preset("low9_multi_h9_minentry_eod_20261106", kind="builtin")
+
+    changed = {c["key"] for c in pv["changes"]}
+    assert "entry_periods" in changed and "eod_enabled" in changed
+    assert "fixed_amount" not in changed and "symbols" not in changed and "batches" not in changed
+
+    hints = {h["key"]: h for h in pv["hints"]}
+    assert set(hints) == {"symbols", "batches", "fixed_amount"}
+    assert hints["symbols"]["preset"] == ["ZEC", "NEAR", "DASH"]
+    assert hints["fixed_amount"]["preset"] == 200.0 and hints["fixed_amount"]["current"] == 4.0
+
+    skipped = {s["key"] for s in pv["skipped"]}
+    assert "fee_rate" in skipped or "slippage" in skipped
+    assert not pv["warnings"]  # 通道一致（okx_cex）
+
+
+def test_preview_warns_on_channel_mismatch():
+    from nanobot_quant.exec_params import DEFAULT_SCENES, save_exec_params
+    from nanobot_quant.exec_presets import preview_preset
+
+    save_exec_params({"execution_channel": "okx_dex", "scenes": {"high": dict(DEFAULT_SCENES["high"])}})
+    pv = preview_preset("low9_multi_h9_minentry_eod_20261106", kind="builtin")
+    assert pv["warnings"] and "okx_dex" in pv["warnings"][0]
+
+
+def test_apply_builtin_writes_params_but_never_symbols_batches_amount():
+    from nanobot_quant.exec_params import load_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_okx()
+    res = apply_snapshot("low9_multi_h9_minentry_eod_20261106", kind="builtin")
+    after = load_exec_params()["scenes"]["high"]
+
+    # 决策参数写入
+    assert after["entry_periods"] == "1,2,3,4,5,8"
+    assert after["eod_enabled"] is True
+    assert after["exit_order"] == "min_entry"
+    # 三项用户自填项保持不变
+    assert after["symbols"] == ["SOL"]
+    assert after["batches"] == 4
+    assert after["td_fixed_amount"] == 4.0
+    assert "symbols" not in res["applied"]
+    assert after["enabled"] is False  # 应用后必须由用户重新启用
+
+
+def test_preview_user_snapshot_keeps_symbols_in_changes():
+    """用户快照的标的池仍属"将写入"（与内置预设的只提示区分）。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import build_snapshot, preview_preset, save_user_preset
+
+    _seed_okx()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "ETH"]
+    ep["td_symbols"] = ["SOL", "ETH"]
+    save_exec_params(ep)
+    save_user_preset("snap_syms", build_snapshot("high"))
+
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL"]
+    ep["td_symbols"] = ["SOL"]
+    save_exec_params(ep)
+
+    pv = preview_preset("snap_syms", kind="user")
+    keys = {c["key"] for c in pv["changes"]}
+    assert "symbols" in keys
+    assert not pv["hints"]
+
+
+def test_preview_numeric_string_equivalence():
+    """'610' 与 610 视为同值，不应记为一次改动。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import build_snapshot, preview_preset, save_user_preset
+
+    _seed_okx()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["entry_ema_period"] = "610"
+    save_exec_params(ep)
+    save_user_preset("snap_str", build_snapshot("high"))
+
+    pv = preview_preset("snap_str", kind="user")
+    assert "entry_ema_period" not in {c["key"] for c in pv["changes"]}
