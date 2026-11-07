@@ -34,12 +34,13 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 __all__ = [
     "EXEC_PRESETS_FILENAME",
+    "apply_snapshot",
     "EXCLUDED_SCENE_KEYS",
     "exec_presets_path",
     "load_user_presets",
@@ -202,6 +203,8 @@ def build_snapshot(scene_key: str = "high") -> dict:
         "capital_total": float(scene.get("capital_total") or 0.0),
         # 记录了但不参与恢复（见 docstring：换所必须单独走流程）
         "source": str(ep.get("execution_channel") or ""),
+        # 账号池：默认不恢复，恢复时由 include_sub_accounts 显式勾选
+        "sub_accounts": list(scene.get("sub_accounts") or []),
     }
     return {
         "created": date.today().isoformat(),
@@ -230,3 +233,122 @@ def user_presets_meta() -> list[dict]:
             }
         )
     return out
+
+
+def _scene_keys() -> set[str]:
+    """场景可写字段全集（DEFAULT_SCENES 的键减去排除项）。"""
+    from .exec_params import DEFAULT_SCENES
+
+    return set(DEFAULT_SCENES["high"]) - EXCLUDED_SCENE_KEYS - {"sub_accounts"}
+
+
+def apply_snapshot(name: str, include_sub_accounts: bool = False) -> dict:
+    """把快照写回实盘某场景（2026-11-07 PR 3）。
+
+    顺序约束由调用方保证不了，所以在服务端**硬性**拦截：
+
+    1. TD 运行中 / 任一场景仍 enabled → 拒绝（不自动停机）
+    2. `execution_channel` 与快照 `run.source` 不一致 → 拒绝
+    3. 快照不完整（缺 decision keys）→ 拒绝，绝不部分写入
+    4. 恢复前自动备份当前参数（`before_restore_<时间>`）；备份失败即拒绝
+
+    Returns:
+        dict：``applied``（实际改动的键 old→new）、``backup``、``global_skipped``
+        （跨场景字段，只报告不写）、``sub_accounts``（written/skipped/absent）。
+    """
+    from .exec_params import SCENE_FIELD_MAP, load_exec_params, save_exec_params
+    from .backtest.presets import REQUIRED_OVERRIDE_KEYS
+
+    snap = get_user_preset(name)
+    if snap is None:
+        raise ValueError(f"快照「{name}」不存在（只允许恢复自己保存的快照）")
+
+    run = snap.get("run") or {}
+    scene_key = str(run.get("scene") or "high")
+    overrides = snap.get("overrides") or {}
+    missing = sorted(REQUIRED_OVERRIDE_KEYS - set(overrides))
+    if missing:
+        raise ValueError(f"快照不自包含，缺少 {len(missing)} 个决策键，拒绝部分写入")
+
+    ep = load_exec_params() or {}
+    scenes = ep.get("scenes") or {}
+    scene_cfg = dict(scenes.get(scene_key) or {})
+    if not scene_cfg:
+        raise ValueError(f"当前配置里没有场景「{scene_key}」，无法恢复")
+
+    # ① TD 必须已停
+    from . import td_live_state
+
+    running = bool((td_live_state.get_state() or {}).get("running"))
+    enabled = any(bool((sc or {}).get("enabled")) for sc in scenes.values())
+    if running or enabled:
+        raise ValueError(
+            "TD 循环仍在运行（或有场景处于启用状态）。请先到 /config/exec 取消勾选"
+            "「启动 TD」并保存，等日志出现「循环线程退出」后再恢复"
+        )
+
+    # ② 执行通道必须一致（换所是环境变更，不能靠快照回滚）
+    cur_ch = str(ep.get("execution_channel") or "")
+    snap_ch = str(run.get("source") or "")
+    if snap_ch and cur_ch and snap_ch != cur_ch:
+        raise ValueError(
+            f"执行通道不一致：快照记录 {snap_ch}、当前 {cur_ch}。"
+            "换所涉及台账/账户池/Key 白名单，必须单独走流程，不能用快照恢复"
+        )
+
+    # ③ 先备份当前参数（备份失败即中止，避免"回滚把自己滚没了"）
+    backup_name = f"before_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    existing = load_user_presets()
+    if backup_name in existing:  # 同一秒内连点两次：加序号而非覆盖
+        n = 2
+        while f"{backup_name}_{n}" in existing:
+            n += 1
+        backup_name = f"{backup_name}_{n}"
+    save_user_preset(backup_name, build_snapshot(scene_key))
+
+    # ④ 逐字段写入（只写场景字段；跨场景字段只报告）
+    writable = _scene_keys()
+    applied: dict[str, dict] = {}
+    global_skipped: dict[str, Any] = {}
+    for key, val in overrides.items():
+        if key not in writable:
+            # ema_* / tdst_filter 属回测专属或 TD 全局参数，不进 exec_params
+            if key not in _BACKTEST_ONLY_DEFAULTS:
+                global_skipped[key] = val
+            continue
+        old = scene_cfg.get(key)
+        if old != val:
+            applied[key] = {"old": old, "new": val}
+        scene_cfg[key] = val
+        # 扁平键必须同步（save_exec_params 里「扁平值覆盖 scenes.high」）——
+        # 只写场景会被旧的扁平值冲掉，恢复静默失效（2026-11-07 实测）。
+        flat_key = SCENE_FIELD_MAP.get(key)
+        if flat_key and flat_key != "td_enabled":
+            ep[flat_key] = val
+
+    # ⑤ 账号池（默认不动，勾选才写）
+    sub_state = "absent"
+    snap_subs = list(run.get("sub_accounts") or [])
+    if snap_subs:
+        if include_sub_accounts:
+            applied["sub_accounts"] = {
+                "old": list(scene_cfg.get("sub_accounts") or []),
+                "new": snap_subs,
+            }
+            scene_cfg["sub_accounts"] = snap_subs
+            sub_state = "written"
+        else:
+            sub_state = "skipped"
+
+    scene_cfg["enabled"] = False  # 恢复后必须由用户显式启动
+    ep.setdefault("scenes", {})[scene_key] = scene_cfg
+    save_exec_params(ep)
+
+    return {
+        "ok": True,
+        "scene": scene_key,
+        "backup": backup_name,
+        "applied": applied,
+        "global_skipped": global_skipped,
+        "sub_accounts": sub_state,
+    }

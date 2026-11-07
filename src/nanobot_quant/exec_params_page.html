@@ -44,6 +44,13 @@
   .snap-btn:hover { background:#e0e7ea; }
   .snap-btn:disabled { opacity:.6; cursor:default; }
   .snap-hint { font-size:.75em; color:#999; }
+  .restore-box { border:1px solid #cfd8dc; background:#fafafa; border-radius:8px;
+                 padding:10px 12px; margin:0 0 14px; }
+  .restore-title { font-weight:600; font-size:.92em; margin-bottom:6px; color:#37474f; }
+  .restore-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .restore-row select { min-width:240px; padding:4px 6px; font-size:.85em; }
+  .restore-chk { font-size:.8em; color:#555; }
+  .restore-hint { font-size:.76em; color:#8d6e63; margin-top:6px; line-height:1.5; }
   input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
   input[type=text] { width:150px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; }
   select { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
@@ -78,6 +85,20 @@
 <div class="actions" style="margin:0 0 12px;">
   <button class="btn-outline" id="btn-md">📋 复制参数 Markdown</button>
   <span id="md-msg" style="font-size:.85em;color:#666;"></span>
+</div>
+
+<div class="restore-box">
+  <div class="restore-title">↩️ 恢复参数快照</div>
+  <div class="restore-row">
+    <select id="restore-sel"><option value="">（加载中…）</option></select>
+    <label class="restore-chk"><input type="checkbox" id="restore-sub"> 同时恢复子账号池</label>
+    <button type="button" class="snap-btn" id="restore-btn">恢复</button>
+    <span id="restore-msg" class="snap-hint"></span>
+  </div>
+  <div class="restore-hint">
+    ⚠️ 顺序：① 取消勾选「启动 TD」→ 保存 → 等日志出现「循环线程退出」② 回到本页点「恢复」③ 重新勾选「启动 TD」→ 保存。
+    TD 运行中恢复会被拒绝（不会自动停机）；恢复前会自动把当前参数存成 <code>before_restore_&lt;时间&gt;</code> 备份。
+  </div>
 </div>
 
 <div class="note">
@@ -290,6 +311,56 @@
     }
   }
   window.applyCapital = applyCapital;
+
+  // 2026-11-07（PR 3）：恢复快照（服务端保证「TD 必须已停」等约束）
+  (function () {
+    const sel = document.getElementById('restore-sel');
+    const btn = document.getElementById('restore-btn');
+    const msg = document.getElementById('restore-msg');
+    if (!sel || !btn) return;
+    const tok = new URLSearchParams(location.search).get('token');
+    const q = tok ? ('?token=' + encodeURIComponent(tok)) : '';
+    function loadList() {
+      fetch('/config/exec-presets' + q)
+        .then(r => r.json())
+        .then(d => {
+          const mine = (d.presets || []).filter(p => p.source === 'user');
+          sel.innerHTML = mine.length
+            ? '<option value="">（选择要恢复的快照）</option>'
+            : '<option value="">（还没有快照，先在下方场景卡点「存为快照」）</option>';
+          mine.forEach(p => {
+            const o = document.createElement('option');
+            o.value = p.name;
+            o.textContent = `${p.label}（${p.created || '—'}）`;
+            sel.appendChild(o);
+          });
+        })
+        .catch(() => { sel.innerHTML = '<option value="">（快照列表读取失败）</option>'; });
+    }
+    loadList();
+    btn.addEventListener('click', async function () {
+      const name = sel.value;
+      if (!name) { msg.textContent = '请先选择快照'; return; }
+      if (!confirm('确认把当前实盘参数回滚到「' + name + '」？\n\n恢复前会自动备份当前参数。')) return;
+      btn.disabled = true; msg.textContent = '⏳ 恢复中…';
+      try {
+        const r = await fetch('/config/exec-presets/apply' + q, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: name,
+            include_sub_accounts: !!(document.getElementById('restore-sub') || {}).checked})
+        });
+        const d = await r.json();
+        if (!d.ok) { msg.textContent = '❌ ' + (d.error || '恢复失败'); btn.disabled = false; return; }
+        const n = Object.keys(d.applied || {}).length;
+        alert('✅ 已恢复 ' + name + '\n改动 ' + n + ' 项\n备份：' + d.backup +
+              '\n\n场景已置为未启用，请重新勾选「启动 TD」并保存。');
+        location.reload();
+      } catch (e) {
+        msg.textContent = '❌ ' + e; btn.disabled = false;
+      }
+    });
+  })();
 
   // 2026-11-07（PR 2）：把当前场景参数冻结成快照（只读生成、不改实盘）
   document.querySelectorAll('[data-snap-scene]').forEach(function (btn) {
