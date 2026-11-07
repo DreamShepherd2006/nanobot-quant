@@ -1048,3 +1048,56 @@ def test_save_exec_params_logs_channel_switch(tmp_path, monkeypatch, capsys):
     assert res["ok"] is True
     err = capsys.readouterr().err
     assert "执行通道切换: okx_cex → okx_dex" in err
+
+
+# --- 资金字段（2026-11-07 PR 1）------------------------------------------
+def test_capital_total_in_scene_defaults_and_meta():
+    """capital_total 是场景专属字段：三场景默认 0（未配置），且不入扁平键。"""
+    from nanobot_quant.exec_params import (
+        DEFAULT_SCENES,
+        PARAM_META,
+        SCENE_ONLY_FIELDS,
+        SCENE_FIELD_ORDER,
+    )
+
+    assert "capital_total" in SCENE_ONLY_FIELDS
+    assert "capital_total" in SCENE_FIELD_ORDER
+    for sc in ("high", "mid", "low"):
+        assert DEFAULT_SCENES[sc]["capital_total"] == 0.0
+    meta = PARAM_META["capital_total"]
+    assert meta["min"] == 0.0 and meta["std"] == 0.0
+    # 展示用字段，不得进入策略参数（策略侧不认识它，避免误当仓位参数）
+    assert "capital_total" not in PARAM_META.get("td_fixed_amount", {})
+
+
+def test_capital_total_roundtrip():
+    """路径已由 conftest 的 autouse fixture 隔离到 tmp_path。"""
+    from nanobot_quant import exec_params as ep
+
+    ep.save_exec_params({"scenes": {"high": {"capital_total": 12345.0}}})
+    got = ep.load_exec_params()
+    assert got["scenes"]["high"]["capital_total"] == 12345.0
+
+
+def test_capital_block_html_without_funds_says_td_not_running():
+    from nanobot_quant.exec_params_handlers import _capital_block_html
+
+    scene = {"quantity_mode": "fixed_amount", "td_fixed_amount": 200.0,
+             "batches": 50, "capital_total": 10000.0}
+    out = _capital_block_html("high", scene)
+    assert "TD 未运行" in out
+    assert 'data-cap-pct>2.00%<' in out
+    assert 'data-cap-full>10000.00<' in out
+
+
+def test_capital_block_html_computes_buildable_contracts(monkeypatch):
+    from nanobot_quant import exec_params_handlers as h
+    from nanobot_quant import td_live_state
+
+    rows = [{"slot": "1-3", "quote": "USDC", "usdt_available": 450.0, "total_asset": 450.0}]
+    monkeypatch.setattr(td_live_state, "get_state", lambda: {"funds": {"high": rows}})
+    scene = {"quantity_mode": "fixed_amount", "td_fixed_amount": 200.0,
+             "batches": 50, "capital_total": 10000.0}
+    out = h._capital_block_html("high", scene)
+    assert 'data-cap-can>2<' in out          # floor(450 / 200) = 2
+    assert "USDC" in out

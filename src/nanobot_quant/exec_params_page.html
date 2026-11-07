@@ -31,6 +31,13 @@
   .f-label { width:200px; font-weight:600; font-size:.9em; }
   .f-std { color:#888; font-size:.8em; min-width:150px; }
   .f-hint { color:#aaa; font-size:.78em; flex:1; min-width:160px; }
+  /* 资金自洽展示条（2026-11-07）：纯展示，不参与决策 */
+  .cap-box { border:1px dashed #ccc; border-radius:8px; padding:8px 10px; margin:10px 0 4px; background:#fafafa; }
+  .cap-line { font-size:.85em; color:#444; }
+  .cap-line b { color:#1565c0; }
+  .cap-note { font-size:.78em; color:#777; margin-top:4px; }
+  .cap-warn-red { color:#c62828; font-weight:600; }
+  .cap-warn-gray { color:#888; }
   input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
   input[type=text] { width:150px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; }
   select { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
@@ -228,6 +235,66 @@
     if (s) s.addEventListener('change', applyShowIf);
   });
   applyShowIf(); // 页面初始按当前模式显隐
+
+  // 2026-11-07（PR 1）：资金自洽展示条实时重算——占比 / 满仓占用 / 可建笔数。
+  // 公式与服务端 _capital_block_html() 一致（只驱动展示，不参与决策）。
+  function applyCapital(sc) {
+    const box = document.querySelector('[data-capital="' + sc + '"]');
+    if (!box) return;
+    const val = (id) => {
+      const el = document.getElementById(id);
+      return el ? parseFloat(el.value) : NaN;
+    };
+    const modeEl = document.getElementById('scenes_' + sc + '_quantity_mode');
+    const mode = modeEl ? modeEl.value : '';
+    const fixed = val('scenes_' + sc + '_td_fixed_amount') || 0;
+    const batches = val('scenes_' + sc + '_batches') || 0;
+    const total = val('scenes_' + sc + '_capital_total') || 0;
+    const rawAvail = box.dataset.avail;
+    const avail = (rawAvail === undefined || rawAvail === '') ? null : parseFloat(rawAvail);
+    const quote = box.dataset.quote || 'USDT';
+    const setT = (sel, v) => { const el = box.querySelector(sel); if (el) el.textContent = v; };
+    const warn = box.querySelector('[data-cap-warn]');
+    const say = (msg, cls) => {
+      if (!warn) return;
+      warn.textContent = msg;
+      warn.className = 'cap-note ' + (cls || '');
+    };
+    if (mode !== 'fixed_amount' || fixed <= 0) {
+      setT('[data-cap-pct]', '—');
+      setT('[data-cap-full]', '—');
+      setT('[data-cap-can]', '—');
+      say('单仓金额仅在「数量模式 = 固定金额」时确定；其它模式的单仓随仓位上限浮动', 'cap-warn-gray');
+      return;
+    }
+    setT('[data-cap-pct]', total > 0 ? (fixed / total * 100).toFixed(2) + '%' : '—');
+    setT('[data-cap-full]', (fixed * batches).toFixed(2));
+    const can = avail === null ? null : Math.floor(avail / fixed);
+    setT('[data-cap-can]', can === null ? '—' : String(can));
+    if (total > 0 && fixed * batches > total + 1e-9) {
+      say('满仓需 ' + (fixed * batches).toFixed(2) + ' ' + quote + ' > 计划总资金 ' + total.toFixed(2)
+          + '（批次多于资金能支撑的）', 'cap-warn-red');
+    } else if (avail === null) {
+      say('TD 未运行，暂无余额快照（启动后显示可建笔数）', 'cap-warn-gray');
+    } else if (can === 0) {
+      say('当前可用 ' + avail.toFixed(2) + ' ' + quote + ' < 单仓 ' + fixed.toFixed(2)
+          + '，信号来了也建不了仓', 'cap-warn-red');
+    } else {
+      say('单仓 × 批次 = 满仓占用；可建笔数按各账户可用余额分别取整后相加', '');
+    }
+  }
+  window.applyCapital = applyCapital;
+  (function bindCapital() {
+    const scenes = ['high', 'mid', 'low'];
+    scenes.forEach(function (sc) {
+      ['td_fixed_amount', 'batches', 'capital_total', 'quantity_mode'].forEach(function (fld) {
+        const el = document.getElementById('scenes_' + sc + '_' + fld);
+        if (el) el.addEventListener('input', function () { applyCapital(sc); });
+        if (el && fld === 'quantity_mode') el.addEventListener('change', function () { applyCapital(sc); });
+      });
+      applyCapital(sc);
+    });
+  })();
 
   function show(m, ok) {
     msg.textContent = m;

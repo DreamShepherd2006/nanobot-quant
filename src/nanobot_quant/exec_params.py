@@ -91,6 +91,8 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
 #:   （LINK 场景），过滤跨多轮周期的陈旧信号；setup 从未归零（结构连续）恒允许；0=关闭（回归
 #:   旧 cd 独立触发行为）。cd 进场门限建立在 setup 结构延续基础上，非独立计算。
 SCENE_ONLY_FIELDS: tuple[str, ...] = (
+    # 计划总资金（2026-11-07）：纯展示用，不进入任何决策
+    "capital_total",
     "sell_only_profit_high", "sell_only_profit_low", "momentum_exit", "cd_stall_n",
     "td_sell_all", "cd_exit_min_profit", "cd_exit_all", "cd_entry_setup_gap",
     # EMA 折价入场门（2026-11-01）——场景专属，无扁平键
@@ -115,7 +117,7 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
 #: 场景卡片字段渲染顺序。
 SCENE_FIELD_ORDER: tuple[str, ...] = (
     "enabled", "sleeptime", "symbols", "quantity_mode",
-    "td_quantity", "td_fixed_amount", "batches", "sub_accounts",
+    "td_quantity", "td_fixed_amount", "capital_total", "batches", "sub_accounts",
     "wave_max_buys",
     "entry_setup", "entry_countdown", "cd_entry_setup_gap",
     # EMA 折价入场门（默认关；周期下拉 21~1597）
@@ -147,6 +149,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
     "high": {
         "enabled": False, "sleeptime": "1m", "symbols": ["SOL"],
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
+        "capital_total": 0.0,
         "batches": 4,
         "sub_accounts": ["gate_bot1", "gate_bot2", "gate_bot3", "gate_bot4"],
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
@@ -172,6 +175,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
     "mid": {
         "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
+        "capital_total": 0.0,
         "batches": 3,
         "sub_accounts": ["gate_bot5", "gate_bot6", "gate_bot7"],
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
@@ -197,6 +201,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
     "low": {
         "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
         "quantity_mode": "fixed", "td_quantity": 10, "td_fixed_amount": 10.0,
+        "capital_total": 0.0,
         "batches": 3,
         "sub_accounts": ["gate_bot8", "gate_bot9", "gate_bot10"],
         "entry_setup": None, "entry_countdown": None, "cd_entry_setup_gap": 5,
@@ -370,6 +375,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "min": 1.0, "max": 5000.0, "step": 1.0, "std": 10.0,
         "show_if": {"quantity_mode": "fixed_amount"},
         "label": "TD 固定金额", "hint": "quantity_mode=fixed_amount 时的每笔建仓金额（U：CEX=USDT / DEX=USDC）。固定金额模式跳过单仓上限（max_position_pct）校验（金额即用户显式仓位），但资金检查保留；CEX 通道需 ≥3U（Gate 最小单），DEX 无下限",
+    },
+    "capital_total": {
+        "group": "scene", "min": 0.0, "max": 10000000.0, "step": 100.0, "std": 0.0,
+        "label": "计划总资金(U)",
+        "hint": "用户自填的计划总资金，**仅用于展示单仓占比与满仓占用，不参与任何决策**——实盘能建多少笔以交易所实际余额为准（页面同时展示「按当前余额可建」）。0=未配置",
     },
     "td_bars": {
         "group": "td", "min": 20, "max": 300, "step": 1, "std": 120, "integer": True,
