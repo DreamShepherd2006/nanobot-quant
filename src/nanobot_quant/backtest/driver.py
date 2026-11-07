@@ -1315,6 +1315,8 @@ class BacktestDriver:
                 "eod_parity": getattr(strategy, "_eod_parity", "even"),
                 "eod_mode": getattr(strategy, "_eod_mode", "all"),
                 "eod_hour_utc": getattr(strategy, "_eod_hour_utc", 0),
+                # EOD 强平豁免名单（2026-11-07）：实际生效值，便于追溯「哪个标的被跳过」
+                "eod_exempt_symbols": sorted(getattr(strategy, "_eod_exempt", frozenset())),
                 "exit_order": getattr(strategy, "_exit_order", None),
                 "stop_loss_pct": getattr(
                     getattr(strategy, "_risk", None), "stop_loss_pct", None

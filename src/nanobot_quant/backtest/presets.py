@@ -169,6 +169,7 @@ _PRESETS: dict[str, dict] = {
             "eod_parity": "even",
             "eod_mode": "all",
             "eod_hour_utc": 0,
+            "eod_exempt_symbols": [],
             # ── 数量 / 成本 ──
             "quantity_mode": "fixed_amount",
             "td_start_slot": 1,

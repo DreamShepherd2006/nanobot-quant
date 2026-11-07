@@ -412,6 +412,12 @@ def _scene_card_html(
         if fk == "sub_accounts":
             fields.append(_field_html(pk, scene.get(fk), gate_accounts, family,
                                       prefix, field_name=fk))
+        elif fk == "eod_exempt_symbols":
+            # EOD 强平豁免名单（2026-11-07）：候选 = 本场景标的池，与标的池同源
+            fields.append(_field_html(pk, scene.get(fk),
+                                      [str(x) for x in (scene.get("symbols") or [])],
+                                      family, prefix, field_name=fk,
+                                      std_override=scene_def.get(fk)))
         else:
             fields.append(_field_html(pk, scene.get(fk), opts.get(pk), family,
                                       prefix, field_name=fk,
@@ -841,6 +847,12 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         # 不打出来则无法从日志确认保存值（静默生效不可接受）。
         _scene_diag = " ".join(
             f"{_sn}.wave_max={_sc.get('wave_max_buys')}"
+            f" {_sn}.eod={_sc.get('eod_enabled')}"
+            f" {_sn}.eod_parity={_sc.get('eod_parity') or '-'}"
+            f" {_sn}.eod_mode={_sc.get('eod_mode') or '-'}"
+            # 0 是合法的小时值（UTC 00:00），不能用 `or '-'` 吞掉（2026-11-08）
+            f" {_sn}.eod_hour={_sc.get('eod_hour_utc') if _sc.get('eod_hour_utc') is not None else '-'}"
+            f" {_sn}.eod_exempt={','.join(_sc.get('eod_exempt_symbols') or []) or '-'}"
             for _sn, _sc in (result["params"].get("scenes") or {}).items()
             if isinstance(_sc, dict) and _sc.get("enabled")
         )

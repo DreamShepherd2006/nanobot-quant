@@ -119,6 +119,13 @@ def coerce_overrides(raw) -> dict:
                         f"{', '.join(sorted(_OV_ENUM[k]))}）"
                     )
                 out[k] = _s
+            elif k == "eod_exempt_symbols":
+                # EOD 强平豁免名单（2026-11-07）：页面是逗号分隔文本、MCP 可能是
+                # list——两种都收，统一成 list[str]。空 = 全部标的参与（合法值）。
+                if isinstance(v, (list, tuple)):
+                    out[k] = [str(x).strip() for x in v if str(x).strip()]
+                else:
+                    out[k] = [x.strip() for x in str(v).replace("、", ",").split(",") if x.strip()]
             elif k == "entry_periods":
                 # 多周期倍数：非法值 fail-closed。策略侧 parse_entry_periods 会
                 # 静默忽略非法项并回退 [1]，若不在入口拦住，页面填错就等于

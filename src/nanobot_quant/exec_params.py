@@ -109,6 +109,8 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "wave_max_buys",
     # EOD 单双号强平（2026-11-05 Step 2）——场景专属、默认关
     "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
+    # EOD 强平豁免名单（2026-11-07）——场景专属、默认 [] = 全部参与
+    "eod_exempt_symbols",
     # 出场首穿（2026-11-06）——场景专属、默认关：高9/cd13 只在首次跨过
     # 阈值那根触发，累加期 10/11/12 不再重复平仓
     "exit_first_cross",
@@ -137,6 +139,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "td_start_slot", "min_account_value",
     # EOD 单双号强平（2026-11-05，默认关）
     "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
+    # 强平豁免标的（2026-11-07，默认空 = 全部参与）
+    "eod_exempt_symbols",
 )
 
 #: 默认 Gate 子账号池（S1 配置层默认值；S3 消费时按 gate.json 实际列表）。
@@ -171,6 +175,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         # （与「不设止损」铁律冲突）⇒ 必须由用户显式开启。
         "eod_enabled": False, "eod_parity": "even",
         "eod_mode": "all", "eod_hour_utc": 0,
+        "eod_exempt_symbols": [],
     },
     "mid": {
         "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
@@ -197,6 +202,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         # （与「不设止损」铁律冲突）⇒ 必须由用户显式开启。
         "eod_enabled": False, "eod_parity": "even",
         "eod_mode": "all", "eod_hour_utc": 0,
+        "eod_exempt_symbols": [],
     },
     "low": {
         "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
@@ -223,6 +229,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         # （与「不设止损」铁律冲突）⇒ 必须由用户显式开启。
         "eod_enabled": False, "eod_parity": "even",
         "eod_mode": "all", "eod_hour_utc": 0,
+        "eod_exempt_symbols": [],
     },
 }
 
@@ -444,6 +451,11 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "eod_hour_utc": {
         "group": "scene", "min": 0, "max": 23, "step": 1, "std": 0, "integer": True,
         "label": "日界小时(UTC)", "hint": "日界所在小时（0=UTC 自然日 24:00）。日界对齐后取日期号判奇偶；非 0 时相当于把交易日起点平移到该小时",
+    },
+    "eod_exempt_symbols": {
+        "group": "scene", "type": "list", "std": "无",
+        "label": "强平豁免标的",
+        "hint": "勾选的标的在日界强平时完全跳过（不清仓、不受 mode 影响）；未勾选 = 参与强平。留空 = 全部参与（默认）。用于保留想长期持有/等解套的仓位，跳过时记 eod_exempt 事件与计数",
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
@@ -679,6 +691,17 @@ def validate_exec_param(key: str, value: Any) -> str | None:
     meta = PARAM_META.get(key)
     if meta is None:
         return "未知参数"
+    if key == "eod_exempt_symbols":
+        # 空名单是合法值（= 全部标的参与强平），故不走下面「非空列表」的
+        # 通用 list 校验；非空时要求全是字符串。名单⊆场景标的池的校验在
+        # _apply_scene_overrides 末尾统一做（symbols 解析顺序不保证）。
+        if value in (None, ""):
+            return None
+        if not isinstance(value, list):
+            return "必须是标的列表"
+        if not all(isinstance(v, str) and v.strip() for v in value):
+            return "列表项必须是非空字符串"
+        return None
     if key == "entry_periods":
         _raw = str(value if value is not None else "").replace("，", ",").strip()
         _toks = [t.strip() for t in _raw.split(",") if t.strip()]
@@ -891,6 +914,23 @@ def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
                 label = SCENES[sk]["label"]
                 return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
             scene[fk] = src[fk]
+    # 2026-11-07：强平豁免名单必须⊆本场景标的池——非法值 fail-closed 并
+    # 列出可选值（按「非法值必须在入口报错」的纪律，不静默丢弃）。
+    for sk, sc in (merged.get("scenes") or {}).items():
+        exempt = sc.get("eod_exempt_symbols") or []
+        if not exempt:
+            continue
+        pool = [str(x) for x in (sc.get("symbols") or [])]
+        bad = [x for x in exempt if x not in pool]
+        if bad:
+            label = SCENES.get(sk, {}).get("label", sk)
+            return {
+                "ok": False,
+                "error": (
+                    f"场景{label}.eod_exempt_symbols: 不在该场景标的池内"
+                    f"（非法：{','.join(bad)}；可选：{','.join(pool) or '无'}）"
+                ),
+            }
     return None
 
 
