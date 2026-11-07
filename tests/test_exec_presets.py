@@ -11,7 +11,7 @@ def _seed_scene(**over):
     sc = dict(DEFAULT_SCENES["high"])
     sc.update(
         {
-            "enabled": True,
+            "enabled": bool(over.pop("enabled", False)),
             "execution_channel": "okx_cex",
             "sub_accounts": ["DreamShepherdbot2"],
             "symbols": ["SOL", "BNB"],
@@ -19,6 +19,7 @@ def _seed_scene(**over):
             "td_fixed_amount": 4.0,
             "batches": 3,
             "entry_setup": 8,
+            "take_profit_pct": 0.02,
         }
     )
     sc.update(over)
@@ -132,3 +133,207 @@ def test_presets_meta_and_get_preset_see_snapshot():
     # 内置在前、快照在后
     assert preset_names().index(name) > 0
     assert get_preset(name)["run"]["scene"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# PR 3：恢复快照
+# ---------------------------------------------------------------------------
+
+
+def _save_high_snapshot(name="live_high_apply"):
+    from nanobot_quant.exec_presets import build_snapshot, save_user_preset
+
+    save_user_preset(name, build_snapshot("high"))
+    return name
+
+
+def test_apply_rejects_while_td_running():
+    from nanobot_quant import td_live_state
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene()
+    name = _save_high_snapshot()
+    td_live_state.set_loop(True)
+    try:
+        with pytest.raises(ValueError, match="TD 循环仍在运行"):
+            apply_snapshot(name)
+    finally:
+        td_live_state.set_loop(False)
+
+
+def test_apply_rejects_when_scene_enabled():
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene(enabled=True)  # 启用中（即使线程没跑）
+    name = _save_high_snapshot()
+    with pytest.raises(ValueError, match="TD 循环仍在运行"):
+        apply_snapshot(name)
+
+
+def test_apply_rejects_channel_mismatch():
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene()
+    name = _save_high_snapshot()
+    ep = load_exec_params()
+    ep["execution_channel"] = "gate"  # 快照记录 okx_cex
+    ep["scenes"]["high"]["enabled"] = False
+    save_exec_params(ep)
+    with pytest.raises(ValueError, match="执行通道不一致"):
+        apply_snapshot(name)
+
+
+def test_apply_unknown_snapshot():
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene()
+    with pytest.raises(ValueError, match="不存在"):
+        apply_snapshot("no_such_snapshot")
+
+
+def test_apply_restores_values_backs_up_and_keeps_scene_disabled():
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot, load_user_presets
+
+    _seed_scene()
+    name = _save_high_snapshot()
+
+    # 改坏：entry_setup 9 → 7、止盈 2% → 5%
+    ep = load_exec_params()
+    ep["scenes"]["high"].update({"enabled": False, "entry_setup": 7})
+    ep["take_profit_pct"] = 0.05  # 扁平值会覆盖 scenes.high（既有约定）⇒ 改扁平才落盘
+    save_exec_params(ep)
+
+    res = apply_snapshot(name)
+    assert res["ok"] and res["scene"] == "high"
+    assert res["applied"]["entry_setup"] == {"old": 7, "new": 8}
+    assert res["applied"]["take_profit_pct"]["new"] == pytest.approx(0.02)
+    assert res["backup"].startswith("before_restore_")
+    assert res["backup"] in load_user_presets()          # 备份真的落盘
+
+    after = load_exec_params()["scenes"]["high"]
+    assert after["entry_setup"] == 8
+    assert after["enabled"] is False                     # 恢复后必须由用户显式启动
+
+
+def test_apply_skips_sub_accounts_by_default_and_writes_when_asked():
+    from nanobot_quant.exec_params import load_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene(sub_accounts=["DreamShepherdbot2", "DreamShepherdbot3"])
+    name = _save_high_snapshot()
+
+    res = apply_snapshot(name)
+    assert res["sub_accounts"] == "skipped"
+    assert load_exec_params()["scenes"]["high"]["sub_accounts"] == [
+        "DreamShepherdbot2",
+        "DreamShepherdbot3",
+    ]
+
+    res2 = apply_snapshot(name, include_sub_accounts=True)
+    assert res2["sub_accounts"] == "written"
+    assert res2["applied"]["sub_accounts"]["new"] == [
+        "DreamShepherdbot2",
+        "DreamShepherdbot3",
+    ]
+
+
+def test_apply_reports_global_fields_without_writing_them():
+    from nanobot_quant.exec_params import load_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene()
+    name = _save_high_snapshot()
+    res = apply_snapshot(name)
+    # fee_rate / slippage 是跨场景字段：只报告、不写
+    assert "fee_rate" in res["global_skipped"]
+    assert "fee_rate" not in res["applied"]
+
+
+def test_snapshot_puts_symbols_in_overrides():
+    """标的池必须进 overrides（自包含），否则实盘恢复读不到（2026-11-07 修）。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import build_snapshot
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "BNB", "BTC"]
+    ep["td_symbols"] = ["SOL", "BNB", "BTC"]
+    save_exec_params(ep)
+
+    snap = build_snapshot("high")
+    assert snap["overrides"]["symbols"] == ["SOL", "BNB", "BTC"]
+    assert snap["run"]["symbols"] == ["SOL", "BNB", "BTC"]  # 展示用，保留
+
+
+def test_apply_restores_symbols():
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "BNB", "BTC"]
+    ep["td_symbols"] = ["SOL", "BNB", "BTC"]
+    save_exec_params(ep)
+    name = _save_high_snapshot("live_high_symbols")
+
+    # 改坏：只剩 SOL
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL"]
+    ep["td_symbols"] = ["SOL"]
+    save_exec_params(ep)
+
+    res = apply_snapshot(name)
+    assert res["applied"]["symbols"] == {"old": ["SOL"], "new": ["SOL", "BNB", "BTC"]}
+    after = load_exec_params()
+    assert after["scenes"]["high"]["symbols"] == ["SOL", "BNB", "BTC"]
+    assert after["td_symbols"] == ["SOL", "BNB", "BTC"]  # 扁平键同步
+
+
+def test_apply_restores_symbols_from_legacy_run_only():
+    """旧快照（overrides 里没有 symbols）走 run.symbols 回退，不能静默丢标的。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot, build_snapshot, save_user_preset
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "ETH"]
+    ep["td_symbols"] = ["SOL", "ETH"]
+    save_exec_params(ep)
+
+    snap = build_snapshot("high")
+    snap["overrides"].pop("symbols", None)          # 模拟第 2 批保存的旧快照
+    assert snap["run"]["symbols"] == ["SOL", "ETH"]
+    save_user_preset("legacy_snapshot", snap)
+
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL"]
+    ep["td_symbols"] = ["SOL"]
+    save_exec_params(ep)
+
+    apply_snapshot("legacy_snapshot")
+    assert load_exec_params()["scenes"]["high"]["symbols"] == ["SOL", "ETH"]
+
+
+def test_apply_never_restores_batches():
+    """batches 与台账 slot 强绑定 ⇒ 明确不恢复（改了会触发拒绝重建）。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot, build_snapshot, save_user_preset
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["batches"] = 10
+    ep["td_batches"] = 10
+    save_exec_params(ep)
+    snap = build_snapshot("high")
+    save_user_preset("batch_snapshot", snap)
+
+    ep = load_exec_params()
+    ep["scenes"]["high"]["batches"] = 3
+    ep["td_batches"] = 3
+    save_exec_params(ep)
+
+    res = apply_snapshot("batch_snapshot")
+    assert "batches" not in res["applied"]
+    assert load_exec_params()["scenes"]["high"]["batches"] == 3  # 保持人工设定

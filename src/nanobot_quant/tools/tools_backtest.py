@@ -782,6 +782,9 @@ def run_backtest(
             from nanobot_quant.backtest.presets import expand_preset
 
             overrides, preset_meta = expand_preset(preset, overrides)
+            # 标的池属 run 级（与 batches 同类）：由 run.symbols / 显式 symbols
+            # 参数控制，不从 overrides 覆盖，避免 preset 冲掉页面上手选的口径。
+            overrides.pop("symbols", None)
             # preset 内部值也要过一遍类型/枚举校验，防 preset 本身写错。
             overrides = coerce_overrides(overrides)
         except ValueError as exc:

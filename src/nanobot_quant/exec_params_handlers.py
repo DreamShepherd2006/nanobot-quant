@@ -913,5 +913,38 @@ def register_exec_params_routes(app, gatekeeper) -> None:
     # 2026-11-02：参数 markdown 快照（只读；页面「📋 复制参数」按钮取它）
     app.add_route("/config/exec/params.md", _params_md, methods=["GET"])
     # 2026-11-07：实盘参数快照（保存 / 列表；恢复在后续批次）
+    async def _presets_apply(request: Request):
+        """把快照写回实盘（2026-11-07 PR 3）。
+
+        服务端硬性顺序约束：TD 运行中拒绝、通道不一致拒绝、残缺拒绝；
+        恢复前自动备份；恢复后场景保持未启用，由用户显式启动。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return PlainTextResponse(f"🔒 {err}", status_code=403 if "Commander" in err else 401)
+        from .exec_presets import apply_snapshot
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
+        name = str((body or {}).get("name") or "").strip()
+        if not name:
+            return JSONResponse({"ok": False, "error": "缺少快照名"}, status_code=400)
+        include_sub = bool((body or {}).get("include_sub_accounts"))
+        try:
+            res = apply_snapshot(name, include_sub_accounts=include_sub)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            gatekeeper._log(f"⚠️ 快照恢复异常: {e}")
+            return JSONResponse({"ok": False, "error": f"恢复失败: {e}"}, status_code=500)
+        gatekeeper._log(
+            f"↩️ 实盘快照已恢复: {name} → 场景 {res.get('scene')}，"
+            f"改动 {len(res.get('applied') or {})} 项，备份 {res.get('backup')}"
+        )
+        return JSONResponse(res)
+
     app.add_route("/config/exec-presets", _presets_list, methods=["GET"])
     app.add_route("/config/exec-presets/save", _presets_save, methods=["POST"])
+    app.add_route("/config/exec-presets/apply", _presets_apply, methods=["POST"])
