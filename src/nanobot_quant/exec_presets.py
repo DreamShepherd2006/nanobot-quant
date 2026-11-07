@@ -193,6 +193,13 @@ def build_snapshot(scene_key: str = "high") -> dict:
             f"以下决策键无法解析出生效值（场景/全局/td_params/默认均缺失）：{', '.join(unresolved)}"
         )
 
+    # 标的池属决策参数：写进 overrides 让快照真正"自包含"
+    # （2026-11-07：此前只放 run 段，实盘恢复只遍历 overrides ⇒ 标的永远恢复不了；
+    #  回测页读 run.symbols 却能恢复 —— 两处各自实现导致的语义漂移）
+    _symbols = [str(s) for s in (scene.get("symbols") or ep.get("symbols") or [])]
+    if _symbols:
+        overrides["symbols"] = _symbols
+
     run = {
         "strategy_variant": variant,
         "scene": scene_key,
@@ -265,7 +272,13 @@ def apply_snapshot(name: str, include_sub_accounts: bool = False) -> dict:
 
     run = snap.get("run") or {}
     scene_key = str(run.get("scene") or "high")
-    overrides = snap.get("overrides") or {}
+    overrides = dict(snap.get("overrides") or {})
+    # 兼容本次之前的快照：标的只存在 run.symbols 里（旧版 build_snapshot 未写进
+    # overrides）⇒ 回退读取，避免"新快照能恢复、旧快照静默丢标的"。
+    if "symbols" not in overrides:
+        _legacy = [str(s) for s in (run.get("symbols") or [])]
+        if _legacy:
+            overrides["symbols"] = _legacy
     missing = sorted(REQUIRED_OVERRIDE_KEYS - set(overrides))
     if missing:
         raise ValueError(f"快照不自包含，缺少 {len(missing)} 个决策键，拒绝部分写入")

@@ -249,3 +249,91 @@ def test_apply_reports_global_fields_without_writing_them():
     # fee_rate / slippage 是跨场景字段：只报告、不写
     assert "fee_rate" in res["global_skipped"]
     assert "fee_rate" not in res["applied"]
+
+
+def test_snapshot_puts_symbols_in_overrides():
+    """标的池必须进 overrides（自包含），否则实盘恢复读不到（2026-11-07 修）。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import build_snapshot
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "BNB", "BTC"]
+    ep["td_symbols"] = ["SOL", "BNB", "BTC"]
+    save_exec_params(ep)
+
+    snap = build_snapshot("high")
+    assert snap["overrides"]["symbols"] == ["SOL", "BNB", "BTC"]
+    assert snap["run"]["symbols"] == ["SOL", "BNB", "BTC"]  # 展示用，保留
+
+
+def test_apply_restores_symbols():
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "BNB", "BTC"]
+    ep["td_symbols"] = ["SOL", "BNB", "BTC"]
+    save_exec_params(ep)
+    name = _save_high_snapshot("live_high_symbols")
+
+    # 改坏：只剩 SOL
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL"]
+    ep["td_symbols"] = ["SOL"]
+    save_exec_params(ep)
+
+    res = apply_snapshot(name)
+    assert res["applied"]["symbols"] == {"old": ["SOL"], "new": ["SOL", "BNB", "BTC"]}
+    after = load_exec_params()
+    assert after["scenes"]["high"]["symbols"] == ["SOL", "BNB", "BTC"]
+    assert after["td_symbols"] == ["SOL", "BNB", "BTC"]  # 扁平键同步
+
+
+def test_apply_restores_symbols_from_legacy_run_only():
+    """旧快照（overrides 里没有 symbols）走 run.symbols 回退，不能静默丢标的。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot, build_snapshot, save_user_preset
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL", "ETH"]
+    ep["td_symbols"] = ["SOL", "ETH"]
+    save_exec_params(ep)
+
+    snap = build_snapshot("high")
+    snap["overrides"].pop("symbols", None)          # 模拟第 2 批保存的旧快照
+    assert snap["run"]["symbols"] == ["SOL", "ETH"]
+    save_user_preset("legacy_snapshot", snap)
+
+    ep = load_exec_params()
+    ep["scenes"]["high"]["symbols"] = ["SOL"]
+    ep["td_symbols"] = ["SOL"]
+    save_exec_params(ep)
+
+    apply_snapshot("legacy_snapshot")
+    assert load_exec_params()["scenes"]["high"]["symbols"] == ["SOL", "ETH"]
+
+
+def test_apply_never_restores_batches():
+    """batches 与台账 slot 强绑定 ⇒ 明确不恢复（改了会触发拒绝重建）。"""
+    from nanobot_quant.exec_params import load_exec_params, save_exec_params
+    from nanobot_quant.exec_presets import apply_snapshot, build_snapshot, save_user_preset
+
+    _seed_scene()
+    ep = load_exec_params()
+    ep["scenes"]["high"]["batches"] = 10
+    ep["td_batches"] = 10
+    save_exec_params(ep)
+    snap = build_snapshot("high")
+    save_user_preset("batch_snapshot", snap)
+
+    ep = load_exec_params()
+    ep["scenes"]["high"]["batches"] = 3
+    ep["td_batches"] = 3
+    save_exec_params(ep)
+
+    res = apply_snapshot("batch_snapshot")
+    assert "batches" not in res["applied"]
+    assert load_exec_params()["scenes"]["high"]["batches"] == 3  # 保持人工设定

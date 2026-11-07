@@ -353,8 +353,23 @@
         const d = await r.json();
         if (!d.ok) { msg.textContent = '❌ ' + (d.error || '恢复失败'); btn.disabled = false; return; }
         const n = Object.keys(d.applied || {}).length;
-        alert('✅ 已恢复 ' + name + '\n改动 ' + n + ' 项\n备份：' + d.backup +
-              '\n\n场景已置为未启用，请重新勾选「启动 TD」并保存。');
+        const fmt = v => {
+          if (Array.isArray(v)) return '[' + v.join(', ') + ']';
+          if (v === null || v === undefined) return '—';
+          return String(v);
+        };
+        const lines = ['✅ 已恢复 ' + name, '改动 ' + n + ' 项：'];
+        Object.entries(d.applied || {}).forEach(([k, v]) => {
+          lines.push('  · ' + k + ': ' + fmt(v.old) + ' → ' + fmt(v.new));
+        });
+        if (d.sub_accounts === 'written') lines.push('✅ 子账号池已恢复');
+        else if (d.sub_accounts === 'skipped') lines.push('ℹ️ 子账号池未恢复（未勾选「同时恢复子账号池」）');
+        else lines.push('⚠️ 该快照未记录子账号池（第 2 批之前保存的旧快照），需人工确认；重新保存快照后即可恢复');
+        const gs = Object.keys(d.global_skipped || {});
+        if (gs.length) lines.push('ℹ️ 跨场景字段未回滚（需手工改）：' + gs.join(', '));
+        lines.push('', '备份：' + d.backup,
+                   '场景已置为未启用，请重新勾选「启动 TD」并保存。');
+        alert(lines.join('\n'));
         location.reload();
       } catch (e) {
         msg.textContent = '❌ ' + e; btn.disabled = false;
