@@ -426,6 +426,9 @@ def _scene_card_html(
         f'<h3>④-{idx} {sdef["label"]}（{sdef["freq"]} · {sdef["desc"]}）　{badge}</h3>'
         f'{"".join(fields)}'
         f'{_capital_block_html(scene_key, scene)}'
+        f'<div class="snap-row"><button type="button" class="snap-btn"'
+        f' data-snap-scene="{scene_key}">💾 把当前参数存为快照</button>'
+        f'<span class="snap-hint">只存参数、不改实盘；重名会被拒绝</span></div>'
         f'{warn}'
         f'</div>'
     )
@@ -859,7 +862,56 @@ def register_exec_params_routes(app, gatekeeper) -> None:
         return JSONResponse({"ok": True, "message": message,
                              "params": result.get("params")})
 
+    async def _presets_list(request: Request):
+        """实盘快照 + 内置 preset 列表（2026-11-07，只读）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return PlainTextResponse(f"🔒 {err}", status_code=403 if "Commander" in err else 401)
+        from .backtest.presets import presets_meta
+
+        try:
+            items = presets_meta()
+        except Exception as e:  # noqa: BLE001 - 快照损坏不拖垮整页
+            gatekeeper._log(f"⚠️ preset 列表读取失败: {e}")
+            items = []
+        return JSONResponse({"presets": items})
+
+    async def _presets_save(request: Request):
+        """把当前实盘某场景冻结成快照（2026-11-07）。
+
+        **只读生成、不改实盘参数**；重名与残缺一律 fail-closed（400）。
+        TD 运行中也可保存 —— 读的是落盘值，不涉及运行状态。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return PlainTextResponse(f"🔒 {err}", status_code=403 if "Commander" in err else 401)
+        from .exec_presets import build_snapshot, default_snapshot_name, save_user_preset
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
+        scene = str((body or {}).get("scene") or "high")
+        name = str((body or {}).get("name") or "").strip() or default_snapshot_name(scene)
+        try:
+            snap = build_snapshot(scene)
+            save_user_preset(name, snap)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            gatekeeper._log(f"⚠️ 快照保存异常: {e}")
+            return JSONResponse({"ok": False, "error": f"保存失败: {e}"}, status_code=500)
+        gatekeeper._log(
+            f"💾 实盘快照已保存: {name} (场景={scene}, "
+            f"{len(snap.get('overrides') or {})} 个决策键, "
+            f"标的={snap.get('run', {}).get('symbols')})"
+        )
+        return JSONResponse({"ok": True, "name": name, "snapshot": snap})
+
     app.add_route("/config/exec", _page, methods=["GET"])
     app.add_route("/config/exec", _save, methods=["POST"])
     # 2026-11-02：参数 markdown 快照（只读；页面「📋 复制参数」按钮取它）
     app.add_route("/config/exec/params.md", _params_md, methods=["GET"])
+    # 2026-11-07：实盘参数快照（保存 / 列表；恢复在后续批次）
+    app.add_route("/config/exec-presets", _presets_list, methods=["GET"])
+    app.add_route("/config/exec-presets/save", _presets_save, methods=["POST"])

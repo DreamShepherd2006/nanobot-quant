@@ -38,6 +38,12 @@
   .cap-note { font-size:.78em; color:#777; margin-top:4px; }
   .cap-warn-red { color:#c62828; font-weight:600; }
   .cap-warn-gray { color:#888; }
+  .snap-row { display:flex; align-items:center; gap:10px; margin:6px 0 2px; }
+  .snap-btn { font-size:.82em; padding:4px 10px; border:1px solid #90a4ae; background:#eceff1;
+              color:#37474f; border-radius:6px; cursor:pointer; }
+  .snap-btn:hover { background:#e0e7ea; }
+  .snap-btn:disabled { opacity:.6; cursor:default; }
+  .snap-hint { font-size:.75em; color:#999; }
   input[type=number] { width:86px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; text-align:right; }
   input[type=text] { width:150px; padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:.9em; }
   select { padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:.9em; background:#fff; }
@@ -284,6 +290,38 @@
     }
   }
   window.applyCapital = applyCapital;
+
+  // 2026-11-07（PR 2）：把当前场景参数冻结成快照（只读生成、不改实盘）
+  document.querySelectorAll('[data-snap-scene]').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      const sc = btn.dataset.snapScene;
+      const name = prompt('快照名（留空 = 自动 live_' + sc + '_日期）', '');
+      if (name === null) return;  // 取消
+      const tok = new URLSearchParams(location.search).get('token');
+      const url = '/config/exec-presets/save' + (tok ? '?token=' + encodeURIComponent(tok) : '');
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = '⏳ 保存中…';
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({scene: sc, name: name})
+        });
+        const d = await r.json();
+        if (d.ok) {
+          btn.textContent = '✅ 已保存 ' + d.name;
+          setTimeout(function () { btn.textContent = old; btn.disabled = false; }, 2500);
+        } else {
+          alert('保存失败：' + (d.error || '未知错误'));
+          btn.textContent = old; btn.disabled = false;
+        }
+      } catch (e) {
+        alert('保存失败：' + e);
+        btn.textContent = old; btn.disabled = false;
+      }
+    });
+  });
   (function bindCapital() {
     const scenes = ['high', 'mid', 'low'];
     scenes.forEach(function (sc) {
