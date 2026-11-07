@@ -1121,6 +1121,10 @@ class _FakeCexBroker:
         self.status, self.filled, self.avg = status, filled, avg
         self.last = None
 
+    def inst_id_of(self, symbol):
+        # 2026-11-07：查单改用 broker 交易对（原为 gate_pair 硬拼）
+        return f"{symbol}_USDT"
+
     def _query_order(self, order_id, pair):
         self.last = (order_id, pair)
         return (self.status, self.filled, 0.0, self.avg)

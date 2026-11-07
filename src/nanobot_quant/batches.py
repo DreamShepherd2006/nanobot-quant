@@ -355,6 +355,7 @@ class BatchManager:
         slot: Optional[int] = None,
         ord_id: Optional[str] = None,
         fill_px: Optional[float] = None,
+        inst_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """BUY：占用一个 available slot 并记录 lot。返回该 slot。
 
@@ -362,6 +363,12 @@ class BatchManager:
         共享资金池通道（``slot_model="shared_pool"``）多批共用同一账号余额，
         重启时无法靠余额反推批次数，故记录交易所订单号供逐批对账。
         仅在传入时写入字段——Gate/DEX 台账字节级不变。
+
+        ``inst_id``（2026-11-07）：下单时的交易所交易对（OKX 形如
+        ``SOL-USDC``、Gate 形如 ``SOL_USDT``）。重启对账按 ord_id 回查订单
+        时必须用**当时的**交易对——换过计价币（USDT ↔ USDC）后用当前值
+        重算会查错对，整批报 ``51603 Order does not exist``。同样只在传入
+        时写入，旧台账零影响。
         """
         target = None
         if slot is not None:
@@ -382,6 +389,8 @@ class BatchManager:
             lot["ord_id"] = str(ord_id)
         if fill_px is not None:
             lot["fill_px"] = float(fill_px)
+        if inst_id:
+            lot["inst_id"] = str(inst_id)
         target["lot"] = lot
         return target
 

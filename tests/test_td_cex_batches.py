@@ -746,7 +746,11 @@ def test_cex_confirm_buy_uses_filled_not_planned(tmp_path):
     }
 
     class _FakeQ:
+        def inst_id_of(self, symbol):
+            return "ETH_USDT"
+
         def _query_order(self, order_id, pair):
+            assert pair == "ETH_USDT"  # 2026-11-07：查单用 broker 交易对
             return ("filled", 0.0012, 0.0, 2461.6)
 
     s._cex_confirm_broker = lambda slot_id, info: _FakeQ()

@@ -756,10 +756,16 @@ class _TdLiveRunner:
                 print(f"[DIAG] td_live 对账(ord_id): {symbol} slot={slot.get('slot')} "
                       f"broker 创建失败: {exc}", file=sys.stderr, flush=True)
                 continue
-            try:
-                pair = broker.inst_id_of(symbol)
-            except Exception:  # noqa: BLE001
-                pair = ""
+            # 交易对口径（2026-11-07）：优先用**下单时写进台账**的 inst_id。
+            # 用当前 quote_ccy 重新解析会在换过计价币后查错交易对 → 整批
+            # 51603 Order does not exist（实测 14 笔全不符；换回原口径即
+            # 「不符 0」）。旧台账无该字段时才回退 broker 解析。
+            pair = str(lot.get("inst_id") or "").strip()
+            if not pair:
+                try:
+                    pair = broker.inst_id_of(symbol)
+                except Exception:  # noqa: BLE001
+                    pair = ""
             checked += 1
             try:
                 status, filled, _left, avg = broker._query_order(oid, pair)

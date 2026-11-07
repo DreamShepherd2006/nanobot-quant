@@ -49,12 +49,14 @@ class _FakeBM:
         self.saved += 1
 
 
-def _slot(no, qty, ord_id=None, fill_px=None):
+def _slot(no, qty, ord_id=None, fill_px=None, inst_id=None):
     lot = {"qty": qty, "entry_price": 100.0, "entry_time": f"2026-10-29T0{no}:00:00"}
     if ord_id:
         lot["ord_id"] = ord_id
     if fill_px is not None:
         lot["fill_px"] = fill_px
+    if inst_id:
+        lot["inst_id"] = inst_id
     return {"slot": no, "status": "open", "account_id": "DreamShepherdbot2", "lot": lot}
 
 
@@ -183,3 +185,24 @@ def test_cex_ord_id_sources():
     assert strat._cex_ord_id(_Order({"cex": {"ord_id": "123"}})) == "123"
     assert strat._cex_ord_id(_Order({}, "gate-oid")) == "gate-oid"
     assert strat._cex_ord_id(_Order(None, None)) is None
+
+
+def test_verify_ord_prefers_ledger_inst_id(capsys):
+    """对账必须用**下单时**的交易对（2026-11-07）。
+
+    实盘背景：quote_ccy 由 USDC 改成 USDT 后，台账里的历史订单属 -USDC 对，
+    用当前值去查 → 整批 51603 Order does not exist（实测 14 笔全不符）。
+    """
+    broker = _FakeBroker(result=("filled", 5.0, 0.0, 100.0), inst="SOL-USDC")
+    bm = _FakeBM([_slot(1, 5.0, ord_id="ord-1", inst_id="SOL-USDT")])
+    _runner(broker)._reconcile_verify_ord(bm, "SOL")
+    assert broker.queries == [("ord-1", "SOL-USDT")]
+    assert "inst_id" in bm.slots[0]["lot"]  # 只读核对，不改台账
+
+
+def test_verify_ord_falls_back_to_broker_inst(capsys):
+    """旧台账无 inst_id → 仍走 broker.inst_id_of（零回归）。"""
+    broker = _FakeBroker(result=("filled", 5.0, 0.0, 100.0), inst="SOL-USDC")
+    bm = _FakeBM([_slot(1, 5.0, ord_id="ord-2")])
+    _runner(broker)._reconcile_verify_ord(bm, "SOL")
+    assert broker.queries == [("ord-2", "SOL-USDC")]
