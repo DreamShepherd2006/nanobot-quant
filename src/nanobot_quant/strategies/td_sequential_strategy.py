@@ -1402,6 +1402,73 @@ class TdSequentialStrategy(Strategy):
         except Exception:  # noqa: BLE001 — 公式兜底，绝不阻断取数
             return n + int(5 * (n + 1) / 2)
 
+    def _manual_close_round(self) -> bool:
+        """消费页面发起的「手动平仓」命令（2026-11-09 用户需求）。
+
+        返回 True = 本轮该标的已按手动命令处理（不论成功/失败），此后不再做
+        任何 TD 决策——避免「刚平完又被同一个 setup 周期买回」。
+
+        只在实盘（``live_mode``）生效；卖出仍走 ``_sell_lot``，从而复用缩量
+        卖出、min_quote 预检、成交确认、台账 ``close_lot`` 与事件记录。
+        fail-closed：取价失败 / 台账无该批 / 未成交 → 标 failed 并原样留原因。
+        """
+        if not self.parameters.get("live_mode"):
+            return False
+        try:
+            from nanobot_quant import manual_close as mc
+        except Exception:  # noqa: BLE001
+            return False
+        scene = getattr(self, "_current_scene", "") or "default"
+        try:
+            items = mc.pending_for(scene, self.symbol)
+        except Exception:  # noqa: BLE001
+            return False
+        if not items:
+            return False
+        bm = self.batch_manager
+        if bm is None:
+            for it in items:
+                mc.mark(it["id"], "failed", "无批次台账")
+            return True
+        open_map = {int(s.get("slot") or 0): s for s in bm.open_slots()}
+        for it in items:
+            slot_no = int(it.get("slot") or 0)
+            slot = open_map.get(slot_no)
+            if slot is None:
+                mc.mark(it["id"], "failed", "台账无该批次（可能已平仓）")
+                continue
+            if not self._is_cex():
+                mc.mark(it["id"], "failed", "DEX 通道暂不支持手动平仓")
+                continue
+            try:
+                price = float(self._cex_price_of(self.symbol) or 0.0)
+            except Exception:  # noqa: BLE001
+                price = 0.0
+            if price <= 0:
+                mc.mark(it["id"], "failed", "取价失败，未下单")
+                continue
+            try:
+                self._sell_lot(
+                    slot,
+                    price,
+                    {"recommendation": "SELL", "price": price, "score": 0.0},
+                    "manual",
+                )
+            except Exception as exc:  # noqa: BLE001
+                mc.mark(it["id"], "failed", f"{type(exc).__name__}: {exc}")
+                continue
+            still = bm.get_lot(slot_no)
+            if still is None:
+                mc.mark(it["id"], "done", f"已平仓 @ {price}", price=price)
+            else:
+                mc.mark(
+                    it["id"],
+                    "failed",
+                    "台账仍 open（未成交/被门拦，详见交易记录）",
+                    price=price,
+                )
+        return True
+
     def _evaluate_symbol(self, prefetched: tuple | None = None) -> None:
         """单标的评估（拉 K 线 → TD 计算 → 信号 → 真分账/常规下单）。
 
@@ -1411,6 +1478,9 @@ class TdSequentialStrategy(Strategy):
         # 每标的每次评估先重置闸门状态（早退路径也保持「无候选」语义，避免
         # 上一标的/上一轮的状态被 driver 读成当前 bar 的决策）
         self._last_ema_gate_state = ""
+        # 2026-11-09：手动平仓命令优先消费（用户页面发起，复用 _sell_lot 全路径）
+        if self._manual_close_round():
+            return
         if prefetched is not None:
             bars, fetch_len, drop_in_progress, exc = prefetched
             if bars is None:

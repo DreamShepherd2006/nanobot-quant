@@ -25,13 +25,15 @@ import html as _html
 import json
 import re
 import sys
+import time
+import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 from fastapi import Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant.data_sources import data_source_for_channel, get_data_source
 from nanobot_quant.exec_params import load_exec_params
@@ -1051,26 +1053,41 @@ def _shared_pool_map_txt(sub_accounts, batches: int = 1) -> str:
         txt += " ⚠ 场景池已忽略"
     return txt
 
-def _pos_row(lot: dict) -> str:
-    """持仓小节单行（标的/slot/数量/价值/成本价/现价/浮盈%）。
+def _pos_row(lot: dict, sc: str = "", running: bool = False) -> str:
+    """持仓小节单行（标的/slot/数量/价值/成本价/现价/浮盈%/操作）。
 
     2026-10-30 用户要求：① 数量与价格定点显示（此前 BTC 显示成
     ``5.094e-05`` / ``7.853e+04``）；② 新增「价值(USD)」列，直接看出
     这仓占多少钱。
+
+    2026-11-09：新增「操作」列 = 手动平仓入口。TD 未运行时按钮禁用
+    （命令由 TD 循环消费，无循环就无人执行）。
     """
     pnl = lot.get("pnl_pct")
     pnl_txt = f"{pnl * 100:+.2f}%" if pnl is not None else "—"
     entry_txt = _fmt_pos_price(lot.get("entry_price"))
     price_txt = _fmt_pos_price(lot.get("price"))
     value_txt = _pos_value_txt(lot.get("qty"), lot.get("price"), lot.get("entry_price"))
+    sym = str(lot.get("symbol", ""))
+    slot = str(lot.get("slot", ""))
+    if sc and sym and slot:
+        dis = "" if running else " disabled"
+        tip = "平掉该批次（市价，两步确认）" if running else "TD 未运行：先启动 TD 才能执行手动平仓"
+        op = (
+            f'<td><button class="mc-btn"{dis} title="{tip}"'
+            f' data-scene="{_esc(sc)}" data-sym="{_esc(sym)}"'
+            f' data-slot="{_esc(slot)}">平仓</button></td>'
+        )
+    else:
+        op = "<td></td>"
     return (
-        f'<tr><td><b>{_esc(str(lot.get("symbol", "")))}</b></td>'
-        f'<td>{_esc(str(lot.get("slot", "")))}</td>'
+        f'<tr><td><b>{_esc(sym)}</b></td>'
+        f'<td>{_esc(slot)}</td>'
         f'<td class="num">{_esc(_fmt_qty(lot.get("qty")))}</td>'
         f'<td class="num">{value_txt}</td>'
         f'<td class="num">{entry_txt}</td>'
         f'<td class="num">{price_txt}</td>'
-        f'<td class="num">{pnl_txt}</td></tr>'
+        f'<td class="num">{pnl_txt}</td>{op}</tr>'
     )
 
 
@@ -1163,10 +1180,10 @@ def _scene_positions_block(sc: str, running: bool) -> str:
     if running and live_pos:
         for _sym, lots in sorted(live_pos.items()):
             for lot in lots or []:
-                rows.append(_pos_row(lot))
+                rows.append(_pos_row(lot, sc, running))
     else:
         for lot in _load_batch_snapshot(sc):
-            rows.append(_pos_row(lot))
+            rows.append(_pos_row(lot, sc, running))
     if not rows:
         return ""
     return (
@@ -1174,7 +1191,7 @@ def _scene_positions_block(sc: str, running: bool) -> str:
         '<span class="muted" style="float:right">运行中=实时价 · 未运行=台账快照（无现价）</span></div>'
         '<table style="margin-top:2px">'
         '<tr><th>标的</th><th>slot</th><th>数量</th><th>价值(USD)</th>'
-        '<th>成本价</th><th>现价</th><th>浮盈%</th></tr>'
+        '<th>成本价</th><th>现价</th><th>浮盈%</th><th>操作</th></tr>'
         + "".join(rows) + "</table>"
     )
 
@@ -1968,9 +1985,209 @@ def _render_history(ticker, bar, start, end, strategy_name, params, setup,
 # ── 路由注册（legion gatekeeper 调用） ───────────────────────────────
 
 
+# ── 手动平仓（2026-11-09 用户需求） ───────────────────────────────
+
+_MC_TOKENS: dict[str, dict] = {}
+_MC_TTL_S = 30
+
+
+def _mc_live_state() -> dict:
+    try:
+        from nanobot_quant import td_live_state
+
+        return td_live_state.get_state() or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _mc_channel() -> str:
+    """当前执行通道（台账文件名的一部分）。"""
+    try:
+        from nanobot_quant.exec_params import normalize_execution_channel
+
+        raw = (load_exec_params() or {}).get("execution_channel") or "okx_cex"
+        return normalize_execution_channel(raw)
+    except Exception:  # noqa: BLE001
+        return "okx_cex"
+
+
+def _mc_open_lots(scene: str, symbol: str) -> list[dict]:
+    """台账 open 批次（成本价/数量来源，纯读）。"""
+    try:
+        from nanobot_quant.batches import BatchManager
+
+        bm = BatchManager.load(symbol=symbol, channel=_mc_channel(), scene=scene)
+        if bm is None:
+            return []
+        out = []
+        for item in bm.open_slots():
+            lot = item.get("lot") or {}
+            out.append(
+                {
+                    "slot": int(item.get("slot") or 0),
+                    "qty": lot.get("qty"),
+                    "entry_price": lot.get("entry_price"),
+                    "entry_time": str(lot.get("entry_time") or "")[:16].replace("T", " "),
+                }
+            )
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _mc_price(scene: str, symbol: str) -> float:
+    """现价：优先 LIVE_STATE（策略每轮写的 ticker 实时价，与页面同源）。"""
+    try:
+        lots = ((_mc_live_state().get("positions") or {}).get(scene) or {}).get(
+            str(symbol).upper()
+        ) or []
+        for lot in lots:
+            px = float(lot.get("price") or 0)
+            if px > 0:
+                return px
+    except Exception:  # noqa: BLE001
+        pass
+    return 0.0
+
+
+async def td_manual_close(request: Request):
+    """手动平仓（2026-11-09）：phase=start|confirm|status。
+
+    两步确认：``start`` 返回预览 + 一次性 token（30s）；``confirm`` 必须
+    ``ack_loss=true``（亏损平仓需显式承认）。命令入队后由 TD 循环在下一轮
+    消费（``manual_close.py``），卖出走策略正常路径 ``_sell_lot``。
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "无效的 JSON 数据"}, status_code=400)
+    from nanobot_quant import manual_close as mc
+
+    phase = str(body.get("phase") or "")
+
+    if phase == "status":
+        scene = str(body.get("scene") or "")
+        sym = str(body.get("symbol") or "").upper()
+        items = mc.recent(50)
+        if scene or sym:
+            items = [
+                i
+                for i in items
+                if (not scene or str(i.get("scene")) == scene)
+                and (not sym or str(i.get("symbol")).upper() == sym)
+            ]
+        return JSONResponse({"ok": True, "items": items[:20]})
+
+    if phase == "start":
+        scene = str(body.get("scene") or "").strip()
+        sym = str(body.get("symbol") or "").strip().upper()
+        try:
+            slot = int(body.get("slot") or 0)
+        except (TypeError, ValueError):
+            slot = 0
+        if not scene or not sym or slot <= 0:
+            return JSONResponse(
+                {"ok": False, "error": "缺少 scene / symbol / slot"}, status_code=400
+            )
+        if not bool(_mc_live_state().get("running")):
+            return JSONResponse(
+                {"ok": False, "error": "TD 未运行：先启动 TD 才能执行手动平仓"},
+                status_code=409,
+            )
+        lots = _mc_open_lots(scene, sym)
+        target = next((x for x in lots if x["slot"] == slot), None)
+        if target is None:
+            return JSONResponse(
+                {"ok": False, "error": f"台账无 {sym} slot{slot}（可能已平仓）"},
+                status_code=404,
+            )
+        price = _mc_price(scene, sym)
+        try:
+            entry = float(target.get("entry_price") or 0.0)
+            qty = float(target.get("qty") or 0.0)
+        except (TypeError, ValueError):
+            entry, qty = 0.0, 0.0
+        pnl_usd = (price - entry) * qty if price > 0 and entry > 0 else None
+        pnl_pct = (price / entry - 1.0) if price > 0 and entry > 0 else None
+        try:
+            fee_rate = float((load_exec_params() or {}).get("fee_rate") or 0.001)
+        except (TypeError, ValueError):
+            fee_rate = 0.001
+        token = uuid.uuid4().hex
+        _MC_TOKENS[token] = {
+            "exp": time.time() + _MC_TTL_S,
+            "scene": scene,
+            "symbol": sym,
+            "slots": [slot],
+        }
+        return JSONResponse(
+            {
+                "ok": True,
+                "token": token,
+                "ttl_s": _MC_TTL_S,
+                "scene": scene,
+                "symbol": sym,
+                "slot": slot,
+                "qty": qty,
+                "entry_price": entry,
+                "price": price,
+                "price_source": "live" if price > 0 else "none",
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "fee_usd": qty * price * fee_rate if price > 0 else None,
+                "siblings": [x for x in lots if x["slot"] != slot],
+            }
+        )
+
+    if phase == "confirm":
+        token = str(body.get("token") or "")
+        rec = _MC_TOKENS.pop(token, None)
+        if not rec or float(rec.get("exp") or 0) < time.time():
+            return JSONResponse(
+                {"ok": False, "error": "确认已过期（30 秒），请重新点「平仓」生成预览"},
+                status_code=400,
+            )
+        if not bool(body.get("ack_loss")):
+            return JSONResponse(
+                {"ok": False, "error": "必须勾选「确认亏损平仓」"}, status_code=400
+            )
+        if not bool(_mc_live_state().get("running")):
+            return JSONResponse(
+                {"ok": False, "error": "TD 未运行：命令无人消费，已取消"}, status_code=409
+            )
+        scene = str(rec.get("scene") or "")
+        sym = str(rec.get("symbol") or "")
+        all_slots = bool(body.get("all_slots"))
+        lots = {x["slot"]: x for x in _mc_open_lots(scene, sym)}
+        if all_slots:
+            targets = sorted(lots)
+        else:
+            targets = [s for s in (rec.get("slots") or []) if s in lots]
+        if not targets:
+            return JSONResponse(
+                {"ok": False, "error": "台账无该批次（可能已平仓）"}, status_code=404
+            )
+        queued = []
+        for s in targets:
+            queued.append(mc.enqueue(scene, sym, s, lots[s].get("qty")))
+        return JSONResponse(
+            {
+                "ok": True,
+                "queued": queued,
+                "count": len(queued),
+                "message": f"已排队 {len(queued)} 条，TD 下一轮（≤1 分钟）执行",
+            }
+        )
+
+    return JSONResponse({"ok": False, "error": f"未知 phase: {phase}"}, status_code=400)
+
+
 def register_td_table_routes(app, gatekeeper) -> None:
     """Mount /config/td-table routes (called from nanobot-legion)."""
     app.get("/config/td-table")(td_table_page)
+    app.post("/config/td-table/manual-close")(td_manual_close)
 def _actual_price_cell(ap) -> str:
     """实际成交价单元格：无/无效 → —。"""
     try:
