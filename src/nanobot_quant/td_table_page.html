@@ -46,6 +46,28 @@
   .stat-card table { font-size: 12px; }
   .stat-card th, .stat-card td { padding: 5px 8px; }
   .legend { font-size: 12px; color: #777; margin: 8px 0 2px; }
+  /* 手动平仓（2026-11-09）：按钮 + 两步确认弹窗 */
+  .mc-btn { font-size:12px; padding:3px 10px; border:1px solid #f0a3a3; background:#fff6f6;
+            color:#c62828; border-radius:6px; cursor:pointer; }
+  .mc-btn:disabled { border-color:#ddd; background:#f5f5f5; color:#bbb; cursor:not-allowed; }
+  .mc-mask { position:fixed; inset:0; background:rgba(0,0,0,.35); display:none;
+             align-items:center; justify-content:center; z-index:999; }
+  .mc-mask.on { display:flex; }
+  .mc-box { background:#fff; border-radius:12px; padding:18px 20px; width:min(460px,92vw);
+            box-shadow:0 12px 40px rgba(0,0,0,.25); font-size:13px; text-align:left; }
+  .mc-box h3 { margin:0 0 12px; font-size:15px; }
+  .mc-kv { display:grid; grid-template-columns:auto 1fr; gap:6px 12px; }
+  .mc-kv .k { color:#777; }
+  .mc-kv .v { text-align:right; font-variant-numeric:tabular-nums; }
+  .mc-warn { margin:10px 0; padding:8px 10px; background:#fff7e6; border:1px solid #ffd591;
+             color:#ad6800; border-radius:8px; line-height:1.5; }
+  .mc-err { margin-top:8px; color:#b3261e; font-size:12px; min-height:1em; }
+  .mc-ack { display:block; margin:10px 0; color:#c62828; }
+  .mc-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+  .mc-actions button { padding:6px 16px; border-radius:6px; border:1px solid #ccc;
+                       background:#fff; cursor:pointer; font-size:13px; }
+  .mc-actions button.primary { background:#c62828; border-color:#c62828; color:#fff; }
+  .mc-actions button.primary:disabled { background:#e6b3b3; border-color:#e6b3b3; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -60,6 +82,107 @@
 {trend}
 {banner}
 {content}
+<div id="mc-mask" class="mc-mask"><div class="mc-box">
+  <h3 id="mc-title">手动平仓</h3>
+  <div id="mc-body"></div>
+  <div id="mc-warn" class="mc-warn"></div>
+  <div id="mc-all" style="display:none;margin-bottom:8px"></div>
+  <label class="mc-ack"><input type="checkbox" id="mc-ack"> 我确认按市价平掉——这是亏损平仓，与「不设止损」策略相反</label>
+  <div id="mc-err" class="mc-err"></div>
+  <div class="mc-actions">
+    <button id="mc-cancel">取消</button>
+    <button id="mc-ok" class="primary" disabled>确认平仓</button>
+  </div>
+</div></div>
+<script>
+(function(){
+  var S = null;
+  function $(id){ return document.getElementById(id); }
+  function mask(){ return $('mc-mask'); }
+  function num(v, d){
+    if (v === null || v === undefined || v === '' || isNaN(Number(v))) return '—';
+    var s = Number(v).toFixed(d);
+    if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    return s;
+  }
+  function reset(){
+    mask().classList.remove('on'); S = null;
+    $('mc-ack').checked = false; $('mc-ok').disabled = true; $('mc-err').textContent = '';
+  }
+  async function post(payload){
+    try {
+      var r = await fetch('/config/td-table/manual-close', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      var d = {};
+      try { d = await r.json(); } catch(e){ d = {ok:false, error:'HTTP ' + r.status}; }
+      if (!r.ok) d.ok = false;
+      return d;
+    } catch(e) {
+      return {ok:false, error:'请求失败：' + e};
+    }
+  }
+  function render(){
+    var pnl = S.pnl_pct;
+    var cls = (pnl !== null && pnl < 0) ? 'dn' : 'up';
+    $('mc-title').textContent = '手动平仓 · ' + S.symbol + ' slot' + S.slot;
+    $('mc-body').innerHTML =
+      '<div class="mc-kv">' +
+      '<span class="k">数量</span><span class="v">' + num(S.qty, 8) + '</span>' +
+      '<span class="k">成本价</span><span class="v">' + num(S.entry_price, 4) + '</span>' +
+      '<span class="k">现价</span><span class="v">' + (S.price > 0 ? num(S.price, 4) : '—') + '</span>' +
+      '<span class="k">预计盈亏</span><span class="v ' + cls + '">' +
+        (S.pnl_usd === null ? '—（无现价）' : (S.pnl_usd >= 0 ? '+' : '') + num(S.pnl_usd, 4)
+          + ' USD（' + num(pnl * 100, 2) + '%）') + '</span>' +
+      '<span class="k">手续费约</span><span class="v">' + num(S.fee_usd, 4) + '</span>' +
+      '</div>';
+    $('mc-warn').textContent = (pnl !== null && pnl < 0)
+      ? '⚠️ 该批次当前浮亏：平仓会把浮亏兑现为本金亏损（与「不设止损」策略相反，仅手动执行）。'
+      : 'ℹ️ 该批次当前浮盈/持平。';
+    var sib = S.siblings || [];
+    var box = $('mc-all');
+    if (sib.length) {
+      box.style.display = '';
+      box.innerHTML = '<label><input type="checkbox" id="mc-all-cb"> 同时平掉该标的全部 '
+        + (sib.length + 1) + ' 批（slot' + S.slot
+        + sib.map(function(x){ return ', slot' + x.slot; }).join('') + '）</label>';
+    } else {
+      box.style.display = 'none'; box.innerHTML = '';
+    }
+  }
+  document.addEventListener('click', async function(ev){
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var b = t.closest('.mc-btn');
+    if (b) {
+      if (b.disabled) return;
+      S = null; $('mc-err').textContent = '';
+      $('mc-ack').checked = false; $('mc-ok').disabled = true;
+      var d = await post({phase:'start', scene:b.dataset.scene,
+                          symbol:b.dataset.sym, slot:Number(b.dataset.slot)});
+      if (!d.ok) { alert(d.error || '生成预览失败'); return; }
+      S = d; render(); mask().classList.add('on');
+      return;
+    }
+    if (t.id === 'mc-cancel') { reset(); return; }
+    if (t.id === 'mc-ok') {
+      if (!S) return;
+      var allCb = $('mc-all-cb');
+      $('mc-ok').disabled = true; $('mc-err').textContent = '提交中…';
+      var r = await post({phase:'confirm', token:S.token, ack_loss:true,
+                          all_slots: !!(allCb && allCb.checked)});
+      if (r.ok) {
+        $('mc-err').textContent = '';
+        alert(r.message || '已排队');
+        reset();
+      } else {
+        $('mc-err').textContent = r.error || '提交失败';
+        $('mc-ok').disabled = false;
+      }
+    }
+  });
+})();
+</script>
 <div class="legend">图例：<span class="setup buy">绿 1-9</span> = Buy Setup 进度（连续下跌计数）｜<span class="setup sell">红 1-9</span> = Sell Setup 进度（连续上涨计数）｜信号行 = setup 达到入场/平仓阈值（当前策略 entry_setup/exit_setup）｜浅蓝行 = 新一轮 setup 启动（count==1）</div>
 </body>
 </html>
