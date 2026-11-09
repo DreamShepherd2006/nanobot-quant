@@ -620,6 +620,9 @@
       else params[sel.name] = sel.value;
     });
     document.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+      // 豁免批次勾选面板（2026-11-09）：无 name、只做文本框的辅助编辑，
+      // 不得进入提交载荷（否则会落到 params[""]）。
+      if (cb.classList.contains('hold-cb')) return;
       if (cb.classList.contains('multi')) {
         const sf = sceneField(cb.name);
         if (sf) {
@@ -740,8 +743,8 @@
         tr.querySelector('.hold-cb').checked = isExempt(sp, p[0], parseInt(p[1], 10));
       });
       renderOrphans(panel);
-      // 勾选 → 写文本框
-      panel.querySelectorAll('tr.hold-cb').forEach(function (cb) {
+      // 勾选 → 写文本框（注意：.hold-cb 是 input 的子元素，不能用 tr.hold-cb）
+      panel.querySelectorAll('input.hold-cb').forEach(function (cb) {
         cb.addEventListener('change', function () { writeSpec(panel); });
       });
       // 手改文本框 → 重算勾选与孤儿项

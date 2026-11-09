@@ -101,6 +101,13 @@ def test_page_carries_hold_panel_js_and_css():
     for token in (
         "initHoldPanels", "parseSlotSpec", "writeSpec", "renderOrphans",
         ".hold-tbl", ".hold-row-na", ".orphan-del", ".hold-refresh",
+        "querySelectorAll('input.hold-cb')",
     ):
         assert token in _PAGE_HTML, token
+    # 2026-11-09 实测 bug：写成 querySelectorAll('tr.hold-cb') 选不到任何元素
+    # → 勾选不写回文本框（注释里提及该写法是允许的，只要不是真实调用）
+    assert "querySelectorAll('tr.hold-cb')" not in _PAGE_HTML
+    assert "querySelectorAll('input.hold-cb')" in _PAGE_HTML
+    # 勾选面板的 checkbox 不得污染提交载荷（collect 必须跳过它）
+    assert "classList.contains('hold-cb')) return" in _PAGE_HTML
     assert "{{" not in _PAGE_HTML
