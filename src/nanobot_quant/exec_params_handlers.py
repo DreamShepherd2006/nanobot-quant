@@ -25,6 +25,7 @@ import time
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from .number_fmt import fmt_decimal
 from .exec_params import (
     DEFAULT_SCENES,
     DEFAULT_SUB_ACCOUNTS,
@@ -114,6 +115,103 @@ def _periods_for_family(family: str) -> list:
     return list(bars) or list(TD_SLEEPTIMES)
 
 
+def _holdings_for_scene(
+    scene_key: str,
+    scene: dict,
+    channel: str,
+) -> list[dict]:
+    """EOD 豁免勾选表的数据源：该场景各标的的 open 批次（台账快照）。
+
+    2026-11-09（展示层）：只读台账文件、**不查交易所**——配置页不该被网络
+    拖慢，且台账即策略实际管理的批次。读不到就返回空表，页面显式写
+    「无 open 批次（台账快照）」，不假装有/没有持仓。
+    """
+    from .batches import BatchManager
+
+    exempt = {str(s).upper() for s in (scene.get("eod_exempt_symbols") or [])}
+    out: list[dict] = []
+    for raw_sym in scene.get("symbols") or []:
+        symbol = str(raw_sym)
+        try:
+            bm = BatchManager.load(symbol=symbol, channel=channel, scene=scene_key)
+            if bm is None:
+                continue
+            for item in bm.open_slots():
+                lot = item.get("lot") or {}
+                out.append({
+                    "symbol": symbol.upper(),
+                    "slot": int(item.get("slot") or 0),
+                    "qty": lot.get("qty"),
+                    "entry_price": lot.get("entry_price"),
+                    "entry_time": str(lot.get("entry_time") or "")[:16].replace("T", " "),
+                    "symbol_exempt": symbol.upper() in exempt,
+                })
+        except Exception:  # 台账缺失/损坏不阻塞配置页
+            continue
+    out.sort(key=lambda r: (r["symbol"], r["slot"]))
+    return out
+
+
+def _eod_slots_field_html(
+    fid: str,
+    label: str,
+    hint: str,
+    std: object,
+    value: object,
+    channels: str,
+    showif: str,
+    scene_mark: str,
+    holdings: list[dict],
+) -> str:
+    """EOD 仓位级豁免：持仓勾选表 + 手填框（2026-11-09）。
+
+    文本框仍是唯一真相源（保存逻辑不变），勾选只是辅助编辑：勾选 → 写文本框，
+    手改文本框 → 勾选状态重算。纯 slot 号（`1,2`）与「已配置但当前无持仓」的项
+    由前端保留在文本框里（勾选面板只表达当前持仓的 `SYM:slot`）。
+    """
+    rows = []
+    for h in holdings:
+        key_ = f'{h["symbol"]}:{h["slot"]}'
+        na = " hold-row-na" if h["symbol_exempt"] else ""
+        note = (
+            '<span class="hold-na" title="该标的已在「强平豁免标的」内，'
+            '批次勾选不会生效">⚠️ 已在标的豁免</span>'
+            if h["symbol_exempt"] else ""
+        )
+        rows.append(
+            f'<tr class="hold-row{na}" data-key="{key_}">'
+            f'<td>{h["symbol"]}</td>'
+            f'<td class="num">{h["slot"]}</td>'
+            f'<td class="num">{fmt_decimal(h["qty"])}</td>'
+            f'<td class="num">{fmt_decimal(h["entry_price"])}</td>'
+            f'<td class="dim">{h["entry_time"]}</td>'
+            f'<td><input type="checkbox" class="hold-cb"></td>'
+            f'<td>{note}</td></tr>'
+        )
+    table = (
+        '<table class="hold-tbl"><thead><tr>'
+        '<th>标的</th><th>slot</th><th>数量</th><th>成本价</th>'
+        '<th>建仓时间</th><th>豁免</th><th>备注</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+        if rows
+        else '<div class="hold-empty">当前无 open 批次（台账快照）</div>'
+    )
+    return (
+        f'<div class="field hold-field" data-channel="{channels}"{showif}{scene_mark}>'
+        f'<label class="f-label" for="{fid}">{label}</label>'
+        f'<input type="text" id="{fid}" name="{fid}" value="{value}">'
+        f'<span class="f-std">默认 {std}</span>'
+        f'<span class="f-hint">{hint}</span>'
+        f'<div class="hold-panel" data-hold-for="{fid}">'
+        f'{table}'
+        f'<div class="hold-orphans"></div>'
+        '<div class="hold-tools">'
+        f'<button type="button" class="hold-refresh" data-hold-for="{fid}">🔄 刷新持仓</button>'
+        '<span class="dim">台账快照（非实时）；保存后按最新台账重算</span>'
+        '</div></div></div>'
+    )
+
+
 def _field_html(
     key: str,
     value: object,
@@ -122,6 +220,7 @@ def _field_html(
     prefix: str = "",
     field_name: str | None = None,
     std_override: object | None = None,
+    holdings: list[dict] | None = None,
 ) -> str:
     meta = PARAM_META[key]
     label = meta.get("label", key)
@@ -199,6 +298,12 @@ def _field_html(
             f'<span class="f-hint">{hint}</span></div>'
         )
     if vtype == "str":
+        # EOD 仓位级豁免（2026-11-09）：持仓勾选表 + 手填框
+        if key == "eod_exempt_slots":
+            return _eod_slots_field_html(
+                fid, label, hint, std, value, channels, showif, scene_mark,
+                holdings or [],
+            )
         choices = options or []
         if choices:
             opts = "".join(
@@ -389,6 +494,7 @@ def _scene_card_html(
     gate_accounts: list[str],
     idx: int,
     candidates: list[str] | None = None,
+    channel: str = "",
 ) -> str:
     """④ 多场景卡片（S1 配置层，2026-08-20）。
 
@@ -418,6 +524,13 @@ def _scene_card_html(
                                       [str(x) for x in (scene.get("symbols") or [])],
                                       family, prefix, field_name=fk,
                                       std_override=scene_def.get(fk)))
+        elif fk == "eod_exempt_slots":
+            # 仓位级豁免（2026-11-09）：持仓勾选表（台账快照）+ 手填框
+            fields.append(_field_html(pk, scene.get(fk), opts.get(pk), family,
+                                      prefix, field_name=fk,
+                                      std_override=scene_def.get(fk),
+                                      holdings=_holdings_for_scene(
+                                          scene_key, scene, channel)))
         else:
             fields.append(_field_html(pk, scene.get(fk), opts.get(pk), family,
                                       prefix, field_name=fk,
@@ -601,7 +714,8 @@ def _render_page(params: dict, message: str = "") -> str:
     scenes = params.get("scenes") or {}
     scene_cards = "".join(
         _scene_card_html(sk, scenes.get(sk, {}), token_opts, family,
-                         gate_accounts, i + 1, candidates=gate_accounts)
+                         gate_accounts, i + 1, candidates=gate_accounts,
+                         channel=params.get("execution_channel", "okx_cex"))
         for i, sk in enumerate(SCENES)
     )
     return (

@@ -38,6 +38,27 @@
   .cap-note { font-size:.78em; color:#777; margin-top:4px; }
   .cap-warn-red { color:#c62828; font-weight:600; }
   .cap-warn-gray { color:#888; }
+  /* EOD 豁免批次勾选面板（2026-11-09）：纯展示层，文本框仍是唯一真相源 */
+  .hold-field { flex-direction:column; align-items:stretch; }
+  .hold-field .f-label { width:auto; }
+  .hold-panel { width:100%; margin-top:6px; }
+  .hold-tbl { width:100%; border-collapse:collapse; font-size:.82em; }
+  .hold-tbl th, .hold-tbl td { padding:4px 8px; border-bottom:1px solid #f0f0f0; text-align:left; }
+  .hold-tbl th { color:#666; font-weight:600; background:#fafafa; }
+  .hold-tbl td.num { font-variant-numeric:tabular-nums; }
+  .hold-tbl td.dim { color:#999; }
+  .hold-row-na { background:#fffde7; color:#999; }
+  .hold-na { color:#e65100; font-size:.85em; }
+  .hold-empty { color:#aaa; font-size:.82em; padding:6px 0; }
+  .hold-orphans { margin:6px 0; font-size:.8em; }
+  .orphan-chip { display:inline-block; background:#e3f2fd; border:1px solid #90caf9;
+    border-radius:10px; padding:1px 6px; margin:2px 4px 2px 0; }
+  .orphan-del { border:none; background:transparent; color:#1565c0;
+    cursor:pointer; font-weight:700; padding:0 2px; }
+  .hold-tools { display:flex; gap:10px; align-items:center; margin-top:6px; }
+  .hold-refresh { font-size:.8em; padding:3px 10px; border:1px solid #90caf9;
+    background:#fff; border-radius:6px; cursor:pointer; }
+  .hold-tools .dim { color:#999; font-size:.78em; }
   .snap-row { display:flex; align-items:center; gap:10px; margin:6px 0 2px; }
   .snap-btn { font-size:.82em; padding:4px 10px; border:1px solid #90a4ae; background:#eceff1;
               color:#37474f; border-radius:6px; cursor:pointer; }
@@ -599,6 +620,9 @@
       else params[sel.name] = sel.value;
     });
     document.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+      // 豁免批次勾选面板（2026-11-09）：无 name、只做文本框的辅助编辑，
+      // 不得进入提交载荷（否则会落到 params[""]）。
+      if (cb.classList.contains('hold-cb')) return;
       if (cb.classList.contains('multi')) {
         const sf = sceneField(cb.name);
         if (sf) {
@@ -633,6 +657,128 @@
     }
     return params;
   }
+
+  // ── EOD 豁免批次：持仓勾选 ↔ 文本框双向同步（2026-11-09）────────────
+  // 文本框仍是唯一真相源（保存逻辑零改动）；勾选面板只表达当前持仓的
+  // `SYM:slot`，纯 slot 号与「已配置但无持仓」的项由文本框/孤儿 chip 保留。
+  function parseSlotSpec(txt) {
+    const all = new Set(); const by = {};
+    String(txt || '').split(/[,，、]/).forEach(function (raw) {
+      const tok = raw.trim().replace(/：/g, ':');
+      if (!tok) return;
+      const i = tok.indexOf(':');
+      if (i >= 0) {
+        const sym = tok.slice(0, i).trim().toUpperCase();
+        const n = parseInt(tok.slice(i + 1), 10);
+        if (sym && n > 0) (by[sym] = by[sym] || new Set()).add(n);
+      } else {
+        const n = parseInt(tok, 10);
+        if (n > 0) all.add(n);
+      }
+    });
+    return { all: all, by: by };
+  }
+  function isExempt(sp, sym, slot) {
+    return sp.all.has(slot) || (!!sp.by[sym] && sp.by[sym].has(slot));
+  }
+  function presentKeys(panel) {
+    const out = {};
+    panel.querySelectorAll('tr.hold-row').forEach(function (tr) { out[tr.dataset.key] = 1; });
+    return out;
+  }
+  function orphansOf(sp, present) {
+    const out = [];
+    Object.keys(sp.by).forEach(function (sym) {
+      sp.by[sym].forEach(function (n) {
+        const k = sym + ':' + n;
+        if (!present[k]) out.push(k);
+      });
+    });
+    return out;
+  }
+  function renderOrphans(panel) {
+    const box = panel.querySelector('.hold-orphans');
+    if (!box) return;
+    const list = (panel.dataset.orphans || '').split(',').filter(Boolean);
+    box.innerHTML = list.length
+      ? '<span class="dim">已配置但当前无持仓：</span>' + list.map(function (k) {
+          return '<span class="orphan-chip">' + k +
+            '<button type="button" class="orphan-del" data-orphan="' + k +
+            '" title="从豁免名单移除">×</button></span>';
+        }).join(' ')
+      : '';
+  }
+  function writeSpec(panel) {
+    const inp = document.getElementById(panel.dataset.holdFor);
+    if (!inp) return;
+    const parts = (panel.dataset.globalSlots || '').split(',').filter(Boolean);
+    (panel.dataset.orphans || '').split(',').filter(Boolean).forEach(function (k) {
+      if (parts.indexOf(k) < 0) parts.push(k);
+    });
+    const by = {};
+    panel.querySelectorAll('tr.hold-row').forEach(function (tr) {
+      if (!tr.querySelector('.hold-cb').checked) return;
+      const p = tr.dataset.key.split(':');
+      (by[p[0]] = by[p[0]] || []).push(parseInt(p[1], 10));
+    });
+    Object.keys(by).sort().forEach(function (sym) {
+      by[sym].sort(function (a, b) { return a - b; }).forEach(function (n) {
+        const k = sym + ':' + n;
+        if (parts.indexOf(k) < 0) parts.push(k);
+      });
+    });
+    inp.value = parts.join(',');
+  }
+  function initHoldPanels() {
+    document.querySelectorAll('.hold-panel').forEach(function (panel) {
+      const inp = document.getElementById(panel.dataset.holdFor);
+      if (!inp) return;
+      const sp = parseSlotSpec(inp.value);
+      const present = presentKeys(panel);
+      panel.dataset.globalSlots = Array.from(sp.all)
+        .sort(function (a, b) { return a - b; }).join(',');
+      panel.dataset.orphans = orphansOf(sp, present).join(',');
+      panel.querySelectorAll('tr.hold-row').forEach(function (tr) {
+        const p = tr.dataset.key.split(':');
+        tr.querySelector('.hold-cb').checked = isExempt(sp, p[0], parseInt(p[1], 10));
+      });
+      renderOrphans(panel);
+      // 勾选 → 写文本框（注意：.hold-cb 是 input 的子元素，不能用 tr.hold-cb）
+      panel.querySelectorAll('input.hold-cb').forEach(function (cb) {
+        cb.addEventListener('change', function () { writeSpec(panel); });
+      });
+      // 手改文本框 → 重算勾选与孤儿项
+      inp.addEventListener('input', function () {
+        const cur = parseSlotSpec(inp.value);
+        panel.dataset.globalSlots = Array.from(cur.all)
+          .sort(function (a, b) { return a - b; }).join(',');
+        panel.dataset.orphans = orphansOf(cur, presentKeys(panel)).join(',');
+        panel.querySelectorAll('tr.hold-row').forEach(function (tr) {
+          const p = tr.dataset.key.split(':');
+          tr.querySelector('.hold-cb').checked = isExempt(cur, p[0], parseInt(p[1], 10));
+        });
+        renderOrphans(panel);
+      });
+    });
+  }
+  document.addEventListener('click', function (ev) {
+    const btn = ev.target.closest && ev.target.closest('.hold-refresh');
+    if (btn) {
+      if (confirm('重新读取台账刷新持仓列表？未保存的修改会丢失。')) location.reload();
+      return;
+    }
+    const del = ev.target.closest && ev.target.closest('.orphan-del');
+    if (del) {
+      const panel = del.closest('.hold-panel');
+      if (!panel) return;
+      const drop = del.dataset.orphan;
+      panel.dataset.orphans = (panel.dataset.orphans || '')
+        .split(',').filter(function (k) { return k && k !== drop; }).join(',');
+      renderOrphans(panel);
+      writeSpec(panel);
+    }
+  });
+  initHoldPanels();
 
   document.getElementById('btn-save').addEventListener('click', async function () {
     const resp = await fetch('/config/exec', {
