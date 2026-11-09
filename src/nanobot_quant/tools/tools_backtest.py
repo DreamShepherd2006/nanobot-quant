@@ -126,6 +126,22 @@ def coerce_overrides(raw) -> dict:
                     out[k] = [str(x).strip() for x in v if str(x).strip()]
                 else:
                     out[k] = [x.strip() for x in str(v).replace("、", ",").split(",") if x.strip()]
+            elif k == "eod_exempt_slots":
+                # EOD 仓位级豁免（2026-11-09，C132）：页面是逗号分隔文本、
+                # MCP 可能是 list——两种都收，统一成「逗号分隔字符串」。
+                # 非法项 fail-closed：策略侧遇到非法配置会 fail-open 到「不豁免」，
+                # 不在入口拦住就等于「以为豁免了、其实没豁免」。
+                from nanobot_quant.exec_params import (
+                    format_slot_spec,
+                    parse_slot_spec,
+                    validate_exec_param,
+                )
+
+                _err = validate_exec_param(k, v)
+                if _err:
+                    raise ValueError(f"回测覆盖参数 {k}={v!r} 非法：{_err}")
+                _all_slots, _by_sym = parse_slot_spec(v)
+                out[k] = format_slot_spec(_all_slots, _by_sym)
             elif k == "entry_periods":
                 # 多周期倍数：非法值 fail-closed。策略侧 parse_entry_periods 会
                 # 静默忽略非法项并回退 [1]，若不在入口拦住，页面填错就等于

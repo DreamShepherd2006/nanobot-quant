@@ -170,6 +170,9 @@ _PRESETS: dict[str, dict] = {
             "eod_mode": "all",
             "eod_hour_utc": 0,
             "eod_exempt_symbols": [],
+            # 仓位级豁免（2026-11-09 C132）：默认空 = 全部批次参与；不进
+            # REQUIRED_OVERRIDE_KEYS（旧 preset 无此键时按默认处理，保持兼容）
+            "eod_exempt_slots": "",
             # ── 数量 / 成本 ──
             "quantity_mode": "fixed_amount",
             "td_start_slot": 1,
