@@ -48,6 +48,8 @@ def _strat(bm, *, exempt=(), enabled=True, parity="even", mode="all", hour=0):
     s._eod_last_day = {}
     # 2026-11-07 新增状态：豁免名单（frozenset）
     s._eod_exempt = frozenset(exempt)
+    # 2026-11-09 新增状态：仓位级豁免（frozenset[int]，C132）
+    s._eod_exempt_slots = frozenset()
     s._sold = []
     s._skip_counts = {}
     s._events = []
@@ -151,3 +153,81 @@ def test_exempt_does_not_affect_non_parity_days(tmp_path):
     _tick(s, "2026-01-04 00:01")  # 刚结束 1/3 = 单号 → 本就不强平，不记
     assert s._skip_counts.get("eod_exempt", 0) == 1
     assert s._sold == []
+
+
+# ── 仓位级豁免（按 slot 号，2026-11-09 C132 / docs §33.61）──────────────
+
+
+def test_default_scenes_have_empty_exempt_slots():
+    for key in ("high", "mid", "low"):
+        assert DEFAULT_SCENES[key]["eod_exempt_slots"] == ""
+
+
+def test_parse_slot_list_normalizes():
+    from nanobot_quant.exec_params import parse_slot_list
+
+    assert parse_slot_list("1,2") == [1, 2]
+    # 中文逗号 / 顿号 / 空白 / 去重 / 升序
+    assert parse_slot_list("2，1、2 ") == [1, 2]
+    assert parse_slot_list([3, "1"]) == [1, 3]
+    assert parse_slot_list("") == [] and parse_slot_list(None) == []
+
+
+def test_validate_slots_fail_closed():
+    assert validate_exec_param("eod_exempt_slots", "") is None
+    assert validate_exec_param("eod_exempt_slots", "1, 5") is None
+    assert "非法 slot 号" in validate_exec_param("eod_exempt_slots", "1,x")
+    assert "越界" in validate_exec_param("eod_exempt_slots", "0")
+    assert "越界" in validate_exec_param("eod_exempt_slots", "201")
+
+
+def test_coerce_overrides_eod_exempt_slots():
+    assert coerce_overrides({"eod_exempt_slots": "2,1"}) == {
+        "eod_exempt_slots": "1,2"}
+    assert coerce_overrides({"eod_exempt_slots": [2, 1]}) == {
+        "eod_exempt_slots": "1,2"}
+    # 空串 = 跟随场景，不进 overrides
+    assert coerce_overrides({"eod_exempt_slots": ""}) == {}
+    with pytest.raises(ValueError):
+        coerce_overrides({"eod_exempt_slots": "abc"})
+
+
+def test_slot_exempt_skips_only_listed_lots(tmp_path):
+    """名单内批次不动，其余照 mode 平；跳过必须计数 + 写事件。"""
+    bm = _bm(tmp_path, [(1, 100.0), (2, 101.0), (3, 102.0)])
+    s = _strat(bm)
+    s._eod_exempt_slots = frozenset({2})
+    _tick(s, "2026-01-02 23:59")
+    assert _tick(s, "2026-01-03 00:01") is True  # 刚结束 1/2 = 双号 → 强平
+    assert sorted(x[0] for x in s._sold) == [1, 3], "slot 2 应在豁免名单里、不被强平"
+    assert s._skip_counts.get("eod_exempt_slots", 0) == 1
+    assert any("eod_exempt_slots" in ev[1] for ev in s._events), "豁免跳过必须写事件"
+
+
+def test_slot_exempt_all_lots_reports_and_does_not_close(tmp_path):
+    bm = _bm(tmp_path, [(1, 100.0), (2, 101.0)])
+    s = _strat(bm)
+    s._eod_exempt_slots = frozenset({1, 2})
+    _tick(s, "2026-01-02 23:59")
+    assert _tick(s, "2026-01-03 00:01") is False
+    assert s._sold == []
+    assert s._skip_counts.get("eod_exempt_slots", 0) == 2
+
+
+def test_slot_exempt_empty_keeps_old_behaviour(tmp_path):
+    """空名单 = 旧行为逐位不变（零回归的锁）。"""
+    bm = _bm(tmp_path, [(1, 100.0), (2, 101.0)])
+    s = _strat(bm)
+    _tick(s, "2026-01-02 23:59")
+    assert _tick(s, "2026-01-03 00:01") is True
+    assert len(s._sold) == 2
+    assert s._skip_counts.get("eod_exempt_slots", 0) == 0
+
+
+def test_preset_carries_slots_default_but_not_required():
+    """旧 preset 无该键时按默认处理（不进 REQUIRED，保持向后兼容）。"""
+    from nanobot_quant.backtest import presets
+
+    p = presets.get_preset("low9_multi_h9_minentry_eod_20261106")
+    assert p["overrides"]["eod_exempt_slots"] == ""
+    assert "eod_exempt_slots" not in presets.REQUIRED_OVERRIDE_KEYS

@@ -111,6 +111,9 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
     # EOD 强平豁免名单（2026-11-07）——场景专属、默认 [] = 全部参与
     "eod_exempt_symbols",
+    # EOD 仓位级豁免（2026-11-09 C132，docs §33.61）——逗号分隔 slot 号；
+    # 场景专属、默认空 = 全部参与日界强平
+    "eod_exempt_slots",
     # 出场首穿（2026-11-06）——场景专属、默认关：高9/cd13 只在首次跨过
     # 阈值那根触发，累加期 10/11/12 不再重复平仓
     "exit_first_cross",
@@ -141,6 +144,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "eod_enabled", "eod_parity", "eod_mode", "eod_hour_utc",
     # 强平豁免标的（2026-11-07，默认空 = 全部参与）
     "eod_exempt_symbols",
+    # 强平豁免批次（2026-11-09，逗号分隔 slot 号，默认空）
+    "eod_exempt_slots",
 )
 
 #: 默认 Gate 子账号池（S1 配置层默认值；S3 消费时按 gate.json 实际列表）。
@@ -176,6 +181,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "eod_enabled": False, "eod_parity": "even",
         "eod_mode": "all", "eod_hour_utc": 0,
         "eod_exempt_symbols": [],
+        "eod_exempt_slots": "",
     },
     "mid": {
         "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
@@ -203,6 +209,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "eod_enabled": False, "eod_parity": "even",
         "eod_mode": "all", "eod_hour_utc": 0,
         "eod_exempt_symbols": [],
+        "eod_exempt_slots": "",
     },
     "low": {
         "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
@@ -230,6 +237,7 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "eod_enabled": False, "eod_parity": "even",
         "eod_mode": "all", "eod_hour_utc": 0,
         "eod_exempt_symbols": [],
+        "eod_exempt_slots": "",
     },
 }
 
@@ -456,6 +464,14 @@ PARAM_META: dict[str, dict[str, Any]] = {
         "group": "scene", "type": "list", "std": "无",
         "label": "强平豁免标的",
         "hint": "勾选的标的在日界强平时完全跳过（不清仓、不受 mode 影响）；未勾选 = 参与强平。留空 = 全部参与（默认）。用于保留想长期持有/等解套的仓位，跳过时记 eod_exempt 事件与计数",
+    },
+    "eod_exempt_slots": {
+        "group": "scene", "type": "str", "std": "无",
+        "label": "强平豁免批次",
+        "hint": "逗号分隔的 slot 号（如 1,2；范围 1–200）。名单内的批次在日界强平时"
+                "完全跳过——不看清仓范围（eod_mode）、不碰 min_hold，并记 eod_exempt_slots "
+                "计数与 SKIP 事件。留空 = 全部批次参与（默认）。用于同一标的内保留部分批次、"
+                "只清前期套牢批腾资金。注意 shared_pool 下 slot 只是记账标签，号小 ≠ 最早建仓",
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
@@ -686,6 +702,36 @@ def parse_entry_periods(value: Any) -> list[int]:
     return sorted(out) or [1]
 
 
+def parse_slot_list(value: Any) -> list[int]:
+    """把「逗号分隔的 slot 号」解析为去重升序 int 列表（2026-11-09，C132）。
+
+    ``None`` / 空串 → ``[]``（合法：全部批次参与日界强平）。列表输入亦接受
+    （便于 MCP / 回测覆盖直传）。非法项**抛 ValueError**——入口 fail-closed，
+    绝不静默丢弃（否则「填了豁免却没生效」无法察觉）。
+    """
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        tokens = [str(x).strip() for x in value]
+    else:
+        tokens = [
+            t.strip()
+            for t in str(value).replace("，", ",").replace("、", ",").split(",")
+        ]
+    out: list[int] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        try:
+            n = int(tok)
+        except (TypeError, ValueError):
+            raise ValueError(f"非法 slot 号 {tok!r}（必须是 1–200 的正整数）")
+        if n < 1 or n > 200:
+            raise ValueError(f"slot 号越界 {n}（范围 1–200）")
+        out.append(n)
+    return sorted(set(out))
+
+
 def validate_exec_param(key: str, value: Any) -> str | None:
     """Return an error message for an invalid value, or None if valid."""
     meta = PARAM_META.get(key)
@@ -701,6 +747,15 @@ def validate_exec_param(key: str, value: Any) -> str | None:
             return "必须是标的列表"
         if not all(isinstance(v, str) and v.strip() for v in value):
             return "列表项必须是非空字符串"
+        return None
+    if key == "eod_exempt_slots":
+        # EOD 仓位级豁免（2026-11-09，C132）：空 = 全部参与（合法），
+        # 非空时每项必须是 1–200 的正整数。不校验是否存在于台账——
+        # td_batches 与台账 slots 可能不一致（C131），多出的项无副作用。
+        try:
+            parse_slot_list(value)
+        except ValueError as exc:
+            return str(exc)
         return None
     if key == "entry_periods":
         _raw = str(value if value is not None else "").replace("，", ",").strip()
