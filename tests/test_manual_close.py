@@ -254,3 +254,6 @@ def test_page_has_manual_close_ui():
     for token in ("mc-btn", "mc-mask", "mc-ack", "/config/td-table/manual-close",
                   "ack_loss", "all_slots"):
         assert token in page, token
+    # 回归（2026-11-09 实机 bug）：勾选 ack 后确认按钮仍灰 —— 必须有 change 监听
+    assert "addEventListener('change'" in page
+    assert "mc-ack" in page and "disabled = !ev.target.checked" in page
