@@ -32,6 +32,7 @@ limit, 15% drawdown, 10% stop-loss, 1% slippage, 5% SOL buffer).
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -468,10 +469,12 @@ PARAM_META: dict[str, dict[str, Any]] = {
     "eod_exempt_slots": {
         "group": "scene", "type": "str", "std": "无",
         "label": "强平豁免批次",
-        "hint": "逗号分隔的 slot 号（如 1,2；范围 1–200）。名单内的批次在日界强平时"
-                "完全跳过——不看清仓范围（eod_mode）、不碰 min_hold，并记 eod_exempt_slots "
-                "计数与 SKIP 事件。留空 = 全部批次参与（默认）。用于同一标的内保留部分批次、"
-                "只清前期套牢批腾资金。注意 shared_pool 下 slot 只是记账标签，号小 ≠ 最早建仓",
+        "hint": "两种写法（可混用）：`1,2` = 所有标的的 slot 1/2；"
+                "`CRCL:4,ETH:5` = 仅指定标的的指定批次（slot 范围 1–200）。"
+                "名单内批次在日界强平时完全跳过——不看清仓范围（eod_mode）、"
+                "不碰 min_hold，并记 eod_exempt_slots 计数与 SKIP 事件。"
+                "留空 = 全部批次参与（默认）。注意 shared_pool 下 slot 只是记账标签，"
+                "号小 ≠ 最早建仓",
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
@@ -702,34 +705,80 @@ def parse_entry_periods(value: Any) -> list[int]:
     return sorted(out) or [1]
 
 
-def parse_slot_list(value: Any) -> list[int]:
-    """把「逗号分隔的 slot 号」解析为去重升序 int 列表（2026-11-09，C132）。
+_SLOT_SYM_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-    ``None`` / 空串 → ``[]``（合法：全部批次参与日界强平）。列表输入亦接受
-    （便于 MCP / 回测覆盖直传）。非法项**抛 ValueError**——入口 fail-closed，
-    绝不静默丢弃（否则「填了豁免却没生效」无法察觉）。
+
+def _parse_slot_no(raw: Any, tok: str) -> int:
+    """单个 slot 号：1–200 正整数，非法抛 ValueError。"""
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"非法 slot 号 {tok!r}（必须是 1–200 的正整数）")
+    if n < 1 or n > 200:
+        raise ValueError(f"slot 号越界 {n}（范围 1–200）")
+    return n
+
+
+def parse_slot_spec(value: Any) -> tuple[list[int], dict[str, list[int]]]:
+    """解析 EOD 仓位级豁免语法（2026-11-09，C132 / C133）。
+
+    语法（逗号分隔、可混用；全角逗号/顿号/冒号自动归一）：
+
+    * ``1,2``          → 所有标的的 slot 1、2（C132 旧行为）
+    * ``CRCL:4,ETH:5`` → 仅指定标的的指定 slot
+    * ``1,CRCL:4``     → 并集
+
+    返回 ``(all_slots, by_symbol)``，两者内部均已去重升序。
+    ``None`` / 空串 → ``([], {})``。非法项**抛 ValueError**——
+    入口 fail-closed，绝不静默丢弃（否则「填了豁免却没生效」无法察觉）。
     """
     if value in (None, ""):
-        return []
+        return [], {}
     if isinstance(value, (list, tuple)):
         tokens = [str(x).strip() for x in value]
     else:
         tokens = [
             t.strip()
-            for t in str(value).replace("，", ",").replace("、", ",").split(",")
+            for t in str(value)
+            .replace("，", ",")
+            .replace("、", ",")
+            .replace("：", ":")
+            .split(",")
         ]
-    out: list[int] = []
+    all_slots: set[int] = set()
+    by_symbol: dict[str, set[int]] = {}
     for tok in tokens:
         if not tok:
             continue
-        try:
-            n = int(tok)
-        except (TypeError, ValueError):
-            raise ValueError(f"非法 slot 号 {tok!r}（必须是 1–200 的正整数）")
-        if n < 1 or n > 200:
-            raise ValueError(f"slot 号越界 {n}（范围 1–200）")
-        out.append(n)
-    return sorted(set(out))
+        if ":" in tok:
+            sym_raw, _, slot_raw = tok.partition(":")
+            sym = sym_raw.strip().upper()
+            if not sym or not _SLOT_SYM_RE.match(sym):
+                raise ValueError(
+                    f"非法标的 {sym_raw!r}（写法 SYMBOL:slot，如 CRCL:4）"
+                )
+            by_symbol.setdefault(sym, set()).add(_parse_slot_no(slot_raw, tok))
+        else:
+            all_slots.add(_parse_slot_no(tok, tok))
+    return (
+        sorted(all_slots),
+        {sym: sorted(v) for sym, v in sorted(by_symbol.items())},
+    )
+
+
+def format_slot_spec(
+    all_slots: Any = (),
+    by_symbol: dict[str, Any] | None = None,
+) -> str:
+    """规范化回显（DIAG / 保存日志 / 回测快照同一格式）。
+
+    ``format_slot_spec(*parse_slot_spec("1, crcl:4"))`` → ``"1,CRCL:4"``。
+    """
+    parts = [str(n) for n in sorted(all_slots or ())]
+    for sym in sorted((by_symbol or {})):
+        for n in sorted(by_symbol[sym] or ()):
+            parts.append(f"{sym}:{n}")
+    return ",".join(parts)
 
 
 def validate_exec_param(key: str, value: Any) -> str | None:
@@ -749,11 +798,12 @@ def validate_exec_param(key: str, value: Any) -> str | None:
             return "列表项必须是非空字符串"
         return None
     if key == "eod_exempt_slots":
-        # EOD 仓位级豁免（2026-11-09，C132）：空 = 全部参与（合法），
-        # 非空时每项必须是 1–200 的正整数。不校验是否存在于台账——
-        # td_batches 与台账 slots 可能不一致（C131），多出的项无副作用。
+        # EOD 仓位级豁免（2026-11-09，C132 / C133）：空 = 全部参与（合法）；
+        # 非空时逐项校验语法（`1` 或 `SYMBOL:slot`）。不校验 slot 是否存在
+        # 于台账——td_batches 与台账 slots 可能不一致（C131），多出的项无副作用；
+        # 带标的的项是否属于场景标的池，在 _apply_scene_overrides 末尾统一校验。
         try:
-            parse_slot_list(value)
+            parse_slot_spec(value)
         except ValueError as exc:
             return str(exc)
         return None
@@ -983,6 +1033,29 @@ def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
                 "ok": False,
                 "error": (
                     f"场景{label}.eod_exempt_symbols: 不在该场景标的池内"
+                    f"（非法：{','.join(bad)}；可选：{','.join(pool) or '无'}）"
+                ),
+            }
+    # 2026-11-09（C133）：仓位级豁免里带标的的项必须⊆本场景标的池——
+    # 与 eod_exempt_symbols 同一纪律（非法值入口报错并列出可选值）。
+    for sk, sc in (merged.get("scenes") or {}).items():
+        raw = sc.get("eod_exempt_slots")
+        if not raw:
+            continue
+        try:
+            _all_slots, _by_sym = parse_slot_spec(raw)
+        except ValueError:
+            continue  # 语法问题已由 validate_exec_param 拦下
+        if not _by_sym:
+            continue
+        pool = [str(x).upper() for x in (sc.get("symbols") or [])]
+        bad = [sym for sym in _by_sym if sym not in pool]
+        if bad:
+            label = SCENES.get(sk, {}).get("label", sk)
+            return {
+                "ok": False,
+                "error": (
+                    f"场景{label}.eod_exempt_slots: 标的不在该场景标的池内"
                     f"（非法：{','.join(bad)}；可选：{','.join(pool) or '无'}）"
                 ),
             }

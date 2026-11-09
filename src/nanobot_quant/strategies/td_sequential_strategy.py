@@ -1092,21 +1092,28 @@ class TdSequentialStrategy(Strategy):
             str(_x).strip() for _x in ([] if not isinstance(_eod_ex, list) else _eod_ex)
             if str(_x).strip()
         )
-        # EOD 仓位级豁免（2026-11-09，C132）：逗号分隔 slot 号 → frozenset[int]。
+        # EOD 仓位级豁免（2026-11-09，C132 + C133）：
+        #   `1,2`         → 所有标的的 slot 1/2
+        #   `CRCL:4,ETH:5`→ 仅指定标的的指定批次
         # 配置非法时 fail-open 到「不豁免」（不让一行配置打死整个循环），但必须留痕。
-        from nanobot_quant.exec_params import parse_slot_list as _parse_slots
+        from nanobot_quant.exec_params import parse_slot_spec as _parse_slots
         _eod_slots = p.get("eod_exempt_slots")
         if _eod_slots is None:
             _eod_slots = self.parameters.get("eod_exempt_slots") or ""
         try:
-            self._eod_exempt_slots = frozenset(_parse_slots(_eod_slots))
+            _slots_all, _slots_by_sym = _parse_slots(_eod_slots)
         except ValueError as _slots_exc:
-            self._eod_exempt_slots = frozenset()
+            _slots_all, _slots_by_sym = [], {}
             print(
                 f"[TD] EOD 豁免批次配置非法（{_eod_slots!r}）：{_slots_exc}"
                 f" → 按不豁免处理",
                 file=sys.stderr, flush=True,
             )
+        self._eod_exempt_slots_all = frozenset(_slots_all)
+        self._eod_exempt_slots_by_symbol = {
+            _sym: frozenset(_v) for _sym, _v in (_slots_by_sym or {}).items()
+        }
+        self._eod_exempt_slots_raw = str(_eod_slots or "")
         # 加仓最小间距闸（2026-11-03）：场景值优先，留空回退全局 parameters（默认 0=关）
         _sc_gap = p.get("entry_min_gap_pct")
         self._entry_min_gap_pct = float(
@@ -1176,7 +1183,7 @@ class TdSequentialStrategy(Strategy):
                 f"eod_mode={getattr(self, '_eod_mode', '?')} "
                 f"eod_hour={getattr(self, '_eod_hour_utc', '?')} "
                 f"eod_exempt={','.join(sorted(getattr(self, '_eod_exempt', ()) or ())) or '-'} "
-                f"eod_exempt_slots={','.join(str(x) for x in sorted(getattr(self, '_eod_exempt_slots', ()) or ())) or '-'} "
+                f"eod_exempt_slots={getattr(self, '_eod_exempt_slots_raw', '') or '-'} "
                 f"family={self.parameters.get('channel_family')} "
                 f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
@@ -4537,7 +4544,9 @@ class TdSequentialStrategy(Strategy):
         sold = 0
         gated = 0
         slot_gated = 0
-        exempt_slots = getattr(self, "_eod_exempt_slots", frozenset())
+        _ex_all = getattr(self, "_eod_exempt_slots_all", frozenset())
+        _ex_by_sym = getattr(self, "_eod_exempt_slots_by_symbol", {}) or {}
+        _sym_u = str(self.symbol or "").split("/")[0].upper()
         for s in candidates:
             # 2026-11-09（C132）：仓位级豁免——名单内批次整批跳过，不看 mode、
             # 不碰 min_hold；拦截必须留痕（计数 + 日志 + 事件），不静默跳过。
@@ -4545,7 +4554,10 @@ class TdSequentialStrategy(Strategy):
                 _slot_no = int(s.get("slot") or 0)
             except (TypeError, ValueError):
                 _slot_no = 0
-            if _slot_no and _slot_no in exempt_slots:
+            if _slot_no and (
+                _slot_no in _ex_all
+                or _slot_no in _ex_by_sym.get(_sym_u, frozenset())
+            ):
                 slot_gated += 1
                 self._bump_skip("eod_exempt_slots")
                 print(

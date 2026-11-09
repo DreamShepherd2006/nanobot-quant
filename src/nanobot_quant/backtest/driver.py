@@ -1317,9 +1317,10 @@ class BacktestDriver:
                 "eod_hour_utc": getattr(strategy, "_eod_hour_utc", 0),
                 # EOD 强平豁免名单（2026-11-07）：实际生效值，便于追溯「哪个标的被跳过」
                 "eod_exempt_symbols": sorted(getattr(strategy, "_eod_exempt", frozenset())),
-                # EOD 仓位级豁免（2026-11-09，C132）：实际生效的 slot 号（升序）
-                "eod_exempt_slots": sorted(
-                    getattr(strategy, "_eod_exempt_slots", frozenset())
+                # EOD 仓位级豁免（2026-11-09，C132/C133）：回显原始配置串
+                # （`1,2` 或 `CRCL:4`），与页面/日志同一写法
+                "eod_exempt_slots": str(
+                    getattr(strategy, "_eod_exempt_slots_raw", "") or ""
                 ),
                 "exit_order": getattr(strategy, "_exit_order", None),
                 "stop_loss_pct": getattr(

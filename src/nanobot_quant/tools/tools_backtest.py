@@ -132,14 +132,16 @@ def coerce_overrides(raw) -> dict:
                 # 非法项 fail-closed：策略侧遇到非法配置会 fail-open 到「不豁免」，
                 # 不在入口拦住就等于「以为豁免了、其实没豁免」。
                 from nanobot_quant.exec_params import (
-                    parse_slot_list,
+                    format_slot_spec,
+                    parse_slot_spec,
                     validate_exec_param,
                 )
 
                 _err = validate_exec_param(k, v)
                 if _err:
                     raise ValueError(f"回测覆盖参数 {k}={v!r} 非法：{_err}")
-                out[k] = ",".join(str(x) for x in parse_slot_list(v))
+                _all_slots, _by_sym = parse_slot_spec(v)
+                out[k] = format_slot_spec(_all_slots, _by_sym)
             elif k == "entry_periods":
                 # 多周期倍数：非法值 fail-closed。策略侧 parse_entry_periods 会
                 # 静默忽略非法项并回退 [1]，若不在入口拦住，页面填错就等于
