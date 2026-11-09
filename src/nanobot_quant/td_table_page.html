@@ -150,6 +150,13 @@
       box.style.display = 'none'; box.innerHTML = '';
     }
   }
+  // 勾选「确认亏损平仓」才启用确认按钮（2026-11-09 修复：此前只有 click
+  // 监听、没有 change 监听，导致 checkbox 勾了按钮仍灰掉）
+  document.addEventListener('change', function(ev){
+    if (ev.target && ev.target.id === 'mc-ack') {
+      $('mc-ok').disabled = !ev.target.checked;
+    }
+  });
   document.addEventListener('click', async function(ev){
     var t = ev.target;
     if (!t || !t.closest) return;
