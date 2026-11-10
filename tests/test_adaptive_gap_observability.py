@@ -107,7 +107,7 @@ def _bars_buy9() -> "object":
 def test_init_log_and_stat_snapshot(capsys):
     """样本足够时首次设定档位 → INIT 日志 + 统计快照（回测 trace 同源）。"""
     s = _strategy({"adaptive_gap_enabled": True, "adaptive_m": 5})
-    s._adaptive_done["high"] = [True] * 5  # 命中率 100% → 0.1% 档
+    s._adaptive_done[("high", s.symbol)] = [True] * 5  # 命中率 100% → 0.1% 档
 
     gap = s._adaptive_gap_observe(_df(), False, s.batch_manager)
     err = capsys.readouterr().err
@@ -116,19 +116,19 @@ def test_init_log_and_stat_snapshot(capsys):
     assert "ADAPT GAP INIT" in err, err
     assert "0.10%" in err
     assert "hit_rate=100.0%" in err
-    assert s._adaptive_gap_src["high"] == "自适应"
-    stat = s._adaptive_last_stat["high"]
+    assert s._adaptive_gap_src[("high", s.symbol)] == "自适应"
+    stat = s._adaptive_last_stat[("high", s.symbol)]
     assert stat["n"] == 5 and stat["target"] == pytest.approx(0.10)
 
 
 def test_switch_logged_after_hysteresis(capsys):
     """命中率掉到 <30% → 目标 0.4%，滞回 2 次后才切换并打 SWITCH 日志。"""
     s = _strategy({"adaptive_gap_enabled": True, "adaptive_m": 5})
-    s._adaptive_done["high"] = [True] * 5
+    s._adaptive_done[("high", s.symbol)] = [True] * 5
     s._adaptive_gap_observe(_df(), False, s.batch_manager)
     capsys.readouterr()  # 丢掉 INIT 日志
 
-    s._adaptive_done["high"] = [False] * 7  # 命中率 0 → 0.4%
+    s._adaptive_done[("high", s.symbol)] = [False] * 7  # 命中率 0 → 0.4%
     first = s._adaptive_gap_observe(_df(), False, s.batch_manager)
     assert first == pytest.approx(0.10), "滞回未满不应切换"
     assert "ADAPT GAP SWITCH" not in capsys.readouterr().err
@@ -150,7 +150,7 @@ def test_na_logged_once_per_scene(capsys):
     err = capsys.readouterr().err
     assert err.count("ADAPT GAP NA") == 1, err
     assert "回退静态 0.30%" in err
-    assert s._adaptive_gap_src["high"] == "自适应·回退静态"
+    assert s._adaptive_gap_src[("high", s.symbol)] == "自适应·回退静态"
 
 
 def test_disabled_writes_static_source_without_log(capsys):
@@ -159,7 +159,7 @@ def test_disabled_writes_static_source_without_log(capsys):
     capsys.readouterr()  # 丢掉 _activate_scene 的 [DIAG] 场景激活日志
     assert s._adaptive_gap_observe(_df(), False, s.batch_manager) == pytest.approx(0.30)
     assert capsys.readouterr().err == ""
-    assert s._adaptive_gap_src["high"] == "静态"
+    assert s._adaptive_gap_src[("high", s.symbol)] == "静态"
 
 
 # ── ② entry_gap 事件带间距 + 来源 ──────────────────────────────────────
@@ -289,9 +289,13 @@ def test_trace_records_change_only(tmp_path):
     d._adaptive_gap_last = {}
 
     ts = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+    # C138（2026-11-10）：档位按 (scene, symbol) 隔离 —— 不同标的各自
+    # 独立成行、首行 from 为 None（旧实现 scene 级共享，ETH 会继承 SOL 的 0.10）
     strat = SimpleNamespace(
-        _adaptive_gap_cur={"high": 0.10},
-        _adaptive_last_stat={"high": {"hit_rate": 0.6, "n": 10, "slot_load": 0.4}},
+        _adaptive_gap_cur={("high", "SOL"): 0.10},
+        _adaptive_last_stat={
+            ("high", "SOL"): {"hit_rate": 0.6, "n": 10, "slot_load": 0.4}
+        },
     )
     d._trace_adaptive_gap(ts, strat, "SOL")
     d._trace_adaptive_gap(ts, strat, "SOL")  # 同值不重复
@@ -300,14 +304,14 @@ def test_trace_records_change_only(tmp_path):
     assert d._adaptive_gap_trace[0]["to"] == pytest.approx(0.10)
     assert d._adaptive_gap_trace[0]["hit_rate"] == pytest.approx(0.6)
 
-    strat._adaptive_gap_cur["high"] = 0.20
+    strat._adaptive_gap_cur[("high", "ETH")] = 0.20
     d._trace_adaptive_gap(ts, strat, "ETH")
     assert len(d._adaptive_gap_trace) == 2
-    assert d._adaptive_gap_trace[1]["from"] == pytest.approx(0.10)
+    assert d._adaptive_gap_trace[1]["from"] is None, "另一个标的首行独立起算"
     assert d._adaptive_gap_trace[1]["symbol"] == "ETH"
 
     d.adaptive_gap_enabled = False
-    strat._adaptive_gap_cur["high"] = 0.40
+    strat._adaptive_gap_cur[("high", "ETH")] = 0.40
     d._trace_adaptive_gap(ts, strat, "ETH")
     assert len(d._adaptive_gap_trace) == 2
 
