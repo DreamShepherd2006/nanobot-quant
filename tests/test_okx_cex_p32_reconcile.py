@@ -48,8 +48,12 @@ class _FakeBM:
         self.opened = []
         self.saved = 0
 
-    def open_lot(self, qty, entry_price, entry_time, slot):
-        self.opened.append({"qty": qty, "entry_price": entry_price, "slot": slot})
+    def open_lot(self, qty, entry_price, entry_time, slot, **kw):
+        # 2026-11-10：真实 BatchManager.open_lot 新增可选字段
+        # （entry_reason / entry_period / entry_ema_* / fee_usd），
+        # 桩必须同构真实签名，否则对账路径一改就 AttributeError
+        self.opened.append({"qty": qty, "entry_price": entry_price,
+                            "slot": slot, **kw})
 
     def save(self):
         self.saved += 1

@@ -509,6 +509,9 @@ class _TdLiveRunner:
                 entry_price=price,
                 entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
                 slot=slot["slot"],
+                # 2026-11-10（§33.64 C136）：对账导入的批次无成交信号，
+                # 来源标「对账导入」——持仓表不再显示 —，与实盘买入可区分
+                entry_reason="对账导入",
             )
             # 对账导入同样进入最短持有期（避免导入后立即被 TD SELL 打出）
             _note = getattr(getattr(self, "strategy", None), "_note_min_hold", None)
@@ -700,6 +703,7 @@ class _TdLiveRunner:
                 entry_price=price,
                 entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
                 slot=slot["slot"],
+                entry_reason="对账导入",  # 2026-11-10 §33.64 C136
             )
             # 对账导入同样进入最短持有期（避免导入后立即被 TD SELL 打出）
             _note = getattr(getattr(self, "strategy", None), "_note_min_hold", None)
@@ -924,6 +928,7 @@ class _TdLiveRunner:
                 entry_price=price,
                 entry_time=_t.strftime("%Y-%m-%dT%H:%M:%S"),
                 slot=slot["slot"],
+                entry_reason="对账导入",  # 2026-11-10 §33.64 C136
             )
             # 对账导入同样进入最短持有期（避免导入后立即被 TD SELL 打出）
             _note = getattr(strategy, "_note_min_hold", None)
