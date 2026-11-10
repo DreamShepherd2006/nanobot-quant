@@ -261,7 +261,24 @@ class BacktestDriver:
 
         # 4. TD 窗口（min_history）：td_bars（默认 120）——数据不足全程 SKIP
         #    与实盘一致（2026-08-23 拍板）
-        self.min_history = int(self.params.get("td_bars", 120) or 120)
+        # C139（2026-11-10 用户拍板 1+2A）：窗口取 覆盖 > 实盘 exec_params > 默认 120。
+        # 此前只读 self.params（实盘）⇒ overrides 里传 td_bars 被静默忽略
+        # （「能传但无效」），且 backtest_config 不记录 ⇒ 报告看不出用的哪个窗口。
+        # 窗口决定评估起点（前 N−1 根只预热）与 prefetch 延展，改它就会改结论。
+        _tb_ov = self.overrides.get("td_bars")
+        if _tb_ov is None:
+            _tb_live = self.params.get("td_bars")
+            if _tb_live is None:
+                self.td_bars, self.td_bars_source = 120, "默认 120"
+            else:
+                self.td_bars, self.td_bars_source = int(_tb_live), "跟随实盘"
+        else:
+            self.td_bars, self.td_bars_source = int(_tb_ov), "本次覆盖"
+        if self.td_bars < 20:
+            raise ValueError(
+                f"td_bars={self.td_bars} 过小（<20 容纳不下 setup 周期与比较窗口）"
+            )
+        self.min_history = self.td_bars
 
         # 4b. EMA 趋势变量（2026-10-20，C73/C74 研究线）
         #     **回测侧、默认关**：driver 注入 parameters，td_live 不注入 → 实盘恒 False。
@@ -1212,6 +1229,9 @@ class BacktestDriver:
                 "scene": self.scene_name,
                 "symbols": self.symbols,
                 "timestep": self.timestep,
+                # C139：TD 窗口与来源——改它同时改评估起点与预热，必须可见
+                "td_bars": self.td_bars,
+                "td_bars_source": self.td_bars_source,
                 "source": self.source,
                 "source_label": self.source_label,
                 "cross_venue": self.cross_venue,

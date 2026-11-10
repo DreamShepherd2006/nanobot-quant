@@ -515,6 +515,11 @@ def _spot_md(res: dict) -> str:
         ("周期", period_label(res.get("timestep"))),
         ("区间", f"{_ts_local(res.get('start_ts'))} → {_ts_local(res.get('end_ts'))}"),
         ("评估 bar", f"{res.get('bars', 0)} / 拉取 {res.get('fetched_bars', 0)}"),
+        # TD 窗口（C139）：窗口决定评估起点与预热，必须与页面同源可见
+        ("TD 窗口", (
+            f"{cfg.get('td_bars')} 根（{cfg.get('td_bars_source') or '—'}）"
+            if cfg.get("td_bars") is not None else "—"
+        )),
         ("初始资金", f"{_num(res.get('initial_total'), 2)}（每 slot {_num(res.get('initial_quote'), 2)} × {res.get('batches', '—')}）"),
         ("资金模型", "共享资金池（所有 slot 一份现金）" if res.get("shared_cash") else "每 slot 独立资金"),
         ("批次", res.get("batches")),
