@@ -124,7 +124,7 @@ def test_cycle_gate_counts_cycle_wait():
     _activate(s, {})
     s._cycle_state = {
         # prev_setup == 当前 setup（单调不减）⇒ reset=False，才算同周期
-        "SOL": {"bought": True, "prev_setup": 9, "reset": False, "cd_triggered": False}
+        ("SOL", 1): {"bought": True, "prev_setup": 9, "reset": False, "cd_triggered": False}
     }
     s._evaluate_symbol()
     assert s._skip_counts.get("cycle_wait", 0) == 1
@@ -149,7 +149,7 @@ def _wave_full_state(s, *, count: int = 1):
     }
     s._denied_cycle = {}
     s._cycle_state = {
-        "SOL": {"bought": False, "prev_setup": 0, "reset": False, "cd_triggered": False}
+        ("SOL", 1): {"bought": False, "prev_setup": 0, "reset": False, "cd_triggered": False}
     }
 
 

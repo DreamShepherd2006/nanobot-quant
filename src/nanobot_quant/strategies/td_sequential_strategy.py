@@ -1688,59 +1688,78 @@ class TdSequentialStrategy(Strategy):
         # 动能停滞状态更新（2026-08-29）：cd_sell 连续 N 根无 +1 → 动能弱，
         # 供高9 盈利门 [下, 上) 区间动能判断使用（与 BUY/SELL 分支顺序无关）。
         self._update_cd_stall(self.symbol, cd_sell)
+        # 本轮触发周期（2026-11-10 方案 A）：由下方逐周期判定写入；
+        # 不触发的轮次置 None，避免上一轮的周期被台账误记。
+        self._cur_entry_period = None
 
-        # ── 信号周期状态（2026-08-19 分批次建仓语义，per-symbol）──
-        # 一个信号周期内同一标的只建一次仓：建仓后 setup 计数单调不减
-        # （9→10→11→12）视为同周期，跳过 BUY；计数变小（12→8 / 9→1）
-        # 标记 reset → 新周期允许再建。slot 平仓释放后同周期也不建
-        # （信号级，用户 2026-08-19 拍板）。SELL 侧不受影响。
+        # ── 信号周期状态（2026-11-10 方案 A：按「标的 × 倍数周期」独立）──
+        # 用户拍板：每个周期各自独立计算，谁先到 9 谁触发，不等其他周期。
+        # 旧实现把各周期取 max 后与**单一** prev_setup 比较单调性——「主导周期
+        # 换主角」时被误判成计数回落=新周期（2026-11-10 实盘：SOL 的 4m 12
+        # 归零、5m 10 顶上 ⇒ 12→10 ⇒ 16 分钟内重复建仓；CRCL 3m 13→5m 12 同型）。
+        # 现在状态键 = (symbol, 周期)：各周期自维护 bought/reset/cd_triggered/
+        # last_setup_zero_ts，跨周期不做任何比较。
         if not hasattr(self, "_cycle_state"):
-            self._cycle_state: dict[str, dict] = {}
+            self._cycle_state: dict[tuple, dict] = {}
         if not hasattr(self, "_denied_cycle"):
             # 共振错峰（2026-08-26）：被全局额度拦截的标的在本 setup
-            # 周期内不再尝试建仓，setup 重置时清除（见下方 reset 分支）。
-            # key=(scene, symbol)——同一 symbol 跨场景独立（用户拍板 per-scene）
+            # 周期内不再尝试建仓。key=(scene, symbol)——跨场景独立。
             self._denied_cycle: dict[tuple, bool] = {}
         if not hasattr(self, "_wave_groups"):
             # 共振组（2026-11-02 重构）：每场景一组列表，每项
             # {"start", "end", "count", "symbols"}——区间 = 组内标的最早
             # setup 周期起点 ~ 最晚周期终点；count = 该组已建仓笔数。
-            # 新信号的周期区间与某组相交 → 同一共振，受 wave_max_buys 限制；
-            # 不相交 → 独立周期，自成一组、不受其他组影响。
             self._wave_groups: dict[str, list] = {}
         if not hasattr(self, "_cycle_span"):
             # 各标的当前 setup 周期区间 (scene, symbol) → {start, end, closed}
             self._cycle_span: dict[tuple, dict] = {}
-        st = self._cycle_state.get(self.symbol)
-        if st is None:
-            # 首次见到该标的：有 open 仓位 → 视为本周期已建仓（保守
-            # 不追——重启边界：setup 累加期重启会立即再建，此守卫避免）
-            st = {"bought": False, "prev_setup": 0, "reset": False, "cd_triggered": False}
-            _bm = (getattr(self, "_batch_managers", None) or {}).get(
-                self.symbol
-            ) or getattr(self, "batch_manager", None)
-            if _bm is not None and _bm.any_open():
-                st["bought"] = True
-                st["cd_triggered"] = True  # 有 open 仓 → 本 countdown 周期已建仓
-            self._cycle_state[self.symbol] = st
-        if setup_buy < st["prev_setup"]:
-            st["reset"] = True  # 计数变小 → 新信号周期
-            # 共振错峰（2026-08-26）：新周期恢复被额度拦截标的的建仓资格
+        entry_setup = int(self._td_params.get("entry_setup", 9))
+        entry_countdown = int(self._td_params.get("entry_countdown", 13))
+        _bm_any = (getattr(self, "_batch_managers", None) or {}).get(
+            self.symbol
+        ) or getattr(self, "batch_manager", None)
+        _has_open = bool(_bm_any is not None and _bm_any.any_open())
+        # 各周期读数：单周期时 _last_multi 为空 → 用聚合值（等价 base 周期）
+        _per_readings = dict(getattr(self, "_last_multi", None) or {})
+        if not _per_readings:
+            _per_readings = {1: (setup_buy, cd_buy)}
+        _per_state: dict[int, dict] = {}
+        for _m, _v in sorted(_per_readings.items()):
+            if _v is None:
+                continue
+            _m = int(_m)
+            _sb, _cb = int(_v[0] or 0), int(_v[1] or 0)
+            _key = (self.symbol, _m)
+            _stp = self._cycle_state.get(_key)
+            if _stp is None:
+                # 首次见到该周期：有 open 仓位且该周期已达阈值 → 视为本周
+                # 期已建仓（重启边界，保守不追）
+                _stp = {
+                    "bought": False,
+                    "prev_setup": 0,
+                    "reset": False,
+                    "cd_triggered": False,
+                }
+                if _has_open and (_sb >= entry_setup or _cb >= entry_countdown):
+                    _stp["bought"] = True
+                    _stp["cd_triggered"] = True
+                self._cycle_state[_key] = _stp
+            if _sb < _stp["prev_setup"]:
+                _stp["reset"] = True  # 该周期计数变小 → 该周期进入新信号周期
+            # cd 入场时效门槛（2026-08-29 拍板 B）：记录**该周期** setup 归零
+            # 事件（>0 → 0）的 bar 时间戳（跨轮记忆），cd 触发时按根数判新鲜度。
+            if _stp["prev_setup"] > 0 and _sb == 0:
+                _stp["last_setup_zero_ts"] = df.index[-1] if len(df) else None
+            _stp["prev_setup"] = _sb
+            # cd 周期门控（2026-08-27）：同 countdown 周期内不重复建仓；
+            # 清位条件 = 该周期 cd 计数归 0 且 setup 翻转。
+            if _stp["reset"] and _cb == 0:
+                _stp["cd_triggered"] = False
+            _per_state[_m] = _stp
+        # 标的级 reset（供波锁 denied 清位；波锁关闭时无副作用）
+        if _per_state and any(s["reset"] for s in _per_state.values()):
             if getattr(self, "_denied_cycle", None):
                 self._denied_cycle.pop((self._cur_scene(), self.symbol), None)
-        # 2026-08-29 拍板 B：cd 入场时效门槛——记录 setup 归零事件（>0 → 0）
-        # 的 bar 时间戳（跨轮记忆），cd 触发时按「距当前 bar 数」判定新鲜度。
-        if st["prev_setup"] > 0 and setup_buy == 0:
-            st["last_setup_zero_ts"] = df.index[-1] if len(df) else None
-        st["prev_setup"] = setup_buy
-        # cd 周期门控（2026-08-27）：countdown 跨 setup 翻转持续累积（09:5x 启动 →
-        # 10:14 完成 13），setup 翻转触发 reset 会让 cd_buy 13 绕过周期门控——同一
-        # countdown 周期内 setup 9 已建仓 + cd 13 再补买（4 根 bar 内两次建仓）。
-        # cd_triggered：本 countdown 周期已建仓（setup 或 cd 触发均置位）；
-        # 清位条件：cd 计数归 0（countdown 完成/未启动）且 setup 翻转（新周期）——
-        # 之后 setup 重新数到 9 才允许再次建仓，cd_buy 独立触发（setup 从未到 9）保留。
-        if st["reset"] and cd_buy == 0:
-            st["cd_triggered"] = False
         # 共振组判定数据（2026-11-02）：记录本标的 setup 周期的 bar 区间。
         # setup > 0 期间区间持续延伸；setup 归零 → closed（下次 >0 开新周期）。
         self._cur_bar_ts = df.index[-1] if len(df) else None
@@ -1818,8 +1837,6 @@ class TdSequentialStrategy(Strategy):
         if self._peak_portfolio is None or pv > self._peak_portfolio:
             self._peak_portfolio = pv
 
-        entry_setup = int(self._td_params.get("entry_setup", 9))
-        entry_countdown = int(self._td_params.get("entry_countdown", 13))
         exit_setup = int(self._td_params.get("exit_setup", 9))
         exit_countdown = int(self._td_params.get("exit_countdown", 13))
         # 出场首穿（2026-11-06）：每根 bar 推进一次 prev 状态，并返回本次是否触发
@@ -1828,58 +1845,69 @@ class TdSequentialStrategy(Strategy):
         )
         score_threshold = float(self._td_params.get("score_threshold", 0.0))
 
-        # 同周期已建仓 → 跳过 BUY（信号级：slot 平仓释放也不建，等 setup
-        # 重置后再现新信号；只拦截 BUY，不 return——SELL/止损仍正常评估）
-        # 2026-08-29 拍板 B：cd 入场时效门槛——cd 通道触发要求 setup 最近归零
-        # ≤ N 根（cd 进场门限建立在 setup 结构延续基础上，非独立计算）；
-        # setup 从未归零（结构连续）恒允许；0=关闭（回归旧 cd 独立触发）。
-        cd_ok = cd_buy >= entry_countdown
+        # ── 入场触发判定（2026-11-10 方案 A：逐周期独立）──
+        # 某周期自身计数达阈值 = 该周期触发一次建仓；该周期「已建仓且未重置」
+        # 则跳过；各周期之间不比较、不等待（旧 max 聚合语义已废弃）。
+        # cd 入场时效门槛（2026-08-29 拍板 B）按**触发周期自身**的 setup 归零
+        # 事件判定；0=关闭。
         _gap = getattr(self, "_cd_entry_setup_gap", 5) or 0
-        if cd_ok and setup_buy < entry_setup and _gap > 0:
-            _ts = st.get("last_setup_zero_ts")
-            if _ts is not None and len(df):
-                _idx = df.index
-                if _ts in _idx:
-                    _bars = len(_idx) - 1 - _idx.get_loc(_ts)
-                    if _bars > _gap:
-                        cd_ok = False
-                        self._bump_skip("cd_stale")
-                        print(
-                            f"[TD] CD STALE SKIP | symbol={self.symbol} "
-                            f"setup 归零 {_bars} 根前 > {_gap}（陈旧 cd 信号），跳过 cd 入场",
-                            file=sys.stderr, flush=True,
-                        )
-                else:
-                    # 归零事件在窗口外（>120 根前）→ 陈旧
-                    cd_ok = False
+        _hits: list[int] = []          # 本轮可触发的周期
+        _blocked_hits: list[int] = []  # 达阈值但本周期已建仓
+        for _m, _v in sorted(_per_readings.items()):
+            if _v is None:
+                continue
+            _m = int(_m)
+            _sb, _cb = int(_v[0] or 0), int(_v[1] or 0)
+            _hit_setup = _sb >= entry_setup
+            _hit_cd = _cb >= entry_countdown
+            if not (_hit_setup or _hit_cd):
+                continue
+            _stp = _per_state.get(_m) or {}
+            if _hit_cd and not _hit_setup and _gap > 0:
+                _ts = _stp.get("last_setup_zero_ts")
+                _stale = False
+                if _ts is not None and len(df):
+                    _idx = df.index
+                    if _ts in _idx:
+                        _stale = (len(_idx) - 1 - _idx.get_loc(_ts)) > _gap
+                    else:
+                        _stale = True  # 归零事件在窗口外 → 陈旧
+                if _stale:
                     self._bump_skip("cd_stale")
                     print(
-                        f"[TD] CD STALE SKIP | symbol={self.symbol} "
-                        f"setup 归零在窗口外（陈旧 cd 信号），跳过 cd 入场",
+                        f"[TD] CD STALE SKIP | symbol={self.symbol} period={_m} "
+                        f"setup 归零超 {_gap} 根（陈旧 cd 信号），跳过该周期",
                         file=sys.stderr, flush=True,
                     )
-            # _ts is None = setup 从未归零（结构连续）→ 新鲜，保留
-        buy_signal = (setup_buy >= entry_setup) or cd_ok
-        # 周期门控（2026-08-27 扩展）：setup 周期（bought+未重置）或 countdown
-        # 周期（cd_triggered 且 cd_buy 仍在触发区——setup 翻转会让 cd 13 绕过
-        # 旧门控，同一 countdown 周期内 setup 9 已建仓 + cd 13 补买被拦）
-        cycle_blocked = (st["bought"] and not st["reset"]) or (
-            st["cd_triggered"] and cd_buy >= entry_countdown
-        )
-        if (
-            cycle_blocked
-            and buy_signal
-            and score > score_threshold
-        ):
-            # 2026-11-04 拆标签：cycle_wait = 同标的 setup/countdown 周期门控
+                    continue
+            if (_stp.get("bought") and not _stp.get("reset")) or (
+                _stp.get("cd_triggered") and _hit_cd
+            ):
+                _blocked_hits.append(_m)
+            else:
+                _hits.append(_m)
+        # 有信号 = 任一周期达阈值（含被本周期门控拦下的，口径与旧 buy_signal 一致）
+        buy_signal = bool(_hits or _blocked_hits)
+        # 所有达阈值的周期都已在各自周期内建仓 → 跳过 BUY（只拦 BUY，不 return）
+        cycle_blocked = bool(_blocked_hits) and not _hits
+        # 本轮触发的周期：多周期同时满足时取最小倍数（最早那一档）
+        self._cur_entry_period = min(_hits) if _hits else None
+        if cycle_blocked and buy_signal and score > score_threshold:
+            _detail = ",".join(
+                f"{_m}={int((_per_readings.get(_m) or (0, 0))[0] or 0)}"
+                for _m in _blocked_hits
+            )
             self._bump_skip("cycle_wait")
             print(
-                f"[TD] BATCH WAIT | symbol={self.symbol} 同周期已建仓"
-                f"（setup_buy={setup_buy} cd_buy={cd_buy} 未重置），等新信号周期",
+                f"[TD] BATCH WAIT | symbol={self.symbol} 各周期均已建仓"
+                f"（setup: {_detail}；聚合 setup_buy={setup_buy}），"
+                f"等各周期各自重置",
                 file=sys.stderr, flush=True,
             )
             self._record(
-                "WAIT", f"同周期已建仓 setup_buy={setup_buy}", symbol=self.symbol
+                "WAIT",
+                f"各周期均已建仓 setup_buy={setup_buy}（{_detail}）",
+                symbol=self.symbol,
             )
         tdst_filter = bool(self._td_params.get("tdst_filter", False))
         support = signal.get("tdst_support")
@@ -2210,7 +2238,8 @@ class TdSequentialStrategy(Strategy):
                         self.logger.info(
                             f"TD BATCH LONG | symbol={self.symbol} slot={slot['slot']} "
                             f"price={price:.2f} qty={lot_qty} "
-                            f"setup_buy={setup_buy} cd_buy={cd_buy} score={score:.1f}"
+                            f"setup_buy={setup_buy} cd_buy={cd_buy} score={score:.1f} "
+                            f"period={self._cur_entry_period or 1}"
                         )
                         self._record(
                             "LONG",
@@ -2222,9 +2251,7 @@ class TdSequentialStrategy(Strategy):
                             chain=((order.custom_params or {}).get("onchain_pending") or {}).get("chain", ""),
                         )
                         executed = True
-                        st["bought"] = True
-                        st["reset"] = False
-                        st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
+                        self._mark_period_bought()
                         # 共振组：本标的 setup 周期区间并入所属组 + 计数
                         self._wave_group_join(
                             self._cur_scene(), self.symbol,
@@ -2270,9 +2297,7 @@ class TdSequentialStrategy(Strategy):
                         chain=pend.get("chain", ""),
                     )
                     executed = True
-                    st["bought"] = True
-                    st["reset"] = False
-                    st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
+                    self._mark_period_bought()
                     # 共振组：本标的 setup 周期区间并入所属组 + 计数
                     self._wave_group_join(
                         self._cur_scene(), self.symbol,
@@ -2312,15 +2337,14 @@ class TdSequentialStrategy(Strategy):
                     )
                 self.logger.info(
                     f"TD LONG  | symbol={self.symbol} price={price:.2f} qty={req.quantity} "
-                    f"setup_buy={setup_buy} score={score:.1f}"
+                    f"setup_buy={setup_buy} score={score:.1f} "
+                    f"period={self._cur_entry_period or 1}"
                 )
                 self._record(
                     "LONG",
                     f"qty={self._fmt_num(req.quantity)} price={price:.2f}",
                 )
-                st["bought"] = True
-                st["reset"] = False
-                st["cd_triggered"] = True  # 本 countdown 周期已建仓（cd 13 补买拦截）
+                self._mark_period_bought()
                 return
 
         # ── SELL signal / stop-loss / take-profit（分批：逐批独立）──
@@ -4237,16 +4261,45 @@ class TdSequentialStrategy(Strategy):
             px = 0.0
         return f * px if px > 0 else None
 
+    def _mark_period_bought(self) -> None:
+        """标记本轮**触发的那个周期**已建仓（2026-11-10 方案 A）。
+
+        各周期独立计数、各自只建一次仓；只标记触发周期，其他周期不受影响
+        （旧实现标记标的级 ``bought``，会让所有周期一起被锁死）。
+        无触发周期（单周期未写 / 已重置）时安全跳过。
+        """
+        m = getattr(self, "_cur_entry_period", None)
+        if m is None:
+            return
+        try:
+            stp = (getattr(self, "_cycle_state", None) or {}).get(
+                (self.symbol, int(m))
+            )
+        except (TypeError, ValueError):
+            return
+        if stp is None:
+            return
+        stp["bought"] = True
+        stp["reset"] = False
+        # 本 countdown 周期已建仓（cd 13 补买拦截）
+        stp["cd_triggered"] = True
+
     def _entry_period_hit(self) -> int | None:
         """本次 BUY 由哪个倍数周期触发（C120，回测逐笔可核验）。
 
-        多周期入场是 OR 聚合（``setup_buy``/``cd_buy`` 取各周期最大值）——
-        这里回看 ``_last_multi`` 把「达到当前生效阈值」的周期列出来，取**最小**
-        的倍数（最快那一档）。单周期返回 1；无聚合数据返回 None（字段缺省，
-        不写空字符串）。
+        2026-11-10 方案 A 起优先返回**本轮真正触发的周期**
+        （``_cur_entry_period``，逐周期独立门控算出的那一个）；
+        无该状态时（如 DEX 旧路径）回退旧逻辑：回看 ``_last_multi``
+        把达阈值的周期列出、取最小倍数。单周期返回 1；无数据返回 None。
 
         纯记录、不参与任何决策。
         """
+        _cur = getattr(self, "_cur_entry_period", None)
+        if _cur is not None:
+            try:
+                return int(_cur)
+            except (TypeError, ValueError):
+                pass
         periods = list(getattr(self, "_entry_periods", None) or [1])
         if len(periods) <= 1:
             return 1
