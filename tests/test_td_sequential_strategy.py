@@ -164,7 +164,7 @@ def test_buy_cd_buy_signal_triggers():
     s.on_trading_iteration()
     assert s._captured.get("order") is not None
     assert s._captured["order"][2] == "buy"
-    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    assert s._cycle_state[("AAPL", 1)]["cd_triggered"] is True
 
 
 def test_buy_cd_buy_below_threshold_no_buy():
@@ -203,7 +203,7 @@ def _preset_cycle(s, ts=None, prev_setup=0):
     """预置周期门控状态：可指定 setup 归零时间戳与上轮 setup 计数。"""
     if not hasattr(s, "_cycle_state"):
         s._cycle_state = {}
-    s._cycle_state["AAPL"] = {
+    s._cycle_state[("AAPL", 1)] = {
         "bought": False, "prev_setup": prev_setup, "reset": False,
         "cd_triggered": False, "last_setup_zero_ts": ts,
     }
@@ -270,7 +270,7 @@ def test_setup_zero_event_tracked():
     _preset_cycle(s, ts=None, prev_setup=5)
     s._calc = lambda df: _fixed_signal(cd_buy=3)  # setup_buy=0（默认）
     s.on_trading_iteration()
-    assert s._cycle_state["AAPL"]["last_setup_zero_ts"] == df.index[-1]
+    assert s._cycle_state[("AAPL", 1)]["last_setup_zero_ts"] == df.index[-1]
 
 
 def test_cd_entry_stale_blocked_but_setup_still_buys():
@@ -613,12 +613,12 @@ def test_cycle_gate_same_period_skips_second_buy():
     s = _make_strategy()
     s._evaluate_symbol()
     assert "order" in s._captured, "首次信号应建仓"
-    assert s._cycle_state["AAPL"]["bought"] is True
-    assert s._cycle_state["AAPL"]["prev_setup"] >= 9
+    assert s._cycle_state[("AAPL", 1)]["bought"] is True
+    assert s._cycle_state[("AAPL", 1)]["prev_setup"] >= 9
     s._captured.clear()
     s._evaluate_symbol()  # 同一 bars → setup_buy 仍触发且未重置
     assert "order" not in s._captured, "同周期不得再建仓"
-    assert s._cycle_state["AAPL"]["reset"] is False
+    assert s._cycle_state[("AAPL", 1)]["reset"] is False
 
 
 def test_cycle_gate_new_period_after_reset():
@@ -626,20 +626,20 @@ def test_cycle_gate_new_period_after_reset():
     s = _make_strategy()
     s._evaluate_symbol()
     assert "order" in s._captured
-    first_setup = s._cycle_state["AAPL"]["prev_setup"]
+    first_setup = s._cycle_state[("AAPL", 1)]["prev_setup"]
     assert first_setup >= 9
     # 中性 bars：setup 计数归小 → 触发 reset
     _swap_bars(s, _neutral_closes())
     s._captured.clear()
     s._evaluate_symbol()
     assert "order" not in s._captured
-    assert s._cycle_state["AAPL"]["reset"] is True, "计数变小应标记新周期"
+    assert s._cycle_state[("AAPL", 1)]["reset"] is True, "计数变小应标记新周期"
     # 重新触发（setup 再数到 >= entry_setup）→ 新周期允许建仓
     _swap_bars(s, _buy_signal_closes())
     s._captured.clear()
     s._evaluate_symbol()
     assert "order" in s._captured, "重置后新周期应允许再建仓"
-    assert s._cycle_state["AAPL"]["reset"] is False
+    assert s._cycle_state[("AAPL", 1)]["reset"] is False
 
 
 def test_cycle_gate_cd_buy_blocked_same_countdown_period():
@@ -654,14 +654,14 @@ def test_cycle_gate_cd_buy_blocked_same_countdown_period():
     s = _make_strategy()
     s._evaluate_symbol()  # setup 9 建仓（cd_buy=0）
     assert "order" in s._captured, "首次信号应建仓"
-    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    assert s._cycle_state[("AAPL", 1)]["cd_triggered"] is True
     s._captured.clear()
     # setup 翻转（reset=True）+ cd_buy 13 触发 → 同一 countdown 周期内补买被拦
     s._calc = lambda df: _fixed_signal(cd_buy=13, setup_buy=1)
     s._evaluate_symbol()
     assert "order" not in s._captured, "同一 countdown 周期内 cd 13 补买应被拦"
-    assert s._cycle_state["AAPL"]["reset"] is True
-    assert s._cycle_state["AAPL"]["cd_triggered"] is True  # cd_buy=13≠0 不清位
+    assert s._cycle_state[("AAPL", 1)]["reset"] is True
+    assert s._cycle_state[("AAPL", 1)]["cd_triggered"] is True  # cd_buy=13≠0 不清位
 
 
 def test_cycle_gate_cd_triggered_cleared_on_cd_zero_and_reset():
@@ -669,13 +669,13 @@ def test_cycle_gate_cd_triggered_cleared_on_cd_zero_and_reset():
     清除，新 setup 周期允许再次建仓（cd_buy 独立触发保留）。"""
     s = _make_strategy()
     s._evaluate_symbol()  # 建仓 → cd_triggered=True
-    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    assert s._cycle_state[("AAPL", 1)]["cd_triggered"] is True
     s._captured.clear()
     # setup 翻转（1 < 9 → reset）+ cd 归 0 → 清位
     s._calc = lambda df: _fixed_signal(cd_buy=0, setup_buy=1)
     s._evaluate_symbol()
-    assert s._cycle_state["AAPL"]["reset"] is True
-    assert s._cycle_state["AAPL"]["cd_triggered"] is False
+    assert s._cycle_state[("AAPL", 1)]["reset"] is True
+    assert s._cycle_state[("AAPL", 1)]["cd_triggered"] is False
     assert "order" not in s._captured  # buy_signal 不成立
 
 
@@ -688,7 +688,7 @@ def test_cycle_gate_cd_buy_independent_trigger_allowed():
     s._calc = lambda df: _fixed_signal(cd_buy=13, setup_buy=0)
     s._evaluate_symbol()
     assert "order" in s._captured, "独立 cd 周期触发应放行"
-    assert s._cycle_state["AAPL"]["cd_triggered"] is True
+    assert s._cycle_state[("AAPL", 1)]["cd_triggered"] is True
 
 
 def test_cycle_gate_open_position_on_start_blocks():
@@ -704,7 +704,7 @@ def test_cycle_gate_open_position_on_start_blocks():
     s._captured.clear()
     s._evaluate_symbol()  # signal 触发 + slot2 available → 周期守卫拦截
     assert "order" not in s._captured, "有 open 仓位视为本周期已建仓，跳过 BUY"
-    assert s._cycle_state["AAPL"]["bought"] is True
+    assert s._cycle_state[("AAPL", 1)]["bought"] is True
 
 
 def test_write_positions_state(monkeypatch):
@@ -770,28 +770,28 @@ def test_write_positions_state_price_failure_fallback(monkeypatch):
     assert rows[0]["pnl_pct"] is None
     # AAPL 触发建仓 → bought=True
     s._evaluate_symbol()
-    assert s._cycle_state["AAPL"]["bought"] is True
+    assert s._cycle_state[("AAPL", 1)]["bought"] is True
     # MSFT 从未评估过 → 首次评估视为新标的（bought=False）
     s.symbol = "MSFT"
     s._evaluate_symbol()
-    assert s._cycle_state["MSFT"]["bought"] is True
-    assert s._cycle_state["MSFT"]["prev_setup"] >= 9
+    assert s._cycle_state[("MSFT", 1)]["bought"] is True
+    assert s._cycle_state[("MSFT", 1)]["prev_setup"] >= 9
     # AAPL 状态未被 MSFT 评估污染
-    assert s._cycle_state["AAPL"]["bought"] is True
+    assert s._cycle_state[("AAPL", 1)]["bought"] is True
 def test_cycle_gate_per_symbol_independent():
     """每币独立：不同 symbol 各自周期状态，互不影响。"""
     s = _make_strategy()
     s.symbols = ["AAPL", "MSFT"]
     # AAPL 触发建仓 → bought=True
     s._evaluate_symbol()
-    assert s._cycle_state["AAPL"]["bought"] is True
+    assert s._cycle_state[("AAPL", 1)]["bought"] is True
     # MSFT 从未评估过 → 首次评估视为新标的（bought=False）
     s.symbol = "MSFT"
     s._evaluate_symbol()
-    assert s._cycle_state["MSFT"]["bought"] is True
-    assert s._cycle_state["MSFT"]["prev_setup"] >= 9
+    assert s._cycle_state[("MSFT", 1)]["bought"] is True
+    assert s._cycle_state[("MSFT", 1)]["prev_setup"] >= 9
     # AAPL 状态未被 MSFT 评估污染
-    assert s._cycle_state["AAPL"]["bought"] is True
+    assert s._cycle_state[("AAPL", 1)]["bought"] is True
 
 def test_write_account_funds_cex(monkeypatch):
     """CEX 通道写入子账号资金（2026-08-22 资金小表数据源）。
