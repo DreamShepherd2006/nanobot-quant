@@ -1318,7 +1318,8 @@ def _scene_positions_block(sc: str, running: bool) -> str:
     return (
         '<div style="margin:8px 0 2px"><span class="muted">持仓（open 批次）</span>'
         '<span class="muted" style="float:right">运行中=实时价 · 未运行=台账快照（无现价）</span></div>'
-        '<div class="pos-wrap"><table style="margin-top:2px">'
+        f'<div class="pos-wrap" data-pos-key="{_esc(str(sc))}">'
+        '<table style="margin-top:2px">'
         '<tr><th rowspan="2" class="pos-sticky col-sym">标的</th>'
         '<th rowspan="2" class="pos-sticky col-slot">slot</th>'
         '<th colspan="7">成交信息</th>'
@@ -1729,12 +1730,41 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             '    for (var k in window.TQ) if (window.TQ[k]) p.push(k + "=" + encodeURIComponent(window.TQ[k]));'
             '    return p.length ? "&" + p.join("&") : "";'
             '  }'
+            '  function snapScroll(){'
+            '    var o = { wx: window.pageXOffset || 0, wy: window.pageYOffset || 0, els: {} };'
+            "    var el = document.getElementById('live-wrap');"
+            '    if (el){'
+            "      var ws = el.querySelectorAll('.pos-wrap');"
+            '      for (var i = 0; i < ws.length; i++){'
+            "        var k = ws[i].getAttribute('data-pos-key') || ('#' + i);"
+            '        o.els[k] = ws[i].scrollLeft;'
+            '      }'
+            '    }'
+            '    return o;'
+            '  }'
+            '  function applyScroll(o){'
+            "    var el = document.getElementById('live-wrap');"
+            '    if (el){'
+            "      var ws = el.querySelectorAll('.pos-wrap');"
+            '      for (var i = 0; i < ws.length; i++){'
+            "        var k = ws[i].getAttribute('data-pos-key') || ('#' + i);"
+            '        if (o.els[k] !== undefined) ws[i].scrollLeft = o.els[k];'
+            '      }'
+            '    }'
+            '    if (window.pageXOffset !== o.wx || window.pageYOffset !== o.wy)'
+            '      window.scrollTo(o.wx, o.wy);'
+            '  }'
             '  function poll(){'
             "    fetch('/config/td-table?tab=live&frag=1' + tqQS())"
             '      .then(function(r){ return r.text(); })'
             '      .then(function(html){'
             "        var el = document.getElementById('live-wrap');"
-            "        if (el && html) el.innerHTML = html;"
+            '        if (el && html){'
+            '          var s = snapScroll();'
+            '          el.innerHTML = html;'
+            '          applyScroll(s);'
+            '          requestAnimationFrame(function(){ applyScroll(s); });'
+            '        }'
             '      }).catch(function(){});'
             '  }'
             '  window.applyTQ = function(){'
