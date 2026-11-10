@@ -511,8 +511,16 @@ def test_render_live_positions_block(monkeypatch, tmp_path: Path):
     html = _render_live(with_script=False, tq={})
     assert "持仓（open 批次）" in html
     # 2026-10-30 用户要求新增「价值(USD)」列（数量 × 现价）
-    assert ("<th>标的</th><th>slot</th><th>数量</th><th>价值(USD)</th>"
-            "<th>成本价</th><th>现价</th><th>浮盈%</th>") in html
+    # 2026-11-10（§33.64）：18 列 + 双行分组表头
+    assert '<th colspan="7">成交信息</th>' in html
+    assert '<th colspan="8">持仓状态</th>' in html
+    for col in ("建仓时间", "入场信号", "入场周期", "入场 EMA", "成交价",
+                "交易对", "手续费", "数量", "价值(USD)", "成本价", "现价",
+                "浮盈%", "最高浮盈", "最低浮盈", "当前 EMA"):
+        assert f"<th>{col}</th>" in html, col
+    assert '<th rowspan="2">操作</th>' in html
+    # 冻结左侧列
+    assert 'class="pos-sticky col-sym"' in html and 'class="pos-sticky col-slot"' in html
     assert "$3.99" in html          # 0.045 × 88.65
     assert "+0.75%" in html          # 0.0075 → +0.75%
     assert ">88.65<" in html         # ticker 现价

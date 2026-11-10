@@ -37,6 +37,17 @@
   .setup { font-weight: 700; }
   .setup.buy { color: #1b7f3d; } .setup.sell { color: #c62828; }
   .muted { color: #aaa; }
+  /* 持仓表 18 列（2026-11-10 §33.64）：横向滚动 + 冻结标的/slot 两列 */
+  .pos-wrap { overflow-x: auto; max-width: 100%; }
+  .pos-wrap table { width: auto; min-width: 100%; }
+  .pos-wrap th, .pos-wrap td { padding: 4px 8px; font-size: 12px; white-space: nowrap; }
+  .pos-wrap th[colspan] { text-align: center; background: #e9eef5; border-bottom: 1px solid #d5dce6; }
+  .pos-sticky { position: sticky; background: #fff; z-index: 3; }
+  .pos-wrap th.pos-sticky { background: #f3f5f8; }
+  .col-sym { left: 0; min-width: 54px; text-align: left; }
+  .col-slot { left: 54px; min-width: 44px; }
+  .pos-sub { font-size: 0.85em; color: #999; }
+  .pos-tip { font-size: 11px; margin-top: 3px; line-height: 1.5; }
   .status { display: flex; gap: 16px; flex-wrap: wrap; background: #fff; border: 1px solid #e5e7eb;
             border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; font-size: 13px; }
   .status b { font-size: 15px; }
