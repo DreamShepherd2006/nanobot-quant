@@ -117,16 +117,16 @@ def test_mid_hit_rate_uses_middle_gap():
 
 def test_hysteresis_requires_two_confirmations():
     s = _mk(static=0.3)
-    s._adaptive_done["high"] = [False, False, False, False]  # 低命中 → 收紧档
+    s._adaptive_done[("high", "SOL")] = [False, False, False, False]  # 低命中 → 收紧档
     assert _feed(s, 100.0, 100.0) == 0.4  # 首次直接设定
-    s._adaptive_done["high"] = [True, True, True, True]  # 反转成高命中
+    s._adaptive_done[("high", "SOL")] = [True, True, True, True]  # 反转成高命中
     assert _feed(s, 100.0, 100.0) == 0.4, "第一次仅登记 pending，维持原档"
     assert _feed(s, 100.0, 100.0) == 0.1, "连续第二次才切换"
 
 
 def test_slot_load_forces_tighter():
     s = _mk(static=0.3)
-    s._adaptive_done["high"] = [True, True, True, True]
+    s._adaptive_done[("high", "SOL")] = [True, True, True, True]
     bm = _BM(open_n=8, total=10)  # 80% 占用 → 触发护栏（0.1 + 0.1）
     assert _feed(s, 100.0, 100.0, bm=bm) == 0.2
 
@@ -143,7 +143,7 @@ def test_watch_expires_after_m_bars():
     _feed(s, 100.2, 100.0)
     _feed(s, 100.3, 100.0)  # 第 3 根 → 定案
     assert key not in s._adaptive_watch
-    assert s._adaptive_done["high"] == [True]  # 摸到 +0.3%
+    assert s._adaptive_done[("high", "SOL")] == [True]  # 摸到 +0.3%
 
 
 def test_no_duplicate_register_while_in_flight():
@@ -152,4 +152,4 @@ def test_no_duplicate_register_while_in_flight():
     for _ in range(4):
         _feed(s, 100.0, 100.0, buy_signal=True)  # 连续信号不重复登记
     assert len(s._adaptive_watch) == 1
-    assert len(s._adaptive_done.get("high", [])) == 0
+    assert len(s._adaptive_done.get(("high", "SOL"), [])) == 0

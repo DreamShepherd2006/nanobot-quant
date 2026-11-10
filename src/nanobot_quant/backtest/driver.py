@@ -344,7 +344,7 @@ class BacktestDriver:
             _ad_m = self.params.get("adaptive_m")
         self.adaptive_m = int(_ad_m) if _ad_m is not None else 30
         self._adaptive_gap_trace: list[dict] = []
-        self._adaptive_gap_last: dict[str, float] = {}
+        self._adaptive_gap_last: dict[tuple[str, str], float] = {}
         # 进度写盘节流（2026-11-01）：重放循环曾每 bar 无条件把 payload（含
         # 逐 bar 明细）序列化写盘到 /data（FUSE 网络卷）——累计量 O(n²)，
         # 1440 根 bar 实测写 ~200MB、回测耗时翻倍以上。改为同一阶段内最多
@@ -775,15 +775,14 @@ class BacktestDriver:
         if not self.adaptive_gap_enabled:
             return
         cur = getattr(strategy, "_adaptive_gap_cur", None) or {}
-        val = cur.get(self.scene_name)
+        key = (self.scene_name, symbol)
+        val = cur.get(key)
         if val is None:
             return
-        old = self._adaptive_gap_last.get(self.scene_name)
+        old = self._adaptive_gap_last.get(key)
         if old == val:
             return
-        stat = (getattr(strategy, "_adaptive_last_stat", {}) or {}).get(
-            self.scene_name
-        ) or {}
+        stat = (getattr(strategy, "_adaptive_last_stat", {}) or {}).get(key) or {}
         self._adaptive_gap_trace.append(
             {
                 "ts": (
@@ -798,7 +797,7 @@ class BacktestDriver:
                 "slot_load": stat.get("slot_load"),
             }
         )
-        self._adaptive_gap_last[self.scene_name] = float(val)
+        self._adaptive_gap_last[key] = float(val)
 
     @staticmethod
     def _pick(series: Any, ts: Any) -> Optional[float]:
