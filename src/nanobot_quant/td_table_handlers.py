@@ -1053,23 +1053,115 @@ def _shared_pool_map_txt(sub_accounts, batches: int = 1) -> str:
         txt += " ⚠ 场景池已忽略"
     return txt
 
-def _pos_row(lot: dict, sc: str = "", running: bool = False) -> str:
-    """持仓小节单行（标的/slot/数量/价值/成本价/现价/浮盈%/操作）。
+def _pos_pct(v, signed: bool = True) -> str:
+    """比例 → 百分比文本（``0.0123`` → ``+1.23%``）；缺失返回 ``—``。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{f * 100:+.2f}%" if signed else f"{f * 100:.2f}%"
 
-    2026-10-30 用户要求：① 数量与价格定点显示（此前 BTC 显示成
-    ``5.094e-05`` / ``7.853e+04``）；② 新增「价值(USD)」列，直接看出
-    这仓占多少钱。
 
-    2026-11-09：新增「操作」列 = 手动平仓入口。TD 未运行时按钮禁用
-    （命令由 TD 循环消费，无循环就无人执行）。
+def _fmt_hold(seconds: float) -> str:
+    """持有时长：天 / 小时 / 分钟（不足 1 分钟按分钟）。"""
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f}d"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    return f"{max(seconds, 0) / 60:.0f}m"
+
+
+def _pos_time_cell(lot: dict) -> str:
+    """建仓时间（UTC）+ 持有天数（2026-11-10 用户要求：成交时信息）。
+
+    ``entry_time`` 由策略用 ``time.strftime`` 写入（容器 TZ=UTC，未带时区
+    后缀）→ 一律按 UTC 解释；解析失败原样显示，不静默丢弃。
     """
-    pnl = lot.get("pnl_pct")
-    pnl_txt = f"{pnl * 100:+.2f}%" if pnl is not None else "—"
+    raw = str(lot.get("entry_time") or "").strip()
+    if not raw:
+        return '<td class="num">—</td>'
+    try:
+        t = datetime.fromisoformat(raw.replace("Z", ""))
+        hold = _fmt_hold((datetime.utcnow() - t).total_seconds())
+        return (
+            f'<td class="num">{t.strftime("%m-%d %H:%M")} UTC'
+            f'<br><span class="pos-sub">持有 {hold}</span></td>'
+        )
+    except (ValueError, TypeError):
+        return f'<td class="num">{_esc(raw)}</td>'
+
+
+def _pos_ema_cell(period, value, ref_price=None, tag: str = "") -> str:
+    """EMA 快照单元格：``EMA610 · 2278.87`` + 小字折价。
+
+    折价 = ``(ref_price − EMA) / EMA``（负值 = 价格在均线下方，与 EMA 折价
+    门的口径直接对应）。``value`` 为空（门关闭 / 取不到 / 对账导入）显示
+    ``—``（2026-11-10 用户要求：记录建仓时所用均线的周期与数值）。
+    """
+    try:
+        ev = float(value)
+    except (TypeError, ValueError):
+        return '<td class="num">—</td>'
+    if ev <= 0:
+        return '<td class="num">—</td>'
+    label = f"EMA{int(period)}" if period not in (None, "") else "EMA"
+    sub = ""
+    try:
+        rp = float(ref_price)
+    except (TypeError, ValueError):
+        rp = 0.0
+    if rp > 0:
+        sub = f'<br><span class="pos-sub">{tag}折价 {(rp - ev) / ev * 100:+.2f}%</span>'
+    return f'<td class="num">{label} · {_fmt_pos_price(ev)}{sub}</td>'
+
+
+def _pos_fill_cell(lot: dict) -> str:
+    """实际成交均价 + 滑点（相对策略价 ``entry_price``）。
+
+    ``fill_px`` 是 CEX 通道成交均价（2026-08-20 起写入）；缺失（DEX 旧台账 /
+    未回填）显示 ``—``，不用策略价冒充成交价。
+    """
+    try:
+        fill = float(lot.get("fill_px"))
+    except (TypeError, ValueError):
+        return '<td class="num">—</td>'
+    sub = ""
+    try:
+        entry = float(lot.get("entry_price"))
+    except (TypeError, ValueError):
+        entry = 0.0
+    if entry > 0:
+        sub = f'<br><span class="pos-sub">滑点 {(fill / entry - 1) * 100:+.2f}%</span>'
+    return f'<td class="num">{_fmt_pos_price(fill)}{sub}</td>'
+
+
+def _pos_usd(v) -> str:
+    """小额美元金额（手续费等）：4 位小数定点；缺失返回 ``—``。"""
+    try:
+        return f"{float(v):.4f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _pos_row(lot: dict, sc: str = "", running: bool = False) -> str:
+    """持仓小节单行（18 列，2026-11-10 用户拍板，见 docs §33.64）。
+
+    成交信息（7）：建仓时间+持有、入场信号、入场周期、入场 EMA+折价、
+      成交价+滑点、交易对、手续费
+    持仓状态（8）：数量、价值(USD)、成本价、现价、浮盈%、最高浮盈、
+      最低浮盈、当前 EMA+折价
+    操作（1）：手动平仓
+
+    PR1 只展示已有字段：``entry_reason`` / ``entry_period`` /
+    ``entry_ema_*`` / ``fee_usd`` / ``max_pnl_pct`` / ``min_pnl_pct`` /
+    ``cur_ema_*`` 待 PR2 写入台账与 LIVE_STATE，缺失一律显示 ``—``（前端
+    无需再改）。``ord_id`` 挂在行 title，不占列宽。
+    """
+    sym = str(lot.get("symbol", ""))
+    slot = str(lot.get("slot", ""))
     entry_txt = _fmt_pos_price(lot.get("entry_price"))
     price_txt = _fmt_pos_price(lot.get("price"))
     value_txt = _pos_value_txt(lot.get("qty"), lot.get("price"), lot.get("entry_price"))
-    sym = str(lot.get("symbol", ""))
-    slot = str(lot.get("slot", ""))
     if sc and sym and slot:
         dis = "" if running else " disabled"
         tip = "平掉该批次（市价，两步确认）" if running else "TD 未运行：先启动 TD 才能执行手动平仓"
@@ -1080,23 +1172,42 @@ def _pos_row(lot: dict, sc: str = "", running: bool = False) -> str:
         )
     else:
         op = "<td></td>"
+    ord_id = str(lot.get("ord_id") or "")
+    row_tip = f'title="订单号 {_esc(ord_id)}"' if ord_id else ""
     return (
-        f'<tr><td><b>{_esc(sym)}</b></td>'
-        f'<td>{_esc(slot)}</td>'
+        f'<tr {row_tip}>'
+        f'<td class="pos-sticky col-sym"><b>{_esc(sym)}</b></td>'
+        f'<td class="pos-sticky col-slot">{_esc(slot)}</td>'
+        f'{_pos_time_cell(lot)}'
+        f'<td class="num">{_esc(str(lot.get("entry_reason") or "—"))}</td>'
+        f'<td class="num">{_esc(str(lot.get("entry_period") or "—"))}</td>'
+        f'{_pos_ema_cell(lot.get("entry_ema_period"), lot.get("entry_ema_value"), lot.get("entry_price"))}'
+        f'{_pos_fill_cell(lot)}'
+        f'<td class="num">{_esc(str(lot.get("inst_id") or "—"))}</td>'
+        f'<td class="num">{_pos_usd(lot.get("fee_usd"))}</td>'
         f'<td class="num">{_esc(_fmt_qty(lot.get("qty")))}</td>'
         f'<td class="num">{value_txt}</td>'
         f'<td class="num">{entry_txt}</td>'
         f'<td class="num">{price_txt}</td>'
-        f'<td class="num">{pnl_txt}</td>{op}</tr>'
+        f'<td class="num">{_pos_pct(lot.get("pnl_pct"))}</td>'
+        f'<td class="num">{_pos_pct(lot.get("max_pnl_pct"))}</td>'
+        f'<td class="num">{_pos_pct(lot.get("min_pnl_pct"))}</td>'
+        f'{_pos_ema_cell(lot.get("cur_ema_period"), lot.get("cur_ema_value"), lot.get("price"), tag="当前")}'
+        f'{op}</tr>'
     )
 
 
-def _load_batch_snapshot(sc: str) -> list[dict]:
-    """TD 未运行时读台账离线快照（2026-08-22 拍板：可见历史持仓，无实时价）。
+def _load_batch_snapshot(sc: str, apply_display_min: bool = True) -> list[dict]:
+    """读台账离线快照（2026-08-22 拍板：可见历史持仓，无实时价）。
 
     遍历场景池标的的 batches.{channel}.{scene}.{symbol}.json，提取 open
-    批次（slot/account/qty/entry_price/entry_time）；price/pnl 置 None
-    （页面显示 —）。
+    批次（slot/account/qty/entry_price/entry_time + 成交类字段）；
+    price/pnl 置 None（页面显示 —）。
+
+    ``apply_display_min=False``（2026-11-10）：运行中用它给 LIVE_STATE 行
+    合并「成交时字段」（``fill_px`` / ``inst_id`` / ``entry_reason`` / …），
+    此时不能按 ``position_display_min_usd`` 过滤——否则小额批次在运行中会
+    丢掉这些列。
     """
     try:
         from nanobot_quant.batches import BatchManager
@@ -1124,7 +1235,7 @@ def _load_batch_snapshot(sc: str) -> list[dict]:
             lot = s.get("lot")
             if lot is None:
                 continue
-            if display_min > 0:
+            if apply_display_min and display_min > 0:
                 value = float(lot.get("qty") or 0) * float(lot.get("entry_price") or 0)
                 if value < display_min:
                     continue  # dust 批次不显示（台账仍在）
@@ -1137,6 +1248,17 @@ def _load_batch_snapshot(sc: str) -> list[dict]:
                 "entry_time": lot.get("entry_time"),
                 "price": None,
                 "pnl_pct": None,
+                # 成交时字段（2026-11-10）：旧台账可能缺，缺则页面显示 —
+                "ord_id": lot.get("ord_id"),
+                "fill_px": lot.get("fill_px"),
+                "inst_id": lot.get("inst_id"),
+                "entry_reason": lot.get("entry_reason"),
+                "entry_period": lot.get("entry_period"),
+                "entry_ema_period": lot.get("entry_ema_period"),
+                "entry_ema_value": lot.get("entry_ema_value"),
+                "fee_usd": lot.get("fee_usd"),
+                "max_pnl_pct": lot.get("max_pnl_pct"),
+                "min_pnl_pct": lot.get("min_pnl_pct"),
             })
     return out
 
@@ -1178,9 +1300,16 @@ def _scene_positions_block(sc: str, running: bool) -> str:
         live_pos = {}
     rows = []
     if running and live_pos:
+        # LIVE_STATE 只带实时/持仓核心字段，成交时字段（fill_px/inst_id/
+        # entry_reason/EMA 快照…）只在台账里 → 一次读台账建索引后合并
+        snap = {}
+        for _lot in _load_batch_snapshot(sc, apply_display_min=False):
+            snap[(str(_lot.get("symbol")), str(_lot.get("slot")))] = _lot
         for _sym, lots in sorted(live_pos.items()):
             for lot in lots or []:
-                rows.append(_pos_row(lot, sc, running))
+                merged = dict(snap.get((str(lot.get("symbol")), str(lot.get("slot"))), {}))
+                merged.update({k: v for k, v in (lot or {}).items() if v is not None})
+                rows.append(_pos_row(merged, sc, running))
     else:
         for lot in _load_batch_snapshot(sc):
             rows.append(_pos_row(lot, sc, running))
@@ -1189,10 +1318,20 @@ def _scene_positions_block(sc: str, running: bool) -> str:
     return (
         '<div style="margin:8px 0 2px"><span class="muted">持仓（open 批次）</span>'
         '<span class="muted" style="float:right">运行中=实时价 · 未运行=台账快照（无现价）</span></div>'
-        '<table style="margin-top:2px">'
-        '<tr><th>标的</th><th>slot</th><th>数量</th><th>价值(USD)</th>'
-        '<th>成本价</th><th>现价</th><th>浮盈%</th><th>操作</th></tr>'
-        + "".join(rows) + "</table>"
+        '<div class="pos-wrap"><table style="margin-top:2px">'
+        '<tr><th rowspan="2" class="pos-sticky col-sym">标的</th>'
+        '<th rowspan="2" class="pos-sticky col-slot">slot</th>'
+        '<th colspan="7">成交信息</th>'
+        '<th colspan="8">持仓状态</th>'
+        '<th rowspan="2">操作</th></tr>'
+        '<tr><th>建仓时间</th><th>入场信号</th><th>入场周期</th><th>入场 EMA</th>'
+        '<th>成交价</th><th>交易对</th><th>手续费</th>'
+        '<th>数量</th><th>价值(USD)</th><th>成本价</th><th>现价</th><th>浮盈%</th>'
+        '<th>最高浮盈</th><th>最低浮盈</th><th>当前 EMA</th></tr>'
+        + "".join(rows) + "</table></div>"
+        '<div class="muted pos-tip">成交价=实际成交均价（策略价见成本价），滑点相对策略价；'
+        '入场 EMA=建仓当根 bar 的均线值与折价；当前 EMA 需 TD 运行中才有值。'
+        '持有天数按 UTC 计算。</div>'
     )
 
 
