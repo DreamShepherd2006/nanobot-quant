@@ -184,6 +184,7 @@
     <summary>⚙️ 参数覆盖（留空 = 跟随场景配置 · 仅本次回测生效，不回写实盘）</summary>
     <div class="ov-grid">
       <div class="ov-item"><label for="sleeptime">周期</label><select id="sleeptime"><option value="">（跟随场景）</option></select><span class="f-hint">回测专用周期，不影响实盘</span></div>
+      <div class="ov-item"><label for="td_bars">🪟 TD 窗口(bars)</label><input type="number" id="td_bars" min="20" max="999" step="1" placeholder="跟随实盘"><span class="f-hint">TD 回看根数（=策略 min_history）；留空跟随 /config/exec 的「K 线数」；改它同时改评估起点与预热长度</span></div>
       <div class="ov-item"><label for="periods">多周期对比</label><select id="periods" multiple size="5" style="min-width:96px"></select><span class="f-hint">勾选 ≥2 档 → 各档<b>独立回放</b>并出对比表（同参数=同根数、非同时间）；全不勾 = 用左侧「周期」</span></div>
       <div class="ov-item"><label for="quantity_mode">数量模式</label><select id="quantity_mode"><option value="">（跟随场景）</option><option value="fixed">固定数量（fixed）</option><option value="fixed_amount">固定金额 U（fixed_amount）</option><option value="value">按比例（value）</option></select><span class="f-hint">选「固定金额」后填上方 TD 固定金额</span></div>
       <div class="ov-item"><label for="entry_setup">入场 Setup 阈值</label><input type="number" id="entry_setup" min="1" max="20" step="1" placeholder="场景值"></div>
@@ -565,7 +566,7 @@ function collectOverrides() {
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
     "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct",
     "entry_min_gap_pct","adaptive_m","wave_max_buys","eod_hour_utc",
-    "fee_rate"];
+    "td_bars","fee_rate"];
   numKeys.forEach(id => {
     const el = $(id);
     if (!el) return;
@@ -812,6 +813,11 @@ function paramsRows(res) {
     })()],
     ["标的", `<code>${(cfg.symbols || res.symbols || []).join(", ")}</code>`],
     ["周期", `<code>${cfg.timestep ?? res.timestep ?? "—"}</code>`],
+    // TD 窗口（C139）：决定评估起点（前 N−1 根只预热）与信号口径，
+    // 不显示就无法解释「同区间同参数为何结果不同」/无法复现。
+    ["TD 窗口", cfg.td_bars != null
+      ? `<code>${cfg.td_bars}</code> 根（${cfg.td_bars_source || "—"}）`
+      : "—（旧记录未记录）"],
     ["评估区间", `${fmtTs(cfg.start_ts ?? res.start_ts)} → ${fmtTs(cfg.end_ts ?? res.end_ts)}`],
     ["初始资金", `${fmtN(cfg.initial_total ?? res.initial_total, 2)} USDT（${cfg.batches ?? res.batches ?? "—"} slot × ${fmtN(cfg.initial_quote ?? res.initial_quote, 2)}）`],
     ["批次数量", `${cfg.batches ?? res.batches ?? "—"} slot`],
