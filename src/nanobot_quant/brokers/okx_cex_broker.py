@@ -553,6 +553,10 @@ class OkxCexBroker(Broker):
             cex["avg_price"] = _num(res.get("avg_px"))
             cex["filled"] = _num(res.get("acc_fill_sz"))
             cex["ord_id"] = oid
+            # 手续费（2026-11-10 §33.64）：OKX 返回 fee（负数=支出）+ feeCcy
+            if res.get("fee") not in (None, ""):
+                cex["fee"] = abs(_num(res.get("fee")))
+                cex["fee_ccy"] = str(res.get("fee_ccy") or "")
             order.custom_params["cex"] = cex
             meta.update({"avg_price": _num(res.get("avg_px")),
                          "filled": _num(res.get("acc_fill_sz"))})

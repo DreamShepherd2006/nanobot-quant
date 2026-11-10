@@ -356,6 +356,11 @@ class BatchManager:
         ord_id: Optional[str] = None,
         fill_px: Optional[float] = None,
         inst_id: Optional[str] = None,
+        entry_reason: Optional[str] = None,
+        entry_period: Optional[int] = None,
+        entry_ema_period: Optional[int] = None,
+        entry_ema_value: Optional[float] = None,
+        fee_usd: Optional[float] = None,
     ) -> Optional[dict[str, Any]]:
         """BUY：占用一个 available slot 并记录 lot。返回该 slot。
 
@@ -369,6 +374,12 @@ class BatchManager:
         时必须用**当时的**交易对——换过计价币（USDT ↔ USDC）后用当前值
         重算会查错对，整批报 ``51603 Order does not exist``。同样只在传入
         时写入，旧台账零影响。
+
+        ``entry_reason`` / ``entry_period`` / ``entry_ema_period`` /
+        ``entry_ema_value`` / ``fee_usd``（2026-11-10，docs/quant-system.md
+        §33.64 C136）：成交时信息，供持仓表「入场信号/入场周期/入场 EMA/
+        手续费」四列展示。均只在传入时写入（None 不落字段）——旧台账与
+        DEX 路径字节级不变；EMA 快照只在折价门启用且算成功时才有值。
         """
         target = None
         if slot is not None:
@@ -391,6 +402,16 @@ class BatchManager:
             lot["fill_px"] = float(fill_px)
         if inst_id:
             lot["inst_id"] = str(inst_id)
+        if entry_reason:
+            lot["entry_reason"] = str(entry_reason)
+        if entry_period is not None:
+            lot["entry_period"] = int(entry_period)
+        if entry_ema_period is not None:
+            lot["entry_ema_period"] = int(entry_ema_period)
+        if entry_ema_value is not None:
+            lot["entry_ema_value"] = float(entry_ema_value)
+        if fee_usd is not None:
+            lot["fee_usd"] = float(fee_usd)
         target["lot"] = lot
         return target
 

@@ -381,6 +381,13 @@ class TdSequentialStrategy(Strategy):
         # slot_no 在不同场景池指向不同子账号，如 high slot1=gate_bot1 vs
         # mid slot1=gate_bot3，复用会串池）。
         self._cex_brokers: dict[str, Any] = {}
+        # ── 持仓入场快照与浮盈极值（2026-11-10，docs §33.64 C136）──
+        # _cur_ema: symbol → (n, value)，折价门开启时每标的每轮算一次，
+        #   供持仓表「当前 EMA / 当前折价」列与建仓快照用（门关闭为空）
+        # _pos_extremes: (symbol, slot) → {"max": x, "min": y}，建仓以来
+        #   最高/最低浮盈（内存，重启后从当前值重新计）
+        self._cur_ema: dict[str, tuple[int, float]] = {}
+        self._pos_extremes: dict[tuple[str, int], dict[str, float]] = {}
 
         # TD algorithm params (subset of the strategy parameters dict)
         self._td_params = {
@@ -729,6 +736,21 @@ class TdSequentialStrategy(Strategy):
                     value = qty * (price if price > 0 else entry)
                     if display_min > 0 and value < display_min:
                         continue  # dust 批次不显示（台账仍在，卖出不受影响）
+                    # 浮盈极值（2026-11-10 §33.64 C136）：建仓以来最高/最低
+                    # 浮盈%，内存跟踪（重启后从当前值重新计）；平仓后 key 清理。
+                    _ext_key = (sym, s["slot"])
+                    ext = self._pos_extremes.setdefault(
+                        _ext_key, {"max": None, "min": None})
+                    if pnl is not None:
+                        ext["max"] = pnl if ext["max"] is None else max(ext["max"], pnl)
+                        ext["min"] = pnl if ext["min"] is None else min(ext["min"], pnl)
+                    # 当前 EMA / 折价（2026-11-10）：门开启时 _ema_snapshot 每轮
+                    # 已算好，这里只读；门关闭/算失败为 None（页面显示 —）。
+                    _cur = self._cur_ema.get(sym)
+                    _cur_n, _cur_v = (_cur if _cur else (None, None))
+                    _cur_disc = (
+                        (price - _cur_v) / _cur_v if (_cur_v and price > 0) else None
+                    )
                     rows.append({
                         "symbol": sym,
                         "slot": s["slot"],
@@ -738,8 +760,26 @@ class TdSequentialStrategy(Strategy):
                         "entry_time": lot.get("entry_time"),
                         "price": price or None,
                         "pnl_pct": pnl,
+                        "max_pnl_pct": ext.get("max"),
+                        "min_pnl_pct": ext.get("min"),
+                        "cur_ema_period": _cur_n,
+                        "cur_ema_value": _cur_v,
+                        "cur_discount_pct": _cur_disc,
                     })
                 by_sym[sym] = rows
+            # 清理已平仓的极值记录（2026-11-10 §33.64）：仅保留仍 open 的
+            # (symbol, slot)，避免长期运行后内存单调增长。
+            try:
+                _open_keys = {
+                    (str(_s), _sl["slot"])
+                    for _s, _bm in (bms or {}).items()
+                    for _sl in _bm.slots if _sl.get("lot") is not None
+                }
+                for _k in list(self._pos_extremes):
+                    if _k not in _open_keys:
+                        self._pos_extremes.pop(_k, None)
+            except Exception:  # noqa: BLE001 — 清理失败不影响展示
+                pass
             td_live_state.set_positions(self._current_scene or "default", by_sym)
             self._write_account_funds()
         except Exception:  # noqa: BLE001
@@ -1222,6 +1262,17 @@ class TdSequentialStrategy(Strategy):
         out = dict(extra)
         out["entry_price"] = ep_f
         out["pnl_net_ratio"] = net_px / ep_f - 1.0
+        # 建仓以来的浮盈极值（2026-11-10 §33.64 C136）：策略内存跟踪的
+        # max/min，平仓时冻结进事件 → 复盘可查「这批最坏/最好浮到过多少」。
+        # 内存值重启后从当前值重计，不回溯。
+        try:
+            _k = (str(getattr(self, "symbol", "")), int(extra.get("slot")))
+        except (TypeError, ValueError):
+            _k = None
+        _ext = getattr(self, "_pos_extremes", {}).get(_k) if _k else None
+        if _ext:
+            out.setdefault("max_pnl_pct", _ext.get("max"))
+            out.setdefault("min_pnl_pct", _ext.get("min"))
         try:
             q = float(extra.get("qty") or 0)
         except (TypeError, ValueError):
@@ -1840,11 +1891,20 @@ class TdSequentialStrategy(Strategy):
         #       EMA 取不到值/异常 → fail-open（不拦）并计入 entry_ema_na，
         #       数据不足不作惩罚（与 IV/F1/贝叶斯闸门同规）。
         entry_ema_blocked = False
-        if getattr(self, "_entry_ema_enabled", False) and buy_signal:
+        # 2026-11-10（§33.64）：门开启时**无条件**算一次当前 EMA（不只
+        # buy_signal 时），作为持仓表「当前 EMA/折价」与建仓快照来源；
+        # 拦截判定仍只在 buy_signal 时执行（决策路径零变化）。
+        _ema_n, _ema_val = self._ema_snapshot(df)
+        _ema_on = bool(getattr(self, "_entry_ema_enabled", False))
+        if _ema_on and _ema_val is None and buy_signal:
+            self._bump_skip("entry_ema_na")
+            print(
+                f"[TD] ENTRY EMA NA | symbol={self.symbol} EMA 数据不足",
+                file=sys.stderr, flush=True,
+            )
+        elif _ema_on and buy_signal:
             try:
-                _n = max(int(getattr(self, "_entry_ema_period", 610) or 610), 2)
-                _series = df["Close"].ewm(span=_n, adjust=False).mean()
-                _ema_val = float(_series.iloc[-1])
+                _n = _ema_n
                 _off = float(getattr(self, "_entry_ema_offset_pct", 0.0) or 0.0)
                 if not (_ema_val > 0):
                     self._bump_skip("entry_ema_na")
@@ -2132,6 +2192,14 @@ class TdSequentialStrategy(Strategy):
                             # 2026-11-07：兼记下单时的交易对，避免换计价币后
                             # 对账用当前 quote 查错对（51603）
                             inst_id=self._cex_inst_of(slot),
+                            # 2026-11-10（§33.64 C136）：成交时信息——入场信号来源、
+                            # 触发的倍数周期、建仓当根 bar 的 EMA 快照、手续费
+                            entry_reason=self._entry_reason_of(
+                                setup_buy, cd_buy, entry_setup, entry_countdown),
+                            entry_period=self._entry_period_recorded(order),
+                            entry_ema_period=_ema_n,
+                            entry_ema_value=_ema_val,
+                            fee_usd=self._cex_fee_usd(order),
                         )
                         # 最短持有期（2026-08-28）：买入后 min_hold_bars 根 bar 内
                         # TD SELL（高9/cd13）不触发——避免震荡市双向 countdown
@@ -4090,6 +4158,84 @@ class TdSequentialStrategy(Strategy):
             return self._cex_slot_broker(slot).inst_id_of(self.symbol) or ""
         except Exception:  # noqa: BLE001
             return ""
+
+    def _ema_snapshot(self, df) -> tuple[int | None, float | None]:
+        """当前 EMA 折价门的均线快照（2026-11-10，docs §33.64 C136）。
+
+        门关闭 → 返回 ``(None, None)``，不计算（结构性零成本、零行为变化）。
+        门开启 → 每标的每轮算一次并写 ``self._cur_ema[symbol]``，供持仓表
+        「当前 EMA / 当前折价」列与建仓快照使用；计算异常返回 None，由
+        调用方按原规则 fail-open 并计 ``entry_ema_na``。纯展示/记录，
+        不参与任何决策。
+        """
+        if not getattr(self, "_entry_ema_enabled", False):
+            return (None, None)
+        try:
+            n = max(int(getattr(self, "_entry_ema_period", 610) or 610), 2)
+            val = float(df["Close"].ewm(span=n, adjust=False).mean().iloc[-1])
+        except Exception:  # noqa: BLE001 — 数据不足或列缺失
+            return (None, None)
+        if val > 0:
+            self._cur_ema[str(getattr(self, "symbol", ""))] = (n, val)
+        return (n, val)
+
+    def _entry_reason_of(self, setup_buy, cd_buy, entry_setup, entry_countdown) -> str:
+        """入场信号来源（2026-11-10 §33.64，写台账用）。
+
+        与 ``buy_signal`` 判定同源：setup 阈值优先（``setup_buy=9``），
+        否则归 cd 通路（``cd_buy=13``）。纯记录，不参与决策。
+        """
+        try:
+            if setup_buy >= entry_setup:
+                return f"setup_buy={int(setup_buy)}"
+            return f"cd_buy={int(cd_buy)}"
+        except (TypeError, ValueError):
+            return "buy"
+
+    def _entry_period_recorded(self, order) -> int | None:
+        """本次建仓由哪个倍数周期触发（2026-11-10 §33.64，写台账用）。
+
+        优先读 CEX 下单时写入的 ``order.custom_params['entry_period']``
+        （C120），缺失（DEX 通道）时退回 ``_entry_period_hit()``。
+        """
+        try:
+            cp = getattr(order, "custom_params", None) or {}
+            v = cp.get("entry_period")
+            if v is not None:
+                return int(v)
+        except (TypeError, ValueError, AttributeError):
+            pass
+        try:
+            return self._entry_period_hit()
+        except Exception:  # noqa: BLE001 — 纯记录，不得影响下单
+            return None
+
+    def _cex_fee_usd(self, order) -> float | None:
+        """成交手续费折算 USD（2026-11-10 §33.64）。
+
+        Gate/OKX 的 fee 币种不同——买单通常扣 base 币、卖单扣 quote 币，
+        故 base 币手续费用成交均价折算成计价币。无 fee 字段（DEX 通道 /
+        旧 broker）返回 None（页面显示 ``—``，不估值代替）。
+        """
+        try:
+            cex = (getattr(order, "custom_params", None) or {}).get("cex") or {}
+        except AttributeError:
+            return None
+        fee = cex.get("fee")
+        if fee is None:
+            return None
+        try:
+            f = abs(float(fee))
+        except (TypeError, ValueError):
+            return None
+        ccy = str(cex.get("fee_ccy") or "").upper()
+        if ccy in ("USDT", "USDC", "USD", "USDG", "TUSD"):
+            return f
+        try:
+            px = float(self._cex_avg_price(order) or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        return f * px if px > 0 else None
 
     def _entry_period_hit(self) -> int | None:
         """本次 BUY 由哪个倍数周期触发（C120，回测逐笔可核验）。

@@ -92,6 +92,10 @@ class CexBroker(Broker):
         self._tokens_json = tokens_json or []
         self._slippage = float(slippage)
         self._sub_account = sub_account
+        # 成交手续费暂存（2026-11-10 §33.64）：``_query_order`` 返回四元组
+        # 不改签名，fee 暂存于此由 ``submit_order`` 取走写进
+        # ``order.custom_params["cex"]``
+        self._last_fee: dict[str, tuple[float, str]] = {}
 
         creds = get_api_credentials(credentials, sub_account)
         self._api_key = str(creds.get("api_key") or "")
@@ -194,6 +198,15 @@ class CexBroker(Broker):
         left = float(data.get("left") or 0)
         avg = float(data.get("avg_deal_price") or 0)
         finish_as = str(data.get("finish_as") or "").lower()
+        # 手续费（2026-11-10 §33.64）：Gate 订单带 fee + fee_currency
+        # （买时扣 base 币、卖时扣 quote 币），暂存给 submit_order 写回
+        _fee_raw = data.get("fee")
+        if _fee_raw not in (None, ""):
+            try:
+                self._last_fee[order_id] = (
+                    abs(float(_fee_raw)), str(data.get("fee_currency") or ""))
+            except (TypeError, ValueError):
+                pass
 
         if status == "closed" or finish_as == "filled":
             return "filled", filled, left, avg
@@ -442,6 +455,9 @@ class CexBroker(Broker):
             cex = order.custom_params.get("cex") or {}
             cex["avg_price"] = avg
             cex["filled"] = filled  # 实际成交 base 数量（amount_precision 截断后）
+            _fee = getattr(self, "_last_fee", {}).pop(oid, None)
+            if _fee:
+                cex["fee"], cex["fee_ccy"] = _fee
             order.custom_params["cex"] = cex
             self._tracked[oid] = {
                 "symbol": symbol, "pair": pair, "side": side,
