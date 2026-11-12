@@ -2223,7 +2223,8 @@ class TdSequentialStrategy(Strategy):
                             # 2026-11-10（§33.64 C136）：成交时信息——入场信号来源、
                             # 触发的倍数周期、建仓当根 bar 的 EMA 快照、手续费
                             entry_reason=self._entry_reason_of(
-                                setup_buy, cd_buy, entry_setup, entry_countdown),
+                                setup_buy, cd_buy, entry_setup, entry_countdown,
+                                order),
                             entry_period=self._entry_period_recorded(order),
                             entry_ema_period=_ema_n,
                             entry_ema_value=_ema_val,
@@ -4211,16 +4212,77 @@ class TdSequentialStrategy(Strategy):
             self._cur_ema[str(getattr(self, "symbol", ""))] = (n, val)
         return (n, val)
 
-    def _entry_reason_of(self, setup_buy, cd_buy, entry_setup, entry_countdown) -> str:
-        """入场信号来源（2026-11-10 §33.64，写台账用）。
+    def _entry_signal_of(self, order=None, fallback=None) -> tuple:
+        """本次建仓的触发信号读数（2026-11-12 C140，写台账用）。
 
-        与 ``buy_signal`` 判定同源：setup 阈值优先（``setup_buy=9``），
-        否则归 cd 通路（``cd_buy=13``）。纯记录，不参与决策。
+        返回 ``(period, setup_buy, cd_buy)``，后两者是**触发周期自身**的
+        计数——不是跨周期 OR 聚合的 max（max 只服务决策与页面进度展示）。
+
+        动因（2026-11-12 实盘核对）：台账「入场信号 32」配「入场周期 2m」，
+        而 2m 当时只有 15、32 其实是 1m 的计数 —— 数字真实但归属周期错。
+
+        优先级：① ``order.custom_params['entry_signal']``（CEX 下单时快照，
+        pending 确认在后续轮也不会读到漂移值）② 本轮触发周期 +
+        ``_last_multi`` 读数 ③ ``fallback``（聚合值）。纯记录、不参与决策。
         """
+        period = None
+        sb = cb = None
         try:
-            if setup_buy >= entry_setup:
-                return f"setup_buy={int(setup_buy)}"
-            return f"cd_buy={int(cd_buy)}"
+            _cur = getattr(self, "_cur_entry_period", None)
+            if _cur is not None:
+                period = int(_cur)
+        except (TypeError, ValueError):
+            pass
+        try:
+            cp = getattr(order, "custom_params", None) or {}
+            sig = cp.get("entry_signal")
+            if isinstance(sig, dict):
+                period = sig.get("period")
+                sb = sig.get("setup_buy")
+                cb = sig.get("cd_buy")
+        except (AttributeError, TypeError):
+            pass
+        if sb is None:
+            try:
+                m = self._entry_period_hit()
+            except Exception:  # noqa: BLE001  # 纯记录，不得影响下单
+                m = None
+            detail = getattr(self, "_last_multi", None) or {}
+            if m is not None:
+                if period is None:
+                    period = int(m)
+                v = detail.get(int(m))
+                if v:
+                    sb, cb = int(v[0] or 0), int(v[1] or 0)
+        if sb is None:
+            if not fallback:
+                return (period, None, None)
+            sb, cb = fallback
+        try:
+            return (period, int(sb), int(cb or 0))
+        except (TypeError, ValueError):
+            return (period, None, None)
+
+    def _entry_reason_of(self, setup_buy, cd_buy, entry_setup, entry_countdown,
+                         order=None) -> str:
+        """入场信号来源（2026-11-10 §33.64 / 2026-11-12 C140，写台账用）。
+
+        **记触发周期自身的计数**而非跨周期 max；周期读数拿不到时退回传入的
+        聚合值（单周期与旧路径行为逐位不变）。与 ``buy_signal`` 判定同源：
+        setup 阈值优先（``setup_buy=9``），否则归 cd 通路（``cd_buy=13``）。
+        纯记录，不参与决策。
+        """
+        sb, cb = setup_buy, cd_buy
+        try:
+            _p, _sb, _cb = self._entry_signal_of(order, fallback=None)
+            if _sb is not None:
+                sb, cb = _sb, _cb
+        except Exception:  # noqa: BLE001  # 纯记录，绝不影响下单
+            pass
+        try:
+            if sb >= entry_setup:
+                return f"setup_buy={int(sb)}"
+            return f"cd_buy={int(cb)}"
         except (TypeError, ValueError):
             return "buy"
 
@@ -4348,6 +4410,15 @@ class TdSequentialStrategy(Strategy):
             if _ep_hit is not None:
                 order.custom_params = order.custom_params or {}
                 order.custom_params["entry_period"] = _ep_hit
+                # C140（2026-11-12）：把该周期自身的读数一并快照，台账写
+                # 「入场信号」时用它（不能用聚合 max——归属周期会错）。
+                _sig = (getattr(self, "_last_multi", None) or {}).get(int(_ep_hit))
+                if _sig:
+                    order.custom_params["entry_signal"] = {
+                        "period": int(_ep_hit),
+                        "setup_buy": int(_sig[0] or 0),
+                        "cd_buy": int(_sig[1] or 0),
+                    }
         return self._cex_slot_broker(slot).submit_order(order)
 
     def _buy_on_slot_cex(self, slot: dict, price: float, reason: str):
