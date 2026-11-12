@@ -2187,7 +2187,9 @@ class TdSequentialStrategy(Strategy):
                         file=sys.stderr, flush=True,
                     )
                     return
-            reason = f"TD LONG setup_buy={setup_buy} cd_buy={cd_buy} score={score:.1f}"
+            # C141（2026-11-12）：原因串改用**触发周期自身**的读数 + 周期号，
+            # 与台账口径同源（回测 fills_detail.reason 由此透传）。
+            reason = self._long_reason_of(setup_buy, cd_buy)
             if batch_mode:
                 # ── 真分账 v1.1（B 方案 2026-08-10）：目标 slot 子钱包为风控基准 ──
                 # position_limit/数量比例/资金检查全部基于 slot 账户资产（pv_slot），
@@ -4262,6 +4264,26 @@ class TdSequentialStrategy(Strategy):
             return (period, int(sb), int(cb or 0))
         except (TypeError, ValueError):
             return (period, None, None)
+
+    def _long_reason_of(self, setup_buy, cd_buy) -> str:
+        """BUY 的原因串（C141，2026-11-12）：``TD LONG setup_buy=12 cd_buy=0 period=2``。
+
+        与台账「入场信号」同源——记**触发周期自身**的 setup/cd 读数与周期号，
+        不用跨周期 OR 聚合的 max（max 只服务决策与页面进度展示）。回测
+        ``fills_detail.reason`` 经 ``_cex_submit`` 透传该串，故回测与台账口径一致。
+
+        纯记录：任何异常都退回旧格式，绝不影响下单。
+        """
+        try:
+            period, sb, cb = self._entry_signal_of(None, fallback=None)
+            if sb is None:
+                sb, cb = setup_buy, cd_buy
+            return (
+                f"TD LONG setup_buy={int(sb)} cd_buy={int(cb or 0)}"
+                f" period={int(period or 1)}"
+            )
+        except (TypeError, ValueError):  # noqa: BLE001 — 纯记录，不得影响下单
+            return f"TD LONG setup_buy={setup_buy}"
 
     def _entry_reason_of(self, setup_buy, cd_buy, entry_setup, entry_countdown,
                          order=None) -> str:
