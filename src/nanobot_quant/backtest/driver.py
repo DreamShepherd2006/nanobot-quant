@@ -516,6 +516,13 @@ class BacktestDriver:
                 "eod_parity": self._merged_params.get("eod_parity", "even"),
                 "eod_mode": self._merged_params.get("eod_mode", "all"),
                 "eod_hour_utc": self._merged_params.get("eod_hour_utc", 0),
+                # EOD 强平保护期（2026-11-16）：建仓不足 N 小时的批次跳过日界
+                # 强平。0 = 关；**显式判 None**（`or` 会把合法的 0 吞成默认值）。
+                "eod_protect_hours": float(
+                    0.0
+                    if self._merged_params.get("eod_protect_hours") is None
+                    else self._merged_params.get("eod_protect_hours")
+                ),
                 # 共振错峰波锁容量（2026-11-01 实盘化）：每波每场景最多建仓 N 笔，
                 # 默认 1 = 原行为；**0 = 关闭波锁**（2026-11-04 拍板 A）。
                 # `or 1` 会把 0 吞成 1 ⇒ 显式判 None。
@@ -1334,6 +1341,10 @@ class BacktestDriver:
                 "eod_parity": getattr(strategy, "_eod_parity", "even"),
                 "eod_mode": getattr(strategy, "_eod_mode", "all"),
                 "eod_hour_utc": getattr(strategy, "_eod_hour_utc", 0),
+                # EOD 强平保护期（2026-11-16）：实际生效值（小时）
+                "eod_protect_hours": float(
+                    getattr(strategy, "_eod_protect_hours", 0.0) or 0.0
+                ),
                 # EOD 强平豁免名单（2026-11-07）：实际生效值，便于追溯「哪个标的被跳过」
                 "eod_exempt_symbols": sorted(getattr(strategy, "_eod_exempt", frozenset())),
                 # EOD 仓位级豁免（2026-11-09，C132/C133）：回显原始配置串

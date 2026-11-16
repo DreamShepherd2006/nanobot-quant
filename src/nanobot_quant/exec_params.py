@@ -91,6 +91,10 @@ SCENE_THRESHOLD_FIELDS: tuple[str, ...] = (
 #:   setup 最近一次归零（>0 → 0）距当前 ≤ N 根才允许——保留「setup 结构尚在进行」的 cd 确认
 #:   （LINK 场景），过滤跨多轮周期的陈旧信号；setup 从未归零（结构连续）恒允许；0=关闭（回归
 #:   旧 cd 独立触发行为）。cd 进场门限建立在 setup 结构延续基础上，非独立计算。
+#: 数值型场景专属参数（2026-11-16）：读盘时归一为 float（int → float），
+#: 避免下游与 0.0 比较时出现 int/float 混用；字符串由 validate 直接拒绝。
+_SCENE_ONLY_FLOATS: tuple[str, ...] = ("eod_protect_hours",)
+
 SCENE_ONLY_FIELDS: tuple[str, ...] = (
     # 计划总资金（2026-11-07）：纯展示用，不进入任何决策
     "capital_total",
@@ -115,6 +119,9 @@ SCENE_ONLY_FIELDS: tuple[str, ...] = (
     # EOD 仓位级豁免（2026-11-09 C132，docs §33.61）——逗号分隔 slot 号；
     # 场景专属、默认空 = 全部参与日界强平
     "eod_exempt_slots",
+    # EOD 强平保护期（2026-11-16，docs §33.68）——建仓不足 N 小时的批次
+    # 跳过日界强平；场景专属、默认 0 = 关
+    "eod_protect_hours",
     # 出场首穿（2026-11-06）——场景专属、默认关：高9/cd13 只在首次跨过
     # 阈值那根触发，累加期 10/11/12 不再重复平仓
     "exit_first_cross",
@@ -147,6 +154,8 @@ SCENE_FIELD_ORDER: tuple[str, ...] = (
     "eod_exempt_symbols",
     # 强平豁免批次（2026-11-09，逗号分隔 slot 号，默认空）
     "eod_exempt_slots",
+    # EOD 强平保护期（2026-11-16，单位小时，默认 0=关）
+    "eod_protect_hours",
 )
 
 #: 默认 Gate 子账号池（S1 配置层默认值；S3 消费时按 gate.json 实际列表）。
@@ -183,6 +192,9 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "eod_mode": "all", "eod_hour_utc": 0,
         "eod_exempt_symbols": [],
         "eod_exempt_slots": "",
+        # EOD 强平保护期（2026-11-16）：建仓不足 N 小时的批次跳过日界强平。
+        # 0 = 关（默认，零行为变化）。
+        "eod_protect_hours": 0.0,
     },
     "mid": {
         "enabled": False, "sleeptime": "15m", "symbols": ["SOL"],
@@ -211,6 +223,9 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "eod_mode": "all", "eod_hour_utc": 0,
         "eod_exempt_symbols": [],
         "eod_exempt_slots": "",
+        # EOD 强平保护期（2026-11-16）：建仓不足 N 小时的批次跳过日界强平。
+        # 0 = 关（默认，零行为变化）。
+        "eod_protect_hours": 0.0,
     },
     "low": {
         "enabled": False, "sleeptime": "1D", "symbols": ["SOL"],
@@ -239,6 +254,9 @@ DEFAULT_SCENES: dict[str, dict[str, Any]] = {
         "eod_mode": "all", "eod_hour_utc": 0,
         "eod_exempt_symbols": [],
         "eod_exempt_slots": "",
+        # EOD 强平保护期（2026-11-16）：建仓不足 N 小时的批次跳过日界强平。
+        # 0 = 关（默认，零行为变化）。
+        "eod_protect_hours": 0.0,
     },
 }
 
@@ -475,6 +493,15 @@ PARAM_META: dict[str, dict[str, Any]] = {
                 "不碰 min_hold，并记 eod_exempt_slots 计数与 SKIP 事件。"
                 "留空 = 全部批次参与（默认）。注意 shared_pool 下 slot 只是记账标签，"
                 "号小 ≠ 最早建仓",
+    },
+    "eod_protect_hours": {
+        "group": "scene", "min": 0.0, "max": 24.0, "step": 1.0, "std": 0.0,
+        "label": "强平保护期(小时)",
+        "hint": "建仓不足 N 小时的批次在日界强平时跳过（只看时间、不看盈亏），"
+                "防「刚买入就被日界平掉」白送双程手续费；保护期内的批次"
+                "单独跳过、其余照平，并记 eod_protect 计数与 SKIP 事件。"
+                "0 = 关闭（默认）；建议 1–4 小时。设得过长会让日界强平形同虚设。"
+                "与最短持有期（拦 TD SELL）互不影响；与 profit_only 叠加生效",
     },
     "take_profit_pct": {
         "group": "scene", "min": 0.0, "max": 1.0, "step": 0.01, "std": 0.0,
@@ -913,7 +940,9 @@ def _load_scenes(raw: dict) -> dict[str, dict[str, Any]]:
                     if fv in (None, ""):
                         continue
                     if validate_exec_param(fk, fv) is None:
-                        scene[fk] = fv
+                        # 2026-11-16：数值型场景专属参数归一为 float
+                        # （旧 JSON 里写成整数时避免 int/float 混用）
+                        scene[fk] = float(fv) if fk in _SCENE_ONLY_FLOATS else fv
                 elif fk == "sell_only_profit":
                     # 2026-08-29 迁移：旧单值高9盈利门 → sell_only_profit_high
                     # （low 用默认 0.002，动能判断自动随 momentum_exit 生效）
@@ -1010,7 +1039,8 @@ def _apply_scenes_from_params(params: dict, merged: dict) -> dict | None:
                 if err is not None:
                     label = SCENES[sk]["label"]
                     return {"ok": False, "error": f"场景{label}.{fk}: {err}"}
-                scene[fk] = v
+                # 2026-11-16：数值型场景专属参数显式转 float
+                scene[fk] = float(v) if fk in _SCENE_ONLY_FLOATS else v
                 continue
             if fk not in src:
                 continue

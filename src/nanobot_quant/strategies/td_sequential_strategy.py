@@ -141,6 +141,10 @@ class TdSequentialStrategy(Strategy):
         # 名单内的批次在日界强平时整批跳过（不看 mode、不碰 min_hold），
         # 空 = 全部批次参与（零行为变化）。
         "eod_exempt_slots": "",
+        # EOD 强平保护期（2026-11-16）：建仓不足 N 小时的批次在日界强平时跳过，
+        # 防「刚买入就被日界平掉」白送双程手续费。只判时间、不看盈亏，
+        # 与 eod_mode 叠加（profit_only 下同样生效）。0 = 关（默认，零行为变化）。
+        "eod_protect_hours": 0.0,
         **DEFAULT_TD_PARAMS,
     }
 
@@ -1126,6 +1130,17 @@ class TdSequentialStrategy(Strategy):
         except (TypeError, ValueError):
             _eod_h_v = 0
         self._eod_hour_utc = _eod_h_v % 24
+        # 2026-11-16：EOD 强平保护期（小时）——建仓不足 N 小时的批次跳过日界
+        # 强平。0 = 关；必须显式判 None（`or` 会把合法的 0 吞成默认值）。
+        _eod_ph = p.get("eod_protect_hours")
+        try:
+            _eod_ph_v = float(
+                _eod_ph if _eod_ph is not None
+                else (self.parameters.get("eod_protect_hours", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            _eod_ph_v = 0.0
+        self._eod_protect_hours = max(0.0, _eod_ph_v)
         # 2026-11-07：EOD 强平豁免名单（场景 → 全局 → 空）
         _eod_ex = p.get("eod_exempt_symbols")
         if _eod_ex is None:
@@ -1226,6 +1241,8 @@ class TdSequentialStrategy(Strategy):
                 f"eod_hour={getattr(self, '_eod_hour_utc', '?')} "
                 f"eod_exempt={','.join(sorted(getattr(self, '_eod_exempt', ()) or ())) or '-'} "
                 f"eod_exempt_slots={getattr(self, '_eod_exempt_slots_raw', '') or '-'} "
+                f"eod_protect_h={getattr(self, '_eod_protect_hours', 0)} "
+                f"min_hold={getattr(self, '_min_hold_bars', 0)}bar "
                 f"family={self.parameters.get('channel_family')} "
                 f"slot_model={self._slot_model} "
                 f"broker={broker_name}",
@@ -4914,6 +4931,7 @@ class TdSequentialStrategy(Strategy):
         sold = 0
         gated = 0
         slot_gated = 0
+        prot_gated = 0
         _ex_all = getattr(self, "_eod_exempt_slots_all", frozenset())
         _ex_by_sym = getattr(self, "_eod_exempt_slots_by_symbol", {}) or {}
         _sym_u = str(self.symbol or "").split("/")[0].upper()
@@ -4942,6 +4960,31 @@ class TdSequentialStrategy(Strategy):
                     symbol=self.symbol,
                 )
                 continue
+            # 2026-11-16：日界强平保护期——建仓不足 eod_protect_hours 小时的批次
+            # 跳过日界强平（防「刚买入就被日界平掉」白送双程手续费）。只判时间、
+            # 不看盈亏，与 mode 叠加（profit_only 下同样生效）。
+            # 拦截必须留痕：skip 计数 + 日志 + 事件，不静默跳过。
+            _pa = self._eod_protect_age(s)
+            if _pa is None:
+                # 台账缺 entry_time / 无法解析 → fail-open 放行，但计数留痕
+                self._bump_skip("eod_protect_na")
+            elif _pa[0]:
+                prot_gated += 1
+                self._bump_skip("eod_protect")
+                print(
+                    f"[TD] EOD SKIP | symbol={self.symbol} slot={_slot_no} "
+                    f"保护期（eod_protect_hours="
+                    f"{getattr(self, '_eod_protect_hours', 0)}h，"
+                    f"已持有 {_pa[1]:.2f}h）日界={prev}",
+                    file=sys.stderr, flush=True,
+                )
+                self._record(
+                    "SKIP",
+                    f"eod_protect:{prev.isoformat()} slot={_slot_no} "
+                    f"持有 {_pa[1]:.2f}h < 保护期，不参与日界强平",
+                    symbol=self.symbol,
+                )
+                continue
             if mode == "profit_only":
                 # lot 字段在 slot["lot"] 下（batches.py 结构：{slot, status, lot:{...}}）
                 _lot = s.get("lot") or {}
@@ -4961,6 +5004,7 @@ class TdSequentialStrategy(Strategy):
                 f"平 {sold} 批（候选 {len(candidates)}"
                 + (f"，未盈利跳过 {gated}" if gated else "")
                 + (f"，豁免仓位跳过 {slot_gated}" if slot_gated else "")
+                + (f"，保护期跳过 {prot_gated}" if prot_gated else "")
                 + "）",
                 file=sys.stderr, flush=True,
             )
@@ -4979,10 +5023,16 @@ class TdSequentialStrategy(Strategy):
                     f"（mode={mode}）",
                     symbol=self.symbol,
                 )
-            if slot_gated and not gated:
+            if slot_gated and not gated and not prot_gated:
                 _why = f"候选 {len(candidates)} 批均在豁免名单（eod_exempt_slots）"
             elif gated:
                 _why = f"候选 {len(candidates)} 批均未盈利（mode={mode}）"
+            elif prot_gated:
+                _why = (
+                    f"候选 {len(candidates)} 批均在保护期"
+                    f"（eod_protect_hours="
+                    f"{getattr(self, '_eod_protect_hours', 0)}h）"
+                )
             else:
                 _why = f"候选 {len(candidates)} 批无可平"
             print(
@@ -4991,6 +5041,33 @@ class TdSequentialStrategy(Strategy):
                 file=sys.stderr, flush=True,
             )
         return sold > 0
+
+    def _eod_protect_age(self, slot: dict) -> tuple[bool, float] | None:
+        """日界强平保护期判定（2026-11-16，docs §33.68）。
+
+        返回 ``(是否处于保护期, 已持有小时数)``；返回 ``None`` = 台账缺
+        ``entry_time`` 或无法解析 —— 调用方 fail-open 放行并计
+        ``eod_protect_na``（静默放行不可接受）。
+
+        基准 = 台账 ``entry_time``（持久化字段，跨重启保留），**不引入
+        内存态**——``_min_hold_until`` 是内存态、重启即失效，用它会造出
+        「重启后刚买的仓照样被日界平」的洞。
+        """
+        hours = float(getattr(self, "_eod_protect_hours", 0.0) or 0.0)
+        if hours <= 0:
+            return (False, 0.0)
+        raw = ((slot or {}).get("lot") or {}).get("entry_time")
+        if not raw:
+            return None
+        try:
+            entry_ts = self._bar_utc_ts(raw)
+            now_ts = self._bar_utc_ts(self._current_bar_time)
+            age_h = (now_ts - entry_ts).total_seconds() / 3600.0
+        except Exception:  # noqa: BLE001 — 台账字段异常不拖垮出场链
+            return None
+        # age_h < 0（台账时间在未来，时钟/时区异常）按保护处理：
+        # 宁可少平一次，也不错误平掉刚建仓的批次。
+        return (age_h < hours, age_h)
 
     def _profit_gate_blocked(
         self, slot: dict, price: float, setup_sell: int = 0, cd_sell: int = 0
