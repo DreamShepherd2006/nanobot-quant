@@ -142,6 +142,16 @@ def coerce_overrides(raw) -> dict:
                     raise ValueError(f"回测覆盖参数 {k}={v!r} 非法：{_err}")
                 _all_slots, _by_sym = parse_slot_spec(v)
                 out[k] = format_slot_spec(_all_slots, _by_sym)
+            elif k == "eod_protect_hours":
+                # EOD 强平保护期（2026-11-16）：范围 fail-closed，不静默夹取。
+                # 0 = 关是合法值；超出 0–24 直接报错并列范围（否则填 25 会
+                # 「以为关不掉 EOD」，实际是把日界强平整个废掉）。
+                from nanobot_quant.exec_params import validate_exec_param
+
+                _err = validate_exec_param(k, v)
+                if _err:
+                    raise ValueError(f"回测覆盖参数 {k}={v!r} 非法：{_err}")
+                out[k] = float(v)
             elif k == "entry_periods":
                 # 多周期倍数：非法值 fail-closed。策略侧 parse_entry_periods 会
                 # 静默忽略非法项并回退 [1]，若不在入口拦住，页面填错就等于

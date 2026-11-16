@@ -224,6 +224,7 @@
       <div class="ov-item"><label for="eod_enabled">⏰ EOD 日界强平</label><select id="eod_enabled"><option value="">（跟随场景/关）</option><option value="on">开</option><option value="off">关</option></select><span class="f-hint">每到日界按单双号决定是否清空该标的所有批；<b>all 模式会亏损平仓</b>，与「不设止损」铁律冲突，默认关</span></div>
       <div class="ov-item"><label for="eod_parity">强平奇偶</label><select id="eod_parity"><option value="">（跟随场景/even）</option><option value="even">双号日结束</option><option value="odd">单号日结束</option><option value="both">每天</option></select><span class="f-hint">日期号取日界对齐后的 UTC 日期</span></div>
       <div class="ov-item"><label for="eod_mode">强平范围</label><select id="eod_mode"><option value="">（跟随场景/all）</option><option value="all">全平（含浮亏）</option><option value="profit_only">只平浮盈</option></select><span class="f-hint">两种模式都绕过 min_hold 与高9 盈利门</span></div>
+      <div class="ov-item"><label for="eod_protect_hours">强平保护期(小时)</label><input type="number" id="eod_protect_hours" step="1" min="0" max="24" placeholder="跟随场景 / 0=关"><span class="f-hint">建仓不足 N 小时的批次跳过日界强平（只看时间、不看盈亏）；保护期内的批次<b>单独跳过</b>、其余照平。留空=跟随场景</span></div>
       <div class="ov-item"><label for="eod_hour_utc">日界小时(UTC)</label><input type="number" id="eod_hour_utc" min="0" max="23" step="1" placeholder="场景值/0"><span class="f-hint">0=UTC 自然日 24:00；非 0 = 交易日起点平移到该小时</span></div>
       <div class="ov-item"><label for="eod_exempt_slots">强平豁免批次</label><input type="text" id="eod_exempt_slots" placeholder="跟随场景 / 如 1,2 或 CRCL:4"><span class="f-hint"><code>1,2</code>=所有标的的 slot 1/2；<code>CRCL:4,ETH:5</code>=仅指定标的的指定批次；可混用。名单内批次在日界强平时<b>完全跳过</b>（不看清仓范围、不碰最短持有期）。留空=跟随场景</span></div>
       <div class="ov-item"><label for="eod_exempt_symbols">强平豁免标的</label><input type="text" id="eod_exempt_symbols" placeholder="跟随场景 / 如 SOL,CRCL"><span class="f-hint">逗号分隔；这些标的在日界强平时<b>完全跳过</b>（不看清仓范围）。留空=跟随场景，场景为空=全部参与</span></div>
@@ -566,6 +567,7 @@ function collectOverrides() {
     "stop_loss_pct","take_profit_pct","td_start_slot","min_account_value",
     "gate_red_min","ema_n","ema_k","entry_ema_period","entry_ema_offset_pct",
     "entry_min_gap_pct","adaptive_m","wave_max_buys","eod_hour_utc",
+    "eod_protect_hours",
     "td_bars","fee_rate"];
   numKeys.forEach(id => {
     const el = $(id);
@@ -855,7 +857,7 @@ function paramsRows(res) {
     ["每波建仓上限", (cfg.wave_max_buys ?? 1) > 0 ? `${cfg.wave_max_buys ?? 1} 笔（同一共振组内）` : "关（不限笔数）"],
     ["加仓最小间距", (cfg.entry_min_gap_pct ?? 0) > 0 ? `${cfg.entry_min_gap_pct}%（有持仓时新买价须比最低成本再低该幅度）` : "关"],
     ["自适应间距", cfg.adaptive_gap_enabled ? `开（反馈窗口 M=${cfg.adaptive_m ?? "—"} bar；基础档仍读上面的加仓最小间距）` : "关"],
-    ["EOD 日界强平", cfg.eod_enabled ? `开（${cfg.eod_parity === "odd" ? "单号日" : cfg.eod_parity === "both" ? "每天" : "双号日"}结束 ${cfg.eod_hour_utc ?? 0}:00 UTC 强平 · ${cfg.eod_mode === "profit_only" ? "只平浮盈" : "全平（含浮亏）"}${(cfg.eod_exempt_symbols && cfg.eod_exempt_symbols.length) ? ` · 豁免标的 ${cfg.eod_exempt_symbols.join(",")}` : ""}${(cfg.eod_exempt_slots && cfg.eod_exempt_slots.length) ? ` · 豁免批次 ${cfg.eod_exempt_slots.join(",")}` : ""}）` : "关"],
+    ["EOD 日界强平", cfg.eod_enabled ? `开（${cfg.eod_parity === "odd" ? "单号日" : cfg.eod_parity === "both" ? "每天" : "双号日"}结束 ${cfg.eod_hour_utc ?? 0}:00 UTC 强平 · ${cfg.eod_mode === "profit_only" ? "只平浮盈" : "全平（含浮亏）"}${(cfg.eod_exempt_symbols && cfg.eod_exempt_symbols.length) ? ` · 豁免标的 ${cfg.eod_exempt_symbols.join(",")}` : ""}${(cfg.eod_exempt_slots && cfg.eod_exempt_slots.length) ? ` · 豁免批次 ${cfg.eod_exempt_slots.join(",")}` : ""}${(cfg.eod_protect_hours ?? 0) > 0 ? ` · 保护期 ${cfg.eod_protect_hours}h` : ""}）` : "关"],
   ];
   return rows
     .map(([k, v]) => `<tr><td class="pk">${k}</td><td class="pv">${v}</td></tr>`)
@@ -891,6 +893,8 @@ const SKIP_LABELS = {
   eod_exempt: "EOD 日界强平跳（豁免标的）",
   // EOD 仓位级豁免（2026-11-09 C132）
   eod_exempt_slots: "EOD 日界强平跳（豁免批次）",
+  eod_protect: "EOD 日界强平跳（保护期）",
+  eod_protect_na: "EOD 保护期无法判定（建仓时间缺失，fail-open 放行）",
   // 入场门四键（2026-11-05 C108）：与 backtest_markdown._SKIP_LABELS 同源
   entry_gap: "加仓间距未达标",
   entry_gap_na: "加仓间距判断无数据（放行）",

@@ -968,6 +968,8 @@ def register_exec_params_routes(app, gatekeeper) -> None:
             f" {_sn}.eod_hour={_sc.get('eod_hour_utc') if _sc.get('eod_hour_utc') is not None else '-'}"
             f" {_sn}.eod_exempt={','.join(_sc.get('eod_exempt_symbols') or []) or '-'}"
             f" {_sn}.eod_exempt_slots={_sc.get('eod_exempt_slots') or '-'}"
+            # 保护期（2026-11-16）：0 = 关，显式打印生效值（不静默）
+            f" {_sn}.eod_protect_h={_sc.get('eod_protect_hours') if _sc.get('eod_protect_hours') is not None else '-'}"
             for _sn, _sc in (result["params"].get("scenes") or {}).items()
             if isinstance(_sc, dict) and _sc.get("enabled")
         )

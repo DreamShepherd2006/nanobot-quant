@@ -882,6 +882,31 @@ def test_scene_only_fields_roundtrip(tmp_path):
     assert loaded["scenes"]["mid"]["momentum_exit"] is True
 
 
+def test_eod_protect_hours_roundtrip_float(tmp_path):
+    """2026-11-16：eod_protect_hours（EOD 强平保护期，小时，0=关）保存→读回。
+
+    契约：前端对 input[type=number] 一律 parseFloat 提交（exec_params_page.html），
+    后端只接受数值 → 字符串属非法输入、fail-closed 拒绝。
+
+    锁四件事：① 数值保存后读回仍是 float 且值不变；② 显式 0（关）是合法值，
+    不得被 `or` 类兜底吞掉；③ 未保存场景保持默认 0（不污染）；④ 越界/字符串
+    一律拒绝并给出范围（不静默降级）。
+    """
+    res = save_exec_params({"scenes": {"high": {"eod_protect_hours": 1.5}}})
+    assert res["ok"] is True, res
+    v = load_exec_params()["scenes"]["high"]["eod_protect_hours"]
+    assert isinstance(v, float) and v == 1.5, repr(v)
+
+    save_exec_params({"scenes": {"high": {"eod_protect_hours": 0}}})
+    assert load_exec_params()["scenes"]["high"]["eod_protect_hours"] == 0.0
+    assert load_exec_params()["scenes"]["mid"]["eod_protect_hours"] == 0.0
+
+    bad = save_exec_params({"scenes": {"high": {"eod_protect_hours": 25}}})
+    assert bad["ok"] is False and "24" in bad["error"], bad
+    bad2 = save_exec_params({"scenes": {"high": {"eod_protect_hours": "1.5"}}})
+    assert bad2["ok"] is False, bad2
+
+
 def test_sell_only_profit_legacy_migration(tmp_path):
     """2026-08-29 迁移：旧单值 sell_only_profit（文件内残留键）→ sell_only_profit_high。
 

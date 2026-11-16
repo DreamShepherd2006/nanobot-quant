@@ -128,3 +128,24 @@ def test_webui_handler_shares_same_implementation():
     assert not hasattr(bh, "_coerce_overrides"), "handler 侧不应保留旧实现"
     assert bh.coerce_overrides is _tb().coerce_overrides
     assert bh.DEFAULT_INITIAL_QUOTE == _tb().DEFAULT_INITIAL_QUOTE
+
+
+def test_eod_protect_hours_range_fail_closed():
+    """EOD 强平保护期（2026-11-16）：0–24 数值，越界/字符串 fail-closed。
+
+    填 25 若被静默接受，等价于把日界强平整个废掉（所有批次都在「保护期」
+    内），而页面看起来只是「填了个大点的值」——必须在入口拦住并给出范围。
+    """
+    coerce_overrides = _tb().coerce_overrides
+
+    assert coerce_overrides({"eod_protect_hours": 0}) == {"eod_protect_hours": 0.0}
+    assert coerce_overrides({"eod_protect_hours": 1.5}) == {"eod_protect_hours": 1.5}
+    assert coerce_overrides({"eod_protect_hours": 24}) == {"eod_protect_hours": 24.0}
+    # 空串 = 跟随场景（不是 0）
+    assert coerce_overrides({"eod_protect_hours": ""}) == {}
+
+    for bad in (25, -1, "1.5", "abc"):
+        with pytest.raises(ValueError) as ei:
+            coerce_overrides({"eod_protect_hours": bad})
+        msg = str(ei.value)
+        assert "eod_protect_hours" in msg and "24" in msg, msg

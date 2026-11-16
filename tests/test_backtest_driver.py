@@ -1028,3 +1028,103 @@ def test_backtest_config_wave_max_buys_zero_preserved(tmp_path):
     out = driver.run()
     assert out["backtest_config"]["wave_max_buys"] == 0, "0=关闭波锁，不得被夹到 1"
 
+
+
+def test_backtest_config_eod_protect_default_zero(tmp_path):
+    """EOD 强平保护期（2026-11-16）：默认 0 必须原样进快照。
+
+    回测与实盘共用同一策略决策链；快照缺键 ⇒ 页面/markdown 看不到生效值
+    （历史踩过 `entry_periods` 漏进快照的静默失真）。
+    """
+    driver = _mk_driver(
+        scene="mid",
+        params=_params(),
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["backtest_config"]["eod_protect_hours"] == 0.0
+
+
+def test_backtest_config_eod_protect_override_preserved(tmp_path):
+    """覆盖值必须进策略参数与快照，且 0/小数不被 `or` 吞成默认值。"""
+    driver = _mk_driver(
+        scene="mid",
+        params=_params(),
+        overrides={"eod_protect_hours": 1.5},
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    out = driver.run()
+    assert out["backtest_config"]["eod_protect_hours"] == pytest.approx(1.5)
+
+
+def test_backtest_config_eod_protect_explicit_zero_not_swallowed(tmp_path):
+    """显式覆盖 0（关）不得被夹成默认/非零——0 是合法语义。"""
+    driver = _mk_driver(
+        scene="mid",
+        params=_params(),
+        overrides={"eod_protect_hours": 0},
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40)),
+        ledger_dir=tmp_path,
+    )
+    assert driver.run()["backtest_config"]["eod_protect_hours"] == 0.0
+
+
+# ── EOD 强平保护期：接线端到端（2026-11-16）────────────────────────────
+# 单元测试只覆盖策略层判定；这里验证**整条链真的通电**：
+# 场景配置 → driver 注入 → 策略 _maybe_eod_close → skip_counts/成交明细
+# → backtest_config 快照。构造：1m 序列，buy9 落在 UTC 日界前几分钟。
+
+_EOD_START = datetime(2026, 8, 1, 22, 46, tzinfo=timezone.utc)
+
+
+def _eod_params() -> dict:
+    p = _params()
+    p["scenes"]["mid"].update(
+        {
+            "sleeptime": "1m",
+            "exit_setup": 20,          # 关掉 TD SELL（高9 永不触发）
+            "take_profit_pct": 0,      # 关止盈
+            "stop_loss_pct": 0,        # 关止损
+            "sell_only_profit_high": 0,  # 关高9 盈利门
+            "momentum_exit": False,
+            "min_hold_bars": 0,
+            "eod_enabled": True,
+            "eod_parity": "both",      # 每个日界都触发
+            "eod_mode": "all",
+            "eod_hour_utc": 0,
+            "eod_exempt_symbols": [],
+            "eod_exempt_slots": "",
+        }
+    )
+    return p
+
+
+def _run_eod(tmp_path, protect: float) -> dict:
+    driver = _mk_driver(
+        scene="mid",
+        params=_eod_params(),
+        overrides={"eod_protect_hours": protect},
+        fetcher=_FakeFetcher(_flat_then_falling(60, 40), bar="1m", start=_EOD_START),
+        ledger_dir=tmp_path / f"ledger_{protect}",
+    )
+    return driver.run()
+
+
+def test_eod_protect_end_to_end_baseline_closes(tmp_path):
+    """保护期 0（默认）：日界照平刚买入的批次，且不产生保护期计数。"""
+    out = _run_eod(tmp_path, 0.0)
+    reasons = [f["reason"] for f in out["fills_detail"]]
+    assert any(r.startswith("eod_close") for r in reasons), reasons
+    assert out["skip_counts"].get("eod_protect", 0) == 0
+    assert out["backtest_config"]["eod_protect_hours"] == 0.0
+
+
+def test_eod_protect_end_to_end_protects_fresh_lot(tmp_path):
+    """保护期 24h：同一笔刚买入的批次被跳过，计数与快照同时可见。"""
+    out = _run_eod(tmp_path, 24.0)
+    reasons = [f["reason"] for f in out["fills_detail"]]
+    assert not any(r.startswith("eod_close") for r in reasons), reasons
+    assert out["skip_counts"].get("eod_protect", 0) >= 1, out["skip_counts"]
+    assert out["backtest_config"]["eod_protect_hours"] == 24.0

@@ -203,6 +203,8 @@ _SKIP_LABELS = {
     "eod_hold": "EOD 日界强平跳（profit_only 无浮盈批）",
     "eod_exempt": "EOD 日界强平跳（豁免标的）",
     "eod_exempt_slots": "EOD 日界强平跳（豁免批次）",
+    "eod_protect": "EOD 日界强平跳（保护期）",
+    "eod_protect_na": "EOD 保护期无法判定（建仓时间缺失，fail-open 放行）",
     # 入场门四键（2026-11-05 C108）：此前只存在于策略 `_bump_skip`，两张表
     # 都漏映射 ⇒ 页面/SKIP 统计里原样显示英文键名。
     "entry_gap": "加仓间距未达标",
@@ -563,6 +565,29 @@ def _spot_md(res: dict) -> str:
             f"{_num(cfg.get('min_account_value'), 2)} USD"
             if cfg.get("min_account_value") is not None else "—"
         )),
+        # EOD 日界强平（2026-11-05 Step 2 + 2026-11-07 豁免 + 2026-11-16 保护期）：
+        # 场景级、默认关；关也显式写一行（不静默省略）。
+        ("EOD 日界强平", (
+            "开（"
+            + ("单号日" if cfg.get("eod_parity") == "odd"
+               else "每天" if cfg.get("eod_parity") == "both" else "双号日")
+            + f"结束 {int(cfg.get('eod_hour_utc') or 0)}:00 UTC 强平 · "
+            + ("只平浮盈" if cfg.get("eod_mode") == "profit_only"
+               else "全平（含浮亏）")
+            + (
+                f" · 豁免标的 {','.join(cfg.get('eod_exempt_symbols') or [])}"
+                if cfg.get("eod_exempt_symbols") else ""
+            )
+            + (
+                f" · 豁免批次 {cfg.get('eod_exempt_slots')}"
+                if cfg.get("eod_exempt_slots") else ""
+            )
+            + (
+                f" · 保护期 {_num(cfg.get('eod_protect_hours'), 2)}h"
+                if (cfg.get("eod_protect_hours") or 0) > 0 else ""
+            )
+            + "）"
+        ) if cfg.get("eod_enabled") else "关"),
         # EMA 趋势闸门（2026-10-20，C73/C74 研究线）：只拦 BUY、默认关
         ("EMA 趋势闸门", _on_off(cfg.get("ema_gate_enabled"))),
         ("EMA 周期 n", cfg.get("ema_n")),
