@@ -20,3 +20,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 nanobot_quant = ["skills/**/*", "*.html", "environment/*.json"]
+
+# Legion Module：网关（nanobot-legion）通过该 entry point 发现本模块
+[project.entry-points."nanobot_legion.modules"]
+quant = "nanobot_quant.legion_plugin:MODULE"
