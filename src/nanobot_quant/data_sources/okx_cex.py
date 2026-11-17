@@ -1,9 +1,11 @@
-"""OKX CEX data source — retained for future business-quant integration.
+"""OKX CEX data source（自 P3 起 ``kind=executable``，与 OkxCexBroker 同源）。
 
-现状（2026-08-15 拍板）：OKX CEX 后续会接入执行，但目前业务量化部分
-尚未完成，故 kind=research（仅回测/展示，不参与执行）。接入执行时：
-注册表条目改 kind=executable + 注册 BrokerSpec（含 data_source="okx_cex"）
-+ EXECUTION_CHANNELS/enum_groups 加一项。
+**计价币跟随执行通道（C144，2026-11-17）**：本模块只把「标的基名」交给
+``okx_cex_data``，最终的 instId 由 ``okx_cex_data.resolve_data_inst()`` 按
+``brokers.registry.effective_quote()`` 解析 —— 与 broker 下单一入口，避免
+「信号读 USDT 盘、成交在 USDC 盘」（XCRCL 两盘口 |基差| 中位 0.121%、
+p95 0.482%，与 0.4%/0.8% 盈利门同量级）。某标的无目标计价币对时
+（如 XAUT 只有 -USDT），``okx_cex_data`` 回退 USDT 并打一次 DIAG。
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ def _interval_seconds(bar: str) -> int:
 def fetch_kline(symbol, bar="1D", limit=120,
                 start: Optional[datetime] = None,
                 end: Optional[datetime] = None) -> pd.DataFrame:
-    """OKX CEX candles for ``symbol`` (instId via ``okx_ticker``)."""
+    """OKX CEX candles for ``symbol`` —— instId 按执行计价币解析（C144）。"""
     inst = okx_ticker(symbol, load_tokens_json())
     if start and end:
         # 必须保留**时分秒**：KlineCache 的增量按 [缓存尾, now] 传秒级边界，

@@ -66,7 +66,9 @@ def test_okx_range_parser_accepts_full_iso(monkeypatch):
 
     start = datetime(2026, 10, 30, 3, 41, tzinfo=timezone.utc)
     end = datetime(2026, 10, 30, 3, 42, tzinfo=timezone.utc)
-    monkeypatch.setattr(okx_cex_data, "inst_id_for", lambda t: "BTC-USDT")
+    # C144：取数侧改为 resolve_data_inst(ticker, quote) —— stub 需接受关键字
+    monkeypatch.setattr(okx_cex_data, "inst_id_for",
+                        lambda t, *a, **kw: "BTC-USDT")
     monkeypatch.setattr(okx_cex_data, "_RATE_DELAY", 0)
     okx_cex_data.fetch_kline_range("BTC", start.isoformat(), end.isoformat(),
                                    bar="1m", session=_Sess())

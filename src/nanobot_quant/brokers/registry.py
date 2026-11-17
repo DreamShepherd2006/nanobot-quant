@@ -204,6 +204,47 @@ def spec_for_channel(channel: str) -> BrokerSpec:
     return get_broker(name)
 
 
+def effective_quote(channel: Optional[str] = None,
+                    params: Optional[dict] = None) -> str:
+    """执行通道的**有效计价币** —— 取数与下单的唯一入口（C144，2026-11-17）。
+
+    ``okx_cex`` 由 WebUI ``quote_ccy`` 决定（USDT/USDC，默认 USDT）；其余
+    通道取注册表声明的固定 quote（Gate 恒 USDT）。未知通道、读不到配置一律
+    返回 ``"USDT"``（零回归，调用方自行 fail-closed）。
+
+    为什么必须集中：OKX 同一标的常有 ``-USDT`` / ``-USDC`` 两组现货对，两个
+    订单簿价格不同（XCRCL 实测 |基差| 中位 0.121%、p95 0.482%）。取数侧曾用
+    ``inst_id_for(ticker)`` 的默认 USDT、broker 用 ``quote_ccy`` 拼 USDC，造成
+    「按 USDT 盘算信号、在 USDC 盘成交」，污染 EMA 折价门与高9/保本门。
+    """
+    if params is None:
+        try:
+            from nanobot_quant.exec_params import load_exec_params
+
+            params = load_exec_params() or {}
+        except Exception:  # noqa: BLE001
+            params = {}
+    ch = channel
+    if not ch:
+        raw = str((params or {}).get("execution_channel") or "")
+        if not raw:
+            # 读不到配置就回到历史行为（USDT）：不要凭空假设一个通道，
+            # 否则空 exec_params 会误落到 okx_dex 的 USDC（零回归底线）。
+            return "USDT"
+        try:
+            ch = normalize_execution_channel(raw)
+        except Exception:  # noqa: BLE001
+            return "USDT"
+    try:
+        spec = spec_for_channel(ch)
+    except Exception:  # noqa: BLE001 — 未知通道交给调用方 fail-closed
+        return "USDT"
+    if getattr(spec, "name", "") != "okx_cex":
+        return str(getattr(spec, "quote", "") or "USDT")
+    q = str((params or {}).get("quote_ccy") or "USDT").upper()
+    return q if q in ("USDT", "USDC") else "USDT"
+
+
 def broker_for_channel(channel: str, **kw: Any) -> Any:
     """Build the broker bound to an execution channel (fail-closed)."""
     return spec_for_channel(channel).create_broker(**kw)
