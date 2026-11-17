@@ -4,7 +4,7 @@ from .order_tracker import OrderTracker, TrackedOrder, TradeRecord
 from .signal import batch_calculate
 from .signal_schema import SignalRequest, SignalResponse, TickerSignal
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "batch_calculate",
