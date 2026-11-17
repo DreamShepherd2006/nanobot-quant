@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -38,6 +39,18 @@ def _warn_once(msg: str) -> None:
         return
     _WARNED.add(msg)
     logger.warning("%s", msg)
+
+
+#: 解析成功也打一次 DIAG（每个 ticker×计价币 一次）——用于核对「取数到底走了
+#: 哪个盘」，否则「计价币跟随通道」这件事只能靠反推（C144）
+_DIAG_SEEN: set[str] = set()
+
+
+def _diag_once(key: str, msg: str) -> None:
+    if key in _DIAG_SEEN:
+        return
+    _DIAG_SEEN.add(key)
+    print(msg, file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +346,51 @@ def inst_id_for(ticker: str, quote: Optional[str] = None,
     return to_inst_id(t, quote=q)
 
 
+def data_quote() -> str:
+    """取数侧的有效计价币 —— 与执行 broker 走**同一入口**（C144，2026-11-17）。
+
+    OKX 同一标的常有两组现货对（``XCRCL-USDT`` / ``XCRCL-USDC``），两个订单簿
+    价格不同：实测 43 小时 2599 根对齐 1m，基差中位 +0.069%、|基差| 中位
+    0.121%、p95 0.482%、max 0.782%（32.6% 的时间 >0.2%）。取数侧此前用
+    ``inst_id_for(ticker)`` 的默认 USDT，而 broker 用 ``exec_params.quote_ccy``
+    拼 ``-USDC`` ⇒ **按 USDT 盘算信号、在 USDC 盘成交**，污染 EMA 折价门
+    （1.3%）与高9/保本门（0.4~0.8% / 0%）。
+
+    规则：``okx_cex`` 通道读 WebUI 计价币；其余通道或读不到配置一律 ``USDT``
+    （零回归）。
+    """
+    try:
+        from nanobot_quant.brokers.registry import effective_quote
+        from nanobot_quant.exec_params import load_exec_params
+
+        return effective_quote(None, load_exec_params() or {})
+    except Exception:  # noqa: BLE001 — 取数不得因配置读取失败而崩
+        return "USDT"
+
+
+def resolve_data_inst(ticker: str, *, session: Optional[requests.Session] = None) -> str:
+    """``ticker`` → 当前计价币下的 instId（缺失该币对时回退 USDT 并告警一次）。
+
+    已带 quote 的完整 instId（如期权/现货补买传 ``XAUT-USDT``）原样透传——
+    此时 ``resolve_inst_id`` 直接返回该串，不受计价币参数影响。
+    """
+    q = data_quote()
+    inst = inst_id_for(ticker, q, session=session, strict=True)
+    if inst:
+        _diag_once(f"{ticker}|{q}",
+                   f"[DIAG] okx_cex 取数 | {ticker} → {inst}（计价币 {q}）")
+        return inst
+    if q != "USDT":
+        inst = inst_id_for(ticker, "USDT", session=session, strict=True)
+        if inst:
+            _warn_once(
+                f"okx_cex 数据源: {ticker} 无 {q} 现货对，回退 {inst}"
+                f"（计价币={q}，该标的取数会跨盘，下单仍按 {q} 解析）"
+            )
+            return inst
+    return inst_id_for(ticker, q, session=session)
+
+
 def fetch_kline(
     ticker: str,
     bar: str = "1D",
@@ -382,7 +440,7 @@ def fetch_kline(
     # 过滤后若只请求 limit 根就会少 1（实测 got=179 < min_history=180 →
     # 每轮 SKIP）。与 gate_cex_data「请求 limit+1、再丢进行中」同构。
     limit = max(1, min(limit, 299))
-    inst_id = inst_id_for(ticker)
+    inst_id = resolve_data_inst(ticker, session=session)
 
     # ── rate-limit ──
     time.sleep(_RATE_DELAY)
@@ -463,7 +521,7 @@ def fetch_ticker(ticker: str, *, session: Optional[requests.Session] = None) -> 
     dict
         Keys: ``last``, ``open24h``, ``high24h``, ``low24h``, ``vol24h``.
     """
-    inst_id = inst_id_for(ticker)
+    inst_id = resolve_data_inst(ticker, session=session)
     time.sleep(_RATE_DELAY)
 
     _sess = session or requests
@@ -513,7 +571,7 @@ def fetch_order_book(
     session:
         Optional ``requests.Session``.
     """
-    inst_id = inst_id_for(ticker)
+    inst_id = resolve_data_inst(ticker, session=session)
     _sess = session or requests
     url = f"{_BASE_URL}{_ORDER_BOOK_PATH}"
     url_lite = f"{_BASE_URL}{_ORDER_BOOK_LITE_PATH}"
@@ -639,7 +697,7 @@ def fetch_kline_range(
     if bar_okx is None:
         raise ValueError(f"Unsupported bar size: {bar!r}")
 
-    inst_id = inst_id_for(ticker)
+    inst_id = resolve_data_inst(ticker, session=session)
     start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
     start_ms = int(start_dt.timestamp() * 1000)
