@@ -30,6 +30,51 @@ class _Ctx:
         self.logs.append(msg)
 
 
+# ── MCP 工具声明（契约可选钩子）─────────────────────────────────
+
+
+def test_module_exposes_optional_mcp_specs_hook():
+    assert callable(getattr(lp.QuantModule, "mcp_specs", None))
+
+
+def test_mcp_specs_returns_registered_servers():
+    specs = lp.MODULE.mcp_specs(_Ctx("/tmp/none"))
+    assert isinstance(specs, dict)
+    assert set(specs) == {"vibe-trading", "squad-delegate", "signal-structurizer"}
+    for name, spec in specs.items():
+        assert spec.name == name
+        assert isinstance(spec.command, str) and spec.command
+        assert isinstance(spec.args, list)
+        assert hasattr(spec, "target_agents")
+
+
+def test_mcp_specs_matches_discover():
+    from nanobot_quant.mcp_spec import discover
+
+    assert lp.MODULE.mcp_specs(_Ctx("/tmp/none")) == discover()
+
+
+def test_mcp_specs_does_not_pull_heavy_deps():
+    """契约要求 plugin 顶层保持轻量：调 mcp_specs 不得连带引入重依赖。"""
+    import os
+    import subprocess
+    import sys as _sys
+
+    code = (
+        "import sys\n"
+        "from nanobot_quant import legion_plugin as lp\n"
+        "lp.MODULE.mcp_specs(None)\n"
+        "bad = [m for m in ('lumibot', 'pandas', 'okx', 'gate_api') if m in sys.modules]\n"
+        "print(','.join(bad))\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(PKG_DIR.parent)}
+    out = subprocess.run(
+        [_sys.executable, "-c", code], capture_output=True, text=True, env=env
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == ""
+
+
 # ── 契约字段 ──────────────────────────────────────────────────────
 
 
