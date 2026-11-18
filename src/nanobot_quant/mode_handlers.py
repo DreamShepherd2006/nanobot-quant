@@ -18,15 +18,25 @@ def _mode_path(gatekeeper) -> str:
     return os.path.join(gatekeeper._platform.data_root, "legion", "mode.json")
 
 
-def _read_mode(gatekeeper) -> str:
-    """Read current mode, default 'quant'."""
+def _read_mode_state(gatekeeper) -> tuple[str | None, bool]:
+    """读取交易模式状态：(mode, saved)。
+
+    ``saved=False`` 表示 mode.json 不存在 / 读失败 / mode 为空 —— 此时页面必须
+    提示用户保存（不再伪造“已保存”的假象）。
+    """
     path = _mode_path(gatekeeper)
     try:
         with open(path) as f:
-            data = json.load(f)
-        return data.get("mode", "quant")
+            mode = (json.load(f).get("mode") or "").strip()
     except Exception:
-        return "quant"
+        return None, False
+    return (mode, True) if mode else (None, False)
+
+
+def _read_mode(gatekeeper) -> str:
+    """Read current mode, default 'quant' (未保存时按默认值处理)."""
+    mode, _saved = _read_mode_state(gatekeeper)
+    return mode or "quant"
 
 
 def _write_mode(gatekeeper, mode: str) -> None:
@@ -75,24 +85,27 @@ _MODE_PAGE = """\
           box-shadow: 0 1px 3px rgba(0,0,0,0.08); font-size: 0.85rem; color: #555;
           line-height: 1.6; }
   .info code { background: #f1f3f4; padding: 1px 5px; border-radius: 3px; font-size: 0.82rem; }
+  .banner { background: #fff8e1; border-left: 4px solid #f9ab00; border-radius: 8px;
+             padding: 0.9rem 1.1rem; margin-bottom: 1.25rem; font-size: 0.88rem;
+             color: #7a4f01; line-height: 1.6; }
 </style>
 </head>
 <body>
 <h1>⚙️ 交易模式</h1>
 <p class="sub">选择 Neo 的分析决策模式。影响 "分析" / "评估" 类指令的路由。</p>
-
+{saved_block}
 <div class="modes">
   <div class="mode-card{mode_quant}" onclick="switchMode('quant')">
     <div class="icon">📊</div>
     <h2>Quant 模式</h2>
     <p>TD Sequential 确定性信号<br>公式驱动，无 LLM 偏见</p>
-    <span class="badge">✓ 当前</span>
+    <span class="badge">✓ {current_badge}</span>
   </div>
   <div class="mode-card{mode_research}" onclick="switchMode('research')">
     <div class="icon">🧠</div>
     <h2>Research 模式</h2>
     <p>VT Swarm 投资委员会<br>多空辩论，LLM 驱动推理</p>
-    <span class="badge">✓ 当前</span>
+    <span class="badge">✓ {current_badge}</span>
   </div>
 </div>
 
@@ -145,12 +158,23 @@ def register_mode_routes(app, gatekeeper):
                 "<h3 style='text-align:center;margin-top:60px;color:#e74c3c;'>🔒 仅 Commander 可访问</h3>",
                 status_code=403,
             )
-        mode = _read_mode(gatekeeper)
+        mode, saved = _read_mode_state(gatekeeper)
+        effective = mode or "quant"
         labels = {"quant": "📊 Quant 模式（TD Sequential）", "research": "🧠 Research 模式（VT Swarm）"}
+        saved_block = ""
+        if not saved:
+            saved_block = (
+                '<div class="banner">⚠️ 当前交易模式尚未保存，系统按「'
+                f'{labels.get(effective, effective)}」处理。'
+                "请点击下方卡片确认并保存。</div>"
+            )
+        label = labels.get(effective, effective) + ("（未保存 · 默认）" if not saved else "")
         html = (
-            _MODE_PAGE.replace("{current_label}", labels.get(mode, mode))
-            .replace("{mode_quant}", ' active' if mode == "quant" else '')
-            .replace("{mode_research}", ' active' if mode == "research" else '')
+            _MODE_PAGE.replace("{saved_block}", saved_block)
+            .replace("{current_badge}", "当前" if saved else "当前（默认）")
+            .replace("{current_label}", label)
+            .replace("{mode_quant}", ' active' if effective == "quant" else '')
+            .replace("{mode_research}", ' active' if effective == "research" else '')
         )
         return HTMLResponse(html)
 
