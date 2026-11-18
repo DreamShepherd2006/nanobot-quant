@@ -50,10 +50,10 @@ RUN pip install --break-system-packages \
     && echo "✅ CAG v0.2.0"
 
 # ── 4. nanobot-legion: patches + webui source + assets ───
-RUN echo "[bust=94]" && pip install --break-system-packages \
-        git+https://github.com/DreamShepherd2006/nanobot-legion.git@fbafd063 \
+RUN echo "[bust=96]" && pip install --break-system-packages \
+        git+https://github.com/DreamShepherd2006/nanobot-legion.git@610fe5ee \
     && python3 -m nanobot_legion.install \
-    && echo "✅ nanobot-legion @fbafd063 (零隐式依赖: 删 3 处旧业务系统兜底, bust=94)"
+    && echo "✅ nanobot-legion @610fe5ee (启动 DIAG 版本行去硬编码 C152, bust=96)"
 
 # ── 4b. Build Legion webui from source ────────────────────
 RUN cd /app/legion_webui_src \
