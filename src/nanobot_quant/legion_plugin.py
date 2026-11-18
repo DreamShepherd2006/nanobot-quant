@@ -209,6 +209,19 @@ class QuantModule:
         ]
         return sections
 
+    # ── MCP 工具声明（契约可选钩子）───────────────────────────
+    def mcp_specs(self, ctx) -> dict:
+        """把 quant 的 MCP server 声明交给 Legion 注入 agent config。
+
+        契约可选钩子：未实现的模块 = 不提供 MCP 工具。这里只读 mcp_spec 的
+        内存注册表（登记在 import 时完成），不连网、不读凭证，可幂等调用。
+        导入放在函数体内 —— ``legion_plugin`` 顶层必须保持轻量，因为
+        ``squad_config_sync`` 会在启动早期 import 每个模块的 plugin 模块。
+        """
+        from nanobot_quant.mcp_spec import discover
+
+        return discover()
+
     # ── 内部 ────────────────────────────────────────────────
     @staticmethod
     def _credential_rows() -> list[Row]:
