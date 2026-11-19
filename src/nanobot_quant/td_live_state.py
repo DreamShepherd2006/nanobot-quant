@@ -74,6 +74,10 @@ def update_symbol(symbol: str, data: dict, scene: str = "") -> None:
             "note": data.get("note", ""),
             "time": data.get("time", ""),
             "updated_at": _now_iso(),
+            # 数据陈旧度（2026-11-19 C154）：策略每轮算出「最后一根已收盘 bar
+            # 距现在多少秒」，页面据此打「⚠️ 数据滞后 N 分钟」红字。此前该值
+            # 被本白名单静默丢弃，导致 2026-10-30 上线的告警从未生效。
+            "lag_s": data.get("lag_s"),
             # EMA 折价门快照（2026-11-19）：供实时监控表「EMA / 偏离%」两列；
             # 门关闭或取不到值时为 None（页面显示 —，不填 0）。
             "ema_period": data.get("ema_period"),
