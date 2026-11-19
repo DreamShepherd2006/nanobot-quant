@@ -1825,6 +1825,16 @@ class TdSequentialStrategy(Strategy):
                 _time_s = str(df.index[-1])
         else:
             _time_s = ""
+        # EMA 折价门快照（2026-11-19）：门开启时每标的每轮算一次，供实时监控表
+        # 「EMA610 / 偏离%」两列观测（与下方门判定同一个值，不重复计算）；
+        # 门关闭 → (None, None)，页面显示 —，零额外开销；决策路径不变。
+        _ema_n, _ema_val = self._ema_snapshot(df)
+        _ema_disc = None
+        try:
+            if _ema_val and float(_ema_val) > 0 and float(price or 0) > 0:
+                _ema_disc = (float(price) - float(_ema_val)) / float(_ema_val)
+        except (TypeError, ValueError):
+            _ema_disc = None
         self._last_signal = {
             "setup_buy": setup_buy,
             "setup_sell": setup_sell,
@@ -1834,6 +1844,9 @@ class TdSequentialStrategy(Strategy):
             "price": price,
             "time": _time_s,
             "lag_s": _lag_s,
+            "ema_period": _ema_n,
+            "ema_value": _ema_val,
+            "ema_discount_pct": _ema_disc,
         }
         try:
             if self.parameters.get("live_mode"):
@@ -1941,7 +1954,8 @@ class TdSequentialStrategy(Strategy):
         # 2026-11-10（§33.64）：门开启时**无条件**算一次当前 EMA（不只
         # buy_signal 时），作为持仓表「当前 EMA/折价」与建仓快照来源；
         # 拦截判定仍只在 buy_signal 时执行（决策路径零变化）。
-        _ema_n, _ema_val = self._ema_snapshot(df)
+        # 2026-11-19：该调用已上移到实时状态写入前（同一份值供实时监控表
+        # 展示），此处直接复用 _ema_n / _ema_val，不重复计算。
         _ema_on = bool(getattr(self, "_entry_ema_enabled", False))
         if _ema_on and _ema_val is None and buy_signal:
             self._bump_skip("entry_ema_na")
