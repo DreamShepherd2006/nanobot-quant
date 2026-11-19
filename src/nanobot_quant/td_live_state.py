@@ -74,6 +74,11 @@ def update_symbol(symbol: str, data: dict, scene: str = "") -> None:
             "note": data.get("note", ""),
             "time": data.get("time", ""),
             "updated_at": _now_iso(),
+            # EMA 折价门快照（2026-11-19）：供实时监控表「EMA / 偏离%」两列；
+            # 门关闭或取不到值时为 None（页面显示 —，不填 0）。
+            "ema_period": data.get("ema_period"),
+            "ema_value": data.get("ema_value"),
+            "ema_discount_pct": data.get("ema_discount_pct"),
         }
         LIVE_STATE["updated_at"] = syms[symbol]["updated_at"]
 

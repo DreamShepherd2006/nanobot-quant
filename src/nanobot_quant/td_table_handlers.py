@@ -817,6 +817,30 @@ def _live_refresh_s() -> int:
         return 10
 
 
+def _live_ema_cells(value, discount_pct) -> tuple[str, str]:
+    """实时监控表「EMA / 偏离%」两列（2026-11-19 用户拍板方案 B）。
+
+    ``value`` = EMA 折价门当前使用的均线值，与策略 ``_cur_ema`` **同源**
+    （展示层不另算，防「页面显示 ≠ 实际判定」）；门关闭 / 取不到值 → ``—``
+    （零成本路径，不填 0 以免误读为均线为 0）。
+
+    ``discount_pct`` 是**比率**（-0.0312 = 价格在均线下方 3.12%），
+    展示带符号两位小数；精度口径与「持仓表 → 当前折价」一致。
+    """
+    try:
+        ev = float(value)
+    except (TypeError, ValueError):
+        ev = 0.0
+    ema_td = (f'<td class="num">{ev:.4f}</td>' if ev > 0
+              else '<td class="num muted">—</td>')
+    try:
+        dp = float(discount_pct) * 100.0
+        disc_td = f'<td class="num">{dp:+.2f}%</td>'
+    except (TypeError, ValueError):
+        disc_td = '<td class="num muted">—</td>'
+    return ema_td, disc_td
+
+
 def _live_cell(v: int, threshold: int) -> str:
     """setup/cd 进度单元格：临近阈值橙色、达到/超过绿色高亮。"""
     try:
@@ -1539,6 +1563,10 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
                         if _stale_bad else f'<span class="muted"> · {_esc(note_txt)}</span>')
             else:
                 note = ""
+            # EMA / 偏离% 两列（2026-11-19）：值来自策略写的 ema_value /
+            # ema_discount_pct（与折价门判定同源），门关闭 → —。
+            _ema_td, _disc_td = _live_ema_cells(
+                d.get("ema_value"), d.get("ema_discount_pct"))
             sig_cls = {
                 "LONG": "sig buy", "EXIT": "sig sell", "BUY_FAIL": "sig sell",
                 "EXIT_FAIL": "sig sell", "SKIP": "sig hold",
@@ -1552,13 +1580,24 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
                 f'<td>{_live_cell(cds, xc)}</td>'
                 f'<td class="num">{float(score or 0):.1f}</td>'
                 f'<td class="num">{float(price or 0):.4f}</td>'
+                f'{_ema_td}{_disc_td}'
                 f'<td class="sig {sig_cls}">{signal}</td>'
                 f'<td class="time">{_esc(str(d.get("time", "")))}</td>'
                 f'<td>{note}</td></tr>'
             )
         if not rows:
-            rows = ('<tr><td colspan="10" class="muted" style="text-align:left">'
+            rows = ('<tr><td colspan="12" class="muted" style="text-align:left">'
                     '暂无数据——该场景 TD 循环未运行或尚未产生第一轮结果</td></tr>')
+        # EMA 列头（2026-11-19 方案 B）：显示折价门实际使用的周期；门关闭时
+        # 加小字「折价门关闭」（值列仍保留、一律 —，避免列数随开关跳变）。
+        _ema_on = bool(sc_cfg.get("entry_ema_enabled"))
+        try:
+            _ema_n_h = int(sc_cfg.get("entry_ema_period") or 610)
+        except (TypeError, ValueError):
+            _ema_n_h = 610
+        _ema_head = (f'EMA{_ema_n_h}' if _ema_on
+                     else f'EMA{_ema_n_h}<br><span class="muted" '
+                          f'style="font-weight:400">折价门关闭</span>')
         blocks += (
             f'<div class="scene-block" style="margin:14px 0 4px">'
             f'<h4 style="margin:0 0 6px">{label} <span class="muted">{sc}</span>'
@@ -1566,10 +1605,12 @@ def _render_live(with_script: bool = True, tq: dict | None = None,
             f'{" · " + _esc(slot_txt) if slot_txt else ""} · {st_txt}'
             f' · 数据更新 {upd_txt}</h4>'
             f'{_scene_bal_err_block(sc)}'
-            '<table>'
+            '<div class="pos-wrap"><table>'
             '<tr><th>标的</th><th>Buy Setup</th><th>Sell Setup</th><th>CD Buy</th>'
-            '<th>CD Sell</th><th>Score</th><th>价格</th><th>信号</th><th>最后 bar</th><th>备注</th></tr>'
-            f'{rows}</table>'
+            '<th>CD Sell</th><th>Score</th><th>价格</th>'
+            f'<th>{_ema_head}</th><th>偏离%</th>'
+            '<th>信号</th><th>最后 bar</th><th>备注</th></tr>'
+            f'{rows}</table></div>'
             f'{_scene_positions_block(sc, bool(st.get("running")))}'
             f'{_scene_funds_block(sc, bool(st.get("running")), shared_pool=_is_shared_pool)}</div>'
         )
