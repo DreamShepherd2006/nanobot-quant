@@ -93,7 +93,7 @@ def test_module_contract_fields():
 
 
 def test_routes_cover_all_business_pages():
-    assert len(lp.ROUTES) == 14
+    assert len(lp.ROUTES) == 15
     names = [r[0] for r in lp.ROUTES]
     assert len(set(names)) == len(names), "模块名不应重复"
     # 关键页面必须在册（回归保护：新增页面漏进表即失败）
@@ -103,6 +103,7 @@ def test_routes_cover_all_business_pages():
         "backtest_handlers",
         "okx_options_handlers",
         "f1_backtest_handlers",
+        "ashare_handlers",
     ):
         assert expected in names
 
@@ -171,7 +172,7 @@ def test_register_routes_isolates_failures(monkeypatch, tmp_path):
 
     assert any("路由挂载失败" in m for m in ctx.logs)
     assert any("导入失败" in m for m in ctx.logs)
-    assert any("1/14" in m for m in ctx.logs)
+    assert any(f"1/{len(lp.ROUTES)}" in m for m in ctx.logs)
 
 
 # ── sections() ───────────────────────────────────────────────────
@@ -192,6 +193,7 @@ def test_sections_structure(tmp_path):
         "📊 回测验证",
         "🔑 账户与资产",
         "🟤 OKX 期权",
+        "🇨🇳 A 股期权",
     ]
     links = [r.link for s in sections for r in s.rows if r.link]
     assert links, "至少要有可点击入口"

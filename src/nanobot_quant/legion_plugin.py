@@ -69,6 +69,7 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "🟤 已注册期权回测路由（/config/backtest 期权分栏）",
     ),
     ("f1_backtest_handlers", "register_f1_routes", "🧪 已注册 F1 分析路由（/config/backtest/f1）"),
+    ("ashare_handlers", "register_ashare_routes", "🇨🇳 已注册 A 股期权路由"),
 )
 
 
@@ -205,6 +206,11 @@ class QuantModule:
                 "🟤 OKX 期权",
                 [Row("打开期权链", link="/config/okx-options")],
                 desc="U 本位线性期权（美元现金结算）：期权链 + IV/HV + 卖 put 定价辅助；持仓与台账监控；逐仓担保自动追加；到期巡检自动判定（OTM 作废关账 / ITM 赔付补买）。",
+            ),
+            Section(
+                "🇨🇳 A 股期权",
+                [Row("打开 A 股期权", link="/config/ashare")],
+                desc="只读盘口采集（东财合约清单 + 新浪五档，交易时段每轮落盘）：用于校准回测滑点与判断合约当时是否可成交；不参与任何交易决策。",
             ),
         ]
         return sections
