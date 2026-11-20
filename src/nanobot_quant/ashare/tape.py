@@ -57,10 +57,21 @@ BATCH = 60                                  # 新浪单请求合约数（实测 
 SESSIONS = (((9, 30), (11, 30)), ((13, 0), (15, 2)))
 STALE_TOLERANCE_S = 300                     # 快照时间落后超过这个值视为非交易时段
 
+# 标的池（与回测/分析口径一致）：只有这四个有流动性。588080（易方达科创50）
+# 日成交额比 588000 低约 10 倍、且有整天零成交的月份 ⇒ **不入池**（仍可从 QMT 拿历史
+# 做对照，但不采集盘口，否则只是无意义的空行）。
+POOL_UNDERLYINGS: tuple[tuple[str, str], ...] = (
+    ("510050.SH", "上证50ETF"),
+    ("510300.SH", "沪深300ETF"),
+    ("510500.SH", "中证500ETF"),
+    ("588000.SH", "科创50ETF"),
+)
+POOL_CODES = tuple(c for c, _ in POOL_UNDERLYINGS)
+
 DEFAULT_TAPE: dict = {
     "enabled": False,
     "interval_s": DEFAULT_INTERVAL_S,
-    "underlyings": ["510050.SH", "510300.SH", "510500.SH", "588000.SH"],  # 588080 太薄
+    "underlyings": list(POOL_CODES),
     "expiries": 3,          # 最近 N 个未到期档
     "band_pct": 12.0,       # 行权价相对现价的窗口（±%）
     "max_per_side": 8,      # 每档每方向最多收录多少个行权价（按贴近现价排序）
@@ -98,8 +109,8 @@ def _normalize(cfg: dict | None) -> dict:
     c["expiries"] = _clamp_int(c.get("expiries"), 1, 6, DEFAULT_TAPE["expiries"])
     c["band_pct"] = _clamp_float(c.get("band_pct"), 3.0, 30.0, 12.0)
     c["max_per_side"] = _clamp_int(c.get("max_per_side"), 1, 20, 8)
-    undls = [u for u in (c.get("underlyings") or []) if u in ac.UNDERLYINGS.values()]
-    c["underlyings"] = undls or list(DEFAULT_TAPE["underlyings"])
+    undls = [u for u in (c.get("underlyings") or []) if u in POOL_CODES]
+    c["underlyings"] = undls or list(POOL_CODES)
     return c
 
 

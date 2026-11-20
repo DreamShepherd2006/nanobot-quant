@@ -198,3 +198,18 @@ def test_save_config_keeps_defaults_when_underlyings_all_invalid(tmp_path, monke
     monkeypatch.setattr(tape.creg, "_get_storage_dir", lambda: str(tmp_path))
     cfg = tape.save_tape_config(underlyings=["NOPE"])
     assert cfg["underlyings"] == tape.DEFAULT_TAPE["underlyings"]
+
+
+def test_pool_excludes_588080(tmp_path, monkeypatch):
+    """588080 流动性太薄（整天零成交）⇒ 永不入采集池，即使手改配置文件。"""
+    monkeypatch.setattr(tape.creg, "_get_storage_dir", lambda: str(tmp_path))
+    assert "588080.SH" not in tape.POOL_CODES
+    assert len(tape.POOL_CODES) == 4
+    cfg = tape.save_tape_config(underlyings=["510050.SH", "588080.SH"])
+    assert cfg["underlyings"] == ["510050.SH"]
+
+
+def test_pool_underlyings_have_display_names():
+    names = dict(tape.POOL_UNDERLYINGS)
+    assert names["510050.SH"] == "上证50ETF"
+    assert all(v for v in names.values())

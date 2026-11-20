@@ -53,7 +53,8 @@ def _state_payload() -> dict:
             "underlyings": sorted({i["undl"] for i in items}),
         },
         "options": {
-            "underlyings": [{"code": k, "label": k} for k in ac.UNDERLYINGS.values()],
+            # 只列池内标的（588080 流动性太差，故意不给选项）
+            "underlyings": [{"code": c, "name": n} for c, n in tape.POOL_UNDERLYINGS],
             "interval_range": list(tape.INTERVAL_RANGE),
         },
     }

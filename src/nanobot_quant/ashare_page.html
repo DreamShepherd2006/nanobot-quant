@@ -88,7 +88,7 @@ function renderUndls(all, chosen) {
     const id = 'u_' + u.code;
     const lab = document.createElement('label');
     lab.className = 'chk';
-    lab.innerHTML = `<input type="checkbox" id="${id}" value="${u.code}" ${chosen.includes(u.code) ? 'checked' : ''}> ${u.code}`;
+    lab.innerHTML = `<input type="checkbox" id="${id}" value="${u.code}" ${chosen.includes(u.code) ? 'checked' : ''}> ${u.code}${u.name ? ' ' + u.name : ''}`;
     box.appendChild(lab);
   });
 }
@@ -108,9 +108,10 @@ async function loadState() {
     : '<span class="warn">⚪ 采集器未运行</span>';
   $('status').innerHTML = [
     runTxt,
-    `上次采样：<b>${st.last_run || '—'}</b>`,
+    `上次运行：<b>${st.last_run || '—'}</b>`,
+    `上次落盘：<b>${t.last_ts || '—'}</b>`,
     `今日样本：<b>${t.samples || 0}</b> 轮 / <b>${t.rows || 0}</b> 条`,
-    `文件大小：<b>${((t.bytes || 0) / 1048576).toFixed(2)} MB</b>`,
+    `<span title="采集是只读的，落盘体积是最值得盯的指标">文件大小：<b>${((t.bytes || 0) / 1048576).toFixed(2)} MB</b></span>`,
     `合约清单：<b>${cs.count || 0}</b> 个（${cs.source || '—'}${cs.error ? ' · <span class="bad">' + cs.error + '</span>' : ''}）`,
     st.last_error ? `<span class="bad">错误：${st.last_error}</span>` : ''
   ].filter(Boolean).join('　');
