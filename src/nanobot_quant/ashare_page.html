@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A 股期权盘口采集</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;background:#0f1115;color:#d8dee9;margin:0;padding:22px 26px}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:#7b8794;font-size:12.5px;margin-bottom:16px}
+  .card{background:#171a21;border:1px solid #242a35;border-radius:8px;padding:14px 16px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px;color:#a9b6c6;font-weight:600}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:center}
+  .fld{display:flex;flex-direction:column;gap:4px;font-size:12.5px;color:#8b98a8}
+  input[type=number],select{background:#0f1115;border:1px solid #2b3340;color:#d8dee9;border-radius:5px;padding:5px 7px;font-size:13px;width:96px}
+  label.chk{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:#d8dee9}
+  button{background:#2563eb;border:0;color:#fff;border-radius:6px;padding:7px 14px;font-size:13px;cursor:pointer}
+  button.ghost{background:#222834;color:#c3ccd9}
+  button:disabled{opacity:.55;cursor:default}
+  .stat{display:flex;gap:22px;flex-wrap:wrap;font-size:13px}
+  .stat b{color:#e5edf7}
+  .ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#f87171}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
+  th,td{border-bottom:1px solid #222834;padding:5px 7px;text-align:right;white-space:nowrap}
+  th{color:#8b98a8;font-weight:500;text-align:right}
+  td.l,th.l{text-align:left}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .hint{color:#6b7684;font-size:12px;margin-top:8px;line-height:1.6}
+  #msg{font-size:12.5px;margin-left:10px}
+</style>
+</head>
+<body>
+<h1>🇨🇳 A 股 ETF 期权盘口采集</h1>
+<div class="sub">只读采集（不下单、不参与决策）· 合约清单来自东财全量列表（缓存 1 天）· 盘口来自新浪五档 · 落盘 <span class="mono">legion/credentials/ashare_tape/tape_YYYYMMDD.jsonl</span></div>
+
+<div class="card">
+  <h2>① 运行状态</h2>
+  <div class="stat" id="status">加载中…</div>
+  <div class="hint" id="session-line"></div>
+</div>
+
+<div class="card">
+  <h2>② 采集配置</h2>
+  <div class="row">
+    <label class="chk"><input type="checkbox" id="enabled"> 启用采集</label>
+    <div class="fld">采样间隔（秒）<input type="number" id="interval" min="10" max="1800" step="10"></div>
+    <div class="fld">到期档数<input type="number" id="expiries" min="1" max="6"></div>
+    <div class="fld">虚值带 ±%<input type="number" id="band" min="3" max="30" step="1"></div>
+    <div class="fld">每档每方向上限<input type="number" id="perside" min="1" max="20"></div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div class="fld" style="flex:1">标的
+      <div id="undls" class="row" style="gap:14px"></div>
+    </div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button id="btn-save">保存并应用</button>
+    <button class="ghost" id="btn-sample">立即采样（不落盘）</button>
+    <button class="ghost" id="btn-refresh">刷新合约清单</button>
+    <span id="msg"></span>
+  </div>
+  <div class="hint">
+    交易时段外自动跳过（北京时间 9:30–11:30 / 13:00–15:02，工作日）。落盘体积约 <b>40–60 KB/轮</b>，60 秒间隔一天约 10–14 MB。<br>
+    「启用采集」保存后立即生效；空间重建后若仍为启用状态会自动恢复（只读采集，不涉及资金）。
+  </div>
+</div>
+
+<div class="card">
+  <h2>③ 最近采样预览</h2>
+  <div id="preview" class="hint">点「立即采样」查看当前盘口。</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtPct = (v) => (v === null || v === undefined) ? '—' : (v * 100).toFixed(2) + '%';
+const fmtNum = (v, d) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+function renderUndls(all, chosen) {
+  const box = $('undls'); box.innerHTML = '';
+  (all || []).forEach(u => {
+    const id = 'u_' + u.code;
+    const lab = document.createElement('label');
+    lab.className = 'chk';
+    lab.innerHTML = `<input type="checkbox" id="${id}" value="${u.code}" ${chosen.includes(u.code) ? 'checked' : ''}> ${u.code}${u.name ? ' ' + u.name : ''}`;
+    box.appendChild(lab);
+  });
+}
+
+async function loadState() {
+  const j = await api('/config/ashare/state');
+  const c = j.config, st = j.status, t = st.stats || {}, cs = j.contracts || {};
+  $('enabled').checked = !!c.enabled;
+  $('interval').value = c.interval_s;
+  $('expiries').value = c.expiries;
+  $('band').value = c.band_pct;
+  $('perside').value = c.max_per_side;
+  renderUndls(j.options.underlyings, c.underlyings || []);
+
+  const runTxt = st.running
+    ? '<span class="ok">🟢 采集器运行中</span>'
+    : '<span class="warn">⚪ 采集器未运行</span>';
+  $('status').innerHTML = [
+    runTxt,
+    `上次运行：<b>${st.last_run || '—'}</b>`,
+    `上次落盘：<b>${t.last_ts || '—'}</b>`,
+    `今日样本：<b>${t.samples || 0}</b> 轮 / <b>${t.rows || 0}</b> 条`,
+    `<span title="采集是只读的，落盘体积是最值得盯的指标">文件大小：<b>${((t.bytes || 0) / 1048576).toFixed(2)} MB</b></span>`,
+    `合约清单：<b>${cs.count || 0}</b> 个（${cs.source || '—'}${cs.error ? ' · <span class="bad">' + cs.error + '</span>' : ''}）`,
+    st.last_error ? `<span class="bad">错误：${st.last_error}</span>` : ''
+  ].filter(Boolean).join('　');
+  $('session-line').textContent = st.in_session ? '当前处于交易时段：采集会正常进行。' : '当前不在交易时段：自动跳过，不发请求。';
+}
+
+$('btn-save').onclick = async () => {
+  const undls = Array.from(document.querySelectorAll('#undls input:checked')).map(x => x.value);
+  if (!undls.length) { $('msg').innerHTML = '<span class="bad">至少选择一个标的</span>'; return; }
+  $('msg').textContent = '保存中…';
+  try {
+    await api('/config/ashare/save', {
+      enabled: $('enabled').checked,
+      interval_s: Number($('interval').value),
+      expiries: Number($('expiries').value),
+      band_pct: Number($('band').value),
+      max_per_side: Number($('perside').value),
+      underlyings: undls,
+    });
+    $('msg').innerHTML = '<span class="ok">已保存并应用</span>';
+    await loadState();
+  } catch (e) { $('msg').innerHTML = '<span class="bad">' + e.message + '</span>'; }
+};
+
+$('btn-sample').onclick = async () => {
+  $('msg').textContent = '采样中…';
+  try {
+    const j = await api('/config/ashare/sample', {persist: false});
+    $('msg').innerHTML = '<span class="ok">采样完成：' + j.rows + ' 条</span>';
+    renderPreview(j);
+  } catch (e) { $('msg').innerHTML = '<span class="bad">' + e.message + '</span>'; }
+};
+
+$('btn-refresh').onclick = async () => {
+  $('msg').textContent = '刷新合约清单…';
+  try {
+    const j = await api('/config/ashare/contracts/refresh');
+    $('msg').innerHTML = j.error
+      ? '<span class="bad">拉取失败（沿用缓存）：' + j.error + '</span>'
+      : '<span class="ok">已刷新：' + j.count + ' 个合约</span>';
+    await loadState();
+  } catch (e) { $('msg').innerHTML = '<span class="bad">' + e.message + '</span>'; }
+};
+
+function renderPreview(j) {
+  const rows = j.preview || [];
+  if (!rows.length) {
+    $('preview').innerHTML = '无数据（' + (j.skipped || j.error || '空结果') + '）';
+    return;
+  }
+  const spot = Object.entries(j.spot || {}).map(([k, v]) => `${k}=${v}`).join('　');
+  let html = `<div>时间 <b>${j.ts}</b>　合约 <b>${j.picked || 0}</b> 个　现货 ${spot}</div>`;
+  html += '<table><thead><tr><th class="l">合约</th><th class="l">标的</th><th>方向</th><th>行权价</th>'
+        + '<th>买一</th><th>买量</th><th>卖一</th><th>卖量</th><th>最新</th><th>IV</th><th>持仓量</th></tr></thead><tbody>';
+  rows.forEach(r => {
+    html += `<tr><td class="l mono">${r.i}</td><td class="l">${r.u || ''}</td><td>${r.r || ''}</td>`
+          + `<td>${fmtNum(r.k, 3)}</td><td>${fmtNum(r.b, 4)}</td><td>${r.bs ?? '—'}</td>`
+          + `<td>${fmtNum(r.a, 4)}</td><td>${r.as ?? '—'}</td><td>${fmtNum(r.last, 4)}</td>`
+          + `<td>${fmtPct(r.iv)}</td><td>${r.oi ?? '—'}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  $('preview').innerHTML = html;
+}
+
+loadState().catch(e => { $('status').innerHTML = '<span class="bad">加载失败：' + e.message + '</span>'; });
+</script>
+</body>
+</html>
