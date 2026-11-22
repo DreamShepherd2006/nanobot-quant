@@ -1,0 +1,3 @@
+# GBK / CRLF 文件：禁止 git 做行尾与编码转换
+qmt/deliver/** -text -diff
+qmt/**/*.gbk.py -text -diff
