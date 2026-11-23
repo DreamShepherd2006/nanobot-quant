@@ -48,6 +48,8 @@ def _state_payload() -> dict:
         "contracts": {
             "count": len(items),
             "fetched_at": c.get("fetched_at"),
+            "age_s": c.get("age_s"),
+            "retry_in_s": c.get("retry_in_s") or 0,
             "source": c.get("source"),
             "error": c.get("error") or "",
             "underlyings": sorted({i["undl"] for i in items}),
@@ -134,6 +136,8 @@ def register_ashare_routes(app, gatekeeper) -> None:
         c = ac.contracts(creg._get_storage_dir(), force=True)
         return JSONResponse({"ok": True, "count": len(c.get("items") or []),
                              "source": c.get("source"),
+                             "age_s": c.get("age_s"),
+                             "retry_in_s": c.get("retry_in_s") or 0,
                              "error": c.get("error") or ""})
 
     # 开机自恢复：采集是只读的，enabled=true 时随网关启动。
