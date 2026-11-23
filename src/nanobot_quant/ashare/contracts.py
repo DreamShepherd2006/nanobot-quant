@@ -1,15 +1,21 @@
-"""A 股 ETF 期权合约清单（东财全量列表 + 到期日推算 + 本地缓存）。
+"""A 股 ETF 期权合约清单（新浪为主源、东财为备源；本地缓存 + 失败退避）。
 
 **为什么不要静态快照**：OKX 线是 ``get_tickers(instType="OPTION")`` 一次拿全市场
-在售合约、本地过滤，零维护（新挂牌自动进池、到期自动出池）。A 股这边等价能力来自
-东方财富的板块列表：``fs=m:10`` 返回全部在售合约（2026-11-20 实测 total=716，
-与券商「上证期权」板块数量一致），分页 100/页，共 8 页。
+在售合约、本地过滤，零维护（新挂牌自动进池、到期自动出池）。A 股这边靠两个公开源：
 
-字段：``f12``=合约代码（如 10012437）、``f14``=名称（``50ETF购11月2800``）。
-名称里**没有年份**，只能按月推断：取「未来最近的该月份」，若算出的到期日已过则 +1 年。
+1. **新浪（主源，2026-11-23 新增）**：``OP_UP_<标的><YYMM>`` / ``OP_DOWN_…`` 返回
+   该标的该到期月的认购/认沽**全部合约代码**；再按代码批量查 ``CON_OP_<code>``
+   取真实规格。优点：到期日、行权价、方向全部来自交易所行情（比「第四个星期三」
+   推算更准），不走东财；共约 9 个请求（列表 2 批 + 规格 6–7 批）。
+2. **东财（备源）**：``fs=m:10`` 板块列表（2026-11-20 实测 total=716），分页 100/页。
+   名称里没有年份，到期日按「该月第四个星期三」推算（已验证 202611/202612/202703 吻合）。
 
-到期日规则：到期月**第四个星期三**（遇法定节假日顺延，本项目只用于选池，
-错一天不影响采集）。已验证 20261125 / 20261223 / 20270324 三个月均吻合。
+**2026-11-23 实测**：东财 ``clist`` 接口对云 IP 整体 502（含非期权的 ``fs=m:1``，
+换域名/参数均无效），但新浪 ``OP_UP_``/``CON_OP_`` 完全正常——这是把新浪升为主源的直接动因。
+
+**失败退避**：缓存过期后拉取失败只重试一次，之后 ``FAIL_BACKOFF_S`` 内不再打外网
+（否则每轮采样——约 78s——都会重试 4 个 host × 多页）。页面手动「刷新合约清单」
+不受退避限制（``force=True``），但失败文案会提示还有多少秒。
 """
 
 from __future__ import annotations
@@ -49,6 +55,34 @@ _RIGHT = {"购": "C", "沽": "P"}
 
 CACHE_NAME = "contracts_cache.json"
 _HOST_OK = ""              # 记住本次进程内可用的东财入口（避免每页都重试超时域名）
+
+# 失败退避：缓存过期后拉取失败，这段时间内不再打外网（force=True 不受限）
+FAIL_BACKOFF_S = 600
+_BACKOFF: dict = {"until": 0.0, "msg": ""}
+LAST_SOURCE = ""           # 最近一次成功的源名（sina / eastmoney），供返回体标注
+
+# ── 新浪合约清单（主源） ──────────────────────────────────────
+SINA_URL = "http://hq.sinajs.cn/list="
+SINA_HEADERS = {"User-Agent": "Mozilla/5.0",
+                "Referer": "https://finance.sina.com.cn"}
+# OP_UP_/OP_DOWN_ 里用的标的短码
+SINA_UNDL_SHORT: dict[str, str] = {
+    "510050.SH": "510050",
+    "510300.SH": "510300",
+    "510500.SH": "510500",
+    "588000.SH": "588000",
+    "588080.SH": "588080",
+}
+_SINA_SHORT_TO_UNDL = {v: k for k, v in SINA_UNDL_SHORT.items()}
+SINA_MONTHS_AHEAD = 8      # 枚举当月起的 8 个月（ETF 期权最长 3 个季月，留足余量）
+SINA_LIST_BATCH = 40       # 一次请求多少个 OP_UP_/OP_DOWN_ 名字
+SINA_SPEC_BATCH = 60       # 一次请求多少个 CON_OP_ 代码
+
+# CON_OP_ 字段索引（2026-11-23 实测，51 字段；同一行里规格与盘口混在一起）
+_F_STRIKE = 7
+_F_UNDL = 36
+_F_RIGHT = 45
+_F_EXPIRE = 46
 
 
 # ── 纯函数（可单测，不碰网络） ──────────────────────────────
@@ -105,6 +139,60 @@ def filter_active(items: list[dict], today: date,
     return out
 
 
+def month_seq(today: date, n: int = SINA_MONTHS_AHEAD) -> list[str]:
+    """当月起的 ``YYMM`` 序列（新浪 ``OP_UP_<标的><YYMM>`` 用）。"""
+    out: list[str] = []
+    y, m = today.year, today.month
+    for _ in range(max(1, int(n))):
+        out.append(f"{y % 100:02d}{m:02d}")
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return out
+
+
+def parse_sina_codes(text: str) -> list[str]:
+    """``OP_UP_/OP_DOWN_`` 响应 → 合约代码列表（去 ``CON_OP_`` 前缀）。"""
+    codes: list[str] = []
+    for line in (text or "").splitlines():
+        if "=" not in line:
+            continue
+        body = line.split("=", 1)[1].strip().rstrip(";").strip('"')
+        for tok in body.split(","):
+            tok = tok.strip()
+            if tok.startswith("CON_OP_"):
+                codes.append(tok[len("CON_OP_"):])
+    return codes
+
+
+def parse_sina_spec(line: str) -> dict | None:
+    """``CON_OP_<code>`` 行 → ``{code, name, undl, right, strike, expire}``。
+
+    字段索引实测（2026-11-23，51 字段）：``[7]`` 行权价、``[36]`` 标的短码、
+    ``[37]`` 名称、``[45]`` C/P、``[46]`` 到期日（``2026-12-23``）。
+    比东财名称解析可靠：到期日来自交易所行情，不靠「第四个星期三」推算。
+    """
+    key, _, rest = (line or "").partition("=")
+    if not rest or "CON_OP_" not in key:
+        return None
+    code = key.split("CON_OP_", 1)[1].strip()
+    body = rest.strip().rstrip(";").strip('"')
+    f = body.split(",")
+    if not code or len(f) <= _F_EXPIRE:
+        return None
+    undl = _SINA_SHORT_TO_UNDL.get(f[_F_UNDL].strip())
+    right = f[_F_RIGHT].strip().upper()
+    expire = f[_F_EXPIRE].strip().replace("-", "")
+    try:
+        strike = float(f[_F_STRIKE])
+    except (TypeError, ValueError):
+        return None
+    if not undl or right not in ("C", "P") or strike <= 0 or len(expire) != 8:
+        return None
+    return {"code": code, "name": f[37].strip(), "undl": undl,
+            "right": right, "strike": strike, "expire": expire}
+
+
 # ── 网络 ────────────────────────────────────────────────────
 
 def _fetch_page(pn: int, timeout: float = 8.0, host: str | None = None) -> dict:
@@ -135,8 +223,51 @@ def _fetch_page(pn: int, timeout: float = 8.0, host: str | None = None) -> dict:
     raise last_err or RuntimeError("no host available")
 
 
-def fetch_contracts(today: date | None = None, timeout: float = 8.0) -> list[dict]:
-    """从东财分页拉全部在售合约并解析（失败抛异常，由调用方兜缓存）。"""
+def _sina_get(names: list[str], timeout: float = 8.0) -> str:
+    """一次取多个新浪 name（GBK 编码）。"""
+    url = SINA_URL + ",".join(names)
+    req = urllib.request.Request(url, headers=SINA_HEADERS)
+    return urllib.request.urlopen(req, timeout=timeout).read().decode("gbk", "replace")
+
+
+def fetch_contracts_sina(today: date | None = None, timeout: float = 8.0) -> list[dict]:
+    """新浪：``OP_UP_/OP_DOWN_`` 枚举代码 → 批量 ``CON_OP_`` 取规格。
+
+    只返回未到期合约；任一环节失败直接抛异常（由 ``fetch_contracts`` 换源）。
+    """
+    today = today or _cn_today()
+    names: list[str] = []
+    for ym in month_seq(today):
+        for short in SINA_UNDL_SHORT.values():
+            for side in ("OP_UP", "OP_DOWN"):
+                names.append(f"{side}_{short}{ym}")
+
+    codes: list[str] = []
+    seen: set[str] = set()
+    for i in range(0, len(names), SINA_LIST_BATCH):
+        for c in parse_sina_codes(_sina_get(names[i:i + SINA_LIST_BATCH], timeout)):
+            if c not in seen:
+                seen.add(c)
+                codes.append(c)
+    if not codes:
+        raise RuntimeError("OP_UP_/OP_DOWN_ 返回 0 个合约代码")
+
+    floor = today.strftime("%Y%m%d")
+    items: list[dict] = []
+    seen.clear()
+    for i in range(0, len(codes), SINA_SPEC_BATCH):
+        chunk = codes[i:i + SINA_SPEC_BATCH]
+        txt = _sina_get([f"CON_OP_{c}" for c in chunk], timeout)
+        for line in txt.splitlines():
+            spec = parse_sina_spec(line)
+            if spec and spec["code"] not in seen and spec["expire"] >= floor:
+                seen.add(spec["code"])
+                items.append(spec)
+    return items
+
+
+def fetch_contracts_eastmoney(today: date | None = None, timeout: float = 8.0) -> list[dict]:
+    """从东财分页拉全部在售合约并解析（备源；失败抛异常，由调用方兜缓存）。"""
     today = today or _cn_today()
     items: list[dict] = []
     seen: set[str] = set()
@@ -162,6 +293,24 @@ def fetch_contracts(today: date | None = None, timeout: float = 8.0) -> list[dic
         if len(diff) < PAGE_SIZE:
             break
     return items
+
+
+def fetch_contracts(today: date | None = None, timeout: float = 8.0) -> list[dict]:
+    """多源拉取：新浪（主）→ 东财（备），全部失败才抛异常。"""
+    global LAST_SOURCE
+    today = today or _cn_today()
+    errors: list[str] = []
+    for name, fn in (("sina", fetch_contracts_sina),
+                     ("eastmoney", fetch_contracts_eastmoney)):
+        try:
+            items = fn(today, timeout)
+            if items:
+                LAST_SOURCE = name
+                return items
+            errors.append(f"{name}: 返回 0 个合约")
+        except Exception as e:  # noqa: BLE001 — 换下一个源
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+    raise RuntimeError(" | ".join(errors) or "no source available")
 
 
 # ── 缓存 ────────────────────────────────────────────────────
@@ -195,33 +344,55 @@ def save_cached(storage_dir: str | os.PathLike, items: list[dict]) -> None:
 
 def contracts(storage_dir: str | os.PathLike, force: bool = False,
               today: date | None = None) -> dict:
-    """取合约清单（优先缓存）。
+    """取合约清单（优先缓存；拉取失败后退避 ``FAIL_BACKOFF_S``）。
 
-    返回 ``{"items": [...], "fetched_at": int|None, "source": "cache"|"live",
-    "error": ""}`` —— 网络失败时回退上次缓存并把异常写进 ``error``（不抛），
-    页面据此提示「清单未更新」。
+    返回 ``{"items", "fetched_at", "source", "error", "age_s", "retry_in_s"}``：
+
+    - ``source``：``cache`` / ``live:sina`` / ``live:eastmoney``
+    - ``age_s``：缓存年龄（秒），没有缓存为 ``None``
+    - ``retry_in_s``：退避中还有多少秒才重试（不在退避中为 0）
+
+    网络失败时回退上次缓存并把异常写进 ``error``（不抛），页面据此提示。
+    ``force=True``（页面手动刷新）不受退避限制。
     """
     today = today or _cn_today()
     cached = load_cached(storage_dir)
-    age = time.time() - int(cached.get("fetched_at") or 0)
+    fetched_at = cached.get("fetched_at")
+    age = time.time() - int(fetched_at or 0)
+    age_s = int(age) if fetched_at else None
+
+    def _hit(source: str, error: str = "", retry_in_s: int = 0) -> dict:
+        return {"items": cached.get("items") or [], "fetched_at": fetched_at,
+                "source": source, "error": error,
+                "age_s": age_s, "retry_in_s": retry_in_s}
+
     if not force and cached.get("items") and age < CACHE_TTL_S:
-        return {"items": cached["items"], "fetched_at": cached.get("fetched_at"),
-                "source": "cache", "error": ""}
+        return {**_hit("cache"), "items": cached["items"]}
+
+    now = time.time()
+    if not force and now < _BACKOFF["until"]:
+        left = int(_BACKOFF["until"] - now)
+        return _hit("cache", f"{_BACKOFF['msg']}（退避中，{left}s 后重试）", left)
+
     try:
         items = fetch_contracts(today)
         if not items:
             raise RuntimeError("返回 0 个合约")
         save_cached(storage_dir, items)
+        _BACKOFF["until"], _BACKOFF["msg"] = 0.0, ""
         return {"items": items, "fetched_at": int(time.time()),
-                "source": "live", "error": ""}
+                "source": f"live:{LAST_SOURCE or 'unknown'}", "error": "",
+                "age_s": 0, "retry_in_s": 0}
     except Exception as e:  # noqa: BLE001 — 清单取不到就用旧缓存，绝不阻断采集
-        return {"items": cached.get("items") or [],
-                "fetched_at": cached.get("fetched_at"),
-                "source": "cache", "error": f"{type(e).__name__}: {e}"}
+        _BACKOFF["msg"] = f"{type(e).__name__}: {e}"
+        _BACKOFF["until"] = time.time() + FAIL_BACKOFF_S
+        return _hit("cache", _BACKOFF["msg"], FAIL_BACKOFF_S)
 
 
 __all__ = [
     "UNDERLYINGS", "expiry_of", "resolve_expiry", "parse_name",
-    "filter_active", "fetch_contracts", "contracts", "cache_path",
-    "load_cached", "save_cached",
+    "month_seq", "parse_sina_codes", "parse_sina_spec",
+    "fetch_contracts", "fetch_contracts_sina", "fetch_contracts_eastmoney",
+    "contracts", "cache_path", "load_cached", "save_cached",
+    "FAIL_BACKOFF_S", "LAST_SOURCE",
 ]

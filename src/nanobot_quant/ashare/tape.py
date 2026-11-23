@@ -147,7 +147,14 @@ def sample_path(day: str | None = None) -> Path:
 
 
 def _append_sample(rec: dict) -> None:
-    p = sample_path()
+    """落盘文件名跟随记录自身的时间，不用真实时钟。
+
+    旧实现恒用 ``sample_path()``（= ``datetime.now()``），两个问题：
+    ① 跨零点采样会把 ``23:59`` 的记录写进次日文件（人工翻旧数据会错位）；
+    ② 单测 patch ``now_cn`` 后落盘仍用真实日期——测试于是变成时间炸弹（2026-11-23 实测已红）。
+    """
+    day = str(rec.get("ts") or "")[:10].replace("-", "") or None
+    p = sample_path(day)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")

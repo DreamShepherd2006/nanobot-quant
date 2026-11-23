@@ -93,16 +93,17 @@ function renderUndls(all, chosen) {
   });
 }
 
-async function loadState() {
-  const j = await api('/config/ashare/state');
-  const c = j.config, st = j.status, t = st.stats || {}, cs = j.contracts || {};
-  $('enabled').checked = !!c.enabled;
-  $('interval').value = c.interval_s;
-  $('expiries').value = c.expiries;
-  $('band').value = c.band_pct;
-  $('perside').value = c.max_per_side;
-  renderUndls(j.options.underlyings, c.underlyings || []);
+function ageText(sec) {
+  if (sec === null || sec === undefined) return '—';
+  if (sec < 90) return '刚刚';
+  if (sec < 3600) return Math.round(sec / 60) + ' 分钟前';
+  if (sec < 86400) return (sec / 3600).toFixed(1) + ' 小时前';
+  return (sec / 86400).toFixed(1) + ' 天前';
+}
 
+/* 状态区单独渲染：30s 轮询只调它，不碰表单输入框（否则会打断用户填写）。 */
+function renderStatus(st, t, cs) {
+  st = st || {}; t = t || {}; cs = cs || {};
   const runTxt = st.running
     ? '<span class="ok">🟢 采集器运行中</span>'
     : '<span class="warn">⚪ 采集器未运行</span>';
@@ -112,10 +113,33 @@ async function loadState() {
     `上次落盘：<b>${t.last_ts || '—'}</b>`,
     `今日样本：<b>${t.samples || 0}</b> 轮 / <b>${t.rows || 0}</b> 条`,
     `<span title="采集是只读的，落盘体积是最值得盯的指标">文件大小：<b>${((t.bytes || 0) / 1048576).toFixed(2)} MB</b></span>`,
-    `合约清单：<b>${cs.count || 0}</b> 个（${cs.source || '—'}${cs.error ? ' · <span class="bad">' + cs.error + '</span>' : ''}）`,
+    `合约清单：<b>${cs.count || 0}</b> 个（${cs.source || '—'} · 抓取于 ${ageText(cs.age_s)}`
+      + (cs.error ? ' · <span class="bad">' + cs.error + '</span>' : '') + '）',
     st.last_error ? `<span class="bad">错误：${st.last_error}</span>` : ''
   ].filter(Boolean).join('　');
   $('session-line').textContent = st.in_session ? '当前处于交易时段：采集会正常进行。' : '当前不在交易时段：自动跳过，不发请求。';
+}
+
+async function pollStatus() {
+  try {
+    const j = await api('/config/ashare/state');
+    const st = j.status || {};
+    renderStatus(st, st.stats || {}, j.contracts || {});
+  } catch (e) {
+    $('session-line').innerHTML = '<span class="bad">状态刷新失败：' + e.message + '（显示的是上次状态）</span>';
+  }
+}
+
+async function loadState() {
+  const j = await api('/config/ashare/state');
+  const c = j.config, st = j.status, t = st.stats || {}, cs = j.contracts || {};
+  $('enabled').checked = !!c.enabled;
+  $('interval').value = c.interval_s;
+  $('expiries').value = c.expiries;
+  $('band').value = c.band_pct;
+  $('perside').value = c.max_per_side;
+  renderUndls(j.options.underlyings, c.underlyings || []);
+  renderStatus(st, t, cs);
 }
 
 $('btn-save').onclick = async () => {
@@ -148,10 +172,12 @@ $('btn-sample').onclick = async () => {
 $('btn-refresh').onclick = async () => {
   $('msg').textContent = '刷新合约清单…';
   try {
-    const j = await api('/config/ashare/contracts/refresh');
+    // 必须传 body 才走 POST（后端是 @app.post；发 GET 会落到 SPA 兵底返回 HTML，
+    // 旧版这里传 undefined ⇒ 页面显示「已刷新：undefined 个合约」）
+    const j = await api('/config/ashare/contracts/refresh', {});
     $('msg').innerHTML = j.error
       ? '<span class="bad">拉取失败（沿用缓存）：' + j.error + '</span>'
-      : '<span class="ok">已刷新：' + j.count + ' 个合约</span>';
+      : '<span class="ok">已刷新：' + j.count + ' 个合约（来源 ' + (j.source || '—') + '）</span>';
     await loadState();
   } catch (e) { $('msg').innerHTML = '<span class="bad">' + e.message + '</span>'; }
 };
@@ -177,6 +203,8 @@ function renderPreview(j) {
 }
 
 loadState().catch(e => { $('status').innerHTML = '<span class="bad">加载失败：' + e.message + '</span>'; });
+// 状态区 30s 轮询：采集器在后台跑，页面不刷新会一直显示打开时的快照（易误判卡死）
+setInterval(pollStatus, 30000);
 </script>
 </body>
 </html>
