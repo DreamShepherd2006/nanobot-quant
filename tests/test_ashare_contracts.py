@@ -120,6 +120,29 @@ def test_contracts_uses_cache_within_ttl(tmp_path, monkeypatch):
     assert r["source"] == "cache" and r["items"][0]["code"] == "7"
 
 
+def test_contracts_cache_reports_origin(tmp_path, monkeypatch):
+    """缓存命中时要能看出数据来自哪个源（旧缓存无 source 字段 → 仍为 cache）。"""
+    ac.save_cached(tmp_path, [{"code": "5", "undl": "510050.SH", "expire": "20261223"}],
+                   "sina")
+    monkeypatch.setattr(ac, "fetch_contracts",
+                        lambda *a, **k: pytest.fail("不应走网络"))
+    r = ac.contracts(tmp_path)
+    assert r["source"] == "cache:sina" and r["items"][0]["code"] == "5"
+
+
+def test_contracts_fallback_keeps_origin(tmp_path, monkeypatch):
+    """网络失败落回带源缓存时，仍标明缓存来源。"""
+    ac.save_cached(tmp_path, [{"code": "6", "undl": "588000.SH", "expire": "20261223"}],
+                   "sina")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(ac, "fetch_contracts", _boom)
+    r = ac.contracts(tmp_path, force=True)
+    assert r["source"] == "cache:sina" and "network down" in r["error"]
+
+
 def test_fetch_page_falls_back_across_hosts(monkeypatch):
     from urllib.error import URLError
 
