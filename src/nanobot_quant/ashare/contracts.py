@@ -333,12 +333,16 @@ def load_cached(storage_dir: str | os.PathLike) -> dict:
         return {}
 
 
-def save_cached(storage_dir: str | os.PathLike, items: list[dict]) -> None:
+def save_cached(storage_dir: str | os.PathLike, items: list[dict],
+                source: str = "") -> None:
+    """写缓存；``source`` 记录本批数据从哪里来（``sina`` / ``eastmoney``），
+    使缓存命中时也能在页面显示来源（否则只看到笼统的 ``cache``）。"""
     p = cache_path(storage_dir)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"fetched_at": int(time.time()), "items": items}, f, ensure_ascii=False)
+        json.dump({"fetched_at": int(time.time()), "items": items,
+                   "source": source}, f, ensure_ascii=False)
     os.replace(tmp, p)
 
 
@@ -348,7 +352,8 @@ def contracts(storage_dir: str | os.PathLike, force: bool = False,
 
     返回 ``{"items", "fetched_at", "source", "error", "age_s", "retry_in_s"}``：
 
-    - ``source``：``cache`` / ``live:sina`` / ``live:eastmoney``
+    - ``source``：``cache`` / ``cache:<sina|eastmoney>``（缓存命中且能识别来源时）
+      / ``live:sina`` / ``live:eastmoney``
     - ``age_s``：缓存年龄（秒），没有缓存为 ``None``
     - ``retry_in_s``：退避中还有多少秒才重试（不在退避中为 0）
 
@@ -360,6 +365,9 @@ def contracts(storage_dir: str | os.PathLike, force: bool = False,
     fetched_at = cached.get("fetched_at")
     age = time.time() - int(fetched_at or 0)
     age_s = int(age) if fetched_at else None
+    # 缓存来源：新缓存记录 sina/eastmoney；旧缓存无该字段 → 退回笼统的 "cache"
+    cached_src = str(cached.get("source") or "").strip()
+    cache_label = f"cache:{cached_src}" if cached_src else "cache"
 
     def _hit(source: str, error: str = "", retry_in_s: int = 0) -> dict:
         return {"items": cached.get("items") or [], "fetched_at": fetched_at,
@@ -367,18 +375,18 @@ def contracts(storage_dir: str | os.PathLike, force: bool = False,
                 "age_s": age_s, "retry_in_s": retry_in_s}
 
     if not force and cached.get("items") and age < CACHE_TTL_S:
-        return {**_hit("cache"), "items": cached["items"]}
+        return {**_hit(cache_label), "items": cached["items"]}
 
     now = time.time()
     if not force and now < _BACKOFF["until"]:
         left = int(_BACKOFF["until"] - now)
-        return _hit("cache", f"{_BACKOFF['msg']}（退避中，{left}s 后重试）", left)
+        return _hit(cache_label, f"{_BACKOFF['msg']}（退避中，{left}s 后重试）", left)
 
     try:
         items = fetch_contracts(today)
         if not items:
             raise RuntimeError("返回 0 个合约")
-        save_cached(storage_dir, items)
+        save_cached(storage_dir, items, LAST_SOURCE or "unknown")
         _BACKOFF["until"], _BACKOFF["msg"] = 0.0, ""
         return {"items": items, "fetched_at": int(time.time()),
                 "source": f"live:{LAST_SOURCE or 'unknown'}", "error": "",
@@ -386,7 +394,7 @@ def contracts(storage_dir: str | os.PathLike, force: bool = False,
     except Exception as e:  # noqa: BLE001 — 清单取不到就用旧缓存，绝不阻断采集
         _BACKOFF["msg"] = f"{type(e).__name__}: {e}"
         _BACKOFF["until"] = time.time() + FAIL_BACKOFF_S
-        return _hit("cache", _BACKOFF["msg"], FAIL_BACKOFF_S)
+        return _hit(cache_label, _BACKOFF["msg"], FAIL_BACKOFF_S)
 
 
 __all__ = [
