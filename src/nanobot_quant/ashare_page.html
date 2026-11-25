@@ -56,8 +56,10 @@
 <div class="card">
   <h2>🧪 模拟账本（不接券商） <span id="pp-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
   <div class="stat" id="pp-kpi">加载中…</div>
+  <div id="pp-arms" style="margin-top:10px"></div>
   <div class="row" style="margin-top:12px">
     <label class="chk"><input type="checkbox" id="pp-enabled"> 启用模拟循环</label>
+    <label class="chk" title="D 方案：TD 高9 且该仓浮盈才买回，浮亏不主动平；DTE ≤ 5 强平两臂都保留。默认关（新增选项一律默认关闭）。"><input type="checkbox" id="pp-arm-b"> 臂 B（D 方案：高9 + 浮盈）</label>
     <div class="fld">心跳（秒）<input type="number" id="pp-interval" min="30" max="1800" step="10"></div>
     <div class="fld">初始资金（元）<input type="number" id="pp-cash" min="1000" step="10000"></div>
     <button id="pp-save">保存并应用</button>
@@ -67,11 +69,17 @@
   </div>
   <div id="pp-pos" class="hint">暂无持仓</div>
   <div id="pp-fills"></div>
+  <details id="pp-armb-wrap" style="margin-top:8px">
+    <summary class="hint" style="cursor:pointer">臂 B 明细（D 方案）</summary>
+    <div id="pp-pos-b" class="hint">暂无持仓</div>
+    <div id="pp-fills-b"></div>
+  </details>
   <div class="hint">
     <b>纸上交易</b>：只读行情 + 本地账本，不连券商、不下单、不读 QMT 持仓 —— 这些数字与实盘物理隔开，不能当实盘验收证据。<br>
     资金按 <b>100% 全损担保</b>（行权价 × 面值 × 张数）占用，不按平台 7–12% 保证金 —— 否则资金效率虚高。
     成交价取真实盘口（卖出吃买一、买回吃卖一），取不到才回退「bar 收盘 ± 1 tick」。<br>
     一轮 = 一根 1m bar：低9 首穿 → 同浪门 → 额度门 → 选档 → 开仓；出场 = 到期结算 / 权利金回落 50% 买回 / DTE ≤ 5 强平。
+    勾上「臂 B」后同一份行情并行记第二本账（D 方案：高9 + 浮盈才买回）。
     交易时段外不计新 bar、不发请求。
   </div>
 </div>
@@ -343,9 +351,9 @@ function renderPaperKpi(j) {
   }
 }
 
-function renderPaperPositions(j) {
-  const rows = (j.ledger || {}).shorts || [];
-  if (!rows.length) { $('pp-pos').innerHTML = '暂无持仓'; return; }
+function _paperPosTable(led, el) {
+  const rows = (led || {}).shorts || [];
+  if (!rows.length) { $(el).innerHTML = '暂无持仓'; return; }
   let html = '<table><thead><tr><th class="l">合约</th><th class="l">标的</th><th>行权价</th><th>到期</th>'
            + '<th>张数</th><th>开仓价</th><th>现价</th><th>浮盈%</th><th>浮盈(元)</th><th>担保(元)</th></tr></thead><tbody>';
   rows.forEach(s => {
@@ -355,33 +363,81 @@ function renderPaperPositions(j) {
           + `<td>${fmtSign(s.pnl_pct)}%</td><td>${fmtSign(s.unrealized)}</td>`
           + `<td>${fmtMoney(s.collateral, 0)}</td></tr>`;
   });
-  $('pp-pos').innerHTML = html + '</tbody></table>';
+  $(el).innerHTML = html + '</tbody></table>';
 }
 
-function renderPaperFills(j) {
-  const rows = (j.fills || []).slice(0, 12);
-  if (!rows.length) { $('pp-fills').innerHTML = '<div class="hint">暂无成交</div>'; return; }
+function _paperFillsTable(rowsIn, el) {
+  const rows = (rowsIn || []).slice(0, 12);
+  if (!rows.length) { $(el).innerHTML = '<div class="hint">暂无成交</div>'; return; }
   const LAB = {sell_open:'卖出开仓', buy_close:'买回平仓', settle:'到期结算',
                exercise:'被行权接货', sell_etf:'交割卖出'};
   let html = '<table><thead><tr><th class="l">时间</th><th class="l">动作</th><th class="l">合约</th>'
-           + '<th>数量</th><th>价格</th><th>现金流(元)</th><th>手续费</th><th class="l">说明</th></tr></thead><tbody>';
+           + '<th>数量</th><th>价格</th><th>现金流(元)</th><th>盈亏(元)</th><th>手续费</th><th class="l">说明</th></tr></thead><tbody>';
   rows.forEach(f => {
     html += `<tr><td class="l mono">${f.ts || ''}</td><td class="l">${LAB[f.action] || f.action || ''}</td>`
           + `<td class="l mono">${f.code || ''}</td><td>${f.qty ?? '—'}</td>`
           + `<td>${fmtNum(f.px, 4)}</td><td>${fmtSign(f.cash_delta)}</td>`
+          + `<td>${f.realized === undefined ? '—' : fmtSign(f.realized)}</td>`
           + `<td>${fmtNum(f.fee, 2)}</td><td class="l" style="white-space:normal;max-width:260px">${f.reason || ''}</td></tr>`;
   });
-  $('pp-fills').innerHTML = html + '</tbody></table>';
+  $(el).innerHTML = html + '</tbody></table>';
+}
+
+function renderPaperPositions(j) { _paperPosTable(j.ledger, 'pp-pos'); }
+
+function renderPaperFills(j) { _paperFillsTable(j.fills, 'pp-fills'); }
+
+function renderArmB(j) {
+  const b = (j.arms || {}).B || {};
+  if (!b.active) {
+    $('pp-pos-b').innerHTML = '臂 B 未启用（勾选上方「臂 B」并保存）';
+    $('pp-fills-b').innerHTML = '';
+    return;
+  }
+  _paperPosTable(b.ledger, 'pp-pos-b');
+  _paperFillsTable(b.fills, 'pp-fills-b');
 }
 
 let ppLoaded = false;
+function renderPaperArms(j) {
+  const arms = j.arms || {};
+  const CLOSED = ['buy_close', 'settle', 'exercise'];
+  let html = '<table><thead><tr><th class="l">臂</th><th class="l">出场规则</th><th>净值</th>'
+           + '<th>收益率</th><th>已实现</th><th>未实现</th><th>持仓</th><th>已平仓</th><th>胜率</th></tr></thead><tbody>';
+  ['A', 'B'].forEach(a => {
+    const x = arms[a];
+    if (!x) return;
+    const led = x.ledger || {}, init = led.initial_cash || 0;
+    const roi = init > 0 ? ((led.equity || 0) / init - 1) * 100 : 0;
+    const fills = x.fills || [];
+    const closed = fills.filter(f => CLOSED.indexOf(f.action) >= 0);
+    const wins = closed.filter(f => (f.realized || 0) > 0).length;
+    const wr = closed.length ? (wins / closed.length * 100) : null;
+    html += `<tr${x.active ? '' : ' style="opacity:.45"'}><td class="l"><b>${a}</b></td>`
+          + `<td class="l">${x.label || ''}${x.active ? '' : '　<span class="hint">未启用</span>'}</td>`
+          + `<td>${fmtMoney(led.equity)}</td><td>${fmtSign(roi)}%</td>`
+          + `<td>${fmtSign(led.realized)}</td><td>${fmtSign(led.unrealized)}</td>`
+          + `<td>${(led.shorts || []).length} 张</td><td>${closed.length}</td>`
+          + `<td>${wr === null ? '—' : wr.toFixed(1) + '%'}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  html += '<div class="hint" style="margin-top:4px">两臂共用同一份行情与同一套入场、选档规则，<b>只差止盈条件</b> —— '
+        + 'A = 权利金回落 50%；B = TD 高9 且浮盈。DTE ≤ 5 强平两臂都保留（时间维度退出，不是止损）。'
+        + '持仓会分叉（B 拿得更久 → 额度门可能先拦住它），这是策略层对照、不是单函数对照。'
+        + '胜率 = 已平仓单中 realized > 0 的占比（按笔，不按张）。</div>';
+  $('pp-arms').innerHTML = html;
+}
+
 function renderPaper(j) {
   renderPaperKpi(j);
+  renderPaperArms(j);
   renderPaperPositions(j);
   renderPaperFills(j);
+  renderArmB(j);
   if (!ppLoaded) {
     const cfg = j.config || {};
     $('pp-enabled').checked = !!cfg.enabled;
+    $('pp-arm-b').checked = !!cfg.second_arm;
     $('pp-interval').value = cfg.interval_s;
     $('pp-cash').value = cfg.initial_cash;
     ppLoaded = true;
@@ -398,6 +454,7 @@ $('pp-save').onclick = async () => {
   try {
     const j = await api('/config/ashare/paper/save', {
       enabled: $('pp-enabled').checked,
+      second_arm: $('pp-arm-b').checked,
       interval_s: Number($('pp-interval').value),
       initial_cash: Number($('pp-cash').value),
     });

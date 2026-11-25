@@ -191,6 +191,7 @@ def register_ashare_routes(app, gatekeeper) -> None:
                 interval_s=body.get("interval_s"),
                 symbols=body.get("symbols"),
                 initial_cash=body.get("initial_cash"),
+                second_arm=body.get("second_arm"),
                 params=body.get("params") if isinstance(body.get("params"), dict) else None,
             )
         except ValueError as e:

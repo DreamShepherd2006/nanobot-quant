@@ -52,6 +52,10 @@ from nanobot_quant.ashare.paper_strategy import (                  # noqa: E402
     days_to_expiry,
     pick_put,
     should_close,
+    should_close_high9,
+    ARM_A,
+    ARM_B,
+    ARM_LABELS,
 )
 from nanobot_quant.ashare.td_panel import setup_by_session         # noqa: E402
 
@@ -116,7 +120,7 @@ def load_option_closes(opt_dir: str, underlying: str, codes: set[str]) -> dict[s
 
 def run(etf: pd.DataFrame, contracts: dict[str, dict],
         closes: dict[str, pd.Series], *, underlying: str,
-        initial: float, params: PaperParams) -> dict:
+        initial: float, params: PaperParams, arm: str = "A") -> dict:
     led = PaperLedger(initial_cash=initial, mult=params.mult,
                       fee_open=params.fee_open)
     puts = {c: m for c, m in contracts.items() if m["type"] == "P" and c in closes}
@@ -164,13 +168,22 @@ def run(etf: pd.DataFrame, contracts: dict[str, dict],
         for code in list(led.shorts):
             sp = led.shorts[code]
             mark = sp.mark_px or sp.entry_px
-            ok, why = should_close(sp.to_dict(), mark, today, params)
+            if arm == ARM_B:
+                ok, why = should_close_high9(sp.to_dict(), mark, today, params,
+                                             sell_setup=int(row.get("sell_setup_count") or 0))
+            else:
+                ok, why = should_close(sp.to_dict(), mark, today, params)
             if not ok:
                 continue
             r = led.buy_close(code=code, bar_close=mark, ts=ts, reason=why)
             if r["ok"]:
                 stats["buy_close"] += 1
-                stats["tp" if why.startswith("take_profit") else "dte_force"] += 1
+                if why.startswith("take_profit"):
+                    stats["tp"] += 1
+                elif why.startswith("high9_profit"):
+                    stats["high9"] += 1
+                else:
+                    stats["dte_force"] += 1
                 wave_done.discard(sp.underlying)
 
         # 4) 信号 → 选档 → 开仓
@@ -216,7 +229,7 @@ def run(etf: pd.DataFrame, contracts: dict[str, dict],
     return {"ledger": led, "stats": dict(stats), "daily": daily}
 
 
-def _summary(res: dict, params: PaperParams) -> str:
+def _summary(res: dict, params: PaperParams, arm: str = ARM_A) -> str:
     led: PaperLedger = res["ledger"]
     st = res["stats"]
     snap = led.snapshot()
@@ -229,6 +242,7 @@ def _summary(res: dict, params: PaperParams) -> str:
     lines = [
         "# 模拟账本离线回放（自测）",
         "",
+        f"- 出场臂：**{ARM_LABELS.get(arm, arm)}**",
         f"- 初始资金：{snap['initial_cash']:,.2f} 元",
         f"- 期末净值：{snap['equity']:,.2f} 元（{snap['return_pct']:+.4f}%）",
         f"- 已实现：{snap['realized']:,.2f} 元 · 未实现：{snap['unrealized']:,.2f} 元",
@@ -243,7 +257,8 @@ def _summary(res: dict, params: PaperParams) -> str:
         f"| TD 买9 信号 | {st.get('signal', 0)} |",
         f"| 卖出开仓 | {st.get('sell_open', 0)} |",
         f"| 买入平仓 | {st.get('buy_close', 0)} |",
-        f"| ↳ 止盈 | {st.get('tp', 0)} |",
+        (f"| ↳ 止盈 | {st.get('tp', 0)} |" if arm == ARM_A
+         else f"| ↳ 高9 + 浮盈 | {st.get('high9', 0)} |"),
         f"| ↳ DTE 强平 | {st.get('dte_force', 0)} |",
         f"| 行权接货 | {st.get('assign', 0)} |",
         f"| 到期作废 | {st.get('settle_otm', 0)} |",
@@ -310,6 +325,8 @@ def main() -> int:
     ap.add_argument("--min-dte", type=int, default=PaperParams.min_dte)
     ap.add_argument("--max-dte", type=int, default=PaperParams.max_dte)
     ap.add_argument("--out", default="", help="写 markdown 到该路径（默认打印）")
+    ap.add_argument("--arm", choices=["a", "b", "both"], default="a",
+                    help="出场臂：a=止盈 50%%（默认）、b=D 方案（高9+浮盈）、both=两臂对照")
     a = ap.parse_args()
 
     for p in (a.etf_csv, a.opt_dir, a.contracts):
@@ -325,9 +342,35 @@ def main() -> int:
     print(f"[replay] ETF bars={len(etf)} 合约={len(contracts)} put 有行情="
           f"{len([c for c in codes if c in closes])}", file=sys.stderr)
 
-    res = run(etf, contracts, closes, underlying=a.underlying,
-              initial=a.initial, params=params)
-    md = _summary(res, params)
+    if a.arm == "both":
+        arms = [ARM_A, ARM_B]
+        parts: list[str] = []
+        rows: list[tuple] = []
+        for arm in arms:
+            res = run(etf, contracts, closes, underlying=a.underlying,
+                      initial=a.initial, params=params, arm=arm)
+            parts.append(_summary(res, params, arm))
+            snap = res["ledger"].snapshot()
+            closes_all = [f for f in res["ledger"].fills if f["action"] == "buy_close"]
+            wins = [f for f in closes_all if (f.get("realized") or 0) > 0]
+            rows.append((arm, snap, len(res["ledger"].fills), len(closes_all), len(wins)))
+        head = ["# 模拟账本两臂对照", "",
+                "两臂共用同一份 ETF 1m 与期权行情、同一套入场与选档规则，**只差止盈条件**：",
+                f"- A = {ARM_LABELS[ARM_A]}", f"- B = {ARM_LABELS[ARM_B]}", "",
+                "| 臂 | 净值 | 收益率 | 已实现 | 未实现 | 成交笔数 | 平仓笔数 | 胜 | 胜率 |",
+                "|:--|--:|--:|--:|--:|--:|--:|--:|--:|"]
+        for arm, snap, nfill, nclose, nwin in rows:
+            wr = (nwin / nclose * 100) if nclose else 0.0
+            head.append(f"| {arm} | {snap['equity']:,.2f} | {snap['return_pct']:+.4f}% | "
+                        f"{snap['realized']:,.2f} | {snap['unrealized']:,.2f} | {nfill} | "
+                        f"{nclose} | {nwin} | {wr:.1f}% |")
+        head += ["", "---", ""]
+        md = "\n".join(head) + "\n\n".join(parts)
+    else:
+        arm = ARM_B if a.arm == "b" else ARM_A
+        res = run(etf, contracts, closes, underlying=a.underlying,
+                  initial=a.initial, params=params, arm=arm)
+        md = _summary(res, params, arm)
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             f.write(md)
