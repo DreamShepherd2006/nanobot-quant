@@ -81,14 +81,25 @@ def register_ashare_routes(app, gatekeeper) -> None:
 
     @app.get("/config/ashare/td")
     async def _td(request: Request):
-        """510050 TD 计数看板（只读、与策略同源、10s 缓存）。"""
+        """A 股 ETF TD 计数看板（只读、与策略同源、10s 缓存）。
+
+        ``?symbol=588000.SH`` 切换标的（只限注册表内标的，未知值 400 并列可选值）；
+        缺省 = ``510050.SH``。
+        """
         err, ok = _authorized(request, gatekeeper)
         if not ok:
             return JSONResponse({"ok": False, "error": err}, status_code=403)
         force = request.query_params.get("force") == "1"
+        symbol = (request.query_params.get("symbol")
+                  or request.query_params.get("code")
+                  or tp.DEFAULT_CODE)
+        if symbol not in tp.SYMBOLS:
+            return JSONResponse({"ok": False,
+                                 "error": f"未知标的 {symbol!r}",
+                                 "available": list(tp.SYMBOLS)}, status_code=400)
         try:
             # 同步网络请求放到线程池，避免阻塞网关事件循环（页面 10s 轮询）
-            return JSONResponse(await asyncio.to_thread(tp.panel, force=force))
+            return JSONResponse(await asyncio.to_thread(tp.panel, symbol, force=force))
         except Exception as e:  # noqa: BLE001 — 看板失败不能拖垮页面
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=500)
 

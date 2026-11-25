@@ -31,6 +31,7 @@ DEFAULT_SYMBOL = "sh510050"
 DEFAULT_CODE = "510050.SH"
 DEFAULT_CMP = 4
 SETUP_N = 9
+CD_N = 13
 CACHE_TTL_S = 10.0
 
 # 标的注册表 —— 单一来源：配置代码（xxx.SH/SZ）↔ 腾讯符号 ↔ 显示名 ↔ TD 引擎。
@@ -120,30 +121,45 @@ def drop_unclosed(df: pd.DataFrame, span_sec: int, now: datetime | None = None) 
 
 # ── TD ────────────────────────────────────────────────────
 
-def setup_by_session(df: pd.DataFrame, cmp_length: int = DEFAULT_CMP) -> pd.DataFrame:
-    """按交易日切分算 setup 计数 —— 直接复用策略引擎，保证与执行层同源。"""
+def setup_by_session(df: pd.DataFrame, cmp_length: int = DEFAULT_CMP,
+                     engine: str = "futu") -> pd.DataFrame:
+    """按交易日切分算 TD 计数 —— 直接复用策略引擎，保证与执行层同源。
+
+    engine="futu"：``FutuDeMarkEngine``（QMT 策略 v5/v6 同源，只有 setup）；
+    engine="base"：``td_sequential._DeMarkEngine``（setup + countdown，供 cd13
+    通路，例如 588000 只认 cd13、不用 buy9）。
+    """
     if df.empty:
         return df
-    from ..strategies.td_sequential_futu import FutuDeMarkEngine   # 延迟导入，避免循环
+    cols = ["buy_setup_count", "sell_setup_count"]
+    if engine == "base":
+        cols += ["buy_countdown_count", "sell_countdown_count"]
 
     out: list[pd.DataFrame] = []
     for _, g in df.groupby("date", sort=True):
         g = g.copy()
         if len(g) <= cmp_length:
-            g["buy_setup_count"] = 0
-            g["sell_setup_count"] = 0
+            for c in cols:
+                g[c] = 0
             out.append(g)
             continue
         work = g.rename(columns={"open": "Open", "high": "High",
                                  "low": "Low", "close": "Close", "volume": "Volume"})
         try:
-            res = FutuDeMarkEngine(work, {"compare_length": cmp_length}).calculate_setup()
+            if engine == "base":
+                from ..strategies.td_sequential import _DeMarkEngine   # 延迟导入
+                eng = _DeMarkEngine(work, {"compare_length": cmp_length})
+                res = eng.calculate_setup()
+                res = eng.calculate_countdown()
+            else:
+                from ..strategies.td_sequential_futu import FutuDeMarkEngine
+                res = FutuDeMarkEngine(work, {"compare_length": cmp_length}).calculate_setup()
         except Exception:      # noqa: BLE001 —— 单日算不出来也不能拖垮整块看板
-            g["buy_setup_count"] = 0
-            g["sell_setup_count"] = 0
+            for c in cols:
+                g[c] = 0
             out.append(g)
             continue
-        for col in ("buy_setup_count", "sell_setup_count"):
+        for col in cols:
             g[col] = res[col].to_numpy() if col in res.columns else 0
         out.append(g)
     return pd.concat(out, ignore_index=True).sort_values("dt").reset_index(drop=True)
@@ -191,6 +207,15 @@ def _remaining_bars(label: str, now: datetime) -> int:
     return int(remaining_min // span_min)
 
 
+def _cd_side(cnt: int) -> dict:
+    """Countdown 侧块（cd13 通路：buy 回落至 13 必为下跌衰竭确认）。"""
+    return {
+        "count": int(cnt),
+        "need": max(0, CD_N - cnt),
+        "state": "triggered" if cnt >= CD_N else ("near" if cnt >= CD_N - 2 else "counting"),
+    }
+
+
 def describe_period(df: pd.DataFrame, label: str,
                     now: datetime | None = None) -> dict:
     """单周期 → 看板用的描述块。"""
@@ -216,7 +241,7 @@ def describe_period(df: pd.DataFrame, label: str,
             "last_signal_close": sig["close"] if sig else None,
         }
 
-    return {
+    out = {
         "period": label,
         "ok": True,
         "bars": int(len(df)),
@@ -227,6 +252,11 @@ def describe_period(df: pd.DataFrame, label: str,
         "buy": _side(buy_cnt, "buy_setup_count"),
         "sell": _side(sell_cnt, "sell_setup_count"),
     }
+    # countdown 块只在 base 引擎算过时出现（futu 引擎无 countdown，不出空列）
+    if "buy_countdown_count" in df.columns:
+        out["buy_cd"] = _cd_side(int(last.get("buy_countdown_count", 0) or 0))
+        out["sell_cd"] = _cd_side(int(last.get("sell_countdown_count", 0) or 0))
+    return out
 
 
 # ── 面板 ────────────────────────────────────────────────────
@@ -241,14 +271,31 @@ def _in_session(now: datetime | None = None) -> bool:
     return in_session(now)
 
 
-def panel(symbol: str = DEFAULT_SYMBOL, ticker: str = "510050",
+def _resolve_code(symbol: str | None) -> tuple[str, dict]:
+    """标的代码解析 —— 只认注册表内的标的（fail-closed，不静默回退默认值）。"""
+    s = (symbol or "").strip()
+    if s in SYMBOLS:
+        return s, SYMBOLS[s]
+    tx = tx_code(s)
+    for code, meta in SYMBOLS.items():
+        if meta["tx"] == tx:
+            return code, meta
+    raise ValueError(f"未知标的 {symbol!r}，可选：{', '.join(SYMBOLS)}")
+
+
+def panel(symbol: str = DEFAULT_CODE, ticker: str | None = None,
           force: bool = False) -> dict:
     """看板完整载荷（带 10 秒缓存，避免页面轮询把腾讯打爆）。
+
+    ``symbol`` 接受配置代码（``588000.SH``）、腾讯符号（``sh588000``）或裸代码；
+    未知标的 fail-closed 报错（由 handler 转 400 并列出可选值）。
 
     非交易时段（含收盘后 / 午休 / 周末）数据不会再变，直接复用缓存、
     不发任何外部请求——与采集器「交易时段外自动跳过」同一判据。
     """
-    key = f"{symbol}:panel"
+    code, spec = _resolve_code(symbol)
+    tx, engine, name = spec["tx"], spec["engine"], spec["name"]
+    key = f"{code}:panel"
     now_m = time.monotonic()
     if not force:
         hit = _cache.get(key)
@@ -269,9 +316,9 @@ def panel(symbol: str = DEFAULT_SYMBOL, ticker: str = "510050",
     now = datetime.now(CN)
     for label, (bar, span) in PERIODS.items():
         try:
-            raw = fetch_klines(bar=bar, n=640, symbol=symbol)
+            raw = fetch_klines(bar=bar, n=640, symbol=tx)
             closed = drop_unclosed(raw, span, now)
-            with_td = setup_by_session(closed)
+            with_td = setup_by_session(closed, engine=engine)
             periods[label] = describe_period(with_td, label, now)
         except Exception as exc:      # noqa: BLE001 —— 单周期失败不影响其它周期
             periods[label] = {"period": label, "ok": False, "error": str(exc)[:200]}
@@ -293,8 +340,11 @@ def panel(symbol: str = DEFAULT_SYMBOL, ticker: str = "510050",
 
     payload = {
         "ok": any(p.get("ok") for p in periods.values()),
-        "ticker": ticker,
-        "symbol": symbol,
+        "ticker": code,
+        "symbol": tx,
+        "code": code,
+        "name": name,
+        "engine": engine,
         "spot": spot,
         "asof": now.strftime("%Y-%m-%d %H:%M:%S"),
         "data_asof": data_asof,
@@ -302,7 +352,9 @@ def panel(symbol: str = DEFAULT_SYMBOL, ticker: str = "510050",
         "session": _session_state(now),
         "periods": periods,
         "source": "tencent",
-        "note": "按交易日切分（隔夜从 0 重数）· 计数与策略同源（FutuDeMarkEngine）",
+        "note": "按交易日切分（隔夜从 0 重数）· 计数与策略同源"
+                + ("（_DeMarkEngine，含 countdown）" if engine == "base"
+                   else "（FutuDeMarkEngine）"),
         "cached_s": 0.0,
     }
     if errors:
@@ -316,5 +368,5 @@ def clear_cache() -> None:
 
 
 __all__ = ["panel", "fetch_klines", "setup_by_session", "describe_period",
-           "drop_unclosed", "clear_cache", "PERIODS", "SETUP_N",
+           "drop_unclosed", "clear_cache", "PERIODS", "SETUP_N", "CD_N",
            "SYMBOLS", "tx_code", "DEFAULT_CODE"]
