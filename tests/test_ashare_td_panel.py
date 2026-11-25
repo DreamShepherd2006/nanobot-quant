@@ -191,3 +191,73 @@ def test_panel_caches_within_ttl(monkeypatch):
     assert calls["n"] > n_after_first
     assert p3["ok"] is True
     tp.clear_cache()
+
+
+# ── 非交易时段冻结（不发请求）───────────────────────────────
+
+def _stub_fetch(calls):
+    def fake_fetch(bar="m1", n=640, symbol=tp.DEFAULT_SYMBOL):
+        calls["n"] += 1
+        dts = [f"2026-11-25 14:{30+i:02d}" for i in range(12)]
+        return _mk(dts, [2.90] * 12)
+    return fake_fetch
+
+
+def test_panel_freezes_outside_session(monkeypatch):
+    """收盘后：TTL 过期也不发请求，直接复用缓存并标 frozen。"""
+    calls = {"n": 0}
+    monkeypatch.setattr(tp, "fetch_klines", _stub_fetch(calls))
+    monkeypatch.setattr(tp, "_in_session", lambda now=None: False)
+    monkeypatch.setattr(tp, "CACHE_TTL_S", 0.0)
+    tp.clear_cache()
+
+    p1 = tp.panel()
+    assert p1["ok"] is True
+    assert not p1.get("frozen")          # 首拉必须真取数
+    n_first = calls["n"]
+
+    p2 = tp.panel()                      # TTL 已过期，但非交易时段
+    assert calls["n"] == n_first          # 一次请求都没发
+    assert p2.get("frozen") is True
+    assert p2["data_asof"] == p1["data_asof"]
+
+    p3 = tp.panel(force=True)            # 页面「立即采样」仍然真拉
+    assert calls["n"] > n_first
+    assert p3.get("frozen") is False
+    tp.clear_cache()
+
+
+def test_panel_refreshes_in_session(monkeypatch):
+    """交易时段内：TTL 过期就正常重拉，不得冻结。"""
+    calls = {"n": 0}
+    monkeypatch.setattr(tp, "fetch_klines", _stub_fetch(calls))
+    monkeypatch.setattr(tp, "_in_session", lambda now=None: True)
+    monkeypatch.setattr(tp, "CACHE_TTL_S", 0.0)
+    tp.clear_cache()
+
+    tp.panel()
+    n_first = calls["n"]
+    p2 = tp.panel()
+    assert calls["n"] > n_first
+    assert p2.get("frozen") is False
+    tp.clear_cache()
+
+
+def test_panel_reports_data_asof(monkeypatch):
+    """data_asof（最新 bar 时刻）与 asof（拉取时刻）必须分开报。"""
+    monkeypatch.setattr(tp, "fetch_klines", _stub_fetch({"n": 0}))
+    tp.clear_cache()
+    p = tp.panel()
+    assert p["data_asof"]                       # 形如 "11-25 14:41"
+    assert p["asof"] != p["data_asof"]          # asof 带年份与秒，两者不同字符串
+    assert len(p["asof"]) > len(p["data_asof"])
+    tp.clear_cache()
+
+
+def test_page_shows_data_asof_and_fixed_price():
+    """展示层：区分「数据时刻」与「拉取时刻」，价格定点补零。"""
+    from pathlib import Path
+    html = (Path(tp.__file__).parent.parent / "ashare_page.html").read_text(encoding="utf-8")
+    assert "data_asof" in html                   # 顶部显式展示数据时刻
+    assert "toFixed(3)" in html                  # @2.9 → @2.900
+    assert "更新 ${j.asof" not in html            # 不再把拉取时刻当「更新」

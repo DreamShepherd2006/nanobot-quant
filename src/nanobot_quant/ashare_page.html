@@ -238,7 +238,7 @@ function tdLine(key, d, color, closed) {
   const needTxt = trig ? '已触发' : `还差 ${d.need} 根`;
   const tail = (trig || d.can_fire_today || closed) ? '' : '<span style="color:#6b7684">（今日不够）</span>';
   const sig = d.last_signal
-    ? `上次 ${d.last_signal}${d.last_signal_close != null ? ' @' + d.last_signal_close : ''}`
+    ? `上次 ${d.last_signal}${d.last_signal_close != null ? ' @' + Number(d.last_signal_close).toFixed(3) : ''}`
     : '上次 —';
   return `<div class="tdln"><span class="k">${key}</span>`
        + `<span class="tdnum" style="color:${trig ? color : '#d8dee9'}">${numTxt}</span>`
@@ -256,7 +256,9 @@ function renderTd(j) {
   const sess = SESSION_TXT[j.session] || j.session || '';
   $('td-meta').innerHTML = `现货 <b style="color:#e5edf7">${j.spot != null ? Number(j.spot).toFixed(3) : '—'}</b>`
     + `　·　${sess}`
-    + `　·　更新 ${j.asof ? j.asof.slice(11) : '—'}`
+    + `　·　数据 ${j.data_asof || '—'}`
+    + ` · 拉取 ${j.asof ? j.asof.slice(11) : '—'}`
+    + (j.frozen ? `　·　<span style="color:#6b7684">非交易时段 · 不刷新</span>` : '')
     + `　·　${j.source}${j.cached_s > 0.5 ? '（缓存 ' + j.cached_s + 's）' : ''}`;
 
   const P = j.periods || {};

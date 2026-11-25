@@ -202,17 +202,38 @@ def describe_period(df: pd.DataFrame, label: str,
 
 # ── 面板 ────────────────────────────────────────────────────
 
+def _in_session(now: datetime | None = None) -> bool:
+    """交易时段判据与采集器同源（``ashare.tape.in_session``），不在此复制一份。
+
+    延迟导入：看板只借一个判据，不该把采集器的运行时依赖链
+    （LiveRunnerBase / credential_registry 等）拉进来。
+    """
+    from .tape import in_session
+    return in_session(now)
+
+
 def panel(symbol: str = DEFAULT_SYMBOL, ticker: str = "510050",
           force: bool = False) -> dict:
-    """看板完整载荷（带 10 秒缓存，避免页面轮询把腾讯打爆）。"""
+    """看板完整载荷（带 10 秒缓存，避免页面轮询把腾讯打爆）。
+
+    非交易时段（含收盘后 / 午休 / 周末）数据不会再变，直接复用缓存、
+    不发任何外部请求——与采集器「交易时段外自动跳过」同一判据。
+    """
     key = f"{symbol}:panel"
     now_m = time.monotonic()
     if not force:
         hit = _cache.get(key)
-        if hit and now_m - hit[0] < CACHE_TTL_S:
-            payload = dict(hit[1])
-            payload["cached_s"] = round(now_m - hit[0], 1)
-            return payload
+        if hit:
+            age = now_m - hit[0]
+            if age < CACHE_TTL_S:
+                payload = dict(hit[1])
+                payload["cached_s"] = round(age, 1)
+                return payload
+            if not _in_session():
+                payload = dict(hit[1])
+                payload["cached_s"] = round(age, 1)
+                payload["frozen"] = True
+                return payload
 
     periods: dict[str, dict] = {}
     errors: list[str] = []
@@ -232,12 +253,23 @@ def panel(symbol: str = DEFAULT_SYMBOL, ticker: str = "510050",
     if one.get("ok"):
         spot = one.get("last_close")
 
+    # 最新已收盘 bar 的时刻（按最高频可用周期取）——与 asof（本次拉取时刻）
+    # 是两个概念：收盘后 asof 仍会随轮询前进，data_asof 恒停在同一根 bar。
+    data_asof = None
+    for label in ("1m", "5m", "15m"):
+        p = periods.get(label) or {}
+        if p.get("ok"):
+            data_asof = p.get("last_time")
+            break
+
     payload = {
         "ok": any(p.get("ok") for p in periods.values()),
         "ticker": ticker,
         "symbol": symbol,
         "spot": spot,
         "asof": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "data_asof": data_asof,
+        "frozen": False,
         "session": _session_state(now),
         "periods": periods,
         "source": "tencent",
