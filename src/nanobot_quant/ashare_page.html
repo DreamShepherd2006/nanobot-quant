@@ -26,11 +26,32 @@
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
   .hint{color:#6b7684;font-size:12px;margin-top:8px;line-height:1.6}
   #msg{font-size:12.5px;margin-left:10px}
+  /* TD 计数看板 */
+  .tdgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:4px}
+  @media(max-width:820px){.tdgrid{grid-template-columns:1fr}}
+  .tdbox{background:#0f1115;border:1px solid #242a35;border-radius:6px;padding:10px 12px}
+  .tdbox .ph{font-size:12.5px;color:#a9b6c6;font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between;align-items:baseline}
+  .tdbox .ph em{font-style:normal;color:#6b7684;font-size:11.5px;font-weight:400}
+  .tdln{display:flex;align-items:center;gap:8px;font-size:12.5px;margin:7px 0 2px}
+  .tdln .k{width:28px;color:#8b98a8}
+  .tdbar{flex:1;height:7px;background:#1d222b;border-radius:4px;overflow:hidden;min-width:50px}
+  .tdbar i{display:block;height:100%;border-radius:4px;transition:width .3s}
+  .tdnum{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;min-width:40px;text-align:right}
+  .tdsub{font-size:11.5px;color:#6b7684;margin:0 0 6px 36px}
+  .tdsub b{color:#9aa7b6;font-weight:500}
+  .hot{animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
 </style>
 </head>
 <body>
 <h1>🇨🇳 A 股 ETF 期权盘口采集</h1>
 <div class="sub">只读采集（不下单、不参与决策）· 合约清单来自新浪（东财备源，缓存 1 天）· 盘口来自新浪五档 · 落盘 <span class="mono">legion/credentials/ashare_tape/tape_YYYYMMDD.jsonl</span></div>
+
+<div class="card">
+  <h2>📊 510050 · TD 计数实况 <span id="td-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
+  <div id="td-board" class="hint">加载中…</div>
+  <div class="hint">口径：按交易日切分（隔夜从 0 重数）· 计数与 QMT 策略同源（FutuDeMarkEngine）· 每 10 秒刷新 · 低9 对应卖 put 入场，高9 对应出场</div>
+</div>
 
 <div class="card">
   <h2>① 运行状态</h2>
@@ -205,6 +226,64 @@ function renderPreview(j) {
 loadState().catch(e => { $('status').innerHTML = '<span class="bad">加载失败：' + e.message + '</span>'; });
 // 状态区 30s 轮询：采集器在后台跑，页面不刷新会一直显示打开时的快照（易误判卡死）
 setInterval(pollStatus, 30000);
+
+/* ── TD 计数看板（10s 轮询；后端 10s 缓存，不会把腾讯打爆）── */
+const SESSION_TXT = {pre:'盘前', am:'上午盘', noon:'午间休市', pm:'下午盘', closed:'已收盘'};
+
+function tdLine(key, d, color, closed) {
+  if (!d) return '';
+  const pctW = Math.min(100, (d.count / 9) * 100);
+  const trig = d.count >= 9;
+  const numTxt = trig ? '✅ 9+' : `${d.count}/9`;
+  const needTxt = trig ? '已触发' : `还差 ${d.need} 根`;
+  const tail = (trig || d.can_fire_today || closed) ? '' : '<span style="color:#6b7684">（今日不够）</span>';
+  const sig = d.last_signal
+    ? `上次 ${d.last_signal}${d.last_signal_close != null ? ' @' + Number(d.last_signal_close).toFixed(3) : ''}`
+    : '上次 —';
+  return `<div class="tdln"><span class="k">${key}</span>`
+       + `<span class="tdnum" style="color:${trig ? color : '#d8dee9'}">${numTxt}</span>`
+       + `<span class="tdbar"><i class="${trig ? 'hot' : ''}" style="width:${pctW}%;background:${color}"></i></span>`
+       + `<span style="min-width:78px;color:${trig ? color : '#8b98a8'}">${needTxt}${tail}</span></div>`
+       + `<div class="tdsub">${sig}</div>`;
+}
+
+function renderTd(j) {
+  if (!j || j.ok === false) {
+    $('td-board').innerHTML = '<span class="bad">看板加载失败：' + ((j && j.error) || '未知错误') + '</span>';
+    $('td-meta').textContent = '';
+    return;
+  }
+  const sess = SESSION_TXT[j.session] || j.session || '';
+  $('td-meta').innerHTML = `现货 <b style="color:#e5edf7">${j.spot != null ? Number(j.spot).toFixed(3) : '—'}</b>`
+    + `　·　${sess}`
+    + `　·　数据 ${j.data_asof || '—'}`
+    + ` · 拉取 ${j.asof ? j.asof.slice(11) : '—'}`
+    + (j.frozen ? `　·　<span style="color:#6b7684">非交易时段 · 不刷新</span>` : '')
+    + `　·　${j.source}${j.cached_s > 0.5 ? '（缓存 ' + j.cached_s + 's）' : ''}`;
+
+  const P = j.periods || {};
+  const closed = j.session === 'closed';
+  const html = '<div class="tdgrid">' + ['1m','5m','15m'].map(p => {
+    const d = P[p];
+    if (!d || !d.ok) {
+      return `<div class="tdbox"><div class="ph">${p}<em>—</em></div>`
+           + `<div class="hint">${(d && d.error) || '无数据'}</div></div>`;
+    }
+    return `<div class="tdbox"><div class="ph">${p}<em>${d.bars} 根 · 最新 ${d.last_time}</em></div>`
+         + tdLine('低9', d.buy, '#22c55e', closed)
+         + tdLine('高9', d.sell, '#f59e0b', closed)
+         + (closed ? `<div class="hint" style="margin:8px 0 0">已收盘 · 明日 9:30 从 0 重数</div>` : '')
+         + `</div>`;
+  }).join('') + '</div>';
+  $('td-board').innerHTML = html;
+}
+
+async function pollTd() {
+  try { renderTd(await api('/config/ashare/td')); }
+  catch (e) { $('td-board').innerHTML = '<span class="bad">看板刷新失败：' + e.message + '</span>'; }
+}
+pollTd();
+setInterval(pollTd, 10000);
 </script>
 </body>
 </html>
