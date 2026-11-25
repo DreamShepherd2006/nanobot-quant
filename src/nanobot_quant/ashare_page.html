@@ -48,9 +48,18 @@
 <div class="sub">只读采集（不下单、不参与决策）· 合约清单来自新浪（东财备源，缓存 1 天）· 盘口来自新浪五档 · 落盘 <span class="mono">legion/credentials/ashare_tape/tape_YYYYMMDD.jsonl</span></div>
 
 <div class="card">
-  <h2>📊 510050 · TD 计数实况 <span id="td-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
+  <h2>📊 <span id="td-name">510050 上证50ETF</span> · TD 计数实况 <span id="td-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
+  <div class="hint" style="margin:-2px 0 8px">标的
+    <select id="td-symbol">
+      <option value="510050.SH">510050 · 上证50ETF</option>
+      <option value="510300.SH">510300 · 沪深300ETF</option>
+      <option value="510500.SH">510500 · 中证500ETF</option>
+      <option value="588000.SH">588000 · 科创50ETF（cd13）</option>
+    </select>
+    <span style="color:#6b7684">· 切换立即重拉；588000 走 cd13（_DeMarkEngine 含 countdown）</span>
+  </div>
   <div id="td-board" class="hint">加载中…</div>
-  <div class="hint">口径：按交易日切分（隔夜从 0 重数）· 计数与 QMT 策略同源（FutuDeMarkEngine）· 每 10 秒刷新 · 低9 对应卖 put 入场，高9 对应出场</div>
+  <div class="hint">口径：按交易日切分（隔夜从 0 重数）· 计数与策略同源（FutuDeMarkEngine；588000 用 _DeMarkEngine）· 每 10 秒刷新 · 低9 对应卖 put 入场，高9 对应出场；CD 买 13 为 cd13 衰竭确认</div>
 </div>
 
 <div class="card">
@@ -278,6 +287,16 @@ function tdLine(key, d, color, closed) {
        + `<div class="tdsub">${sig}</div>`;
 }
 
+function cdLine(key, d, color) {
+  const trig = d.count >= 13;
+  const numTxt = trig ? '✅ 13' : `${d.count}/13`;
+  const pctW = Math.min(100, (d.count / 13) * 100);
+  return `<div class="tdln"><span class="k">${key}</span>`
+       + `<span class="tdnum" style="color:${trig ? color : '#d8dee9'};opacity:.85">${numTxt}</span>`
+       + `<span class="tdbar"><i class="${trig ? 'hot' : ''}" style="width:${pctW}%;background:${color};opacity:.55"></i></span>`
+       + `<span style="min-width:78px;color:${trig ? color : '#8b98a8'}">${trig ? '已确认' : '还差 ' + d.need + ' 根'}</span></div>`;
+}
+
 function renderTd(j) {
   if (!j || j.ok === false) {
     $('td-board').innerHTML = '<span class="bad">看板加载失败：' + ((j && j.error) || '未知错误') + '</span>';
@@ -285,6 +304,7 @@ function renderTd(j) {
     return;
   }
   const sess = SESSION_TXT[j.session] || j.session || '';
+  $('td-name').textContent = j.name ? `${j.code} ${j.name}` : (j.code || j.ticker || '');
   $('td-meta').innerHTML = `现货 <b style="color:#e5edf7">${j.spot != null ? Number(j.spot).toFixed(3) : '—'}</b>`
     + `　·　${sess}`
     + `　·　数据 ${j.data_asof || '—'}`
@@ -303,16 +323,26 @@ function renderTd(j) {
     return `<div class="tdbox"><div class="ph">${p}<em>${d.bars} 根 · 最新 ${d.last_time}</em></div>`
          + tdLine('低9', d.buy, '#22c55e', closed)
          + tdLine('高9', d.sell, '#f59e0b', closed)
+         + (d.buy_cd ? cdLine('CD买', d.buy_cd, '#22c55e') : '')
+         + (d.sell_cd ? cdLine('CD卖', d.sell_cd, '#f59e0b') : '')
          + (closed ? `<div class="hint" style="margin:8px 0 0">已收盘 · 明日 9:30 从 0 重数</div>` : '')
          + `</div>`;
   }).join('') + '</div>';
   $('td-board').innerHTML = html;
 }
 
+function tdSymbol() { const el = $('td-symbol'); return (el && el.value) || '510050.SH'; }
+
 async function pollTd() {
-  try { renderTd(await api('/config/ashare/td')); }
+  try { renderTd(await api('/config/ashare/td?symbol=' + encodeURIComponent(tdSymbol()))); }
   catch (e) { $('td-board').innerHTML = '<span class="bad">看板刷新失败：' + e.message + '</span>'; }
 }
+function switchTd() {
+  $('td-board').innerHTML = '<span class="hint">切换标的，加载中…</span>';
+  $('td-meta').textContent = '';
+  pollTd();
+}
+$('td-symbol').addEventListener('change', switchTd);
 pollTd();
 setInterval(pollTd, 10000);
 
