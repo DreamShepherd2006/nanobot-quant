@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant.ashare import contracts as ac
 from nanobot_quant.ashare import tape
+from nanobot_quant.ashare import td_panel as tp
 from nanobot_quant import credential_registry as creg
 
 _HERE = Path(__file__).resolve().parent
@@ -77,6 +79,19 @@ def register_ashare_routes(app, gatekeeper) -> None:
         if not ok:
             return JSONResponse({"ok": False, "error": err}, status_code=403)
         return JSONResponse({"ok": True, **_state_payload()})
+
+    @app.get("/config/ashare/td")
+    async def _td(request: Request):
+        """510050 TD 计数看板（只读、与策略同源、10s 缓存）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        force = request.query_params.get("force") == "1"
+        try:
+            # 同步网络请求放到线程池，避免阻塞网关事件循环（页面 10s 轮询）
+            return JSONResponse(await asyncio.to_thread(tp.panel, force=force))
+        except Exception as e:  # noqa: BLE001 — 看板失败不能拖垮页面
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=500)
 
     @app.post("/config/ashare/save")
     async def _save(request: Request):
