@@ -171,17 +171,21 @@ class PaperLedger:
         return float(bar_close) + self.tick
 
     def sell_open(self, *, code: str, underlying: str, strike: float, expiry: str,
-                  qty: int, bar_close: float, ts: str, reason: str = "") -> dict:
+                  qty: int, bar_close: float = 0.0, ts: str, reason: str = "",
+                  px: float | None = None) -> dict:
         """卖出开仓。返回 ``{"ok": True, "fill": {...}}`` 或 ``{"ok": False, "reason": ...}``。
 
         fail-closed 判据（任一不满足即拒绝，不打折、不近似）：
         合约已存在持仓、张数非正、成交价非正、可用现金不足担保额。
+
+        ``px`` 给了真实卖一价就直接用（盘口优先），否则按 bar 收盘 − 1 tick
+        保守化 —— 有实盘盘口时 "bar 收盘" 本身就是近似值，不该再叠一层 tick。
         """
         if code in self.shorts:
             return {"ok": False, "reason": f"合约已有持仓，不可重复开仓（{code}）"}
         if int(qty) <= 0:
             return {"ok": False, "reason": f"张数必须为正（qty={qty}）"}
-        px = self.sell_price(bar_close)
+        px = float(px) if (px is not None and float(px) > 0) else self.sell_price(bar_close)
         if px <= 0:
             return {"ok": False, "reason": f"成交价非正（bar_close={bar_close}）"}
         need = float(strike) * self.mult * int(qty)
@@ -206,12 +210,16 @@ class PaperLedger:
         self.fills.append(fill)
         return {"ok": True, "fill": fill}
 
-    def buy_close(self, *, code: str, bar_close: float, ts: str, reason: str = "") -> dict:
-        """买入平仓。合约不存在则拒绝（fail-closed，不做空、不猜）。"""
+    def buy_close(self, *, code: str, bar_close: float = 0.0, ts: str,
+                  reason: str = "", px: float | None = None) -> dict:
+        """买入平仓。合约不存在则拒绝（fail-closed，不做空、不猜）。
+
+        ``px`` 给了真实买一价就直接用（吃 ask），否则 bar 收盘 + 1 tick。
+        """
         sp = self.shorts.get(code)
         if sp is None:
             return {"ok": False, "reason": f"无该合约持仓，不可平仓（{code}）"}
-        px = self.buy_price(bar_close)
+        px = float(px) if (px is not None and float(px) > 0) else self.buy_price(bar_close)
         if px <= 0:
             return {"ok": False, "reason": f"成交价非正（bar_close={bar_close}）"}
         cost = px * sp.mult * sp.qty
@@ -343,6 +351,84 @@ class PaperLedger:
             "etf": [h.to_dict() for h in self.etf.values()],
             "fills": len(self.fills),
         }
+
+    # ── 持久化（跨重启恢复，供 runner 落盘用） ─────────────
+
+    def to_state(self) -> dict:
+        """可完整反解的账本状态（与 ``snapshot()`` 不同：不含派生字段）。"""
+        return {
+            "version": 1,
+            "initial_cash": float(self.initial_cash),
+            "cash": float(self.cash),
+            "mult": int(self.mult),
+            "tick": float(self.tick),
+            "fee_open": float(self.fee_open),
+            "fee_close": float(self.fee_close),
+            "fee_exercise_ratio": float(self.fee_exercise_ratio),
+            "shorts": [
+                {"code": s.code, "underlying": s.underlying, "strike": s.strike,
+                 "expiry": s.expiry, "qty": s.qty, "entry_px": s.entry_px,
+                 "entry_ts": s.entry_ts, "mult": s.mult, "entry_fee": s.entry_fee,
+                 "mark_px": s.mark_px, "reason": s.reason}
+                for s in self.shorts.values()
+            ],
+            "etf": [
+                {"underlying": h.underlying, "qty": h.qty, "cost_basis": h.cost_basis,
+                 "since": h.since, "mark": h.mark}
+                for h in self.etf.values()
+            ],
+            "fills": list(self.fills),
+        }
+
+    @classmethod
+    def from_state(cls, state: dict | None) -> "PaperLedger":
+        """从 ``to_state()`` 的输出恢复。残缺/非法的行跳过（不拿猜测补仓）。"""
+        st = state if isinstance(state, dict) else {}
+        ledger = cls(
+            initial_cash=float(st.get("initial_cash") or 500_000.0),
+            cash=float(st.get("cash") or 0.0),
+            mult=int(st.get("mult") or DEFAULT_MULT),
+            tick=float(st.get("tick") if st.get("tick") is not None else DEFAULT_TICK),
+            fee_open=float(st.get("fee_open") if st.get("fee_open") is not None
+                           else FEE_OPEN_PER_CONTRACT),
+            fee_close=float(st.get("fee_close") if st.get("fee_close") is not None
+                            else FEE_CLOSE_PER_CONTRACT),
+            fee_exercise_ratio=float(st.get("fee_exercise_ratio")
+                                     if st.get("fee_exercise_ratio") is not None
+                                     else FEE_EXERCISE_RATIO),
+        )
+        for row in st.get("shorts") or []:
+            try:
+                sp = ShortPut(
+                    code=str(row["code"]), underlying=str(row.get("underlying") or ""),
+                    strike=float(row["strike"]), expiry=str(row["expiry"]),
+                    qty=int(row["qty"]), entry_px=float(row["entry_px"]),
+                    entry_ts=str(row.get("entry_ts") or ""),
+                    mult=int(row.get("mult") or ledger.mult),
+                    entry_fee=float(row.get("entry_fee") or 0.0),
+                    mark_px=float(row.get("mark_px") or 0.0),
+                    reason=str(row.get("reason") or ""),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if sp.qty > 0 and sp.strike > 0:
+                ledger.shorts[sp.code] = sp
+        for row in st.get("etf") or []:
+            try:
+                h = EtfHolding(
+                    underlying=str(row["underlying"]), qty=float(row["qty"]),
+                    cost_basis=float(row["cost_basis"]),
+                    since=str(row.get("since") or ""),
+                    mark=float(row.get("mark") or 0.0),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if h.qty > 0:
+                ledger.etf[h.underlying] = h
+        for row in st.get("fills") or []:
+            if isinstance(row, dict):
+                ledger.fills.append(dict(row))
+        return ledger
 
 
 def fee_of_premium(px: float, qty: int, mult: int = DEFAULT_MULT,

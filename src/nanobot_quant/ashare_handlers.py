@@ -16,6 +16,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant.ashare import contracts as ac
+from nanobot_quant.ashare import paper_runner as pr
 from nanobot_quant.ashare import tape
 from nanobot_quant.ashare import td_panel as tp
 from nanobot_quant import credential_registry as creg
@@ -38,8 +39,6 @@ def _authorized(request: Request, gatekeeper) -> tuple[str | None, bool]:
     except Exception:  # noqa: BLE001
         return "权限校验失败", False
     return None, True
-
-
 def _state_payload() -> dict:
     storage = creg._get_storage_dir()
     c = ac.contracts(storage)
@@ -161,6 +160,87 @@ def register_ashare_routes(app, gatekeeper) -> None:
         tape.sync()
     except Exception as e:  # noqa: BLE001
         print(f"[ASHARE-TAPE] 启动同步失败: {type(e).__name__}: {e}", flush=True)
+
+    # ── 模拟账本（纸上交易，不接券商） ──────────────────────
+
+    @app.get("/config/ashare/paper/state")
+    async def _paper_state(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        try:
+            return JSONResponse({"ok": True, **(await asyncio.to_thread(pr.state))})
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+
+    @app.post("/config/ashare/paper/save")
+    async def _paper_save(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "无效的 JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "无效的请求体"}, status_code=400)
+        try:
+            cfg = pr.save_config(
+                enabled=body.get("enabled"),
+                interval_s=body.get("interval_s"),
+                symbols=body.get("symbols"),
+                initial_cash=body.get("initial_cash"),
+                params=body.get("params") if isinstance(body.get("params"), dict) else None,
+            )
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        try:
+            st = pr.sync()
+        except Exception as e:  # noqa: BLE001 — 保存成功、启停失败也要如实回报
+            return JSONResponse({"ok": False, "config": cfg,
+                                 "error": f"保存成功但启停失败: {type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, "config": cfg, "runner": st})
+
+    @app.post("/config/ashare/paper/reset")
+    async def _paper_reset(request: Request):
+        """清空模拟账本（先关循环，避免与正在跑的一轮抢写）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        try:
+            pr.save_config(enabled=False)
+            pr.stop()
+            pr.reset_state(initial_cash=(body or {}).get("initial_cash"))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+        return JSONResponse({"ok": True, **(await asyncio.to_thread(pr.state))})
+
+    @app.post("/config/ashare/paper/round")
+    async def _paper_round(request: Request):
+        """立即跑一轮（手动验证，不改变开关状态）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        try:
+            out = await asyncio.to_thread(pr.round_once)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+        return JSONResponse({"ok": True, "round": out,
+                             **(await asyncio.to_thread(pr.state))})
+
+    # 模拟账本同样自动恢复（enabled=true 时）：只读行情 + 本地账本，不下单、
+    # 不碰资金，中断只丢纸上样本，无资金风险。
+    try:
+        pr.sync()
+    except Exception as e:  # noqa: BLE001
+        print(f"[ASHARE-PAPER] 启动同步失败: {type(e).__name__}: {e}", flush=True)
 
 
 __all__ = ["register_ashare_routes"]
