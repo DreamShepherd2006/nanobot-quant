@@ -28,9 +28,20 @@ CN = timezone(timedelta(hours=8))
 
 TENCENT_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline?param={sym},{bar},,{n}"
 DEFAULT_SYMBOL = "sh510050"
+DEFAULT_CODE = "510050.SH"
 DEFAULT_CMP = 4
 SETUP_N = 9
 CACHE_TTL_S = 10.0
+
+# 标的注册表 —— 单一来源：配置代码（xxx.SH/SZ）↔ 腾讯符号 ↔ 显示名 ↔ TD 引擎。
+# engine="futu" 用 FutuDeMarkEngine（只有 setup，与 QMT 策略 v5/v6 同源）；
+# engine="base" 用 td_sequential._DeMarkEngine（setup + countdown，供 cd13 通路）。
+SYMBOLS: dict[str, dict] = {
+    "510050.SH": {"tx": "sh510050", "name": "上证50ETF", "engine": "futu"},
+    "510300.SH": {"tx": "sh510300", "name": "沪深300ETF", "engine": "futu"},
+    "510500.SH": {"tx": "sh510500", "name": "中证500ETF", "engine": "futu"},
+    "588000.SH": {"tx": "sh588000", "name": "科创50ETF", "engine": "base"},
+}
 
 # 周期 -> (腾讯 bar 名, 单根秒数)
 PERIODS: dict[str, tuple[str, int]] = {
@@ -56,8 +67,26 @@ def _get_json(url: str, timeout: float = 12.0) -> dict:
     return json.loads(raw.decode("utf-8", "replace"))
 
 
+def tx_code(symbol: str) -> str:
+    """把配置代码 / 腾讯符号统一成腾讯 kline 要的 ``sh510050`` 形式。
+
+    腾讯 ``mkline`` 端点只认带 ``sh``/``sz`` 前缀的符号：直接传配置里的
+    ``510050.SH`` 会返回空 ``data``（2026-11-25 实测 rows=0），而
+    ``paper_runner`` 的 ``symbols`` 恰好是 ``xxx.SH`` 形式 —— 不归一化就会
+    「轮次在涨、永远无行情」。所有取数入口都必须先经过这里。
+    """
+    s = (symbol or "").strip()
+    if not s:
+        return DEFAULT_SYMBOL
+    if s.lower().startswith(("sh", "sz")):
+        return s.lower()
+    code = s.split(".")[0]
+    return ("sh" if code[:1] in ("5", "6", "9") else "sz") + code
+
+
 def fetch_klines(bar: str = "m1", n: int = 640, symbol: str = DEFAULT_SYMBOL) -> pd.DataFrame:
     """拉腾讯分钟线 → DataFrame(dt, open, high, low, close, volume)，按时间升序。"""
+    symbol = tx_code(symbol)
     payload = _get_json(TENCENT_URL.format(sym=symbol, bar=bar, n=n))
     blk = ((payload.get("data") or {}).get(symbol) or {})
     rows = blk.get(bar) or []
@@ -287,4 +316,5 @@ def clear_cache() -> None:
 
 
 __all__ = ["panel", "fetch_klines", "setup_by_session", "describe_period",
-           "drop_unclosed", "clear_cache", "PERIODS", "SETUP_N"]
+           "drop_unclosed", "clear_cache", "PERIODS", "SETUP_N",
+           "SYMBOLS", "tx_code", "DEFAULT_CODE"]
