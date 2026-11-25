@@ -146,6 +146,48 @@ def should_close(short: dict, mark_px: float, today: date,
     return False, ""
 
 
+# ── 出场臂（PR 3/5：D 方案 A/B 对照） ──────────────────────
+#
+# 两臂共用同一套入场规则与同一份行情，**只差止盈条件** —— 这样 A/B 的差异
+# 能干净地归因到出场，而不是混进入场或选档的噪声里。
+
+ARM_A = "A"
+ARM_B = "B"
+ARM_LABELS: dict[str, str] = {
+    ARM_A: "A · 止盈 50% / DTE 强平",
+    ARM_B: "B · 高9 + 浮盈 / DTE 强平（D 方案）",
+}
+
+
+def should_close_high9(short: dict, mark_px: float, today: date,
+                       params: PaperParams | None = None, *,
+                       sell_setup: int = 0,
+                       entry_count: int = 9) -> tuple[bool, str]:
+    """D 方案出场（臂 B）：TD 高9 **且该仓有毛浮盈**才买回；浮亏不主动平。
+
+    与 :func:`should_close` 的唯一差别是止盈条件：不看权利金回落到多少，
+    只看「高9 那一刻是否浮盈」。DTE 强平两臂都保留 —— 那是时间维度的结构性
+    退出，不是止损（用户 2026-11-22 口径）；到期结算由 ledger 接管。
+
+    ``sell_setup`` 传当前 bar 的 Sell Setup 计数（``≥ entry_count`` 视为高9）。
+    **高9 不要求首穿**：同一累加周期内首次浮亏、后续浮盈也能平 —— 这正是
+    「有浮盈就走」的意图（D 方案回测口径为计数 ≥9）。
+    """
+    p = params or PaperParams()
+    entry_px = float(short.get("entry_px") or 0.0)
+    mark = float(mark_px or 0.0)
+    if int(sell_setup or 0) >= int(entry_count) and entry_px > 0 and 0 < mark < entry_px:
+        drop_pct = (entry_px - mark) / entry_px * 100.0
+        return True, f"high9_profit: 高9 + 浮盈 {drop_pct:.1f}%"
+    try:
+        dte = days_to_expiry(str(short.get("expiry") or ""), today)
+    except ValueError:
+        return False, ""
+    if dte <= p.force_close_dte:
+        return True, f"dte_force: 剩余 {dte} 天 ≤ {p.force_close_dte}"
+    return False, ""
+
+
 def is_expired(short: dict, today: date) -> bool:
     """是否已到期（到期日当天视为已到期、由账本接货或作废）。"""
     try:
