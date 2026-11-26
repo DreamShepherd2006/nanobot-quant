@@ -43,6 +43,21 @@ def cfg(monkeypatch):
     monkeypatch.setattr(ivp, "cached_state", lambda u: {
         "status": "ready", "run": "run_20261126_125304_p1120",
         "asof": "2026-11-25", "error": ""})
+    # 账本摘要只读 pr.state（不碰 /data）：用一根成交的最小 payload
+    payload = {
+        "runner": {"thread_alive": True, "last_run": None},
+        "arms": {
+            ps.ARM_A: {"active": True, "ledger": {
+                "equity": 500100.0, "return_pct": 0.02, "realized": 100.0,
+                "unrealized": 0.0, "shorts": [], "collateral_locked": 0.0,
+                "available_cash": 500100.0},
+                "consistency": {"ok": True},
+                "fills": [{"ts": "2026-11-26T05:00:00Z", "action": "buy_close",
+                           "qty": 1, "realized": 100.0}]},
+            ps.ARM_B: {"active": False, "ledger": {}, "fills": []},
+        },
+    }
+    monkeypatch.setattr(pr, "state", lambda **kw: payload)
     return tape_cfg, paper_cfg
 
 
@@ -68,7 +83,9 @@ def test_build_has_all_sections(cfg):
     for head in ("# A 股 ETF 期权 · 页面参数快照", "## 运行态（读取时刻）",
                  "## ① 盘口采集（tape）", "## ② 模拟账本（基础）",
                  "## ③ 账本规则（入场 / 张数 / 出场 / 费用）",
-                 "## ④ IV 分位口径（只读）", "## ⑤ 口径注记"):
+                 "## ④ IV 分位口径（只读）",
+                 "## ⑤ 账本摘要（成交/持仓明细见「📋 复制成交」）",
+                 "## ⑥ 口径注记"):
         assert head in md, head
 
 
@@ -122,6 +139,13 @@ def test_notes_state_key_kou_jing(cfg):
     assert "100% 全损担保" in md
     assert "盘口优先" in md
     assert "新浪行内 IV" in md
+
+
+def test_params_snapshot_has_ledger_summary(cfg):
+    md = pm.build()
+    assert "| A · " in md and "500100.00" in md
+    assert "100.00%" in md          # 唯一一笔已平仓且盈利 → 胜率 100%
+    assert "| B · " not in md         # 未启用臂不进汇总表（active=False；② 里的配置行不算）
 
 
 def test_iv_section_uses_cache_only(cfg, monkeypatch):

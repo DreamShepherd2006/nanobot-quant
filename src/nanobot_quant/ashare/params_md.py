@@ -25,6 +25,7 @@ from . import paper_ledger as pl
 from . import paper_runner as pr
 from . import paper_strategy as ps
 from . import tape
+from . import trades_md as tm
 
 CST = timezone(timedelta(hours=8))
 
@@ -266,8 +267,20 @@ def build(undl: str | None = None) -> str:
     out.append(f"| 数据 run | `{iv_state.get('run') or '—'}` |")
     out.append("")
 
-    # ⑤ 口径注记
-    out.append("## ⑤ 口径注记")
+    # ⑤ 账本摘要（不带明细——成交体量会涨，明细走「📋 复制成交」）
+    out.append("## ⑤ 账本摘要（成交/持仓明细见「📋 复制成交」）")
+    out.append("")
+    try:
+        payload = pr.state(limit_fills=pr.FILLS_KEEP)
+        out.extend(tm.summary_table(payload))
+        if payload.get("error"):
+            out.append(f"| ⚠️ 状态读取 | {payload['error']} |")
+    except Exception as e:  # noqa: BLE001 — 账本读不到也要出参数快照
+        out.append(f"（账本读取失败：{type(e).__name__}: {e}）")
+    out.append("")
+
+    # ⑥ 口径注记
+    out.append("## ⑥ 口径注记")
     out.append("")
     for n in NOTES:
         out.append(f"- {n}")
