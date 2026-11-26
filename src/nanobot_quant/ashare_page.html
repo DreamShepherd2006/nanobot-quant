@@ -695,7 +695,7 @@ function renderCand(j) {
   let html = '<div style="overflow-x:auto"><table style="margin-top:6px;white-space:nowrap">'
     + '<thead><tr class="l"><th>行权价</th><th>到期</th><th>买价</th><th>净权利金</th>'
     + '<th>担保额</th><th>净收益率</th><th>年化</th><th>Δ</th><th>虚值%</th>'
-    + '<th>IV%</th><th>IV分位</th><th>往返后</th><th>打平回落</th><th>可开</th></tr></thead><tbody>';
+    + '<th>IV%</th><th>ATM分位</th><th>往返后</th><th>打平回落</th><th>可开</th></tr></thead><tbody>';
   rows.forEach(r => {
     html += '<tr class="' + (r.pick ? 'oc-atm' : '') + '">'
       + '<td class="oc-k" style="text-align:left;padding-left:8px">'
@@ -710,15 +710,28 @@ function renderCand(j) {
       + '<td>' + pctv(r.otm_pct, 2) + '</td>'
       + '<td>' + (r.iv === null || r.iv === undefined ? '—' : pctv(Number(r.iv) * 100, 1)) + '</td>'
       + '<td>' + (r.iv_pct === null || r.iv_pct === undefined
-          ? '<span class="hint">—</span>' : num(r.iv_pct, 0)) + '</td>'
+          ? '<span class="hint">—</span>'
+          : (r.iv_pct_approx ? '≈' : '') + num(r.iv_pct, 0)) + '</td>'
       + '<td>' + pctv(r.round_trip_pct, 3) + '</td>'
       + '<td>' + pctv(r.breakeven_drop_pct, 2) + '</td>'
       + '<td>' + armTxt(r.arms) + '</td></tr>';
   });
   html += '</tbody></table></div>' + otherExp
     + '<div class="hint" style="margin-top:4px">净收益率（排序依据）= (买价×10000 − 开仓费) ÷ 担保额；'
-    + '往返后再扣平仓费 1.7 + 1 tick 价差；IV 分位 = 该合约 IV 在同 DTE 桶历史分钟样本中的分位，'
-    + '「—」= 该桶暂无样本（数据缺口，不是 0）。</div>';
+    + '往返后再扣平仓费 1.7 + 1 tick 价差；虚值% 按现货算（与 ≥ 门槛同源）；'
+    + '<b>ATM分位</b> = 该到期档 ATM put IV（|Δ| 最小那张）在同 DTE 桶历史样本中的分位，'
+    + '同到期的各档同值 —— 不用单张合约的 IV 比（深虚值因 skew 恒落在高位），'
+    + '「—」= 该桶暂无样本（数据缺口，不是 0）；<b>≈</b> = 该桶只有分位数、缺日代表值，'
+    + '按 p5/p25/p50/p75/p95 线性插值近似（同档同值的近似，不是精确分位）。'
+    + (P.iv_src === 'none'
+        ? '<br><b class="warn">IV 分位数据未就绪</b>（IV 面板还在算或无缓存）：'
+          + '分位暂不可用，约 15 秒后自动刷新即出 —— 这与「该桶无样本」是两回事。'
+        : (P.iv_vals === 0 && P.iv_buckets
+            ? '<br><b class="warn">该标的的历史样本里没有日代表值</b>'
+              + '（桶 ' + P.iv_buckets + ' 个、有分位数的 ' + P.iv_q
+              + ' 个）：分位按分位数插值近似。'
+            : ''))
+    + '</div>';
   box.innerHTML = head + html;
 }
 
