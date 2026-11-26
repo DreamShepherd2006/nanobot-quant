@@ -16,6 +16,8 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from nanobot_quant.ashare import contracts as ac
+from nanobot_quant.ashare import iv_panel as ivp
+from nanobot_quant.ashare import option_chain as oc
 from nanobot_quant.ashare import paper_runner as pr
 from nanobot_quant.ashare import tape
 from nanobot_quant.ashare import td_panel as tp
@@ -63,6 +65,43 @@ def _state_payload() -> dict:
     }
 
 
+def _trim_row(r: dict) -> dict:
+    """只回传页面要用的字段（快照行有 20+ 键，全传会拖慢轮询）。"""
+    keys = ("code", "right", "strike", "dte", "bid", "ask", "mid",
+            "iv", "iv_bid", "iv_ask", "delta", "otm_pct", "spread_pct",
+            "f_src")
+    return {k: r.get(k) for k in keys}
+
+
+def _expiry_summary(snap: dict) -> list[dict]:
+    """每个到期一条摘要：DTE / 隐含远期 / ATM IV（call·put）/ 配对质量。"""
+    rows = snap.get("rows") or []
+    out = []
+    for expiry in snap.get("expiries") or []:
+        rs = [r for r in rows if str(r.get("expiry") or "") == expiry]
+        fw = (snap.get("forwards") or {}).get(expiry) or {}
+        f = fw.get("f")
+        dtes = [r["dte"] for r in rs if r.get("dte") is not None]
+        dte = sorted(dtes)[len(dtes) // 2] if dtes else None
+        atm_c = atm_p = strike = None
+        if f:
+            strikes = sorted({r["strike"] for r in rs if r.get("strike")},
+                             key=lambda k: (abs(k - f), k))[:1]
+            if strikes:
+                strike = strikes[0]
+                for r in rs:
+                    if r.get("strike") != strike:
+                        continue
+                    if r.get("right") == "C":
+                        atm_c = r.get("iv")
+                    elif r.get("right") == "P":
+                        atm_p = r.get("iv")
+        out.append({"expiry": expiry, "dte": dte, "forward": f,
+                    "pairs": fw.get("n_pairs"), "mad_pct": fw.get("mad_pct"),
+                    "atm_strike": strike, "atm_iv_c": atm_c, "atm_iv_p": atm_p})
+    return out
+
+
 def register_ashare_routes(app, gatekeeper) -> None:
 
     @app.get("/config/ashare", response_class=HTMLResponse)
@@ -102,6 +141,85 @@ def register_ashare_routes(app, gatekeeper) -> None:
             return JSONResponse(await asyncio.to_thread(tp.panel, symbol, force=force))
         except Exception as e:  # noqa: BLE001 — 看板失败不能拖垮页面
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=500)
+
+    # ── 期权链 · IV 分位（只读；实时链 + 历史分位）──────────────
+
+    @app.get("/config/ashare/chain")
+    async def _chain(request: Request):
+        """实时期权链（parity 远期 + 自算 IV）+ 当前 30d 常熟 IV。
+
+        ``?symbol=510050.SH``（限池内标的）``&expiry=20261223``（缺省=最近到期）
+        ``&band=12``（虚值带，3–30）``&force=1``（绕过 15s 缓存）。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        pool = [c for c, _ in tape.POOL_UNDERLYINGS]
+        symbol = request.query_params.get("symbol") or pool[0]
+        if symbol not in pool:
+            return JSONResponse({"ok": False, "error": f"未知标的 {symbol!r}",
+                                 "available": pool}, status_code=400)
+        try:
+            band = float(request.query_params.get("band") or oc.DEFAULT_BAND_PCT)
+        except ValueError:
+            band = oc.DEFAULT_BAND_PCT
+        band = min(30.0, max(3.0, band))
+        force = request.query_params.get("force") == "1"
+        want = request.query_params.get("expiry") or ""
+        try:
+            snap = await asyncio.to_thread(
+                oc.chain_snapshot, symbol, creg._get_storage_dir(),
+                expiries=3, band_pct=band, force=force)
+        except Exception as e:  # noqa: BLE001 — 拉链失败要如实回报，不静默留白
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+
+        exps = _expiry_summary(snap)
+        expiry = want if any(e["expiry"] == want for e in exps) else (
+            exps[0]["expiry"] if exps else "")
+        rows = [r for r in (snap.get("rows") or [])
+                if str(r.get("expiry") or "") == expiry]
+        live = ivp.live_cm_iv(snap, 30.0)
+        iv_state = ivp.panel(symbol)
+        pct = None
+        if iv_state.get("status") == "ready" and live.get("iv") is not None:
+            pct = ivp.pctile(live["iv"], (iv_state.get("cm30") or {}).get("values") or [])
+        return JSONResponse({
+            "ok": True,
+            "symbol": symbol,
+            "spot": snap.get("spot"),
+            "asof": snap.get("asof"),
+            "in_session": snap.get("in_session"),
+            "frozen": snap.get("frozen"),
+            "cached": snap.get("cached"),
+            "age_s": snap.get("age_s"),
+            "source": snap.get("source"),
+            "errors": snap.get("errors") or [],
+            "note": snap.get("note") or "",
+            "band_pct": band,
+            "expiry": expiry,
+            "expiries": exps,
+            "rows": [_trim_row(r) for r in rows],
+            "live_cm30": {**live, "pct": pct},
+        })
+
+    @app.get("/config/ashare/iv")
+    async def _iv(request: Request):
+        """IV 分位面板（QMT 历史序列；首次请求起后台线程算，其余返回 computing）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        pool = [c for c, _ in tape.POOL_UNDERLYINGS]
+        symbol = request.query_params.get("symbol") or pool[0]
+        if symbol not in pool:
+            return JSONResponse({"ok": False, "error": f"未知标的 {symbol!r}",
+                                 "available": pool}, status_code=400)
+        force = request.query_params.get("force") == "1"
+        try:
+            return JSONResponse(await asyncio.to_thread(ivp.panel, symbol, force=force))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
 
     @app.post("/config/ashare/save")
     async def _save(request: Request):

@@ -38,3 +38,27 @@ def test_contracts_row_shows_cache_age():
 def test_poll_failure_is_visible():
     """轮询失败不得静默：状态行要显式提示「显示的是上次状态」。"""
     assert "状态刷新失败" in _html()
+
+
+# ── 期权链 · IV 分位（5c）──────────────────────────────────
+
+def test_option_chain_section_wired():
+    html = _html()
+    # 区块与控件
+    assert "📈 期权链 · IV 分位" in html
+    for el in ("oc-symbol", "oc-expiry", "oc-band", "oc-refresh", "oc-kpi",
+               "oc-chain", "oc-iv", "oc-meta"):
+        assert f'id="{el}"' in html, el
+    # 两个只读端点必被调用（路径写错会落到 SPA 兜底返回 HTML）
+    assert "/config/ashare/chain?symbol=" in html
+    assert "/config/ashare/iv?symbol=" in html
+    # 现役月默认取第一个（最近到期）
+    assert "else if ((list || []).length) sel.value = list[0].expiry" in html
+
+
+def test_option_chain_section_states_iv_caveats():
+    """口径必须写在页面上：不用新浪 IV 字段、分位按交易日计、不外推。"""
+    html = _html()
+    assert "不用" in html and "新浪 IV" in html
+    assert "按交易日计" in html
+    assert "不外推" in html

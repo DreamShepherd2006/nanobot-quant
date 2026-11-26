@@ -40,6 +40,11 @@
   .tdsub{font-size:11.5px;color:#6b7684;margin:0 0 6px 36px}
   .tdsub b{color:#9aa7b6;font-weight:500}
   .hot{animation:pulse 1.2s ease-in-out infinite}
+  /* 期权链 */
+  .oc-itm-c td{background:rgba(34,197,94,.07)}
+  .oc-itm-p td{background:rgba(248,113,113,.07)}
+  .oc-atm td{background:rgba(255,255,255,.055)}
+  .oc-k{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;border-left:1px solid #242a35;border-right:1px solid #242a35}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
 </style>
 </head>
@@ -83,6 +88,32 @@
     <div id="pp-pos-b" class="hint">暂无持仓</div>
     <div id="pp-fills-b"></div>
   </details>
+  <div style="border-top:1px solid #242a35;margin:16px 0 0;padding-top:14px">
+    <h2 style="margin-bottom:8px">📈 期权链 · IV 分位 <span id="oc-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
+    <div class="row" style="gap:12px">
+      <div class="fld">标的
+        <select id="oc-symbol">
+          <option value="510050.SH">510050 · 上证50ETF</option>
+          <option value="510300.SH">510300 · 沪深300ETF</option>
+          <option value="510500.SH">510500 · 中证500ETF</option>
+          <option value="588000.SH">588000 · 科创50ETF</option>
+        </select>
+      </div>
+      <div class="fld">到期月<select id="oc-expiry"></select></div>
+      <div class="fld">虚值带 ±%<input type="number" id="oc-band" min="3" max="30" step="1" value="12"></div>
+      <button class="ghost" id="oc-refresh">🔄 刷新</button>
+      <span id="oc-msg" class="hint"></span>
+    </div>
+    <div class="stat" id="oc-kpi" style="margin-top:10px">加载中…</div>
+    <div id="oc-chain"></div>
+    <div id="oc-iv" style="margin-top:12px">加载中…</div>
+    <div class="hint">
+      <b>链</b>：新浪实时盘口 + put-call parity 隐含远期 F 自算 IV（<b>不用</b>新浪 IV 字段 —— 实测失真且方向不一）；报价单位元/份，1 张 = 报价 × 10,000。<br>
+      <b>分位</b>：QMT 历史 1m 自算，样本<b>按交易日计</b>（分钟高度自相关，不能当独立样本）；30d 常熟 IV = 相邻到期线性插值，<b>不外推</b>。<br>
+      现役月默认最近到期；休市时链显示上次快照（不重拉），分位不受影响。
+    </div>
+  </div>
+
   <div class="hint">
     <b>纸上交易</b>：只读行情 + 本地账本，不连券商、不下单、不读 QMT 持仓 —— 这些数字与实盘物理隔开，不能当实盘验收证据。<br>
     资金按 <b>100% 全损担保</b>（行权价 × 面值 × 张数）占用，不按平台 7–12% 保证金 —— 否则资金效率虚高。
@@ -520,6 +551,160 @@ $('pp-reset').onclick = async () => {
 
 pollPaper();
 setInterval(pollPaper, 30000);
+
+/* ── 期权链 · IV 分位 ─────────────────────────────────────── */
+const ocState = {expiries: [], expiry: '', rows: [], summary: [], live: null};
+const fmtPx = (v) => (v === null || v === undefined) ? '—' : Number(v).toFixed(4);
+
+function ocSymbol() { return $('oc-symbol').value || '510050.SH'; }
+
+function ocFillExpiries(list) {
+  const sel = $('oc-expiry');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  (list || []).forEach(e => {
+    const dte = e.dte === null || e.dte === undefined ? '—' : Math.max(0, Math.round(e.dte)) + 'D';
+    const o = document.createElement('option');
+    o.value = e.expiry;
+    o.textContent = `${e.expiry}（${dte}）`;
+    sel.appendChild(o);
+  });
+  if (prev && (list || []).some(e => e.expiry === prev)) sel.value = prev;
+  else if ((list || []).length) sel.value = list[0].expiry;   // 默认现役月
+}
+
+function renderChainKpi(j) {
+  const ex = (j.expiries || []).find(e => e.expiry === j.expiry) || {};
+  const lv = j.live_cm30 || {};
+  const iv = (v) => (v === null || v === undefined) ? '—' : (Number(v) * 100).toFixed(2) + '%';
+  const pctTxt = (lv.pct === null || lv.pct === undefined) ? '—'
+    : `<b>${Number(lv.pct).toFixed(0)}</b> 分位`;
+  $('oc-kpi').innerHTML = [
+    `现货 <b>${fmtPx(j.spot)}</b>`,
+    `隐含远期 F（${j.expiry || '—'}）<b>${fmtPx(ex.forward)}</b>`,
+    `ATM IV call <b>${iv(ex.atm_iv_c)}</b> / put <b>${iv(ex.atm_iv_p)}</b>`,
+    `30d 常熟 IV（实时插值）<b>${iv(lv.iv)}</b> ${pctTxt}`,
+    lv.legs && lv.legs.length ? `腿：${lv.legs.map(x => `${x.expiry.slice(4)} ${x.dte.toFixed(0)}D ${(x.iv * 100).toFixed(1)}%`).join(' · ')}` : '',
+  ].filter(Boolean).join('　');
+  $('oc-meta').innerHTML = `数据 ${j.asof || '—'}`
+    + (j.frozen ? '　·　<span style="color:#6b7684">休市 · 上次快照</span>' : '')
+    + (j.cached ? `　·　缓存 ${j.age_s || 0}s` : '')
+    + ((j.errors || []).length ? `　·　<span class="bad">${j.errors.length} 个合约取价失败</span>` : '')
+    + (j.note ? `　·　<span class="warn">${j.note}</span>` : '');
+}
+
+function renderChainTable(j) {
+  const rows = j.rows || [];
+  const ex = (j.expiries || []).find(e => e.expiry === j.expiry) || {};
+  const f = ex.forward || 0;
+  if (!rows.length) {
+    $('oc-chain').innerHTML = '<div class="hint">该到期月无可用报价（可能休市或合约已到期）</div>';
+    return;
+  }
+  const byK = {};
+  rows.forEach(r => {
+    const k = Number(r.strike);
+    byK[k] = byK[k] || {};
+    byK[k][r.right] = r;
+  });
+  const iv = (v) => (v === null || v === undefined) ? '—' : (Number(v) * 100).toFixed(2);
+  const dl = (v) => (v === null || v === undefined) ? '—' : Number(v).toFixed(3);
+  let html = '<table style="margin-top:8px"><thead><tr class="l">'
+    + '<th colspan="5" style="text-align:center;border-bottom:1px solid #2b3340">Call</th>'
+    + '<th style="text-align:center;border-bottom:1px solid #2b3340">行权价</th>'
+    + '<th colspan="5" style="text-align:center;border-bottom:1px solid #2b3340">Put</th></tr>'
+    + '<tr><th>买价</th><th>卖价</th><th>中价</th><th>IV%</th><th>Δ</th>'
+    + '<th></th><th>买价</th><th>卖价</th><th>中价</th><th>IV%</th><th>Δ</th></tr></thead><tbody>';
+  Object.keys(byK).map(Number).sort((a, b) => a - b).forEach(k => {
+    const c = byK[k].C || {}, p = byK[k].P || {};
+    const cls = [];
+    if (ex.atm_strike !== null && ex.atm_strike !== undefined && Math.abs(k - ex.atm_strike) < 1e-9) cls.push('oc-atm');
+    else if (f && k < f) cls.push('oc-itm-c');
+    else if (f && k > f) cls.push('oc-itm-p');
+    html += `<tr class="${cls.join(' ')}">`
+      + `<td>${fmtPx(c.bid)}</td><td>${fmtPx(c.ask)}</td><td>${fmtPx(c.mid)}</td><td>${iv(c.iv)}</td><td>${dl(c.delta)}</td>`
+      + `<td class="oc-k" style="text-align:center">${k.toFixed(3)}</td>`
+      + `<td>${fmtPx(p.bid)}</td><td>${fmtPx(p.ask)}</td><td>${fmtPx(p.mid)}</td><td>${iv(p.iv)}</td><td>${dl(p.delta)}</td></tr>`;
+  });
+  $('oc-chain').innerHTML = html + '</tbody></table>';
+}
+
+function renderIvPanel(j) {
+  const box = $('oc-iv');
+  if (!j || j.ok === false) {
+    box.innerHTML = '<span class="bad">IV 分位加载失败：' + ((j && j.error) || '未知错误') + '</span>';
+    return;
+  }
+  if (j.status === 'computing') {
+    box.innerHTML = `<span class="warn">⏳ IV 分位计算中（首次约 15–60s，后台线程）… ${j.elapsed_s || 0}s</span>`;
+    return;
+  }
+  if (j.status === 'error') {
+    box.innerHTML = '<span class="bad">IV 分位计算失败：' + (j.error || '') + '</span>';
+    return;
+  }
+  if (j.status === 'no_data') {
+    box.innerHTML = '<span class="warn">无 QMT 历史数据：' + (j.error || '') + '</span>';
+    return;
+  }
+  const iv = (v) => (v === null || v === undefined) ? '—' : (Number(v) * 100).toFixed(2) + '%';
+  const cm = j.cm30 || {};
+  let html = `<div class="stat">30d 常熟 IV：p5 <b>${iv(cm.p5)}</b>　 p50 <b>${iv(cm.p50)}</b>　 p95 <b>${iv(cm.p95)}</b>`
+    + `　 样本 <b>${cm.days || 0}</b> 个交易日（截至 ${cm.last_day || '—'}）</div>`;
+  html += '<table><thead><tr><th class="l">DTE 桶</th><th>交易日</th><th>分钟点</th>'
+    + '<th>p5</th><th>p25</th><th>p50</th><th>p75</th><th>p95</th><th>当前</th></tr></thead><tbody>';
+  (j.buckets || []).forEach(b => {
+    html += `<tr${b.days ? '' : ' style="opacity:.45"'}><td class="l">${b.label} 天</td>`
+      + `<td>${b.days}</td><td>${b.minutes}</td>`
+      + `<td>${iv(b.p5)}</td><td>${iv(b.p25)}</td><td>${iv(b.p50)}</td><td>${iv(b.p75)}</td><td>${iv(b.p95)}</td>`
+      + `<td>${iv(b.current)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  html += `<div class="hint" style="margin-top:4px">数据 ${j.run || '—'} · 月份 ${(j.months || []).join('/')}`
+    + ` · 明细 ${j.minutes || 0} 分钟 / ${j.rows || 0} 行 · stale ${j.stale_pct || 0}%`
+    + (j.elapsed_s ? ` · 计算 ${j.elapsed_s}s` : '') + (j.cached ? ' · 缓存' : '') + '</div>';
+  box.innerHTML = html;
+}
+
+async function loadChain(force) {
+  const q = `/config/ashare/chain?symbol=${encodeURIComponent(ocSymbol())}`
+    + `&expiry=${encodeURIComponent($('oc-expiry').value || '')}`
+    + `&band=${Number($('oc-band').value) || 12}` + (force ? '&force=1' : '');
+  try {
+    const j = await api(q);
+    ocFillExpiries(j.expiries);
+    ocState.expiries = j.expiries || [];
+    renderChainKpi(j);
+    renderChainTable(j);
+  } catch (e) {
+    $('oc-chain').innerHTML = '<span class="bad">期权链加载失败：' + e.message + '</span>';
+    $('oc-meta').textContent = '';
+  }
+}
+
+let ivTimer = null;
+async function loadIv(force) {
+  try {
+    const j = await api('/config/ashare/iv?symbol=' + encodeURIComponent(ocSymbol()) + (force ? '&force=1' : ''));
+    renderIvPanel(j);
+    if (j.status === 'computing' && !ivTimer) ivTimer = setInterval(loadIv, 3000);
+    else if (j.status !== 'computing' && ivTimer) { clearInterval(ivTimer); ivTimer = null; }
+  } catch (e) {
+    $('oc-iv').innerHTML = '<span class="bad">IV 分位加载失败：' + e.message + '</span>';
+  }
+}
+
+$('oc-symbol').addEventListener('change', () => {
+  $('oc-expiry').innerHTML = '';
+  $('oc-chain').innerHTML = '<div class="hint">切换标的，加载中…</div>';
+  $('oc-iv').innerHTML = '<div class="hint">切换标的，加载中…</div>';
+  loadChain(true); loadIv(false);
+});
+$('oc-expiry').addEventListener('change', () => loadChain(false));
+$('oc-refresh').addEventListener('click', () => { loadChain(true); loadIv(false); });
+loadChain(false);
+loadIv(false);
+setInterval(() => loadChain(false), 30000);
 </script>
 </body>
 </html>
