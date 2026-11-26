@@ -124,9 +124,11 @@
     </div>
     <div class="stat" id="oc-kpi" style="margin-top:10px">加载中…</div>
     <div id="oc-chain"></div>
+    <div id="oc-cand" style="margin-top:12px"></div>
     <div id="oc-iv" style="margin-top:12px">加载中…</div>
     <div class="hint">
       <b>链</b>：新浪实时盘口 + put-call parity 隐含远期 F 自算 IV（<b>不用</b>新浪 IV 字段 —— 实测失真且方向不一）；报价单位元/份，1 张 = 报价 × 10,000。<br>
+      <b>候选</b>：选档规则与模拟账本同一份（DTE 窗口 → 虚值门槛 → 净权利金>0 → 按净收益率排序）；★ 行是自动线此刻会选的那张，可能落在别的到期档（表下会提示）。<br>
       <b>分位</b>：QMT 历史 1m 自算，样本<b>按交易日计</b>（分钟高度自相关，不能当独立样本）；30d 常熟 IV = 相邻到期线性插值，<b>不外推</b>。<br>
       现役月默认最近到期；休市时链显示上次快照（不重拉），分位不受影响。
     </div>
@@ -652,6 +654,74 @@ function renderChainTable(j) {
   $('oc-chain').innerHTML = html + '</tbody></table>';
 }
 
+// 🎯 卖出候选：选档规则与模拟账本同一份（后端 rank_puts），这里只负责渲染。
+// 列的含义：「净收益率」= 账本口径（只扣开仓费），排序用它；「往返后」再扣平仓费
+// + 1 tick 价差，仅作展示；「打平回落」= 往返成本 ÷ 开仓权利金。
+function renderCand(j) {
+  const box = $('oc-cand');
+  if (!box) return;
+  const c = (j && j.candidates) || {};
+  if (c.error) {
+    box.innerHTML = '<span class="bad">候选表算失败：' + c.error + '</span>';
+    return;
+  }
+  const rows = c.rows || [];
+  const P = c.params || {};
+  const num = (v, d) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+  const pctv = (v, d) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d) + '%';
+  const head = '<div class="stat" style="margin-top:4px">🎯 卖出候选'
+    + ' <span class="hint">DTE ' + (P.min_dte ?? '—') + '–' + (P.max_dte ?? '—')
+    + ' · 虚值 ≥' + (P.min_distance_pct ?? '—') + '% · 带 ±' + (P.band_pct ?? '—') + '%'
+    + ' · 额度 ' + (P.max_per_underlying ?? '—') + '/标的 · ' + (P.max_total ?? '—') + '/总'
+    + ' · 开仓费 ' + (P.fee_open ?? '—') + ' 元/张 · ★ = 自动线此刻会选的那张</span></div>';
+  const otherExp = c.pick_other_expiry
+    ? '<div class="warn" style="margin-top:6px">自动线此刻选的是 <b>' + c.pick
+      + '</b>（到期 ' + c.pick_other_expiry + '），切到那个到期档才能看到它。</div>'
+    : '';
+  if (!rows.length) {
+    box.innerHTML = head + '<div class="hint">当前到期档没有通过过滤的候选'
+      + '（DTE 窗口 / 虚值 ≥ 门槛 / 扣费后净权利金 > 0）。</div>' + otherExp;
+    return;
+  }
+  const armTxt = (arms) => {
+    const parts = [];
+    ['A', 'B'].forEach(a => {
+      const s = (arms || {})[a] || {};
+      const ok = !!s.ok;
+      parts.push(`<span style="color:${ok ? '#4ade80' : '#6b7684'}">${a} ${ok ? '✓' : s.label || '—'}</span>`);
+    });
+    return parts.join(' · ');
+  };
+  let html = '<div style="overflow-x:auto"><table style="margin-top:6px;white-space:nowrap">'
+    + '<thead><tr class="l"><th>行权价</th><th>到期</th><th>买价</th><th>净权利金</th>'
+    + '<th>担保额</th><th>净收益率</th><th>年化</th><th>Δ</th><th>虚值%</th>'
+    + '<th>IV%</th><th>IV分位</th><th>往返后</th><th>打平回落</th><th>可开</th></tr></thead><tbody>';
+  rows.forEach(r => {
+    html += '<tr class="' + (r.pick ? 'oc-atm' : '') + '">'
+      + '<td class="oc-k" style="text-align:left;padding-left:8px">'
+        + (r.pick ? '★ ' : '') + Number(r.strike).toFixed(3) + '</td>'
+      + '<td>' + String(r.expiry || '').slice(4) + '<span class="hint"> ' + (r.dte ?? '—') + 'D</span></td>'
+      + '<td>' + fmtPx(r.bid) + '</td>'
+      + '<td>' + num(r.net_premium, 2) + '</td>'
+      + '<td>' + num(r.collateral, 0) + '</td>'
+      + '<td><b>' + pctv(r.net_yield_pct, 3) + '</b></td>'
+      + '<td>' + pctv(r.annual_pct, 1) + '</td>'
+      + '<td>' + num(r.delta, 3) + '</td>'
+      + '<td>' + pctv(r.otm_pct, 2) + '</td>'
+      + '<td>' + (r.iv === null || r.iv === undefined ? '—' : pctv(Number(r.iv) * 100, 1)) + '</td>'
+      + '<td>' + (r.iv_pct === null || r.iv_pct === undefined
+          ? '<span class="hint">—</span>' : num(r.iv_pct, 0)) + '</td>'
+      + '<td>' + pctv(r.round_trip_pct, 3) + '</td>'
+      + '<td>' + pctv(r.breakeven_drop_pct, 2) + '</td>'
+      + '<td>' + armTxt(r.arms) + '</td></tr>';
+  });
+  html += '</tbody></table></div>' + otherExp
+    + '<div class="hint" style="margin-top:4px">净收益率（排序依据）= (买价×10000 − 开仓费) ÷ 担保额；'
+    + '往返后再扣平仓费 1.7 + 1 tick 价差；IV 分位 = 该合约 IV 在同 DTE 桶历史分钟样本中的分位，'
+    + '「—」= 该桶暂无样本（数据缺口，不是 0）。</div>';
+  box.innerHTML = head + html;
+}
+
 function renderIvPanel(j) {
   const box = $('oc-iv');
   if (!j || j.ok === false) {
@@ -703,6 +773,7 @@ async function loadChain(force) {
     ocState.expiries = j.expiries || [];
     renderChainKpi(j);
     renderChainTable(j);
+    renderCand(j);
   } catch (e) {
     $('oc-chain').innerHTML = '<span class="bad">期权链加载失败：' + e.message + '</span>';
     $('oc-meta').textContent = '';
@@ -773,6 +844,7 @@ on('md-mask', 'click', (e) => { if (e.target === $('md-mask')) $('md-mask').styl
 on('oc-symbol', 'change', () => {
   $('oc-expiry').innerHTML = '';
   $('oc-chain').innerHTML = '<div class="hint">切换标的，加载中…</div>';
+  $('oc-cand').innerHTML = '';
   $('oc-iv').innerHTML = '<div class="hint">切换标的，加载中…</div>';
   loadChain(true); loadIv(false);
 });

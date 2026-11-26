@@ -167,6 +167,9 @@ def summarize(rows: list[dict], stats: dict) -> dict:
             "p5": pc.get(5), "p25": pc.get(25), "p50": pc.get(50),
             "p75": pc.get(75), "p95": pc.get(95),
             "current": p["current"],
+            # 内部键：给 ``bucket_percentile()`` 算逐合约分位用；对外响应由
+            # ``_public()`` 剔掉（否则每桶几千个点全塞给页面、拖慢轮询）
+            "_values": [float(v) for v in (p.get("values") or [])],
         })
 
     cm = ivs.constant_maturity_iv(rows, target_dte=30.0)
@@ -194,6 +197,62 @@ def summarize(rows: list[dict], stats: dict) -> dict:
         "stale_pct": round(int(stats.get("stale_rows") or 0) / total_rows * 100.0, 2),
         "quality": dict(stats.get("quality") or {}),
     }
+
+
+def _public(payload: dict) -> dict:
+    """对外载荷：剔掉桶里的内部 ``_values``（只给 :func:`bucket_percentile` 用）。"""
+    out = dict(payload)
+    out["buckets"] = [{k: v for k, v in b.items() if k != "_values"}
+                      for b in (payload.get("buckets") or [])]
+    return out
+
+
+def _has_values(payload: dict) -> bool:
+    """旧的磁盘缓存没有桶内样本（加 ``_values`` 之前写的）→ 视为失效。"""
+    bs = payload.get("buckets") or []
+    return any(b.get("_values") for b in bs) if bs else True
+
+
+def bucket_values(undl: str) -> list[tuple[float, float, list[float]]]:
+    """``[(lo, hi, values)]``，一次读盘（候选表逐行算分位时用，别每行读一次文件）。"""
+    dirs = _as_dirs(None)
+    if not dirs:
+        return []
+    cached = _read_cache(_cache_path(dirs, undl))
+    if not cached:
+        return []
+    out = []
+    for b in cached.get("buckets") or []:
+        lo, hi = b.get("lo"), b.get("hi")
+        if lo is None or hi is None:
+            continue
+        out.append((float(lo), float(hi), list(b.get("_values") or [])))
+    return out
+
+
+def percentile_in(buckets: list[tuple[float, float, list[float]]], dte, iv
+                  ) -> Optional[float]:
+    """在已读好的桶表里算分位（纯函数；桶无样本 → None）。"""
+    if iv is None or dte is None:
+        return None
+    try:
+        d = float(dte)
+    except (TypeError, ValueError):
+        return None
+    for lo, hi, vals in buckets or []:
+        if lo <= d < hi:
+            return pctile(float(iv), vals)
+    return None
+
+
+def bucket_percentile(undl: str, dte, iv) -> Optional[float]:
+    """该合约的 IV 在**同 DTE 桶**历史分钟样本中的分位（桶无样本 → None）。
+
+    只读磁盘缓存、不触发重算：拿不到就返回 None，页面显示 ``—`` 并注明桶无样本。
+    """
+    if iv is None or dte is None:
+        return None
+    return percentile_in(bucket_values(undl), dte, iv)
 
 
 def compute(undl: str, src=None) -> dict:
@@ -316,8 +375,9 @@ def panel(undl: str, *, force: bool = False) -> dict:
         if st["status"] == "ready" and st.get("payload"):
             age = time.time() - float(st.get("done_at") or 0.0)
             pl = st["payload"]
-            if age < CACHE_TTL_S and (pl.get("runs") or [pl.get("run")]) == cur_runs:
-                return {**pl, "status": "ready", "cached": True,
+            if (age < CACHE_TTL_S and _has_values(pl)
+                    and (pl.get("runs") or [pl.get("run")]) == cur_runs):
+                return {**_public(pl), "status": "ready", "cached": True,
                         "age_s": int(age)}
         if st["status"] == "computing":
             return {"ok": True, "status": "computing", "symbol": undl,
@@ -325,11 +385,11 @@ def panel(undl: str, *, force: bool = False) -> dict:
                     "elapsed_s": round(time.time() - st["started"], 1)}
 
     cached = None if force else _read_cache(cache)
-    if cached:
+    if cached and _has_values(cached):
         with _lock_of(undl):
             st.update({"status": "ready", "payload": cached, "error": "",
                        "done_at": time.time()})
-        return {**cached, "status": "ready", "cached": True,
+        return {**_public(cached), "status": "ready", "cached": True,
                 "from_disk": True, "age_s": 0}
 
     with _lock_of(undl):

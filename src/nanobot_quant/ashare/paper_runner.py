@@ -298,6 +298,25 @@ def _arm_view(st: dict, arm: str, cfg: dict) -> pl.PaperLedger:
 
 # ── 小工具 ────────────────────────────────────────────────
 
+def open_shorts_by_arm() -> dict[str, list[dict]]:
+    """两臂当前的 open 义务仓（给期权链工作台判额度用）。读盘失败返回空 —— 页面不能因为账本坏了就打不开。"""
+    try:
+        cfg = load_config()
+        st = load_state()
+    except Exception:      # noqa: BLE001
+        return {ps.ARM_A: [], ps.ARM_B: []}
+    out: dict[str, list[dict]] = {}
+    for arm in (ps.ARM_A, ps.ARM_B):
+        if arm == ps.ARM_B and not cfg.get("second_arm"):
+            out[arm] = []
+            continue
+        try:
+            view = _arm_view(st, arm, cfg)
+            out[arm] = [s.to_dict() for s in (view.shorts or {}).values()]
+        except Exception:  # noqa: BLE001
+            out[arm] = []
+    return out
+
 def _now_ts(now: datetime | None = None) -> str:
     return (now or datetime.now(CN)).strftime("%Y-%m-%dT%H:%M:%S")
 

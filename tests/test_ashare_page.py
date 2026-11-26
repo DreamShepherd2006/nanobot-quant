@@ -83,6 +83,16 @@ def test_optional_nodes_wired_through_guard():
     assert "页面初始化失败" in html and "loadChain(false);" in html
 
 
+def test_chain_workbench_section_wired():
+    """🎯 卖出候选：容器、渲染函数、接线三处都要在（缺一处页面就静默不显示）。"""
+    html = _html()
+    assert '<div id="oc-cand"' in html
+    assert "function renderCand(j)" in html
+    assert "renderCand(j);" in html          # loadChain 成功分支里真的调了
+    # 候选口径必须在页面上写明，不能让人把「净收益率」当成往返后的数字
+    assert "往返后" in html and "打平回落" in html
+
+
 def test_arm_labels_have_no_letter_prefix():
     """臂名列已经是 A/B，标签再带「A · 」就重复（页面与 markdown 同源）。"""
     from nanobot_quant.ashare import paper_strategy as ps

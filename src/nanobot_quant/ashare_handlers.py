@@ -15,9 +15,11 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from nanobot_quant.ashare import chain_workbench as cwb
 from nanobot_quant.ashare import contracts as ac
 from nanobot_quant.ashare import iv_panel as ivp
 from nanobot_quant.ashare import params_md as pm
+from nanobot_quant.ashare import paper_strategy as ps
 from nanobot_quant.ashare import trades_md as tm
 from nanobot_quant.ashare import option_chain as oc
 from nanobot_quant.ashare import paper_runner as pr
@@ -223,6 +225,22 @@ def register_ashare_routes(app, gatekeeper) -> None:
         pct = None
         if iv_state.get("status") == "ready" and live.get("iv") is not None:
             pct = ivp.pctile(live["iv"], (iv_state.get("cm30") or {}).get("values") or [])
+        # 🎯 卖出候选：选档规则与模拟账本同一份（rank_puts）；IV 分位只读已算好的缓存，
+        # 不触发重算。算不出来也要让页面能打开，但错误必须回传（不静默留白）。
+        cand: dict = {"rows": [], "pick": "", "pick_other_expiry": "", "params": {}}
+        try:
+            pcfg = pr.load_config()
+            pparams = ps.PaperParams(
+                **{k: v for k, v in (pcfg.get("params") or {}).items()
+                   if k in pr.PARAM_FIELDS})
+            bvals = ivp.bucket_values(symbol)
+            cand = cwb.build_candidates(
+                snap.get("rows") or [], float(snap.get("spot") or 0.0),
+                expiry=expiry, underlying=symbol, params=pparams,
+                arm_shorts=pr.open_shorts_by_arm(),
+                iv_pct_fn=lambda iv, dte: ivp.percentile_in(bvals, dte, iv))
+        except Exception as e:  # noqa: BLE001
+            cand["error"] = f"{type(e).__name__}: {e}"
         return JSONResponse({
             "ok": True,
             "symbol": symbol,
@@ -240,6 +258,7 @@ def register_ashare_routes(app, gatekeeper) -> None:
             "expiries": exps,
             "rows": [_trim_row(r) for r in rows],
             "live_cm30": {**live, "pct": pct},
+            "candidates": cand,
         })
 
     @app.get("/config/ashare/iv")
