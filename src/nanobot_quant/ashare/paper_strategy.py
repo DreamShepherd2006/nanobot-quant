@@ -154,8 +154,8 @@ def should_close(short: dict, mark_px: float, today: date,
 ARM_A = "A"
 ARM_B = "B"
 ARM_LABELS: dict[str, str] = {
-    ARM_A: "A · 止盈 50% / DTE 强平",
-    ARM_B: "B · 高9 + 浮盈 / DTE 强平（D 方案）",
+    ARM_A: "止盈 50% / DTE 强平",
+    ARM_B: "高9 + 浮盈 / DTE 强平（D 方案）",
 }
 
 
