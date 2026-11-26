@@ -24,6 +24,7 @@ from datetime import date, datetime
 
 DEFAULT_MULT = 10_000
 FEE_OPEN_PER_CONTRACT = 1.2
+FEE_CLOSE_PER_CONTRACT = 1.7   # 买入平仓费（元/张）；仅「往返后收益率」口径使用，不改选档排序
 
 
 @dataclass
@@ -79,20 +80,24 @@ def net_yield_pct(strike: float, bid: float, mult: int = DEFAULT_MULT,
     return net_premium(bid, mult, fee) / collateral * 100.0
 
 
-def pick_put(chain: list[dict], spot: float, today: date,
-             params: PaperParams | None = None) -> dict | None:
-    """从链上选一张卖出 put。返回带 ``net_yield_pct`` 的候选 dict，无合适则 None。
+def rank_puts(chain: list[dict], spot: float, today: date,
+              params: PaperParams | None = None) -> list[dict]:
+    """全部通过选档过滤的卖出 put 候选，按净收益率降序（同分保持入参顺序）。
+
+    这是选档规则的**唯一实现** —— ``pick_put()`` 只是取它的第一项，页面
+    工作台与模拟账本共用同一份，避免「页面看到的候选 ≠ 账本会买的」。
 
     ``chain`` 元素需含：``code`` / ``underlying`` / ``strike`` / ``expiry`` /
-    ``bid``（缺失或非正会被跳过）。函数不修改入参。
+    ``bid``（缺失或非正会被跳过）。函数不修改入参，返回项带 ``dte`` /
+    ``net_premium`` / ``net_yield_pct``。
     """
     p = params or PaperParams()
     if not chain or not spot or spot <= 0:
-        return None
+        return []
     floor_strike = float(spot) * (1.0 - p.min_distance_pct / 100.0)
-    best: dict | None = None
-    best_yield = None
-    for c in chain:
+    band_abs = float(spot) * p.band_pct / 100.0
+    out: list[tuple[float, int, dict]] = []
+    for i, c in enumerate(chain):
         try:
             code = str(c.get("code") or "")
             strike = float(c.get("strike") or 0.0)
@@ -110,17 +115,24 @@ def pick_put(chain: list[dict], spot: float, today: date,
             continue
         if strike > floor_strike:          # 距离不够（太靠近平价）→ 跳过
             continue
-        if abs(strike - float(spot)) > float(spot) * p.band_pct / 100.0:
+        if abs(strike - float(spot)) > band_abs:
             continue
         np_ = net_premium(bid, p.mult, p.fee_open)
         if np_ <= 0:                       # 扣费后不赚钱的合约一律排除（fail-closed）
             continue
         y = net_yield_pct(strike, bid, p.mult, p.fee_open)
-        if best_yield is None or y > best_yield:
-            best_yield = y
-            best = dict(c, dte=dte, net_premium=round(np_, 2),
-                        net_yield_pct=round(y, 4))
-    return best
+        out.append((y, i, dict(c, dte=dte, net_premium=round(np_, 2),
+                               net_yield_pct=round(y, 4))))
+    # 降序、稳定：同分保持入参顺序 —— 与旧 pick_put 的「首个最大值」语义逐位一致
+    out.sort(key=lambda t: (-t[0], t[1]))
+    return [t[2] for t in out]
+
+
+def pick_put(chain: list[dict], spot: float, today: date,
+             params: PaperParams | None = None) -> dict | None:
+    """从链上选一张卖出 put。返回带 ``net_yield_pct`` 的候选 dict，无合适则 None。"""
+    ranked = rank_puts(chain, spot, today, params)
+    return ranked[0] if ranked else None
 
 
 def should_close(short: dict, mark_px: float, today: date,
