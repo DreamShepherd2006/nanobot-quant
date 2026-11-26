@@ -129,18 +129,40 @@ def _codes(codes: Any, pool: dict[str, str]) -> str:
     return "、".join(f"{c}（{pool.get(str(c), '?')}）" for c in codes) or "—"
 
 
-def _runner_line(label: str, st: dict) -> str:
-    alive = bool(st.get("thread_alive"))
-    totals = st.get("totals") or {}
-    extra = "、".join(f"{k}={v}" for k, v in totals.items() if v)
+def _runner_line(label: str, st: dict, extra: str = "") -> str:
+    """运行态行。注意两种状态形态：\n
+    ``LiveRunnerBase.status()`` 给 ``thread_alive``，而 ``tape.state()`` 给 ``running``——
+    读错键会把「在跑」渲染成「未运行」（假阴性），故两键兼容。
+    """
+    alive = bool(st.get("thread_alive") or st.get("running"))
     parts = ["🟢 运行中" if alive else "⚪ 未运行",
              f"上次 {_cst(st.get('last_run'))}"]
     if extra:
         parts.append(extra)
+    totals = st.get("totals") or {}
+    kv = "、".join(f"{k}={v}" for k, v in totals.items() if v)
+    if kv:
+        parts.append(kv)
     err = st.get("last_error") or ""
     if err:
         parts.append(f"⚠️ {err}")
     return f"| {label} | " + " · ".join(parts) + " |"
+
+
+def _codes_cell(val: Any, default: Any, pool: dict[str, str]) -> str:
+    """列表类参数（标的池）：带中文名，与默认值不同时标出。"""
+    s = _codes(val, pool)
+    if default is None:
+        return s
+    if isinstance(val, str) or isinstance(default, str):
+        same = str(val) == str(default)
+    elif isinstance(val, (list, tuple)) and isinstance(default, (list, tuple)):
+        same = [str(x) for x in val] == [str(x) for x in default]
+    else:
+        same = _same(val, default)
+    if same:
+        return s
+    return f"{s} ⚠️（默认 {_codes(default, pool)}）"
 
 
 # ── 渲染 ─────────────────────────────────────────────────────
@@ -179,7 +201,10 @@ def build(undl: str | None = None) -> str:
     out.append("")
     out.append("| 项 | 状态 |")
     out.append("|:---|:---|")
-    out.append(_runner_line("盘口采集（tape）", tstate))
+    tape_extra = (f"samples={int(tstate.get('total_samples') or 0)}"
+                  f" · rows={int(tstate.get('total_rows') or 0)}"
+                  f" · {'交易时段内' if tstate.get('in_session') else '非交易时段'}")
+    out.append(_runner_line("盘口采集（tape）", tstate, tape_extra))
     out.append(_runner_line("模拟账本（paper）", pr.runner_state()))
     iv_bits = [f"状态 `{iv_state.get('status') or 'idle'}`"]
     if iv_state.get("asof"):
@@ -198,8 +223,8 @@ def build(undl: str | None = None) -> str:
     out.append("|:---|:---|")
     for k, label in TAPE_LABELS.items():
         val = tcfg.get(k)
-        if k == "underlyings":
-            out.append(f"| {label} | {_codes(val, pool)} |")
+        if k in ("underlyings", "symbols"):
+            out.append(f"| {label} | {_codes_cell(val, tdef.get(k), pool)} |")
         else:
             out.append(f"| {label} | {_cell(val, tdef.get(k))} |")
     out.append("")
@@ -211,8 +236,8 @@ def build(undl: str | None = None) -> str:
     out.append("|:---|:---|")
     for k, label in PAPER_BASE_LABELS.items():
         val = pcfg.get(k)
-        if k == "symbols":
-            out.append(f"| {label} | {_codes(val, pool)} |")
+        if k in ("underlyings", "symbols"):
+            out.append(f"| {label} | {_codes_cell(val, pdef.get(k), pool)} |")
         else:
             out.append(f"| {label} | {_cell(val, pdef.get(k))} |")
     out.append("")

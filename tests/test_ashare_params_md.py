@@ -32,8 +32,9 @@ def cfg(monkeypatch):
 
     monkeypatch.setattr(tape, "tape_config", lambda: dict(tape_cfg))
     monkeypatch.setattr(tape, "state", lambda: {
-        "thread_alive": True, "last_run": "2026-11-26T05:00:00Z",
-        "totals": {"samples": 12}, "last_error": ""})
+        "running": True, "last_run": "2026-11-26T05:00:00Z",
+        "total_samples": 199, "total_rows": 37372, "in_session": True,
+        "last_error": ""})
     monkeypatch.setattr(tape, "tape_dir", lambda: "/data/legion/credentials/ashare_tape")
     monkeypatch.setattr(pr, "load_config", lambda: dict(paper_cfg))
     monkeypatch.setattr(pr, "runner_state", lambda: {
@@ -92,6 +93,28 @@ def test_times_rendered_in_cst(cfg):
     md = pm.build()
     assert "2026-11-26 13:00:00" in md          # 05:00Z → 北京 13:00
     assert "2026-11-26 13:00:00" in md and "CST" in md
+
+
+def test_tape_running_key_variant(cfg):
+    """`tape.state()` 用 ``running``（不是 ``thread_alive``）——读错键会把在跑渲染成未运行。"""
+    md = pm.build()
+    tape_line = [l for l in md.splitlines() if "盘口采集（tape）" in l][0]
+    assert "🟢 运行中" in tape_line
+    assert "samples=199" in tape_line and "rows=37372" in tape_line
+    assert "交易时段内" in tape_line
+
+
+def test_paper_stopped_rendered(cfg):
+    md = pm.build()
+    paper_line = [l for l in md.splitlines() if "模拟账本（paper）" in l][0]
+    assert "⚪ 未运行" in paper_line and "rounds=7" in paper_line
+
+
+def test_symbols_deviation_marked(cfg, monkeypatch):
+    paper_cfg = cfg[1]
+    paper_cfg["symbols"] = ["510050.SH", "510300.SH"]  # 默认只有 510050.SH
+    md = pm.build()
+    assert "⚠️（默认 510050.SH（上证50ETF））" in md
 
 
 def test_notes_state_key_kou_jing(cfg):
