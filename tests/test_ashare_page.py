@@ -62,3 +62,29 @@ def test_option_chain_section_states_iv_caveats():
     assert "不用" in html and "新浪 IV" in html
     assert "按交易日计" in html
     assert "不外推" in html
+
+
+# ── 脚本 boot 顺序（2026-11-26 真机回归）────────────────────
+
+def test_modal_markup_precedes_script():
+    """弹窗节点必须在 <script> 之前——否则 $('md-close') 为 null 抛 TypeError，
+    后续 loadChain/loadIv 永不执行，期权链与 IV 分位永远停在「加载中…」。"""
+    html = _html()
+    assert html.index('id="md-mask"') < html.index("<script")
+
+
+def test_optional_nodes_wired_through_guard():
+    """拿不准是否在场的节点一律走 on() 守卫，不得直接 $('x').addEventListener。"""
+    html = _html()
+    assert "const on = (id, ev, fn) =>" in html
+    for el in ("md-close", "md-all", "md-copy", "md-mask", "oc-symbol", "oc-expiry", "oc-refresh"):
+        assert f"{el}').addEventListener" not in html, el
+    # 启动段整体包 try/catch，失败要显式可见（不能静默停在「加载中…」）
+    assert "页面初始化失败" in html and "loadChain(false);" in html
+
+
+def test_arm_labels_have_no_letter_prefix():
+    """臂名列已经是 A/B，标签再带「A · 」就重复（页面与 markdown 同源）。"""
+    from nanobot_quant.ashare import paper_strategy as ps
+    for arm in (ps.ARM_A, ps.ARM_B):
+        assert not ps.ARM_LABELS[arm].startswith(f"{arm} ·")

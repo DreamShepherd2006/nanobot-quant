@@ -57,6 +57,19 @@
 </div>
 <div class="sub">只读采集（不下单、不参与决策）· 合约清单来自新浪（东财备源，缓存 1 天）· 盘口来自新浪五档 · 落盘 <span class="mono">legion/credentials/ashare_tape/tape_YYYYMMDD.jsonl</span></div>
 
+<div id="md-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50">
+  <div style="max-width:900px;margin:6vh auto;background:#161b22;border:1px solid #2a323d;border-radius:8px;padding:14px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <b id="md-title">参数快照（Markdown）</b><span id="md-tip" class="hint" style="margin:0"></span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="md-all">全选</button>
+      <button id="md-copy">复制</button>
+      <button class="ghost" id="md-close">关闭</button>
+    </div>
+    <textarea id="md-text" readonly style="width:100%;height:62vh;background:#0d1117;color:#c3ccd9;border:1px solid #2a323d;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px"></textarea>
+  </div>
+</div>
+
 <div class="card">
   <h2>📊 <span id="td-name">510050 上证50ETF</span> · TD 计数实况 <span id="td-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
   <div class="hint" style="margin:-2px 0 8px">标的
@@ -168,6 +181,11 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// 节点缺失不许把整段脚本打断（一个 null.addEventListener 曾杀死后续所有加载）
+const on = (id, ev, fn) => {
+  const n = $(id);
+  if (n) { n.addEventListener(ev, fn); } else { console.warn('[ashare] 缺少节点', id); }
+};
 const fmtPct = (v) => (v === null || v === undefined) ? '—' : (v * 100).toFixed(2) + '%';
 const fmtNum = (v, d) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
 
@@ -737,40 +755,35 @@ async function copyTradesMd() {
 }
 $('btn-params-md').addEventListener('click', copyParamsMd);
 $('btn-trades-md').addEventListener('click', copyTradesMd);
-$('md-close').addEventListener('click', () => { $('md-mask').style.display = 'none'; });
-$('md-all').addEventListener('click', () => { const t = $('md-text'); t.focus(); t.select(); });
-$('md-copy').addEventListener('click', () => {
+on('md-close', 'click', () => { $('md-mask').style.display = 'none'; });
+on('md-all', 'click', () => { const t = $('md-text'); t.focus(); t.select(); });
+on('md-copy', 'click', () => {
   const t = $('md-text'); t.select();
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(t.value).then(() => { $('md-tip').textContent = '✅ 已复制'; },
       () => { $('md-tip').textContent = '⚠️ 请手动复制（Ctrl+C）'; });
   } else { $('md-tip').textContent = '⚠️ 请手动复制（Ctrl+C）'; }
 });
-$('md-mask').addEventListener('click', (e) => { if (e.target === $('md-mask')) $('md-mask').style.display = 'none'; });
+on('md-mask', 'click', (e) => { if (e.target === $('md-mask')) $('md-mask').style.display = 'none'; });
 
-$('oc-symbol').addEventListener('change', () => {
+on('oc-symbol', 'change', () => {
   $('oc-expiry').innerHTML = '';
   $('oc-chain').innerHTML = '<div class="hint">切换标的，加载中…</div>';
   $('oc-iv').innerHTML = '<div class="hint">切换标的，加载中…</div>';
   loadChain(true); loadIv(false);
 });
-$('oc-expiry').addEventListener('change', () => loadChain(false));
-$('oc-refresh').addEventListener('click', () => { loadChain(true); loadIv(false); });
-loadChain(false);
-loadIv(false);
-setInterval(() => loadChain(false), 30000);
-</script>
-<div id="md-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50">
-  <div style="max-width:900px;margin:6vh auto;background:#161b22;border:1px solid #2a323d;border-radius:8px;padding:14px">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-      <b id="md-title">参数快照（Markdown）</b><span id="md-tip" class="hint" style="margin:0"></span>
-      <span style="flex:1"></span>
-      <button class="ghost" id="md-all">全选</button>
-      <button id="md-copy">复制</button>
-      <button class="ghost" id="md-close">关闭</button>
-    </div>
-    <textarea id="md-text" readonly style="width:100%;height:62vh;background:#0d1117;color:#c3ccd9;border:1px solid #2a323d;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px"></textarea>
-  </div>
-</div>
-</body>
+on('oc-expiry', 'change', () => loadChain(false));
+on('oc-refresh', 'click', () => { loadChain(true); loadIv(false); });
+
+// 启动：整体包在 try/catch 里——任何一个节点缺失/报错都不许静默吞掉后续加载
+// （历史 bug：弹窗节点曾写在 </script> 之后，$('md-close') 为 null 抛 TypeError，
+//   导致 loadChain/loadIv 永不执行，期权链/IV 分位永远停在“加载中…”）
+try {
+  loadChain(false);
+  loadIv(false);
+  setInterval(() => loadChain(false), 30000);
+} catch (e) {
+  console.error('[ashare] boot', e);
+  $('md-msg').innerHTML = '<span class="bad">页面初始化失败：' + e.message + '</span>';
+}
 </html>
