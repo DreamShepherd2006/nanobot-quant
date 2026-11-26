@@ -108,7 +108,8 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
     pick_expiry = str(pick.get("expiry") or "") if pick else ""
     arms = arm_shorts or {}
     # (到期, dte) → (ATM 参考 IV, 该档分位)。同到期多行同一个分位，只算一次
-    pct_cache: dict[tuple[str, int], tuple[Optional[float], Optional[float]]] = {}
+    pct_cache: dict[tuple[str, int],
+                    tuple[Optional[float], Optional[float], bool]] = {}
 
     out = []
     for c in ranked:
@@ -129,9 +130,15 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
         ck = (exp, dte)
         if ck not in pct_cache:
             ref = _atm_iv_ref(puts, exp, spot)
-            pct_cache[ck] = (ref, iv_pct_fn(ref, dte)
-                             if (iv_pct_fn and ref is not None) else None)
-        atm_iv, iv_pct = pct_cache[ck]
+            res = (iv_pct_fn(ref, dte)
+                   if (iv_pct_fn and ref is not None) else None)
+            # 允许回调返回 (分位, 是否近似)——近似值页面要打 ≈，不能当精确值
+            if isinstance(res, (tuple, list)):
+                pct_val, approx = res[0], bool(res[1])
+            else:
+                pct_val, approx = res, False
+            pct_cache[ck] = (ref, pct_val, approx)
+        atm_iv, iv_pct, iv_pct_approx = pct_cache[ck]
         # 虚值% 用现货算 —— 与 min_distance_pct 门槛同源；链行的 otm_pct 是 F 口径
         try:
             otm_pct = ((float(spot) - strike) / float(spot) * 100.0
@@ -147,6 +154,7 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
             "bid": bid,
             "iv": iv,
             "iv_pct": iv_pct,
+            "iv_pct_approx": iv_pct_approx,
             "atm_iv": atm_iv,
             "delta": c.get("delta"),
             "otm_pct": otm_pct,

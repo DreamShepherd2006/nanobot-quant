@@ -248,6 +248,97 @@ def bucket_values(undl: str) -> list[tuple[float, float, list[float]]]:
     return _bvals_of(cached)
 
 
+# 分位数键（升序）——桶内没有 ``_values`` 时用它们做线性插值近似
+_QUANT_KEYS = ((5, "p5"), (25, "p25"), (50, "p50"), (75, "p75"), (95, "p95"))
+
+
+def bucket_refs(undl: str) -> tuple[list[dict], str]:
+    """桶参考数据 + 来源：``([{lo, hi, values, q}], memory|disk|none)``。
+
+    与 :func:`bucket_values` 的区别：**不要求桶内有日代表值**——只要桶里还有
+    分位数（``p5…p95``）就带出去，让调用方至少能给近似分位（页面显示 ``≈``），
+    而不是摆一排 ``—``（那种"静默无数据"比近似值更难排查）。诊断字段同时返回
+    来源，便于页面说明"为什么是近似/为空"。
+    """
+    undl = str(undl)
+    src = "none"
+    payload = None
+    st = _state_of(undl)
+    if st.get("status") == "ready" and st.get("payload"):
+        payload, src = st["payload"], "memory"
+    if not _bvals_ok(payload):
+        dirs = _as_dirs(None)
+        cached = _read_cache(_cache_path(dirs, undl)) if dirs else None
+        if cached and _bvals_ok(cached):
+            payload, src = cached, "disk"
+        elif payload is None:
+            src = "none"
+        else:  # 内存有载荷但连分位数都没有——如实标出来源
+            src = "memory-novals"
+    if not payload:
+        return [], src
+    out: list[dict] = []
+    for b in payload.get("buckets") or []:
+        lo, hi = b.get("lo"), b.get("hi")
+        if lo is None or hi is None:
+            continue
+        vals = [float(v) for v in (b.get("_values") or []) if v is not None]
+        q = {k: b.get(k) for _, k in _QUANT_KEYS}
+        if not vals and all(v is None for v in q.values()):
+            continue
+        out.append({"lo": float(lo), "hi": float(hi),
+                    "values": vals, "q": q,
+                    "days": b.get("days") or 0})
+    return out, src
+
+
+def _bvals_ok(payload) -> bool:
+    """载荷里至少有一个桶带日代表值或分位数。"""
+    for b in (payload or {}).get("buckets") or []:
+        if b.get("_values"):
+            return True
+        if any(b.get(k) is not None for _, k in _QUANT_KEYS):
+            return True
+    return False
+
+
+def percentile_approx(refs: list[dict], dte, iv) -> tuple[Optional[float], bool]:
+    """``(分位, 是否近似)``；桶内无日代表值时用 p5…p95 线性插值（近似）。
+
+    ``dte``/``iv`` 任一缺失或落不进任何桶 → ``(None, False)``。
+    """
+    if iv is None or dte is None:
+        return None, False
+    try:
+        d, value = float(dte), float(iv)
+    except (TypeError, ValueError):
+        return None, False
+    for r in refs or []:
+        if not (r["lo"] <= d <= r["hi"]):
+            continue
+        vals = r.get("values") or []
+        if vals:
+            below = sum(1 for v in vals if v <= value)
+            return below / len(vals) * 100.0, False
+        q = r.get("q") or {}
+        pts = sorted((float(k), float(q[key])) for k, key in _QUANT_KEYS
+                     if q.get(key) is not None)
+        if len(pts) < 2:
+            return None, False
+        if value <= pts[0][1]:
+            return pts[0][0], True
+        if value >= pts[-1][1]:
+            return pts[-1][0], True
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            if y0 <= value <= y1:
+                if y1 == y0:
+                    return x0, True
+                t = (value - y0) / (y1 - y0)
+                return x0 + t * (x1 - x0), True
+        return None, False
+    return None, False
+
+
 def bucket_source(undl: str) -> str:
     """分位数据来源（仅用于“为何显示 —”的可见性）：memory / disk / none。"""
     undl = str(undl)

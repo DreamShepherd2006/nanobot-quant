@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 from fastapi import Request
@@ -104,6 +105,26 @@ def _expiry_summary(snap: dict) -> list[dict]:
                     "pairs": fw.get("n_pairs"), "mad_pct": fw.get("mad_pct"),
                     "atm_strike": strike, "atm_iv_c": atm_c, "atm_iv_p": atm_p})
     return out
+
+
+_LAST_CAND_DIAG = ""
+
+
+def _cand_diag(symbol: str, iv_src: str, refs: list) -> None:
+    """候选表分位来源诊断（仅状态变化时打一行，不刷屏）。
+
+    页面「分位全是 —」这类问题必须能自证原因（哪一层缺数据），否则只能靠
+    重建重试猜。日志走 stderr → Runtime logs。
+    """
+    global _LAST_CAND_DIAG
+    vals = sum(1 for r in refs if r.get("values"))
+    qs = sum(1 for r in refs
+             if any(v is not None for v in (r.get("q") or {}).values()))
+    key = f"{symbol}|{iv_src}|buckets={len(refs)}|vals={vals}|q={qs}"
+    if key == _LAST_CAND_DIAG:
+        return
+    _LAST_CAND_DIAG = key
+    print(f"[ASHARE-CAND] 分位来源 {key}", file=sys.stderr, flush=True)
 
 
 def register_ashare_routes(app, gatekeeper) -> None:
@@ -233,13 +254,22 @@ def register_ashare_routes(app, gatekeeper) -> None:
             pparams = ps.PaperParams(
                 **{k: v for k, v in (pcfg.get("params") or {}).items()
                    if k in pr.PARAM_FIELDS})
-            bvals = ivp.bucket_values(symbol)
+            refs, iv_src = ivp.bucket_refs(symbol)
             cand = cwb.build_candidates(
                 snap.get("rows") or [], float(snap.get("spot") or 0.0),
                 expiry=expiry, underlying=symbol, params=pparams,
                 arm_shorts=pr.open_shorts_by_arm(),
-                iv_src=ivp.bucket_source(symbol),
-                iv_pct_fn=lambda iv, dte: ivp.percentile_in(bvals, dte, iv))
+                iv_src=iv_src,
+                iv_pct_fn=lambda iv, dte: ivp.percentile_approx(refs, dte, iv))
+            # 诊断：分位为空时页面要能说清是哪一层缺数据（桶数/有样本桶数）
+            cand.setdefault("params", {}).update({
+                "iv_buckets": len(refs),
+                "iv_vals": sum(1 for r in refs if r.get("values")),
+                "iv_q": sum(1 for r in refs
+                            if any(v is not None
+                                   for v in (r.get("q") or {}).values())),
+            })
+            _cand_diag(symbol, iv_src, refs)
         except Exception as e:  # noqa: BLE001
             cand["error"] = f"{type(e).__name__}: {e}"
         return JSONResponse({
