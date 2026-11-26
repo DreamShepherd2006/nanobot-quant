@@ -130,6 +130,24 @@ def _codes(codes: Any, pool: dict[str, str]) -> str:
     return "、".join(f"{c}（{pool.get(str(c), '?')}）" for c in codes) or "—"
 
 
+def _today_rows() -> int | None:
+    """今日 tape 落盘行数（跨重启累计）——内存计数器重建后归零，不能当「今日样本」。"""
+    try:
+        p = tape.sample_path()
+        if not p.exists():
+            return 0
+        n = 0
+        with open(p, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                n += chunk.count(b"\n")
+        return n
+    except Exception:  # noqa: BLE001 — 统计失败不影响快照
+        return None
+
+
 def _runner_line(label: str, st: dict, extra: str = "") -> str:
     """运行态行。注意两种状态形态：\n
     ``LiveRunnerBase.status()`` 给 ``thread_alive``，而 ``tape.state()`` 给 ``running``——
@@ -202,9 +220,12 @@ def build(undl: str | None = None) -> str:
     out.append("")
     out.append("| 项 | 状态 |")
     out.append("|:---|:---|")
-    tape_extra = (f"samples={int(tstate.get('total_samples') or 0)}"
-                  f" · rows={int(tstate.get('total_rows') or 0)}"
-                  f" · {'交易时段内' if tstate.get('in_session') else '非交易时段'}")
+    rows_today = _today_rows()
+    tape_extra = (f"本次进程 samples={int(tstate.get('total_samples') or 0)}"
+                  f" · rows={int(tstate.get('total_rows') or 0)}")
+    if rows_today is not None:
+        tape_extra += f" · 今日落盘 {rows_today} 条"
+    tape_extra += f" · {'交易时段内' if tstate.get('in_session') else '非交易时段'}"
     out.append(_runner_line("盘口采集（tape）", tstate, tape_extra))
     out.append(_runner_line("模拟账本（paper）", pr.runner_state()))
     iv_bits = [f"状态 `{iv_state.get('status') or 'idle'}`"]

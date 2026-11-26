@@ -68,7 +68,7 @@ def payload(monkeypatch):
 
 def test_two_arms_listed_separately(payload):
     md = tm.build()
-    assert "## 臂 A · " in md and "## 臂 B · " in md
+    assert "## 臂 A — " in md and "## 臂 B — " in md
     # 同一合约在两臂各出现一次，属预期（两本账），不是重复下单
     assert md.count("10009013") >= 4
 
@@ -86,7 +86,6 @@ def test_inactive_arm_hidden(monkeypatch):
     monkeypatch.setattr(tm.pr, "paper_dir", lambda: "/tmp/x")
     md = tm.build()
     assert "## 臂 A" in md and "## 臂 B" not in md
-
 
 # ── 截断 ────────────────────────────────────────────────────
 
@@ -108,7 +107,6 @@ def test_limit_truncates_to_newest(monkeypatch):
     md = tm.build(limit=2)
     assert "最近 **2** 笔" in md
     assert "| 90 (" not in md and "| 93 (" in md and "| 94 (" in md
-
 def test_limit_zero_shows_all(monkeypatch):
     p = _many_fills()
     monkeypatch.setattr(tm.pr, "state", lambda **kw: p)

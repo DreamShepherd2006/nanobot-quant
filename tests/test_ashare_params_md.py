@@ -117,8 +117,18 @@ def test_tape_running_key_variant(cfg):
     md = pm.build()
     tape_line = [l for l in md.splitlines() if "盘口采集（tape）" in l][0]
     assert "🟢 运行中" in tape_line
-    assert "samples=199" in tape_line and "rows=37372" in tape_line
+    assert "本次进程 samples=199" in tape_line and "rows=37372" in tape_line
     assert "交易时段内" in tape_line
+
+
+def test_tape_today_rows_from_disk(cfg, tmp_path, monkeypatch):
+    """内存计数器重建后归零，今日样本必须从落盘文件算。"""
+    f = tmp_path / "tape_20261126.jsonl"
+    f.write_bytes(b'{"a":1}\n{"a":2}\n{"a":3}\n')
+    monkeypatch.setattr(tape, "sample_path", lambda day=None: f)
+    md = pm.build()
+    line = [l for l in md.splitlines() if "盘口采集（tape）" in l][0]
+    assert "今日落盘 3 条" in line
 
 
 def test_paper_stopped_rendered(cfg):
@@ -143,9 +153,9 @@ def test_notes_state_key_kou_jing(cfg):
 
 def test_params_snapshot_has_ledger_summary(cfg):
     md = pm.build()
-    assert "| A · " in md and "500100.00" in md
+    assert "| A | 止盈回落 50% / DTE 强平 |" in md and "500100.00" in md
     assert "100.00%" in md          # 唯一一笔已平仓且盈利 → 胜率 100%
-    assert "| B · " not in md         # 未启用臂不进汇总表（active=False；② 里的配置行不算）
+    assert "| B | " not in md        # 未启用臂不进汇总表（active=False；② 里的配置行不算）
 
 
 def test_iv_section_uses_cache_only(cfg, monkeypatch):

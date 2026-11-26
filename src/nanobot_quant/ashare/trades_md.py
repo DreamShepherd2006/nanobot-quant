@@ -121,7 +121,7 @@ def summary_table(payload: dict) -> list[str]:
             continue
         wr = "—" if s["win_rate"] is None else f"{_n(s['win_rate'])}%"
         rows.append(
-            f"| {s['label']} | {_arm_rule(arm)} | {_n(s['equity'])} | "
+            f"| {arm} | {_arm_rule(arm)} | {_n(s['equity'])} | "
             f"{_n(s['return_pct'], 4)}% | {_n(s['realized'])} | {_n(s['unrealized'])} | "
             f"{s['open_qty']} | {s['closed']} | {wr} | {_ts_both(s['last_ts'])[0]} |")
     return rows
@@ -194,7 +194,7 @@ def build(limit: int = DEFAULT_LIMIT) -> str:
         view = (payload.get("arms") or {}).get(arm) or {}
         fills = list(view.get("fills") or [])
         shown = fills[-limit:] if limit else fills
-        out.append(f"## 臂 {s['label']} — {_arm_rule(arm)}")
+        out.append(f"## 臂 {arm} — {_arm_rule(arm)}")
         out.append("")
         cons = s["consistency"] or {}
         cons_txt = "✅ 一致" if cons.get("ok", True) else f"⚠️ 不一致：{cons}"
