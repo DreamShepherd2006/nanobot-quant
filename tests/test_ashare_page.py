@@ -88,3 +88,13 @@ def test_arm_labels_have_no_letter_prefix():
     from nanobot_quant.ashare import paper_strategy as ps
     for arm in (ps.ARM_A, ps.ARM_B):
         assert not ps.ARM_LABELS[arm].startswith(f"{arm} ·")
+
+
+def test_script_block_is_closed_exactly_once_and_last():
+    """内联 JS 里不得出现 `</script>` 字面量（注释/字符串都不行）——浏览器会就地结块，
+    其余 JS 变成页面正文；同时闭合标签必须真的存在且只有一个（曾漏掉 → 整页脚本文本化）。"""
+    html = _html()
+    assert html.count("</script") == 1, html.count("</script")
+    assert html.count("</body>") == 1 and html.rstrip().endswith("</html>")
+    # 唯一的闭合标签必须在启动段之后（在它之前出现 = 脚本被提前截断）
+    assert html.index("</script") > html.index("setInterval(() => loadChain(false), 30000);")

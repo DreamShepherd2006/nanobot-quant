@@ -776,7 +776,7 @@ on('oc-expiry', 'change', () => loadChain(false));
 on('oc-refresh', 'click', () => { loadChain(true); loadIv(false); });
 
 // 启动：整体包在 try/catch 里——任何一个节点缺失/报错都不许静默吞掉后续加载
-// （历史 bug：弹窗节点曾写在 </script> 之后，$('md-close') 为 null 抛 TypeError，
+// （历史 bug：弹窗节点曾写在脚本块结束之后，$('md-close') 为 null 抛 TypeError，
 //   导致 loadChain/loadIv 永不执行，期权链/IV 分位永远停在“加载中…”）
 try {
   loadChain(false);
@@ -786,4 +786,6 @@ try {
   console.error('[ashare] boot', e);
   $('md-msg').innerHTML = '<span class="bad">页面初始化失败：' + e.message + '</span>';
 }
+</script>
+</body>
 </html>
