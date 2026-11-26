@@ -154,9 +154,9 @@ def test_iv_percentile_uses_atm_reference_not_contract_iv():
     拿深虚值合约自己的 IV 去比会因 skew 恒落在高位，页面会一直报「超贵」。
     """
     rows = [
-        _row("ATM", 2.85, EXP_20D, 0.0500, iv=0.145, delta=-0.05),   # 参考档，不进候选
+        _row("ATM", 2.85, EXP_20D, 0.0500, iv=0.145, delta=-0.54),    # 参考档，不进候选
         _row("DEEP1", 2.70, EXP_20D, 0.0300, iv=0.165, delta=-0.13),
-        _row("DEEP2", 2.60, EXP_20D, 0.0200, iv=0.185, delta=-0.07),
+        _row("DEEP2", 2.65, EXP_20D, 0.0045, iv=0.185, delta=-0.074),
     ]
     seen = []
     out = cwb.build_candidates(rows, 2.85, TODAY, _p(), expiry=EXP_20D,
@@ -176,12 +176,18 @@ def test_atm_iv_ref_falls_back_to_nearest_strike_without_delta():
         {"code": "B", "expiry": EXP_20D, "strike": 2.85, "iv": 0.145, "delta": None},
     ]
     assert cwb._atm_iv_ref(puts, EXP_20D, 2.85) == pytest.approx(0.145)
-    # 有 Δ 的行优先于只靠 strike 距离的行
-    puts2 = [
-        {"code": "A", "expiry": EXP_20D, "strike": 2.60, "iv": 0.20, "delta": None},
-        {"code": "B", "expiry": EXP_20D, "strike": 2.85, "iv": 0.145, "delta": -0.30},
+    # 缺 strike 时用 |Δ| 距 0.5 最近（ATM），不是 |Δ| 最小（最虚值）
+    nk = [
+        {"code": "V", "expiry": EXP_20D, "strike": None, "iv": 0.19, "delta": -0.03},
+        {"code": "ATM", "expiry": EXP_20D, "strike": None, "iv": 0.145, "delta": -0.52},
     ]
-    assert cwb._atm_iv_ref(puts2, EXP_20D, 2.85) == pytest.approx(0.145)
+    assert cwb._atm_iv_ref(nk, EXP_20D, 2.85) == pytest.approx(0.145)
+    # 深虚值 |Δ| 再小也不会被当成 ATM（strike 距离优先）
+    deep = [
+        {"code": "D", "expiry": EXP_20D, "strike": 2.65, "iv": 0.19, "delta": -0.03},
+        {"code": "ATM", "expiry": EXP_20D, "strike": 2.85, "iv": 0.145, "delta": -0.54},
+    ]
+    assert cwb._atm_iv_ref(deep, EXP_20D, 2.864) == pytest.approx(0.145)
 
 
 def test_candidates_otm_pct_uses_spot_basis():

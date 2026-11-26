@@ -50,10 +50,10 @@ def _arm_status(shorts: list[dict], params: PaperParams, underlying: str,
 
 
 def _atm_iv_ref(puts: list[dict], expiry: str, spot: float) -> Optional[float]:
-    """该到期档的 ATM put IV：优先 ``|Δ|`` 最小那张，缺 Δ 时取 strike 最接近现货。
+    """该到期档的 ATM put IV：取 strike 最接近现货那张，缺 strike 时用 ``|Δ|`` 距 0.5 最近。
 
-    分位基准必须是 ATM —— ``iv_series`` 历史每桶只存 ATM IV，用单张深虚值前的 IV
-    去比会恒为高位（skew 常态），页面就会一直报「超贵」。
+    分位基准必须是 ATM —— ``iv_series`` 历史每桶只存 ATM IV。不能用「``|Δ|`` 最小」
+    （那是**最虚值**那张，skew 最高）也不用单张合约自己的 IV，否则分位恒落在高位。
     """
     pool = [r for r in puts
             if (not expiry or str(r.get("expiry") or "") == expiry)]
@@ -66,14 +66,17 @@ def _atm_iv_ref(puts: list[dict], expiry: str, spot: float) -> Optional[float]:
         except (TypeError, ValueError):
             continue
         try:
-            near = abs(float(r.get("strike") or 0.0) - float(spot or 0.0))
+            strike = float(r.get("strike") or 0.0)
         except (TypeError, ValueError):
-            near = float("inf")
+            strike = 0.0
         d = r.get("delta")
-        try:
-            key = (0, abs(float(d))) if d is not None else (1, near)
-        except (TypeError, ValueError):
-            key = (1, near)
+        if strike > 0 and spot > 0:
+            key = (0, abs(strike - float(spot)))
+        else:
+            try:
+                key = (1, abs(abs(float(d)) - 0.5)) if d is not None else (2, 0.0)
+            except (TypeError, ValueError):
+                key = (2, 0.0)
         if best_key is None or key < best_key:
             best_key, best = key, iv
     return best
