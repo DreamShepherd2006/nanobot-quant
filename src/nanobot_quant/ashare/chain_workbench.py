@@ -11,7 +11,11 @@ IV 分位查表回调），渲染输出。
 - 净收益率：``(bid×面值 − 开仓费) ÷ 担保额``，分母是接货真正占用的钱；
 - 往返后收益率：再扣买入平仓费 + 1 tick 价差，**仅展示、不参与排序**；
 - 打平回落%：往返成本 ÷ 开仓权利金 —— 权利金跌到这条线以下，这一轮就是白干；
-- IV 分位：该合约 IV 在同 DTE 桶历史分钟样本中的分位，桶无样本 → ``None``。
+- 虚值%：``(现货 − strike) ÷ 现货``，与 ``min_distance_pct`` 门槛**同源**（链行自带的
+  ``otm_pct`` 用隐含远期 F 算，那是 IV/Δ 的口径，不能拿来展示门槛）；
+- ATM 分位：该到期档 **ATM put IV**（``|Δ|`` 最小那张）在同 DTE 桶历史样本中的分位。
+  历史序列只存 ATM IV，拿单张深虚值合约的 IV 去比会因 skew 系统性落在高位，
+  桶无样本 → ``None``。
 """
 
 from __future__ import annotations
@@ -45,6 +49,36 @@ def _arm_status(shorts: list[dict], params: PaperParams, underlying: str,
     return {"ok": True, "label": "可开"}
 
 
+def _atm_iv_ref(puts: list[dict], expiry: str, spot: float) -> Optional[float]:
+    """该到期档的 ATM put IV：优先 ``|Δ|`` 最小那张，缺 Δ 时取 strike 最接近现货。
+
+    分位基准必须是 ATM —— ``iv_series`` 历史每桶只存 ATM IV，用单张深虚值前的 IV
+    去比会恒为高位（skew 常态），页面就会一直报「超贵」。
+    """
+    pool = [r for r in puts
+            if (not expiry or str(r.get("expiry") or "") == expiry)]
+    best_key: Optional[tuple] = None
+    best: Optional[float] = None
+    for r in pool:
+        iv = r.get("iv")
+        try:
+            iv = float(iv)
+        except (TypeError, ValueError):
+            continue
+        try:
+            near = abs(float(r.get("strike") or 0.0) - float(spot or 0.0))
+        except (TypeError, ValueError):
+            near = float("inf")
+        d = r.get("delta")
+        try:
+            key = (0, abs(float(d))) if d is not None else (1, near)
+        except (TypeError, ValueError):
+            key = (1, near)
+        if best_key is None or key < best_key:
+            best_key, best = key, iv
+    return best
+
+
 def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None,
                      params: Optional[PaperParams] = None, *,
                      expiry: str = "",
@@ -69,6 +103,8 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
     pick_code = str(pick.get("code") or "") if pick else ""
     pick_expiry = str(pick.get("expiry") or "") if pick else ""
     arms = arm_shorts or {}
+    # (到期, dte) → (ATM 参考 IV, 该档分位)。同到期多行同一个分位，只算一次
+    pct_cache: dict[tuple[str, int], tuple[Optional[float], Optional[float]]] = {}
 
     out = []
     for c in ranked:
@@ -85,18 +121,31 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
         breakeven = rt_cost / (bid * p.mult) * 100.0 if bid > 0 else None
         ann = (float(c.get("net_yield_pct") or 0.0) * 365.0 / dte) if dte > 0 else None
         iv = c.get("iv")
-        iv_pct = iv_pct_fn(iv, dte) if iv_pct_fn else None
+        exp = str(c.get("expiry") or "")
+        ck = (exp, dte)
+        if ck not in pct_cache:
+            ref = _atm_iv_ref(puts, exp, spot)
+            pct_cache[ck] = (ref, iv_pct_fn(ref, dte)
+                             if (iv_pct_fn and ref is not None) else None)
+        atm_iv, iv_pct = pct_cache[ck]
+        # 虚值% 用现货算 —— 与 min_distance_pct 门槛同源；链行的 otm_pct 是 F 口径
+        try:
+            otm_pct = ((float(spot) - strike) / float(spot) * 100.0
+                       if spot and strike > 0 else None)
+        except (TypeError, ValueError):
+            otm_pct = None
         undl = underlying or str(c.get("underlying") or "")
         out.append({
             "code": code,
             "strike": strike,
-            "expiry": str(c.get("expiry") or ""),
+            "expiry": exp,
             "dte": dte,
             "bid": bid,
             "iv": iv,
             "iv_pct": iv_pct,
+            "atm_iv": atm_iv,
             "delta": c.get("delta"),
-            "otm_pct": c.get("otm_pct"),
+            "otm_pct": otm_pct,
             "net_premium": np_,
             "net_yield_pct": c.get("net_yield_pct"),
             "annual_pct": ann,
@@ -119,5 +168,6 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
             "max_total": p.max_total, "force_close_dte": p.force_close_dte,
             "fee_open": p.fee_open, "fee_close": FEE_CLOSE_PER_CONTRACT,
             "tick_cost": TICK_COST_YUAN, "mult": p.mult,
+            "iv_pct_basis": "atm_put", "otm_basis": "spot",
         },
     }

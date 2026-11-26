@@ -147,6 +147,53 @@ def test_iv_percentile_wired_by_callback():
     assert out["rows"][0]["iv_pct"] is None
 
 
+def test_iv_percentile_uses_atm_reference_not_contract_iv():
+    """分位基准必须是该到期档的 ATM put IV（历史桶里存的是 ATM）。
+
+    拿深虚值合约自己的 IV 去比会因 skew 恒落在高位，页面会一直报「超贵」。
+    """
+    rows = [
+        _row("ATM", 2.85, EXP_20D, 0.0500, iv=0.145, delta=-0.05),   # 参考档，不进候选
+        _row("DEEP1", 2.70, EXP_20D, 0.0300, iv=0.165, delta=-0.13),
+        _row("DEEP2", 2.60, EXP_20D, 0.0200, iv=0.185, delta=-0.07),
+    ]
+    seen = []
+    out = cwb.build_candidates(rows, 2.85, TODAY, _p(), expiry=EXP_20D,
+                               iv_pct_fn=lambda iv, dte: seen.append(iv) or 100.0)
+    # 回调只收到一次 ATM 参考值，不是逐行合约 IV
+    assert seen == [0.145]
+    cand = {r["code"]: r for r in out["rows"]}
+    assert set(cand) == {"DEEP1", "DEEP2"}
+    assert {r["iv_pct"] for r in cand.values()} == {100.0}   # 同到期同值
+    assert {round(r["atm_iv"], 3) for r in cand.values()} == {0.145}
+    assert cand["DEEP1"]["iv"] == 0.165                      # 合约自身 IV 照旧展示
+
+
+def test_atm_iv_ref_falls_back_to_nearest_strike_without_delta():
+    puts = [
+        {"code": "A", "expiry": EXP_20D, "strike": 2.60, "iv": 0.20, "delta": None},
+        {"code": "B", "expiry": EXP_20D, "strike": 2.85, "iv": 0.145, "delta": None},
+    ]
+    assert cwb._atm_iv_ref(puts, EXP_20D, 2.85) == pytest.approx(0.145)
+    # 有 Δ 的行优先于只靠 strike 距离的行
+    puts2 = [
+        {"code": "A", "expiry": EXP_20D, "strike": 2.60, "iv": 0.20, "delta": None},
+        {"code": "B", "expiry": EXP_20D, "strike": 2.85, "iv": 0.145, "delta": -0.30},
+    ]
+    assert cwb._atm_iv_ref(puts2, EXP_20D, 2.85) == pytest.approx(0.145)
+
+
+def test_candidates_otm_pct_uses_spot_basis():
+    """虚值% 必须与 ``min_distance_pct`` 同源（现货），不能郿链行的 F 口径。"""
+    rows = [_row("P1", 2.70, EXP_20D, 0.0300)]   # _row 自带 otm_pct=5.5（F 口径）
+    out = cwb.build_candidates(rows, 2.85, TODAY, _p(), expiry=EXP_20D)
+    r = out["rows"][0]
+    assert r["otm_pct"] == pytest.approx((2.85 - 2.70) / 2.85 * 100, abs=1e-6)
+    assert r["otm_pct"] != pytest.approx(5.5)
+    assert out["params"]["otm_basis"] == "spot"
+    assert out["params"]["iv_pct_basis"] == "atm_put"
+
+
 def test_params_snapshot_exposes_effective_values():
     out = cwb.build_candidates([], 2.85, TODAY, _p(min_distance_pct=6.5))
     p = out["params"]
