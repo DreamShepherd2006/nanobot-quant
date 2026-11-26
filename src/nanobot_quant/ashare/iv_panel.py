@@ -5,7 +5,8 @@
 ``iv_series.iv_series_from_bars()`` 单个标的全量跑 12–60 秒（读懂 600 个合约
 分片 + 逐分钟反解），不能放在 HTTP 请求里同步等。这一层负责三件事：
 
-1. **定位数据**：在持久卷上找最新的 QMT 期权 1m 导出目录；
+1. **定位数据**：在持久卷上找**全部** QMT 期权 1m 导出目录（基线 run + 每日
+   增量 run 合并 —— 分位是滚动量，只读最新那个会把历史砍成增量那几天）；
 2. **算 + 缓存**：后台线程算一次，结果按（标的, 数据指纹）落磁盘缓存，
    进程重启后直接读缓存，不必重算；
 3. **组装面板口径**：DTE 分桶分位 + 30d 常熟 IV 序列，以及「用实时链快照
@@ -16,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -64,8 +66,13 @@ def data_roots() -> list[Path]:
     return uniq
 
 
-def find_option_dir() -> Optional[Path]:
-    """最新的 ``qmt-option-1m/run_*`` 目录（没有则 None）。"""
+def find_option_dirs() -> list[Path]:
+    """全部 ``qmt-option-1m/run_*`` 目录（按名字升序 = 基线在前、增量在后）。
+
+    **IV 分位是滚动量**：基线 run + 每日增量 run 必须合并计算。只读最新那个
+    会把历史砍成增量覆盖的那几天 —— 表现为 4 个近月 DTE 桶全空、分位分布窄到
+    p5≈p95、完全失去参考价值。
+    """
     for root in data_roots():
         base = root / "qmt-option-1m"
         if not base.is_dir():
@@ -73,12 +80,25 @@ def find_option_dir() -> Optional[Path]:
         runs = sorted((p for p in base.iterdir() if p.is_dir()),
                       key=lambda p: p.name)
         if runs:
-            return runs[-1]
-    return None
+            return runs
+    return []
 
 
-def _fingerprint(src: Path) -> str:
-    """数据指纹：文件数 + 最大 mtime + 总字节（变了才重算）。"""
+def find_option_dir() -> Optional[Path]:
+    """最新的 ``run_*``（兼容旧调用；分位计算请用 :func:`find_option_dirs`）。"""
+    dirs = find_option_dirs()
+    return dirs[-1] if dirs else None
+
+
+def _as_dirs(src=None) -> list[Path]:
+    """路径 / 路径列表 / None（= 本空间全部 run）→ 目录列表。"""
+    if src is None:
+        return find_option_dirs()
+    seq = src if isinstance(src, (list, tuple, set)) else [src]
+    return [Path(s) for s in seq if s]
+
+
+def _dir_sig(src: Path) -> str:
     n = 0
     mtime = 0.0
     size = 0
@@ -94,9 +114,17 @@ def _fingerprint(src: Path) -> str:
     return f"{n}-{int(mtime)}-{size}"
 
 
-def _cache_path(src: Path, undl: str) -> Path:
-    cache_dir = src.parent.parent / CACHE_DIRNAME
-    return cache_dir / f"{ivs.compact_undl(undl)}_{src.name}_{_fingerprint(src)[-24:]}.json"
+def _fingerprint(src) -> str:
+    """数据指纹：每个 run 的 ``名字:文件数-mtime-总字节``；任一变即重算。"""
+    return "|".join(f"{d.name}:{_dir_sig(d)}" for d in _as_dirs(src))
+
+
+def _cache_path(src, undl: str) -> Path:
+    dirs = _as_dirs(src)
+    cache_dir = dirs[-1].parent.parent / CACHE_DIRNAME
+    tag = dirs[-1].name if len(dirs) == 1 else f"merged{len(dirs)}"
+    digest = hashlib.md5(_fingerprint(dirs).encode("utf-8")).hexdigest()[:20]
+    return cache_dir / f"{ivs.compact_undl(undl)}_{tag}_{digest}.json"
 
 
 # ── 汇总（纯函数，便于单测）─────────────────────────────────
@@ -168,19 +196,20 @@ def summarize(rows: list[dict], stats: dict) -> dict:
     }
 
 
-def compute(undl: str, src: Optional[Path] = None) -> dict:
-    """真跑一次（慢，调用方应放在后台线程）。"""
-    src = src or find_option_dir()
-    if src is None:
+def compute(undl: str, src=None) -> dict:
+    """真跑一次（慢，调用方应放在后台线程）。``src`` = 目录 / 目录列表 / None（全部 run）。"""
+    dirs = _as_dirs(src)
+    if not dirs:
         raise FileNotFoundError("找不到 QMT 期权 1m 导出目录（qmt-option-1m/run_*）")
     t0 = time.time()
-    res = ivs.iv_series_from_bars(src, undl=undl)
+    res = ivs.iv_series_from_bars(dirs, undl=undl)
     payload = {
         "ok": True,
         "status": "ready",
         "symbol": str(undl),
-        "source": str(src),
-        "run": src.name,
+        "source": ", ".join(str(d) for d in dirs),
+        "run": dirs[-1].name,
+        "runs": [d.name for d in dirs],
         "months": list(res["stats"].get("months") or []),
         **summarize(res["rows"], res["stats"]),
         "elapsed_s": round(time.time() - t0, 1),
@@ -221,7 +250,7 @@ def _write_cache(path: Path, payload: dict) -> None:
         print(f"[ASHARE-IV] 缓存写入失败 {path}: {type(e).__name__}: {e}", flush=True)
 
 
-def _run_in_thread(undl: str, src: Path, cache: Path) -> None:
+def _run_in_thread(undl: str, src, cache: Path) -> None:
     st = _state_of(undl)
     lock = _lock_of(undl)
     try:
@@ -230,8 +259,10 @@ def _run_in_thread(undl: str, src: Path, cache: Path) -> None:
         with lock:
             st.update({"status": "ready", "payload": payload, "error": "",
                        "done_at": time.time()})
+        runs = payload.get("runs") or [payload.get("run")]
         print(f"[ASHARE-IV] {undl} 计算完成 {payload.get('elapsed_s', '?')}s "
-              f"（{payload.get('run')} · {payload.get('days', 0)} 天 · "
+              f"（合并 {len(runs)} 个 run：{runs[0]} … {runs[-1]} · "
+              f"{payload.get('days', 0)} 天 · "
               f"30d 样本 {(payload.get('cm30') or {}).get('days', 0)}）",
               flush=True)
     except Exception as e:  # noqa: BLE001
@@ -248,17 +279,20 @@ def cached_state(undl: str) -> dict:
     纯展示路径不能有这种副作用，故单开一个只读入口。
     """
     undl = str(undl)
-    src = find_option_dir()
+    dirs = find_option_dirs()
     st = _state_of(undl)
     payload = st.get("payload") or {}
+    latest = dirs[-1].name if dirs else ""
     out = {"status": st.get("status") or "idle", "error": st.get("error") or "",
-           "run": payload.get("run") or (src.name if src else ""),
+           "run": payload.get("run") or latest,
+           "runs": payload.get("runs") or ([latest] if latest else []),
            "asof": payload.get("asof") or "", "from_disk": False}
-    if out["status"] == "idle" and src is not None:
-        cached = _read_cache(_cache_path(src, undl))
+    if out["status"] == "idle" and dirs:
+        cached = _read_cache(_cache_path(dirs, undl))
         if cached:
             out.update({"status": "ready", "from_disk": True,
-                        "run": cached.get("run") or src.name,
+                        "run": cached.get("run") or latest,
+                        "runs": cached.get("runs") or [latest],
                         "asof": cached.get("asof") or ""})
     return out
 
@@ -266,25 +300,29 @@ def cached_state(undl: str) -> dict:
 def panel(undl: str, *, force: bool = False) -> dict:
     """IV 分位面板：命中缓存直接返回，否则起后台线程算（返回 computing）。"""
     undl = str(undl)
-    src = find_option_dir()
-    if src is None:
+    dirs = find_option_dirs()
+    if not dirs:
         return {"ok": False, "status": "no_data",
                 "error": "找不到 QMT 期权 1m 导出目录（qmt-option-1m/run_*）",
                 "data_roots": [str(p) for p in data_roots()]}
+    cur_runs = [d.name for d in dirs]
+    latest = cur_runs[-1]
 
     st = _state_of(undl)
-    cache = _cache_path(src, undl)
+    cache = _cache_path(dirs, undl)
     with _lock_of(undl):
         if force:
             st.update({"status": "idle", "payload": None, "error": ""})
         if st["status"] == "ready" and st.get("payload"):
             age = time.time() - float(st.get("done_at") or 0.0)
-            if age < CACHE_TTL_S and (st["payload"].get("run") == src.name):
-                return {**st["payload"], "status": "ready", "cached": True,
+            pl = st["payload"]
+            if age < CACHE_TTL_S and (pl.get("runs") or [pl.get("run")]) == cur_runs:
+                return {**pl, "status": "ready", "cached": True,
                         "age_s": int(age)}
         if st["status"] == "computing":
             return {"ok": True, "status": "computing", "symbol": undl,
-                    "run": src.name, "elapsed_s": round(time.time() - st["started"], 1)}
+                    "run": latest, "runs": cur_runs,
+                    "elapsed_s": round(time.time() - st["started"], 1)}
 
     cached = None if force else _read_cache(cache)
     if cached:
@@ -297,13 +335,13 @@ def panel(undl: str, *, force: bool = False) -> dict:
     with _lock_of(undl):
         if st["status"] == "computing":
             return {"ok": True, "status": "computing", "symbol": undl,
-                    "run": src.name, "elapsed_s": 0}
+                    "run": latest, "runs": cur_runs, "elapsed_s": 0}
         st.update({"status": "computing", "payload": None, "error": "",
                    "started": time.time()})
-    threading.Thread(target=_run_in_thread, args=(undl, src, cache),
+    threading.Thread(target=_run_in_thread, args=(undl, dirs, cache),
                      name=f"ashare-iv-{ivs.compact_undl(undl)}", daemon=True).start()
     return {"ok": True, "status": "computing", "symbol": undl,
-            "run": src.name, "elapsed_s": 0}
+            "run": latest, "runs": cur_runs, "elapsed_s": 0}
 
 
 def reset() -> None:
@@ -382,6 +420,7 @@ def live_cm_iv(snap: dict, target_dte: float = 30.0) -> dict:
 
 __all__ = [
     "DATA_ROOT_ENV", "CACHE_TTL_S", "BUCKETS", "data_roots", "find_option_dir",
+    "find_option_dirs",
     "quantiles_of", "pctile", "summarize", "compute", "panel", "reset",
     "live_cm_iv", "cached_state",
 ]

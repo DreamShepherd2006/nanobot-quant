@@ -180,3 +180,50 @@ def test_panel_starts_background_thread_once(tmp_path, monkeypatch):
         time.sleep(0.02)
     assert ivp._state_of("510050.SH")["status"] == "ready"
     assert calls == ["510050.SH"]            # 同一标的不重复起线程
+
+
+def test_find_option_dirs_returns_all_runs(tmp_path, monkeypatch):
+    """分位是滚动量：基线 + 增量都要算，不能只读最新那个 run。"""
+    monkeypatch.setenv(ivp.DATA_ROOT_ENV, str(tmp_path))
+    old = _mk_run(tmp_path, "run_20261120_012436")
+    new = _mk_run(tmp_path, "run_20261126_125304_p1120")
+    dirs = ivp.find_option_dirs()
+    assert dirs == [old, new]          # 升序：基线在前
+    assert ivp.find_option_dir() == new  # 兼容旧调用仍是 latest
+
+
+def test_cache_path_is_stable_and_merged_tag(tmp_path):
+    a = _mk_run(tmp_path, "run_20261120_012436")
+    b = _mk_run(tmp_path, "run_20261126_125304_p1120")
+    one = ivp._cache_path(a, "510050.SH")
+    assert a.name in one.name
+    both = ivp._cache_path([a, b], "510050.SH")
+    assert "merged2" in both.name
+    assert both != one and both == ivp._cache_path([a, b], "510050.SH")
+    # 增量目录变了（新 run 出现）→ 缓存键也要变，否则读旧结果
+    c = _mk_run(tmp_path, "run_20261127_010101_p1126")
+    assert ivp._cache_path([a, b, c], "510050.SH") != both
+
+
+def test_panel_computes_with_all_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv(ivp.DATA_ROOT_ENV, str(tmp_path))
+    _mk_run(tmp_path, "run_20261120_012436")
+    _mk_run(tmp_path, "run_20261126_125304_p1120")
+    ivp.reset()
+    seen = {}
+
+    def _fake_compute(undl, src=None):
+        seen["src"] = src
+        return {"ok": True, "symbol": undl, "run": "x", "runs": ["x"],
+                "cm30": {}, "buckets": []}
+
+    monkeypatch.setattr(ivp, "compute", _fake_compute)
+    ivp.panel("510050.SH")
+    import time
+    for _ in range(100):
+        if ivp._state_of("510050.SH")["status"] == "ready":
+            break
+        time.sleep(0.02)
+    assert isinstance(seen["src"], list) and len(seen["src"]) == 2
+    assert [p.name for p in seen["src"]] == ["run_20261120_012436",
+                                             "run_20261126_125304_p1120"]

@@ -119,46 +119,59 @@ def _open_text(path):
 
 # ── 读数据 ──────────────────────────────────────────────────
 
-def load_contracts(source) -> dict:
-    """读 ``contracts_all.csv``（支持目录 / 直给文件 / .gz）。
+def _as_sources(source) -> list[str]:
+    """目录 / 文件 / 列表 → 路径列表（保持给定顺序；后面的覆盖前面同合约同分钟）。"""
+    seq = source if isinstance(source, (list, tuple, set)) else [source]
+    return [str(s) for s in seq if s]
 
+
+def load_contracts(source) -> dict:
+    """读 ``contracts_all.csv``（支持目录 / 直给文件 / .gz / **多目录列表**）。
+
+    多目录时按顺序合并（后面的 run 覆盖前面的同名合约，以最新规格为准）。
     返回 ``{code: {undl, month, right, strike, expire, mult, tick}}``。
     """
-    p = str(source)
-    if os.path.isdir(p):
-        cand = os.path.join(p, "contracts_all.csv")
-        if not os.path.exists(cand) and os.path.exists(cand + ".gz"):
-            cand += ".gz"
-        p = cand
     out: dict[str, dict] = {}
-    with _open_text(p) as fh:
-        for r in csv.DictReader(fh):
-            code = (r.get("code") or "").strip()
-            if not code:
-                continue
-            out[code] = {
-                "undl": compact_undl(r.get("undl") or ""),
-                "month": (r.get("month") or "").strip(),
-                "right": (r.get("type") or "").strip().upper(),
-                "strike": _float(r.get("strike")),
-                "expire": (r.get("expire") or "").strip(),
-                "mult": _int(r.get("mult"), MULT),
-                "tick": _float(r.get("tick")),
-            }
+    for one in _as_sources(source):
+        p = one
+        if os.path.isdir(p):
+            cand = os.path.join(p, "contracts_all.csv")
+            if not os.path.exists(cand) and os.path.exists(cand + ".gz"):
+                cand += ".gz"
+            p = cand
+        with _open_text(p) as fh:
+            for r in csv.DictReader(fh):
+                code = (r.get("code") or "").strip()
+                if not code:
+                    continue
+                out[code] = {
+                    "undl": compact_undl(r.get("undl") or ""),
+                    "month": (r.get("month") or "").strip(),
+                    "right": (r.get("type") or "").strip().upper(),
+                    "strike": _float(r.get("strike")),
+                    "expire": (r.get("expire") or "").strip(),
+                    "mult": _int(r.get("mult"), MULT),
+                    "tick": _float(r.get("tick")),
+                }
     return out
 
 
 def shard_paths(run_dir, undl: str, months=None) -> list[str]:
-    """某标的的 1m 分片路径（``opt1m_<UNDL>_<month>_pNN.csv[.gz]``，按名字排序）。"""
+    """某标的的 1m 分片路径（``opt1m_<UNDL>_<month>_pNN.csv[.gz]``）。
+
+    ``run_dir`` 也接受目录列表：多个 run 拼在一起、**按给定顺序**（后面的后读，
+    同 (合约, 分钟) 的行以后面的 run 为准）。组内仍按文件名排序。
+    """
     want = compact_undl(undl)
     out = []
-    for path in sorted(glob.glob(os.path.join(str(run_dir), "opt1m_*_p*.csv*"))):
-        m = _SHARD_RE.search(os.path.basename(path))
-        if not m or m.group(1) != want:
-            continue
-        if months and m.group(2) not in months:
-            continue
-        out.append(path)
+    for one in _as_sources(run_dir):
+        for path in sorted(glob.glob(os.path.join(one, "opt1m_*_p*.csv*"))):
+            m = _SHARD_RE.search(os.path.basename(path))
+            if not m or m.group(1) != want:
+                continue
+            if months and m.group(2) not in months:
+                continue
+            out.append(path)
     return out
 
 
@@ -332,19 +345,21 @@ def iv_series_from_bars(source, *, undl: str = "510050.SH", months=None,
                         progress=None) -> dict:
     """QMT 1m 分片 → IV 序列（每 (分钟, 到期) 一行）。
 
-    ``source``：导出目录（含 ``contracts_all.csv`` 与 ``opt1m_*.csv[.gz]``）。
+    ``source``：导出目录（含 ``contracts_all.csv`` 与 ``opt1m_*.csv[.gz]``）；
+    也接受**目录列表**（基线 + 增量 run 合并，后面的覆盖前面同 (合约, 分钟)）。
     ``days``：只算这些交易日（``{"20261119", ...}``），None = 全部。
     ``progress``：可选回调 ``progress(minutes_done)``，便于长任务打点。
 
-    返回 ``{undl, source, paths, rows, stats}``；``rows`` 字段见 ``_eval_minute``。
+    返回 ``{undl, source, sources, paths, rows, stats}``；``rows`` 字段见 ``_eval_minute``。
     """
+    dirs = _as_sources(source)
     want = compact_undl(undl)
-    contracts = load_contracts(source)
+    contracts = load_contracts(dirs)
     meta = {c: v for c, v in contracts.items()
             if v["undl"] == want and (not months or v["month"] in months)}
-    paths = shard_paths(source, undl, months)
+    paths = shard_paths(dirs, undl, months)
     if not paths:
-        raise FileNotFoundError(f"{source} 下没有 {want} 的 1m 分片")
+        raise FileNotFoundError(f"{', '.join(dirs)} 下没有 {want} 的 1m 分片")
 
     rows: list[dict] = []
     stats = {"minutes": 0, "rows": 0, "iv_ok": 0, "stale_rows": 0,
@@ -373,8 +388,8 @@ def iv_series_from_bars(source, *, undl: str = "510050.SH", months=None,
     mads = [r["mad_pct"] for r in rows if r["mad_pct"] is not None]
     stats["mad_pct_median"] = oc.median(mads) if mads else None
     stats["months"] = sorted({meta[c]["month"] for c in meta})
-    return {"undl": undl, "source": str(source), "paths": paths,
-            "rows": rows, "stats": stats}
+    return {"undl": undl, "source": ", ".join(dirs), "sources": dirs,
+            "paths": paths, "rows": rows, "stats": stats}
 
 
 # ── 分位 ────────────────────────────────────────────────────

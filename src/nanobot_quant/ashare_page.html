@@ -683,7 +683,11 @@ function renderIvPanel(j) {
       + `<td>${iv(b.current)}</td></tr>`;
   });
   html += '</tbody></table>';
-  html += `<div class="hint" style="margin-top:4px">数据 ${j.run || '—'} · 月份 ${(j.months || []).join('/')}`
+  const runs = j.runs || (j.run ? [j.run] : []);
+  const runTxt = runs.length > 1
+    ? `合并 ${runs.length} 个 run（${runs[0]} … ${runs[runs.length - 1]}）`
+    : (j.run || '—');
+  html += `<div class="hint" style="margin-top:4px">数据 ${runTxt} · 月份 ${(j.months || []).join('/')}`
     + ` · 明细 ${j.minutes || 0} 分钟 / ${j.rows || 0} 行 · stale ${j.stale_pct || 0}%`
     + (j.elapsed_s ? ` · 计算 ${j.elapsed_s}s` : '') + (j.cached ? ' · 缓存' : '') + '</div>';
   box.innerHTML = html;
