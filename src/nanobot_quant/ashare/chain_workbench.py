@@ -85,6 +85,7 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
                      underlying: str = "",
                      arm_shorts: Optional[dict[str, list[dict]]] = None,
                      iv_pct_fn: Optional[Callable[[object, object], Optional[float]]] = None,
+                     iv_src: str = "",
                      ) -> dict:
     """候选表。``rows`` = 链快照的全部行（含 call，内部只取 put）。
 
@@ -168,6 +169,6 @@ def build_candidates(rows: list[dict], spot: float, today: Optional[date] = None
             "max_total": p.max_total, "force_close_dte": p.force_close_dte,
             "fee_open": p.fee_open, "fee_close": FEE_CLOSE_PER_CONTRACT,
             "tick_cost": TICK_COST_YUAN, "mult": p.mult,
-            "iv_pct_basis": "atm_put", "otm_basis": "spot",
+            "iv_pct_basis": "atm_put", "otm_basis": "spot", "iv_src": iv_src,
         },
     }

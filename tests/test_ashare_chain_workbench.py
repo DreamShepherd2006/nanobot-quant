@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -192,6 +193,7 @@ def test_candidates_otm_pct_uses_spot_basis():
     assert r["otm_pct"] != pytest.approx(5.5)
     assert out["params"]["otm_basis"] == "spot"
     assert out["params"]["iv_pct_basis"] == "atm_put"
+    assert out["params"]["iv_src"] == ""      # 未传时为空串（页面不提示）
 
 
 def test_params_snapshot_exposes_effective_values():
@@ -225,6 +227,52 @@ def test_bucket_percentile_reads_cache(monkeypatch):
     monkeypatch.setattr(ivp, "_read_cache", lambda p: payload)
     assert ivp.bucket_percentile("510050.SH", 10, 0.20) == pytest.approx(50.0, abs=1e-6)
     assert ivp.bucket_percentile("510050.SH", 1, 0.20) is None
+
+
+def test_percentile_in_includes_bucket_upper_bound():
+    """桶上下界是闭区间（与 summarize 同口径）。
+
+    原来用左闭右开，dte=7/15/25/40 这些边界日拿不到任何桶，即便该桶有数据。
+    """
+    buckets = [(4.0, 7.0, [0.10, 0.20]), (8.0, 15.0, [0.10, 0.20])]
+    assert ivp.percentile_in(buckets, 7, 0.10) == pytest.approx(50.0, abs=1e-6)
+    assert ivp.percentile_in(buckets, 15, 0.20) == pytest.approx(100.0, abs=1e-6)
+    # 桶间空隙（7<d<8）仍不归属任何桶
+    assert ivp.percentile_in(buckets, 7.5, 0.10) is None
+
+
+def test_bucket_values_prefers_in_memory_payload(monkeypatch):
+    """``panel()`` 刚算完时磁盘缓存可能还没落盘 —— 内存优先，不能再摆 ``—``。"""
+    payload = {"ok": True, "buckets": [
+        {"lo": 26.0, "hi": 40.0, "_values": [0.13, 0.14, 0.15]}]}
+    monkeypatch.setattr(ivp, "_state_of",
+                        lambda u: {"status": "ready", "payload": payload})
+    monkeypatch.setattr(ivp, "_as_dirs", lambda src=None: [])
+    bv = ivp.bucket_values("510050.SH")
+    assert bv == [(26.0, 40.0, [0.13, 0.14, 0.15])]
+    assert ivp.bucket_source("510050.SH") == "memory"
+    assert ivp.percentile_in(bv, 27, 0.14) == pytest.approx(200 / 3, abs=0.01)
+
+
+def test_bucket_values_skips_legacy_cache_without_values(tmp_path, monkeypatch):
+    """旧版缓存（无 ``_values``）会被当 miss —— 否则分位恒为 ``—`` 且无从得知。"""
+    run = tmp_path / "qmt-option-1m" / "run_A"
+    run.mkdir(parents=True)
+    (run / "opt1m_510050.SH.csv").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(ivp, "find_option_dirs", lambda: [run])
+    monkeypatch.setattr(ivp, "_state_of", lambda u: {"status": "idle"})
+    p = ivp._cache_path([run], "510050.SH")
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    p.write_text(json.dumps({"ok": True, "buckets": [{"lo": 26, "hi": 40}]}),
+                 encoding="utf-8")
+    assert ivp.bucket_values("510050.SH") == []
+    assert ivp.bucket_source("510050.SH") == "none"
+
+    p.write_text(json.dumps({"ok": True, "buckets": [
+        {"lo": 26, "hi": 40, "_values": [0.14, 0.15]}]}), encoding="utf-8")
+    assert ivp.bucket_values("510050.SH") == [(26.0, 40.0, [0.14, 0.15])]
+    assert ivp.bucket_source("510050.SH") == "disk"
 
 
 def test_public_strips_internal_values_without_mutating():

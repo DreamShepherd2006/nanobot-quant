@@ -213,21 +213,54 @@ def _has_values(payload: dict) -> bool:
     return any(b.get("_values") for b in bs) if bs else True
 
 
+def _bvals_of(payload: dict) -> list[tuple[float, float, list[float]]]:
+    out = []
+    for b in payload.get("buckets") or []:
+        lo, hi = b.get("lo"), b.get("hi")
+        if lo is None or hi is None:
+            continue
+        vals = [float(v) for v in (b.get("_values") or []) if v is not None]
+        if not vals:          # 旧版缓存（没有桶内样本）不参与分位
+            continue
+        out.append((float(lo), float(hi), vals))
+    return out
+
+
 def bucket_values(undl: str) -> list[tuple[float, float, list[float]]]:
-    """``[(lo, hi, values)]``，一次读盘（候选表逐行算分位时用，别每行读一次文件）。"""
+    """``[(lo, hi, values)]``，候选表逐行算分位时一次取好（别每行读一次文件）。
+
+    取值优先级：**进程内已算好的载荷** → 磁盘缓存。内存优先是因为 ``panel()``
+    的后台线程刚算完（或本次命中内存）时，磁盘缓存可能还没落盘、或盘上还是
+    旧版（旧版无 ``_values``）——只看磁盘会让分位白摆``—``。
+    """
+    undl = str(undl)
+    st = _state_of(undl)
+    if st.get("status") == "ready" and st.get("payload"):
+        out = _bvals_of(st["payload"])
+        if out:
+            return out
     dirs = _as_dirs(None)
     if not dirs:
         return []
     cached = _read_cache(_cache_path(dirs, undl))
-    if not cached:
+    if not cached or not _has_values(cached):
         return []
-    out = []
-    for b in cached.get("buckets") or []:
-        lo, hi = b.get("lo"), b.get("hi")
-        if lo is None or hi is None:
-            continue
-        out.append((float(lo), float(hi), list(b.get("_values") or [])))
-    return out
+    return _bvals_of(cached)
+
+
+def bucket_source(undl: str) -> str:
+    """分位数据来源（仅用于“为何显示 —”的可见性）：memory / disk / none。"""
+    undl = str(undl)
+    st = _state_of(undl)
+    if st.get("status") == "ready" and _bvals_of(st.get("payload") or {}):
+        return "memory"
+    dirs = _as_dirs(None)
+    if not dirs:
+        return "none"
+    cached = _read_cache(_cache_path(dirs, undl))
+    if cached and _has_values(cached) and _bvals_of(cached):
+        return "disk"
+    return "none"
 
 
 def percentile_in(buckets: list[tuple[float, float, list[float]]], dte, iv
@@ -240,7 +273,9 @@ def percentile_in(buckets: list[tuple[float, float, list[float]]], dte, iv
     except (TypeError, ValueError):
         return None
     for lo, hi, vals in buckets or []:
-        if lo <= d < hi:
+        # 闭区间：与 ``ivs.iv_percentile`` 的桶口径一致，否则 dte=7/15/25/40
+        # 这些边界日拿不到任何桶（桶表按整数天分档、上下界为闭）
+        if lo <= d <= hi:
             return pctile(float(iv), vals)
     return None
 

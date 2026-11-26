@@ -238,6 +238,7 @@ def register_ashare_routes(app, gatekeeper) -> None:
                 snap.get("rows") or [], float(snap.get("spot") or 0.0),
                 expiry=expiry, underlying=symbol, params=pparams,
                 arm_shorts=pr.open_shorts_by_arm(),
+                iv_src=ivp.bucket_source(symbol),
                 iv_pct_fn=lambda iv, dte: ivp.percentile_in(bvals, dte, iv))
         except Exception as e:  # noqa: BLE001
             cand["error"] = f"{type(e).__name__}: {e}"
