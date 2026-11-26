@@ -311,3 +311,48 @@ def test_constant_maturity_skips_failed_quality():
     cm = ivs.constant_maturity_iv(rows, target_dte=20.0)
     assert cm["stats"]["no_below"] == 1     # 短档被剔除 → 不外推
     assert cm["rows"] == []
+
+
+# ── 多 run 合并（基线 + 增量）───────────────────────────────
+
+def _build_dir(root, *, ts_list=(TS,), sigma=SIGMA):
+    root.mkdir(parents=True, exist_ok=True)
+    ctrs = _contracts()
+    _write_contracts(root / "contracts_all.csv", ctrs)
+    rows = _shard_rows(ctrs, ts_list, sigma=sigma)
+    _write_shard(root / f"opt1m_{ivs.compact_undl(UNDL)}_{MONTH}_p01.csv", rows)
+    return ctrs
+
+
+def test_load_contracts_and_shard_paths_accept_dir_list(tmp_path):
+    a, b = tmp_path / "run_20261120_012436", tmp_path / "run_20261126_125304_p1120"
+    _build_dir(a)
+    _build_dir(b, ts_list=("20261120100000",))
+    cts = ivs.load_contracts([str(a), str(b)])
+    assert len(cts) == len(_contracts())
+    paths = ivs.shard_paths([str(a), str(b)], UNDL)
+    assert len(paths) == 2 and all(str(a) in p or str(b) in p for p in paths)
+
+
+def test_dir_list_merges_minutes_from_all_runs(tmp_path):
+    """分位是滚动量：基线 + 增量必须同时进入序列，否则历史被砍成增量那几天。"""
+    a, b = tmp_path / "run_20261120_012436", tmp_path / "run_20261126_125304_p1120"
+    _build_dir(a, ts_list=(TS,))
+    _build_dir(b, ts_list=("20261120100000",))
+    res = ivs.iv_series_from_bars([str(a), str(b)], undl=UNDL)
+    assert res["stats"]["minutes"] == 2
+    assert res["sources"] == [str(a), str(b)]
+    assert res["source"] == f"{a}, {b}"
+    # 单目录仍可用（兼容旧调用）
+    assert ivs.iv_series_from_bars(str(a), undl=UNDL)["stats"]["minutes"] == 1
+
+
+def test_dir_list_later_run_wins_on_duplicate_minute(tmp_path):
+    """同 (合约, 分钟) 以后面的 run 为准 —— 增量补数/修正不得被旧基线盖回去。"""
+    a, b = tmp_path / "run_a", tmp_path / "run_b"
+    _build_dir(a, ts_list=(TS,), sigma=SIGMA)
+    _build_dir(b, ts_list=(TS,), sigma=0.30)
+    res = ivs.iv_series_from_bars([str(a), str(b)], undl=UNDL)
+    assert res["stats"]["minutes"] == 1
+    assert all(abs(float(r["atm_iv"]) - 0.30) < 0.02
+               for r in res["rows"] if r.get("atm_iv") is not None)
