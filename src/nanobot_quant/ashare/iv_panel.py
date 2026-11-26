@@ -241,6 +241,28 @@ def _run_in_thread(undl: str, src: Path, cache: Path) -> None:
         print(f"[ASHARE-IV] {undl} 计算失败: {type(e).__name__}: {e}", flush=True)
 
 
+def cached_state(undl: str) -> dict:
+    """只读缓存态（**不触发计算**）：给参数快照 / 诊断用。
+
+    ``panel()`` 在未命中缓存时会起后台线程重算（数十秒），参数快照这类
+    纯展示路径不能有这种副作用，故单开一个只读入口。
+    """
+    undl = str(undl)
+    src = find_option_dir()
+    st = _state_of(undl)
+    payload = st.get("payload") or {}
+    out = {"status": st.get("status") or "idle", "error": st.get("error") or "",
+           "run": payload.get("run") or (src.name if src else ""),
+           "asof": payload.get("asof") or "", "from_disk": False}
+    if out["status"] == "idle" and src is not None:
+        cached = _read_cache(_cache_path(src, undl))
+        if cached:
+            out.update({"status": "ready", "from_disk": True,
+                        "run": cached.get("run") or src.name,
+                        "asof": cached.get("asof") or ""})
+    return out
+
+
 def panel(undl: str, *, force: bool = False) -> dict:
     """IV 分位面板：命中缓存直接返回，否则起后台线程算（返回 computing）。"""
     undl = str(undl)
@@ -361,5 +383,5 @@ def live_cm_iv(snap: dict, target_dte: float = 30.0) -> dict:
 __all__ = [
     "DATA_ROOT_ENV", "CACHE_TTL_S", "BUCKETS", "data_roots", "find_option_dir",
     "quantiles_of", "pctile", "summarize", "compute", "panel", "reset",
-    "live_cm_iv",
+    "live_cm_iv", "cached_state",
 ]

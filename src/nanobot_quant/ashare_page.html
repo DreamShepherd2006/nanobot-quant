@@ -50,6 +50,10 @@
 </head>
 <body>
 <h1>🇨🇳 A 股 ETF 期权盘口采集</h1>
+<div class="row" style="margin:0 0 10px">
+  <button class="ghost" id="btn-params-md">📋 复制参数（Markdown）</button>
+  <span id="md-msg" class="hint" style="margin:0 0 0 10px"></span>
+</div>
 <div class="sub">只读采集（不下单、不参与决策）· 合约清单来自新浪（东财备源，缓存 1 天）· 盘口来自新浪五档 · 落盘 <span class="mono">legion/credentials/ashare_tape/tape_YYYYMMDD.jsonl</span></div>
 
 <div class="card">
@@ -694,6 +698,42 @@ async function loadIv(force) {
   }
 }
 
+// ── 参数快照（Markdown）：给助手看的一份「当前生效配置」──
+function mdOpen(text) {
+  $('md-text').value = text;
+  $('md-mask').style.display = 'block';
+  $('md-tip').textContent = '';
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => { $('md-tip').textContent = '✅ 已复制到剪贴板'; },
+      () => { $('md-tip').textContent = '⚠️ 剪贴板不可用，点「全选」手动复制'; });
+  } else {
+    $('md-tip').textContent = '⚠️ 剪贴板不可用，点「全选」手动复制';
+  }
+}
+async function copyParamsMd() {
+  $('md-msg').textContent = '生成中…';
+  try {
+    const r = await fetch('/config/ashare/params.md?_=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    mdOpen(await r.text());
+    $('md-msg').textContent = '';
+  } catch (e) {
+    $('md-msg').innerHTML = '<span class="bad">生成失败：' + e.message + '</span>';
+  }
+}
+$('btn-params-md').addEventListener('click', copyParamsMd);
+$('md-close').addEventListener('click', () => { $('md-mask').style.display = 'none'; });
+$('md-all').addEventListener('click', () => { const t = $('md-text'); t.focus(); t.select(); });
+$('md-copy').addEventListener('click', () => {
+  const t = $('md-text'); t.select();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t.value).then(() => { $('md-tip').textContent = '✅ 已复制'; },
+      () => { $('md-tip').textContent = '⚠️ 请手动复制（Ctrl+C）'; });
+  } else { $('md-tip').textContent = '⚠️ 请手动复制（Ctrl+C）'; }
+});
+$('md-mask').addEventListener('click', (e) => { if (e.target === $('md-mask')) $('md-mask').style.display = 'none'; });
+
 $('oc-symbol').addEventListener('change', () => {
   $('oc-expiry').innerHTML = '';
   $('oc-chain').innerHTML = '<div class="hint">切换标的，加载中…</div>';
@@ -706,5 +746,17 @@ loadChain(false);
 loadIv(false);
 setInterval(() => loadChain(false), 30000);
 </script>
+<div id="md-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50">
+  <div style="max-width:900px;margin:6vh auto;background:#161b22;border:1px solid #2a323d;border-radius:8px;padding:14px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <b>参数快照（Markdown）</b><span id="md-tip" class="hint" style="margin:0"></span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="md-all">全选</button>
+      <button id="md-copy">复制</button>
+      <button class="ghost" id="md-close">关闭</button>
+    </div>
+    <textarea id="md-text" readonly style="width:100%;height:62vh;background:#0d1117;color:#c3ccd9;border:1px solid #2a323d;border-radius:6px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px"></textarea>
+  </div>
+</div>
 </body>
 </html>

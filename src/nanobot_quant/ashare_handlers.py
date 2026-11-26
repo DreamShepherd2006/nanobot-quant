@@ -13,10 +13,11 @@ import os
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from nanobot_quant.ashare import contracts as ac
 from nanobot_quant.ashare import iv_panel as ivp
+from nanobot_quant.ashare import params_md as pm
 from nanobot_quant.ashare import option_chain as oc
 from nanobot_quant.ashare import paper_runner as pr
 from nanobot_quant.ashare import tape
@@ -117,6 +118,23 @@ def register_ashare_routes(app, gatekeeper) -> None:
         if not ok:
             return JSONResponse({"ok": False, "error": err}, status_code=403)
         return JSONResponse({"ok": True, **_state_payload()})
+
+    @app.get("/config/ashare/params.md")
+    async def _params_md(request: Request):
+        """页面参数快照（Markdown）——「📋 复制参数」按钮的唯一实现。
+
+        只读：不写文件、不改配置、不触发 IV 重算（``iv_panel.cached_state``）。
+        与 ``/config/ashare`` 页共用同一份渲染，将来 MCP/CLI 也直接读它。
+        """
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return PlainTextResponse(f"{err}", status_code=403)
+        symbol = request.query_params.get("symbol")
+        try:
+            text = await asyncio.to_thread(pm.build, symbol)
+        except Exception as e:  # noqa: BLE001
+            return PlainTextResponse(f"生成失败：{type(e).__name__}: {e}", status_code=500)
+        return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
 
     @app.get("/config/ashare/td")
     async def _td(request: Request):
