@@ -248,10 +248,14 @@ def test_page_has_second_arm_switch_and_arm_table():
     assert "臂 B（D 方案：高9 + 浮盈）" in html
 
 
-def test_replay_script_supports_both_arms():
+def test_replay_cli_supports_both_arms():
+    """CLI 应是薄封装：--arm 与两臂逻辑都在模块里（页面与 CLI 同源）。"""
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "scripts" /
-           "ashare_paper_replay.py").read_text(encoding="utf-8")
-    assert '--arm' in src
-    assert "should_close_high9" in src
-    assert "ARM_B" in src
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "scripts" / "ashare_paper_replay.py").read_text(encoding="utf-8")
+    mod = (root / "src" / "nanobot_quant" / "ashare" /
+           "paper_replay.py").read_text(encoding="utf-8")
+    assert "paper_replay import main" in script          # 脚本只转调，不重复实现
+    assert "--arm" in mod                                 # 选项在模块
+    assert "should_close_high9" in mod                    # 臂 B 出场在模块
+    assert "ARM_B" in mod

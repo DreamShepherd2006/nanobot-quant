@@ -23,6 +23,7 @@ from nanobot_quant.ashare import params_md as pm
 from nanobot_quant.ashare import paper_strategy as ps
 from nanobot_quant.ashare import trades_md as tm
 from nanobot_quant.ashare import option_chain as oc
+from nanobot_quant.ashare import paper_replay as prp
 from nanobot_quant.ashare import paper_runner as pr
 from nanobot_quant.ashare import tape
 from nanobot_quant.ashare import td_panel as tp
@@ -453,6 +454,68 @@ def register_ashare_routes(app, gatekeeper) -> None:
                                 status_code=500)
         return JSONResponse({"ok": True, "round": out,
                              **(await asyncio.to_thread(pr.state))})
+
+    # ── 历史回放（离线；只读 CSV，不写实时账本 state） ──────
+    # 与实时模拟账本**物理隔开**：结果单独落 ashare_paper/replay/，两套数字
+    # 口径不同（历史无盘口、bid 用 1m close 代理），页面也不并列展示。
+
+    @app.get("/config/ashare/paper/replay/datasets")
+    async def _replay_datasets(request: Request):
+        """可用数据集（ETF 批次 / 期权批次 / 合约清单）——页面下拉的数据来源。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        force = request.query_params.get("force") == "1"
+        try:
+            data = await asyncio.to_thread(prp.list_datasets, None, force=force)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+        return JSONResponse({"ok": True, **data})
+
+    @app.post("/config/ashare/paper/replay/start")
+    async def _replay_start(request: Request):
+        """启动后台回放（同一时刻只允许一个；重复点击 fail-closed 报错）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "无效的 JSON"}, status_code=400)
+        try:
+            kw = prp.resolve_inputs(body or {})
+            st = prp.start_job(**kw)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+        return JSONResponse({"ok": True, "job": st})
+
+    @app.get("/config/ashare/paper/replay/state")
+    async def _replay_state(request: Request):
+        """当前任务进度 + 最近结果列表（轮询用；纯内存，2s 一次）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        return JSONResponse({"ok": True, **prp.job_state()})
+
+    @app.get("/config/ashare/paper/replay/result")
+    async def _replay_result(request: Request):
+        """某次回放的全量结果（含 markdown，供复制进对话）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        rid = request.query_params.get("run_id") or ""
+        try:
+            data = await asyncio.to_thread(prp.load_result, rid)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                                status_code=500)
+        return JSONResponse({"ok": True, **data})
 
     # 模拟账本同样自动恢复（enabled=true 时）：只读行情 + 本地账本，不下单、
     # 不碰资金，中断只丢纸上样本，无资金风险。
