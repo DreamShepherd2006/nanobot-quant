@@ -106,6 +106,43 @@
     <div id="pp-pos-b" class="hint">暂无持仓</div>
     <div id="pp-fills-b"></div>
   </details>
+  <details id="rp-wrap" style="margin-top:14px">
+    <summary class="hint" style="cursor:pointer">🕰 历史回放（离线 CSV · 只读 · 与上面的实时账本互不影响）</summary>
+    <div class="hint" style="margin-top:8px">
+      用 QMT 导出的 ETF 1m + 期权 1m 逐 bar 回放<b>同一套</b>入场/选档/出场规则。
+      成交价按 1m 收盘 ± 1 tick 代理（免费通道无历史盘口），资金按 100% 全损担保占用 ⇒
+      <b>不是</b>实盘验收证据，也不能与上方实时账本的数字直接相减。数据根目录：<code id="rp-root">—</code>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="fld">ETF 批次<select id="rp-etf"></select></div>
+      <div class="fld">合约清单<select id="rp-contracts"></select></div>
+      <div class="fld">标的<select id="rp-symbol"></select></div>
+    </div>
+    <div style="margin-top:8px">
+      <div class="hint">期权批次（可多选：基线 + 每日增量各一个 run，全选才覆盖到最新交易日）</div>
+      <div id="rp-opts" class="hint" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:12px"></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div class="fld">起始（留空=全部）<input type="date" id="rp-start"></div>
+      <div class="fld">结束（留空=全部）<input type="date" id="rp-end"></div>
+      <div class="fld">初始资金（元）<input type="number" id="rp-initial" min="1000" step="10000" value="500000"></div>
+      <div class="fld">臂<select id="rp-arms">
+        <option value="both">两臂对照（A + B）</option>
+        <option value="a">仅 A（权利金回落 50%）</option>
+        <option value="b">仅 B（高9 + 浮盈）</option>
+      </select></div>
+      <button id="rp-go">开始回放</button>
+      <button class="ghost" id="rp-ds-refresh">🔄 刷新数据集</button>
+      <span id="rp-msg"></span>
+    </div>
+    <div id="rp-progress" class="hint" style="margin-top:8px"></div>
+    <div id="rp-result" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:8px">
+      <div class="fld">历史结果（最近 10 次）<select id="rp-history"><option value="">—</option></select></div>
+      <button class="ghost" id="rp-copy">📋 复制 markdown</button>
+      <span id="rp-copy-tip" class="hint"></span>
+    </div>
+  </details>
   <div style="border-top:1px solid #242a35;margin:16px 0 0;padding-top:14px">
     <h2 style="margin-bottom:8px">📈 期权链 · IV 分位 <span id="oc-meta" class="hint" style="float:right;font-size:12px;margin:0">加载中…</span></h2>
     <div class="row" style="gap:12px">
@@ -576,6 +613,251 @@ $('pp-reset').onclick = async () => {
 
 pollPaper();
 setInterval(pollPaper, 30000);
+
+/* ── 历史回放（离线 CSV，只读；与实时账本物理隔开） ───── */
+const rpS = {ds: null, tick: null, shown: '', md: ''};
+
+const rpMoney = (v) => (v === null || v === undefined) ? '—'
+  : Number(v).toLocaleString('zh-CN', {maximumFractionDigits: 2});
+const rpPct = (v) => (v === null || v === undefined) ? '—'
+  : (Number(v) >= 0 ? '+' : '') + Number(v).toFixed(4) + '%';
+
+function rpMsg(h) { const n = $('rp-msg'); if (n) n.innerHTML = h; }
+
+async function loadReplayDs(force) {
+  try {
+    const j = await api('/config/ashare/paper/replay/datasets' + (force ? '?force=1' : ''));
+    rpS.ds = j;
+    $('rp-root').textContent = j.root || '—';
+    const etf = $('rp-etf');
+    const prevEtf = etf.value;
+    etf.innerHTML = '';
+    (j.etf_runs || []).forEach(r => {
+      const o = document.createElement('option');
+      o.value = r.name;
+      o.textContent = r.name + '（' + (r.files || []).length + ' 标的）';
+      o.title = (r.files || []).map(f => f.symbol + ' ' + f.first + '~' + f.last).join('\n');
+      etf.appendChild(o);
+    });
+    if (prevEtf && Array.from(etf.options).some(o => o.value === prevEtf)) etf.value = prevEtf;
+    const box = $('rp-opts');
+    box.innerHTML = '';
+    (j.opt_runs || []).forEach(r => {
+      const lab = document.createElement('label');
+      lab.style.cssText = 'display:inline-flex;gap:4px;align-items:center';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.className = 'rp-opt'; cb.value = r.name; cb.checked = true;
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(r.name + ' · ' + r.shards + ' 片 · '
+        + String(r.first || '').slice(0, 8) + '~' + String(r.last || '').slice(0, 8)));
+      box.appendChild(lab);
+    });
+    const cs = $('rp-contracts');
+    cs.innerHTML = '';
+    (j.contracts || []).forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.name;
+      o.textContent = c.name + '（' + c.rows + ' 行 · ' + (c.months || []).join('/') + '）';
+      cs.appendChild(o);
+    });
+    rpFillSymbols();
+    if ((j.notes || []).length) rpMsg('<span class="warn">' + j.notes.join('；') + '</span>');
+  } catch (e) {
+    rpMsg('<span class="bad">数据集加载失败：' + e.message + '</span>');
+  }
+}
+
+function rpCurRun() {
+  const name = $('rp-etf').value;
+  return ((rpS.ds || {}).etf_runs || []).find(r => r.name === name) || null;
+}
+
+function rpFillSymbols() {
+  const run = rpCurRun();
+  const sel = $('rp-symbol');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  ((run && run.files) || []).forEach(f => {
+    const o = document.createElement('option');
+    o.value = f.symbol;
+    o.textContent = f.symbol + '（' + String(f.first).slice(0, 8) + '~' + String(f.last).slice(0, 8) + '）';
+    sel.appendChild(o);
+  });
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+  const f = ((run && run.files) || [])[0];
+  if (f) {
+    $('rp-start').placeholder = f.first.slice(0, 4) + '-' + f.first.slice(4, 6) + '-' + f.first.slice(6, 8);
+    $('rp-end').placeholder = f.last.slice(0, 4) + '-' + f.last.slice(4, 6) + '-' + f.last.slice(6, 8);
+  }
+}
+
+async function startReplay() {
+  const run = rpCurRun();
+  if (!run) return rpMsg('<span class="bad">没有可用的 ETF 批次</span>');
+  const sym = $('rp-symbol').value;
+  const f = (run.files || []).find(x => x.symbol === sym);
+  if (!f) return rpMsg('<span class="bad">请选择标的</span>');
+  const ds = rpS.ds || {};
+  const opts = Array.from(document.querySelectorAll('.rp-opt')).filter(c => c.checked)
+    .map(c => { const r = (ds.opt_runs || []).find(x => x.name === c.value); return r ? r.path : ''; })
+    .filter(Boolean);
+  if (!opts.length) return rpMsg('<span class="bad">至少选一个期权批次</span>');
+  const cr = (ds.contracts || []).find(c => c.name === $('rp-contracts').value);
+  if (!cr) return rpMsg('<span class="bad">请选择合约清单</span>');
+  const body = {
+    etf_csv: run.path + '/' + f.file,
+    opt_dirs: opts,
+    contracts_csv: cr.path,
+    underlying: sym,
+    initial: Number($('rp-initial').value),
+    arms: $('rp-arms').value,
+    start: $('rp-start').value || '',
+    end: $('rp-end').value || '',
+  };
+  rpMsg('提交中…');
+  try {
+    await api('/config/ashare/paper/replay/start', body);
+    rpMsg('<span class="ok">已启动，跑完自动显示</span>');
+    rpS.shown = '';
+    pollReplay();
+  } catch (e) {
+    rpMsg('<span class="bad">' + e.message + '</span>');
+  }
+}
+
+function rpKpiTable(arms) {
+  const keys = Object.keys(arms || {});
+  if (!keys.length) return '';
+  let h = '<table><thead><tr><th class="l">臂</th><th>净值</th><th>收益率</th><th>已实现</th>'
+    + '<th>未实现</th><th>成交</th><th>平仓</th><th>胜率</th></tr></thead><tbody>';
+  keys.forEach(k => {
+    const a = arms[k];
+    h += '<tr><td class="l">' + k + '</td><td>' + rpMoney(a.equity) + '</td><td>' + rpPct(a.return_pct)
+      + '</td><td>' + rpMoney(a.realized) + '</td><td>' + rpMoney(a.unrealized) + '</td><td>'
+      + a.fills + '</td><td>' + a.closes + '</td><td>' + Number(a.win_rate || 0).toFixed(1) + '%</td></tr>';
+  });
+  return h + '</tbody></table>';
+}
+
+function rpFillsTable(fills, limit) {
+  const rows = (fills || []).slice(0, limit || 20);
+  if (!rows.length) return '<div class="hint">无成交</div>';
+  let h = '<table><thead><tr><th class="l">时间</th><th class="l">动作</th><th class="l">合约</th>'
+    + '<th>行权价</th><th>张数</th><th>价</th><th>已实现</th><th class="l">原因</th></tr></thead><tbody>';
+  rows.forEach(f => {
+    const t = String(f.ts || '').slice(0, 16).replace('T', ' ');
+    h += '<tr><td class="l">' + t + '</td><td class="l">' + (f.action || '') + '</td><td class="l">'
+      + (f.code || '') + '</td><td>' + (f.strike === undefined ? '' : f.strike) + '</td><td>'
+      + (f.qty === undefined ? '' : f.qty) + '</td><td>' + (f.px === undefined ? '' : f.px) + '</td><td>'
+      + (f.realized === undefined ? '' : Number(f.realized).toFixed(2)) + '</td><td class="l">'
+      + (f.reason || f.note || '') + '</td></tr>';
+  });
+  return h + '</tbody></table>';
+}
+
+function renderReplayResult(p) {
+  rpS.md = p.markdown || '';
+  rpS.shown = p.run_id || rpS.shown;
+  const w = p.data_window || {};
+  const inp = p.input || {};
+  let h = '<div class="hint">' + String(p.created || '').replace('T', ' ').slice(0, 19)
+    + ' · ' + (inp.underlying || '') + ' · 回放区间 ' + (w.etf_first || '—') + ' ~ ' + (w.etf_last || '—')
+    + '（' + (w.etf_bars || 0) + ' 根）· 期权覆盖 ' + (w.opt_first || '—') + ' ~ ' + (w.opt_last || '—')
+    + ' · 有效重叠 ' + (w.overlap_first || '—') + ' ~ ' + (w.overlap_last || '—') + '</div>';
+  if ((w.notes || []).length) {
+    h += '<div class="hint warn" style="margin-top:4px">' + w.notes.join('<br>') + '</div>';
+  }
+  h += rpKpiTable(p.arms);
+  Object.keys(p.arms || {}).forEach(k => {
+    const a = p.arms[k];
+    const cons = a.consistency || {};
+    h += '<div class="hint" style="margin-top:8px">臂 ' + k + ' · ' + (a.label || '')
+      + ' · 成交 ' + a.fills + ' 笔（平仓 ' + a.closes + '，胜 ' + a.wins + '）'
+      + ' · 担保占用 ' + rpMoney(a.collateral_locked) + ' · 现金 ' + rpMoney(a.available_cash)
+      + ' · 一致性 ' + (cons.ok ? '✅' : '❌') + '</div>';
+    h += rpFillsTable(a.fills_detail, 20);
+  });
+  $('rp-result').innerHTML = h;
+}
+
+async function loadReplayResult(rid) {
+  try {
+    const p = await api('/config/ashare/paper/replay/result?run_id=' + encodeURIComponent(rid));
+    renderReplayResult(p);
+  } catch (e) {
+    $('rp-result').innerHTML = '<span class="bad">结果加载失败：' + e.message + '</span>';
+  }
+}
+
+function rpFillHistory(list) {
+  const sel = $('rp-history');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">—</option>';
+  (list || []).forEach(r => {
+    const o = document.createElement('option');
+    const arms = r.arms || {};
+    o.value = r.run_id;
+    o.textContent = String(r.created || '').replace('T', ' ').slice(0, 19) + ' · ' + (r.underlying || '')
+      + ' · ' + Object.keys(arms).map(k => k + ' ' + rpPct(arms[k].return_pct)).join(' / ');
+    sel.appendChild(o);
+  });
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+}
+
+async function pollReplay() {
+  const pg = $('rp-progress');
+  try {
+    const j = await api('/config/ashare/paper/replay/state');
+    rpFillHistory(j.results || []);
+    if (j.running) {
+      const pct = j.total ? Math.floor(j.done * 100 / j.total) : 0;
+      pg.innerHTML = '⏳ ' + (j.stage || '') + (j.arm ? ' · 臂 ' + j.arm : '')
+        + ' · ' + (j.done || 0) + '/' + (j.total || 0) + '（' + pct + '%）· ' + (j.elapsed_s || 0) + 's';
+      return;
+    }
+    if (j.stage === 'error') {
+      pg.innerHTML = '<span class="bad">回放失败：' + (j.error || '') + '</span>';
+      return;
+    }
+    if (j.stage === 'done' && j.run_id) {
+      pg.innerHTML = '<span class="ok">完成（' + (j.elapsed_s || 0) + 's）· ' + j.run_id + '</span>';
+      if (rpS.shown !== j.run_id) await loadReplayResult(j.run_id);
+    }
+  } catch (e) {
+    if (pg) pg.innerHTML = '<span class="bad">状态刷新失败：' + e.message + '</span>';
+  }
+}
+
+on('rp-go', 'click', startReplay);
+on('rp-ds-refresh', 'click', () => loadReplayDs(true));
+on('rp-etf', 'change', rpFillSymbols);
+on('rp-symbol', 'change', rpFillSymbols);
+on('rp-history', 'change', () => {
+  const rid = $('rp-history').value;
+  if (rid) loadReplayResult(rid);
+});
+on('rp-copy', 'click', () => {
+  const tip = $('rp-copy-tip');
+  if (!rpS.md) { tip.innerHTML = '<span class="warn">先跑一次回放</span>'; return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(rpS.md).then(
+      () => { tip.innerHTML = '<span class="ok">✅ 已复制</span>'; },
+      () => { tip.innerHTML = '<span class="warn">⚠️ 请手动复制</span>'; });
+  } else { tip.innerHTML = '<span class="warn">⚠️ 请手动复制</span>'; }
+});
+// details 折叠时才加载/轮询（避免无人看时每 5s 打端点）
+on('rp-wrap', 'toggle', () => {
+  const open = $('rp-wrap').open;
+  if (open) {
+    if (!rpS.ds) loadReplayDs(false);
+    pollReplay();
+    if (!rpS.tick) rpS.tick = setInterval(pollReplay, 5000);
+  } else if (rpS.tick) {
+    clearInterval(rpS.tick);
+    rpS.tick = null;
+  }
+});
 
 /* ── 期权链 · IV 分位 ─────────────────────────────────────── */
 const ocState = {expiries: [], expiry: '', rows: [], summary: [], live: null};
