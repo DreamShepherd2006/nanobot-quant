@@ -527,6 +527,9 @@ def record_observations(symbols: list[str] | None = None, now: datetime | None =
         sts = state_series(bars)
         st = state_at(sts, dts)
         last_ts = bars[-1][0] if bars else None
+        bar_day = str(last_ts)[:8] if last_ts else ""
+        # 防「静默陈旧」：bar 没跟上决策日就不能当今日读数用，必须显式标出来
+        stale = bool(bar_day and bar_day < today)
         adx = ema_v = slope = None
         if bars:
             a_all = adx14(bars)
@@ -553,7 +556,8 @@ def record_observations(symbols: list[str] | None = None, now: datetime | None =
             "adx14": None if adx is None else round(float(adx), 4),
             "ema55": None if ema_v is None else round(float(ema_v), 6),
             "slope5": None if slope is None else round(float(slope), 6),
-            "bars_15m": len(bars), "last_bar_ts": last_ts,
+            "bars_15m": len(bars), "last_bar_ts": last_ts, "last_bar_day": bar_day,
+            "stale_bars": stale,
             "bar_source": upd.get("source") or "",
             "bars_error": upd.get("error") or "",
             "params": {"adx_in": ADX_IN, "adx_out": ADX_OUT, "ema": EMA_N,
@@ -561,6 +565,8 @@ def record_observations(symbols: list[str] | None = None, now: datetime | None =
         }
         if st is None:
             srow["note"] = f"预热不足（{len(bars)}/{MIN_BARS} 根 15m bar）"
+        elif stale:
+            srow["note"] = f"行情陈旧：最后 bar 为 {bar_day}，非决策日 {today}（state 仅反映旧数据）"
         _append(state_path(), srow)
         res["states"].append({"symbol": sym, "state": st, "spot": spot,
                               "bars": len(bars)})

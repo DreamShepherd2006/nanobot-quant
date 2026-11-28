@@ -258,3 +258,17 @@ def test_routes_registered_and_sync_called(root, monkeypatch):
     assert "/config/ashare/modelb-forward/state" in paths
     assert "/config/ashare/modelb-forward/run" in paths
     assert called == {"tape": 1, "fwd": 1}
+
+
+def test_stale_bars_are_marked_not_silent(root, monkeypatch):
+    """数据没跟上决策日时，state 仍记录但必须标 `stale_bars` + note。"""
+    monkeypatch.setattr(mfw, "update_bars", lambda *a, **k: {"error": "", "source": "csv"})
+    monkeypatch.setattr(mfw, "_chain_rows", lambda *a, **k: {"rows": [], "spot": 4.0,
+                                                            "error": ""})
+    bars = _bars(80, ts0=20261127093000)          # 最后 bar 停在 11-27
+    monkeypatch.setattr(mfw, "load_bars_cache",
+                        lambda: {"510300.SH": {"bars": [list(b) for b in bars]}})
+    mfw.record_observations(["510300.SH"], now=datetime(2026, 11, 28, 14, 50))
+    row = mfw.load_states()[0]
+    assert row["stale_bars"] is True and row["last_bar_day"] == "20261127"
+    assert "行情陈旧" in row["note"]
