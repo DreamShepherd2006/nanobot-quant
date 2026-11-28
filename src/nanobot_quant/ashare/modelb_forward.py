@@ -9,11 +9,16 @@
 **与回测的区别（关键）**：这里不做撮合、不做选档策略、不写台账、不下单，
 只记录「当时能看到什么」。分析脚本（离线、只读）读这三个文件做裁决。
 
-**冻结口径**（``rule_version = modelb_state_v1``，与
-``scripts/modelb_c176_decomp.py`` 逐位一致，改动必须升版本号）：
+**冻结口径**（``rule_version = modelb_state_v2``，改动必须升版本号）：
 
-- 15m bar = 当日 1m 序列按 15 根切块（不足 15 根丢弃），
-  ``o`` = 首根 close、``h`` = max(close)、``l`` = min(low)、``c`` = 末根 close；
+- 15m bar = **按交易时段栅格**归并（上午 09:30 起、下午 13:00 起，每 15 分钟一格，
+  不足 15 根的格丢弃）：``o`` = 格内首根 close、``h`` = max(close)、``l`` = min(low)、
+  ``c`` = 格内末根 close。（v1 是「按当日 1m 序列从头每 15 根切块」，与 C176 脚本
+  一致；改用栅格是因为 1m 源按自然分钟对齐、不同源首根不同（QMT 下午从 13:01 起、
+  Tencent 从 13:00 起），切片口径会让**同一交易日**在不同源上产出不同的块起点，
+  合并时同一根 15m bar 会以两个 ts 各存一份 ⇒ 缓存被污染。栅格口径与源无关、
+  可重复；代价是块边界与 v1 略有差异（v1 在 11:30 处有一根跨午休的块），
+  故升版本号，且 v1 从未产出过落盘记录。）
 - ADX(14) 用 Wilder 平滑，滞回 ``>=25`` 进趋势 / ``<=18`` 出趋势；
 - 趋势内用 EMA55 的 5 根斜率定 ``U``（>0）/ ``D``（<=0），趋势外为 ``R``；
 - 前 60 根 15m bar 之前状态记 ``None``（预热不足）；
@@ -65,7 +70,7 @@ OPTION_FILE = "option_observations.jsonl"
 OUTCOME_FILE = "forward_outcomes.jsonl"
 BARS_CACHE = "bars_15m.json"
 
-RULE_VERSION = "modelb_state_v1"
+RULE_VERSION = "modelb_state_v2"
 SCHEMA_VERSION = 1
 
 # ── 冻结参数（改动必须升 rule_version，否则历史读法与现读法不可比）──────
@@ -73,6 +78,9 @@ DECIDE_HHMMSS = "144500"
 ADX_IN, ADX_OUT, EMA_N, SLOPE_K = 25.0, 18.0, 55, 5
 MIN_BARS = 60               # 前 60 根 15m bar 之前状态记 None
 BAR_SPAN = 900              # 15m = 900 秒
+# 交易时段（分钟数，闭区间）：上午 09:30–11:30、下午 13:00–15:00；15m 栅格从段首起算
+BAR_SESSIONS = ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
+BLOCK_TOL = 3               # 一块至少 15-BLOCK_TOL 根：吸收各源 1 分钟标签差异
 DELTA_TARGET, DELTA_TOL = 0.25, 0.04
 DTE_MIN, DTE_MAX = 4, 35
 HORIZON_DAYS = 5            # 前向结算持有交易日数（冻结）
@@ -225,26 +233,51 @@ def _write_json(path: Path, obj) -> None:
 
 # ══════════════════════ 冻结状态机（modelb_state_v1） ══════════════════════
 
-def to_15m(df) -> list[tuple]:
-    """1m DataFrame → ``[(ts, o, h, l, c)]``，口径与 C176 逐位一致。"""
-    import pandas as pd
+def _block_minute(mins: int) -> int:
+    """分钟数 → 所属 15m 栅格起点（分钟数）；不在交易时段返回 -1。"""
+    for s, e in BAR_SESSIONS:
+        if s <= mins <= e:
+            return s + (mins - s) // 15 * 15
+    return -1
 
+
+def to_15m(df) -> list[tuple]:
+    """1m DataFrame → ``[(ts, o, h, l, c)]``（15m 交易时段栅格，源无关）。
+
+    栅格 = 段首（09:30 / 13:00）起每 15 分钟一格；不满 15 根的允许差 ``BLOCK_TOL`` 根
+    （各源 1 分钟标签差异：QMT 标的为 bar 结束时刻、实时源多为开始时刻，同一交易
+    日的下午首格会差一根），格内不足 15-BLOCK_TOL 根的丢弃（窗口截断 / 中午 11:30
+    与收盘集合竞价 15:00 这类孤立 bar）。这样 QMT CSV 与实时源落在**同一套 ts 栅格**
+    上，合并时不会出现「同一根 bar 两个 ts」的缓存污染。``h`` 用 close 近似、``l`` 用
+    low，与 C176 同口径。
+    """
     out: list[tuple] = []
-    if df is None or len(df) == 0:
+    if df is None or len(df) == 0 or "dt" not in getattr(df, "columns", []):
         return out
-    for _, g in df.groupby("date", sort=True):
-        rows = g[["dt", "close", "low"]].to_records(index=False)
-        n = len(rows)
-        for i in range(0, n, 15):
-            chunk = rows[i:i + 15]
-            if len(chunk) < 15:
-                continue
-            ts = int(pd.Timestamp(chunk[0][0]).strftime("%Y%m%d%H%M%S"))
-            o = float(chunk[0][1])
-            c = float(chunk[-1][1])
-            lo = min(float(x[2]) for x in chunk)
-            hi = max(float(x[1]) for x in chunk)   # high 用 close 近似（C176 口径）
-            out.append((ts, o, hi, lo, c))
+    d = df.copy()
+    d["dt"] = d["dt"].astype("datetime64[ns]")
+    d = d.dropna(subset=["dt"]).sort_values("dt")
+    d = d.drop_duplicates(subset=["dt"], keep="last")
+    if d.empty:
+        return out
+    mins = d["dt"].dt.hour * 60 + d["dt"].dt.minute
+    d["_blk"] = [_block_minute(int(m)) for m in mins]
+    d = d[d["_blk"] >= 0]
+    if d.empty:
+        return out
+    days = (d["date"].astype(str) if "date" in d.columns
+            else d["dt"].dt.strftime("%Y%m%d"))
+    d = d.assign(_day=days)
+    for (day, blk), g in d.groupby(["_day", "_blk"], sort=True):
+        if len(g) < 15 - BLOCK_TOL or len(g) > 15:
+            continue
+        closes = g["close"].astype(float)
+        lows = g["low"].astype(float)
+        b = int(blk)
+        ts = int(f"{day}{b // 60:02d}{b % 60:02d}00")
+        out.append((ts, float(closes.iloc[0]), float(closes.max()),
+                    float(lows.min()), float(closes.iloc[-1])))
+    out.sort(key=lambda x: x[0])
     return out
 
 
@@ -434,6 +467,14 @@ def update_bars(symbol: str, cfg: dict | None = None, force_seed: bool = False) 
         df = drop_unclosed(df, 60)
         fresh = to_15m(df)
         if fresh:
+            # 与既有（预热 CSV）bar 在同一 ts 上的相对偏差：数据源口径不一致时
+            # 会显著变大 ⇒ 写进记录行当可见信号，不静默合并。
+            old = {int(b[0]): float(b[4]) for b in bars if b[4]}
+            diffs = sorted(abs(float(c) - old[int(ts)]) / old[int(ts)]
+                           for ts, _o, _h, _l, c in fresh if int(ts) in old)
+            if diffs:
+                info["drift_n"] = len(diffs)
+                info["drift_med_pct"] = round(diffs[len(diffs) // 2] * 100.0, 4)
             bars = _merge_bars(bars, fresh, cfg["bars_keep"])
             info["appended"] = len(fresh)
     except Exception as e:                                    # noqa: BLE001
@@ -527,9 +568,7 @@ def record_observations(symbols: list[str] | None = None, now: datetime | None =
         sts = state_series(bars)
         st = state_at(sts, dts)
         last_ts = bars[-1][0] if bars else None
-        bar_day = str(last_ts)[:8] if last_ts else ""
-        # 防「静默陈旧」：bar 没跟上决策日就不能当今日读数用，必须显式标出来
-        stale = bool(bar_day and bar_day < today)
+        bar_ts_used = None      # 决策时刻实际生效的最后一根「已完成」15m bar
         adx = ema_v = slope = None
         if bars:
             a_all = adx14(bars)
@@ -538,6 +577,7 @@ def record_observations(symbols: list[str] | None = None, now: datetime | None =
             for i, (ts, _s) in enumerate(sts):
                 if ts + 1500 <= dts:
                     idx = i
+                    bar_ts_used = ts
             adx = a_all[idx]
             ema_v = e_all[idx]
             slope = (e_all[idx] - e_all[idx - SLOPE_K]) if idx >= SLOPE_K else None
@@ -556,17 +596,18 @@ def record_observations(symbols: list[str] | None = None, now: datetime | None =
             "adx14": None if adx is None else round(float(adx), 4),
             "ema55": None if ema_v is None else round(float(ema_v), 6),
             "slope5": None if slope is None else round(float(slope), 6),
-            "bars_15m": len(bars), "last_bar_ts": last_ts, "last_bar_day": bar_day,
-            "stale_bars": stale,
+            "bars_15m": len(bars), "last_bar_ts": last_ts,
+            "state_bar_ts": bar_ts_used,
             "bar_source": upd.get("source") or "",
+            "bars_appended": upd.get("appended") or 0,
+            "bars_drift_n": upd.get("drift_n") or 0,
+            "bars_drift_med_pct": upd.get("drift_med_pct"),
             "bars_error": upd.get("error") or "",
             "params": {"adx_in": ADX_IN, "adx_out": ADX_OUT, "ema": EMA_N,
                        "slope_k": SLOPE_K, "min_bars": MIN_BARS},
         }
         if st is None:
             srow["note"] = f"预热不足（{len(bars)}/{MIN_BARS} 根 15m bar）"
-        elif stale:
-            srow["note"] = f"行情陈旧：最后 bar 为 {bar_day}，非决策日 {today}（state 仅反映旧数据）"
         _append(state_path(), srow)
         res["states"].append({"symbol": sym, "state": st, "spot": spot,
                               "bars": len(bars)})

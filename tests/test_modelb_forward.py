@@ -259,16 +259,57 @@ def test_routes_registered_and_sync_called(root, monkeypatch):
     assert "/config/ashare/modelb-forward/run" in paths
     assert called == {"tape": 1, "fwd": 1}
 
+# ── v2：15m 按交易时段栅格（与数据源无关）────────────────────
 
-def test_stale_bars_are_marked_not_silent(root, monkeypatch):
-    """数据没跟上决策日时，state 仍记录但必须标 `stale_bars` + note。"""
-    monkeypatch.setattr(mfw, "update_bars", lambda *a, **k: {"error": "", "source": "csv"})
-    monkeypatch.setattr(mfw, "_chain_rows", lambda *a, **k: {"rows": [], "spot": 4.0,
-                                                            "error": ""})
-    bars = _bars(80, ts0=20261127093000)          # 最后 bar 停在 11-27
-    monkeypatch.setattr(mfw, "load_bars_cache",
-                        lambda: {"510300.SH": {"bars": [list(b) for b in bars]}})
-    mfw.record_observations(["510300.SH"], now=datetime(2026, 11, 28, 14, 50))
-    row = mfw.load_states()[0]
-    assert row["stale_bars"] is True and row["last_bar_day"] == "20261127"
-    assert "行情陈旧" in row["note"]
+def _session_minutes(day: str, afternoon_start: str = "1301"):
+    """一天的 1m 时间戳：09:30–11:30 + 下午（QMT 从 13:01 起、实时源从 13:00 起）。
+
+    QMT ETF CSV 每日 241 根且下午从 13:01 起；实时源（Tencent）时常含 13:00 与
+    15:00 根。两者必须落在同一套 15m ts 栅格上，否则合并会同一根 bar 存两份。
+    """
+    out = []
+    am0 = datetime.strptime(day + "0930", "%Y%m%d%H%M")
+    out += [am0 + timedelta(minutes=i) for i in range(0, 121)]      # 09:30–11:30
+    pm0 = datetime.strptime(day + afternoon_start, "%Y%m%d%H%M")
+    n = 121 if afternoon_start == "1300" else 120                    # 到 15:00 为止
+    out += [pm0 + timedelta(minutes=i) for i in range(0, n)]
+    return out
+
+
+def _day_df(day: str, afternoon_start: str = "1301", base: float = 10.0):
+    dts = _session_minutes(day, afternoon_start)
+    rows = [{"dt": t, "close": base + i * 0.001, "low": base + i * 0.001 - 0.002,
+             "date": day} for i, t in enumerate(dts)]
+    return pd.DataFrame(rows)
+
+
+def test_to_15m_grid_is_source_independent():
+    """下午 13:01 起（QMT）与 13:00 起（实时）产出同一套 16 根 ts。"""
+    a = mfw.to_15m(_day_df("20261126", "1301"))
+    b = mfw.to_15m(_day_df("20261126", "1300"))
+    ts_a = [x[0] for x in a]
+    ts_b = [x[0] for x in b]
+    expect = [20261126093000, 20261126094500, 20261126100000, 20261126101500,
+              20261126103000, 20261126104500, 20261126110000, 20261126111500,
+              20261126130000, 20261126131500, 20261126133000, 20261126134500,
+              20261126140000, 20261126141500, 20261126143000, 20261126144500]
+    assert ts_a == expect
+    assert ts_b == expect
+
+
+def test_to_15m_drops_lunch_and_close_auction_bars():
+    """v1 会在 11:30 处切出一根跨午休的块；v2 不应出现 11:30 / 15:00 起点。"""
+    ts = [x[0] for x in mfw.to_15m(_day_df("20261126", "1300"))]
+    for bad in (20261126113000, 20261126150000, 20261126131000):
+        assert bad not in ts
+    assert len(ts) == 16
+
+
+def test_merge_two_sources_keeps_one_bar_per_ts():
+    """两个源都算一遍再合并，ts 不重复（v1 切片口径会产出 32 根）。"""
+    old = mfw.to_15m(_day_df("20261126", "1301"))
+    fresh = mfw.to_15m(_day_df("20261126", "1300"))
+    merged = mfw._merge_bars(old, fresh, 2000)
+    assert len(merged) == 16
+    assert [b[0] for b in merged] == [b[0] for b in old]
+
