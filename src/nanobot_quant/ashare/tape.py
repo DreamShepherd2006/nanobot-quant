@@ -237,7 +237,10 @@ def contract_unit_sources() -> list[Path]:
         runs = [p for p in root.glob("qmt-option-1m/*/contracts_all.csv") if p.is_file()]
     except OSError:
         runs = []
-    runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # run 目录名自带时间戳（run_YYYYMMDD_HHMMSS…）⇒ 按名字降序才是「新 run 优先」。
+    # 不能用 mtime：上传顺序会让老文件反而更新（2026-11-28 实测：run_20261120 那份
+    # 缺 opt_unit/margin_unit 列的老表被当成最新 ⇒ ou/mu 全 null、ms 却是 contracts_all）。
+    runs.sort(key=lambda p: (p.parent.name, p.name), reverse=True)
     out.extend(runs)
     return out
 
@@ -324,6 +327,28 @@ def parse_quote_ts(raw) -> datetime | None:
         return None
 
 
+def quote_meta(raw_ts, sample_ms) -> tuple[str | None, int | None]:
+    """行情行 ``ts``（新浪 ``[32]``）→ ``(quote_ts UTC ISO, quote_age_s)``。
+
+    ``flatten`` 与采样预览共用这一处，避免两套算法漂移；解析不了返回 ``(None, None)``，
+    绝不用采样时刻回填（那会把陈旧报价伪装成实时）。
+
+    注意：新浪期权 ``[32]`` 实测是**日级**（``2026-11-27 00:00:00``，全 51 字段无盘中
+    时间戳）⇒ 收盘态下 ``quote_age_s`` 只是「距最近交易日」，判不了盘中陈旧。
+    """
+    q = parse_quote_ts(raw_ts)
+    if q is None:
+        return None, None
+    quote_ts = q.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    age = None
+    if sample_ms:
+        try:
+            age = int(int(sample_ms) / 1000 - q.timestamp())
+        except (TypeError, ValueError):
+            age = None
+    return quote_ts, age
+
+
 # ── 展开 ────────────────────────────────────
 
 def flatten(samples: list[dict]) -> list[dict]:
@@ -346,16 +371,7 @@ def flatten(samples: list[dict]) -> list[dict]:
                 mid = round((bid + ask) / 2.0, 8)
                 if mid > 0:
                     spread = round((ask - bid) / mid, 6)
-            q = parse_quote_ts(r.get("ts"))
-            quote_ts = (
-                q.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if q else None
-            )
-            quote_age_s = None
-            if q is not None and sample_ms:
-                try:
-                    quote_age_s = int(int(sample_ms) / 1000 - q.timestamp())
-                except (TypeError, ValueError):
-                    quote_age_s = None
+            quote_ts, quote_age_s = quote_meta(r.get("ts"), sample_ms)
             out.append({
                 "v": ver,
                 "ts": sample_ts, "sample_ts": sample_ts, "ts_ms": sample_ms,
@@ -693,7 +709,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "tape_config", "save_tape_config", "tape_dir", "sample_path", "load_tape",
     "tape_stats", "flatten", "in_session", "now_cn", "parse_opt_line",
-    "parse_quote_ts", "contract_unit_sources", "load_contract_units",
+    "parse_quote_ts", "quote_meta", "contract_unit_sources", "load_contract_units",
     "attach_contract_units",
     "fetch_spot", "fetch_quotes", "pick_contracts", "sample_once", "sample_now",
     "sync", "stop", "state",

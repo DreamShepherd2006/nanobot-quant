@@ -349,8 +349,14 @@ def register_ashare_routes(app, gatekeeper) -> None:
         persist = bool((body or {}).get("persist"))
         rec = tape.sample_now(persist=persist)
         rows = rec.get("rows") or []
+        preview = []
+        for r in rows[:5]:
+            item = dict(r)
+            item["qt"], item["qa"] = tape.quote_meta(item.get("ts"), rec.get("ts_ms"))
+            preview.append(item)
         return JSONResponse({
             "ok": True,
+            "v": rec.get("v"),
             "persisted": bool(persist and rows),
             "skipped": rec.get("skipped") or "",
             "error": rec.get("error") or "",
@@ -358,7 +364,12 @@ def register_ashare_routes(app, gatekeeper) -> None:
             "spot": rec.get("spot") or {},
             "picked": rec.get("picked"),
             "rows": len(rows),
-            "preview": rows[:5],
+            # 诊断字段必须真正下发：历史上 sample_once 算好了 mult_src/mult_missing，
+            # 却被这层挑字段吞掉 ⇒ 页面无法判断选了哪份合约表、是否漏挂乘数。
+            "mult_src": rec.get("mult_src") or "",
+            "mult_missing": rec.get("mult_missing"),
+            "mult_error": rec.get("mult_error") or "",
+            "preview": preview,
         })
 
     @app.post("/config/ashare/contracts/refresh")

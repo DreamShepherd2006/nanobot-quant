@@ -325,3 +325,89 @@ def test_pool_underlyings_have_display_names():
     names = dict(tape.POOL_UNDERLYINGS)
     assert names["510050.SH"] == "上证50ETF"
     assert all(v for v in names.values())
+
+
+# ── v2 诊断可见性（2026-11-28：乘数源选错 + handler 吞诊断字段） ─────────────────
+
+def test_contract_unit_sources_prefers_newest_run_by_name(tmp_path, monkeypatch):
+    """取源按 run 目录名（含时间戳）降序，**不看 mtime**。
+
+    实测事故：run_20261120 那份缺 opt_unit/margin_unit 列的老表 mtime 反而最新
+    ⇒ ou/mu 全 null、ms 却是 contracts_all（看起来“挂上了”其实字段全丢）。
+    """
+    import csv as _csv
+    import os
+
+    storage = tmp_path / "credentials"
+    storage.mkdir()
+    monkeypatch.setattr(tape.creg, "_get_storage_dir", lambda: str(storage))
+    root = tmp_path / "ashare_data" / "qmt-option-1m"
+
+    def _mk(run, cols, mtime):
+        d = root / run
+        d.mkdir(parents=True)
+        p = d / "contracts_all.csv"
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerow({k: "" for k in cols})
+        os.utime(p, (mtime, mtime))
+        return p
+
+    _mk("run_20261120_012436", ["undl", "code", "mult"], 4_000_000_000)        # 老表 / mtime 最新
+    _mk("run_20261127_220003_p1120",
+        ["undl", "code", "mult", "opt_unit", "margin_unit"], 1_000_000_000)
+
+    src = tape.contract_unit_sources()
+    assert src, "应能找到 contracts_all.csv"
+    assert src[0].parent.name == "run_20261127_220003_p1120"
+
+
+def test_quote_meta_never_backfills_sample_time():
+    """解析不了行情行返回 (None, None)；能解析则按 CN 时区换算成 UTC 并算陈旧秒。"""
+    qt, age = tape.quote_meta("2026-11-27 00:00:00", 1_700_000_000_000)
+    assert qt == "2026-11-26T16:00:00Z"            # 北京时间 00:00 = UTC 前一日 16:00
+    assert age == 1_700_000_000 - int(
+        datetime(2026, 11, 26, 16, 0, tzinfo=timezone.utc).timestamp())
+    assert tape.quote_meta("", 1_700_000_000_000) == (None, None)
+    assert tape.quote_meta("garbage", None) == (None, None)
+
+
+def test_sample_endpoint_exposes_diagnostics(tmp_path, monkeypatch):
+    """采样端点必须把 v / mult_src / mult_missing / qt / qa 真正下发。
+
+    历史缺陷：sample_once 算好了这些键，handler 只挑部分字段 ⇒ 页面无法判断
+    装了哪版、选了哪份合约表，只能靠推断（静默降级不可接受）。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nanobot_quant import ashare_handlers as ah
+
+    monkeypatch.setattr(tape.creg, "_get_storage_dir", lambda: str(tmp_path))
+    rec = {
+        "v": 2,
+        "ts": "2026-11-20T07:00:00Z",
+        "ts_ms": 1_700_000_000_000,
+        "spot": {"510050.SH": 2.9},
+        "picked": 1,
+        "rows": [{"i": "10011425.SHO", "ts": "2026-11-27 00:00:00",
+                  "m": 10000, "ou": 10000.0, "mu": 4091.8,
+                  "ms": "contracts_all"}],
+        "mult_src": "run_20261127_220003_p1120/contracts_all.csv",
+        "mult_missing": 0,
+        "mult_error": "",
+        "skipped": "",
+        "error": "",
+    }
+    monkeypatch.setattr(tape, "sample_now", lambda persist=False: rec)
+    monkeypatch.setattr(ah, "_authorized", lambda req, gk: (None, True))
+
+    app = FastAPI()
+    ah.register_ashare_routes(app, object())
+    j = TestClient(app).post("/config/ashare/sample", json={"persist": False}).json()
+    assert j["v"] == 2
+    assert j["mult_src"] == "run_20261127_220003_p1120/contracts_all.csv"
+    assert j["mult_missing"] == 0 and j["mult_error"] == ""
+    row = j["preview"][0]
+    assert row["qt"] == "2026-11-26T16:00:00Z" and row["qa"] is not None
