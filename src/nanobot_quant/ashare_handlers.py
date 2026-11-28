@@ -22,6 +22,7 @@ from nanobot_quant.ashare import iv_panel as ivp
 from nanobot_quant.ashare import params_md as pm
 from nanobot_quant.ashare import paper_strategy as ps
 from nanobot_quant.ashare import trades_md as tm
+from nanobot_quant.ashare import modelb_forward as mfw
 from nanobot_quant.ashare import option_chain as oc
 from nanobot_quant.ashare import paper_replay as prp
 from nanobot_quant.ashare import paper_runner as pr
@@ -390,6 +391,37 @@ def register_ashare_routes(app, gatekeeper) -> None:
         tape.sync()
     except Exception as e:  # noqa: BLE001
         print(f"[ASHARE-TAPE] 启动同步失败: {type(e).__name__}: {e}", flush=True)
+
+    # ── 模型 B 前向记录器（只读：不写台账 / 不下单 / 不挂交易开关）──
+    # 同一理由自动拉起：它的全部价值就是「时间往前走的样本」，停一天少一天，
+    # 且写入只落在 ashare_tape/research/ 下，不接触任何交易路径或既有文件。
+    try:
+        mfw.sync()
+    except Exception as e:  # noqa: BLE001
+        print(f"[MODELB-FWD] 启动同步失败: {type(e).__name__}: {e}", flush=True)
+
+    @app.get("/config/ashare/modelb-forward/state")
+    async def _mf_state(request: Request):
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        return JSONResponse({"ok": True, **mfw.state()})
+
+    @app.post("/config/ashare/modelb-forward/run")
+    async def _mf_run(request: Request):
+        """手动记一次 + 结算一次（诊断用；正常由 runner 每日自动跑）。"""
+        err, ok = _authorized(request, gatekeeper)
+        if not ok:
+            return JSONResponse({"ok": False, "error": err}, status_code=403)
+        out: dict = {"ok": True}
+        for name, fn in (("record", mfw.record_now), ("settle", mfw.settle_now)):
+            try:
+                out[name] = fn()
+            except Exception as e:  # noqa: BLE001
+                out["ok"] = False
+                out[name] = {"error": f"{type(e).__name__}: {e}"}
+        out["files"] = mfw.files_summary()
+        return JSONResponse(out)
 
     # ── 模拟账本（纸上交易，不接券商） ──────────────────────
 
