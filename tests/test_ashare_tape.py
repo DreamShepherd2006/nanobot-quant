@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -71,6 +71,118 @@ def test_flatten_adds_spread():
     f = rows[0]
     assert f["mid"] == pytest.approx(0.0664)
     assert f["spread_pct"] == pytest.approx((0.0666 - 0.0662) / 0.0664, rel=1e-4)
+
+
+# ── v2：合约自身报价时间 / 合约乘数 ──────────────────────
+
+def test_flatten_keeps_contract_quote_ts_and_age():
+    """``sample_ts`` 与 ``quote_ts`` 是两个字段：新浪 [32] 是合约自己的报价时间。"""
+    rec = tape.parse_opt_line(REAL_LINES.split("\n")[1])   # [32] = 2026-11-20 15:00:00
+    rec.update({"u": "510500.SH", "r": "P", "k": 6.5})
+    ts_ms = int(datetime(2026, 11, 20, 7, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    f = tape.flatten([{"v": 2, "ts": "2026-11-20T07:00:00Z", "ts_ms": ts_ms,
+                       "spot": {"510500.SH": 6.4}, "rows": [rec]}])[0]
+    assert f["sample_ts"] == "2026-11-20T07:00:00Z" and f["ts"] == f["sample_ts"]
+    assert f["quote_ts"] == "2026-11-20T07:00:00Z"          # CN 15:00 = UTC 07:00
+    assert f["quote_ts_raw"] == "2026-11-20 15:00:00"
+    assert f["quote_age_s"] == 0
+
+
+def test_flatten_quote_ts_null_never_filled_with_sample_ts():
+    """报价时间缺失/非法 → ``quote_ts=null``，绝不用采样时间顶替。"""
+    for bad in ("", None, "15:00:00", "not-a-time"):
+        rec = tape.parse_opt_line(REAL_LINES.split("\n")[0])
+        rec.update({"u": "510050.SH", "r": "C", "k": 2.8, "ts": bad})
+        f = tape.flatten([{"v": 2, "ts": "2026-11-20T07:00:00Z", "ts_ms": 1795160400000,
+                           "spot": {"510050.SH": 2.9}, "rows": [rec]}])[0]
+        assert f["quote_ts"] is None, bad
+        assert f["quote_age_s"] is None, bad
+        assert f["sample_ts"] == "2026-11-20T07:00:00Z"        # 采样时间仍在
+
+
+def test_flatten_legacy_record_is_versioned_and_not_guessed():
+    """旧文件没有 ``v``/乘数字段 → v=1 + ``mult_src=legacy``，不当成 missing 混同。"""
+    rec = tape.parse_opt_line(REAL_LINES.split("\n")[0])
+    rec.update({"u": "510050.SH", "r": "C", "k": 2.8})
+    f = tape.flatten([{"ts": "2026-11-20T07:00:00Z", "ts_ms": 1,
+                       "spot": {}, "rows": [rec]}])[0]
+    assert f["v"] == 1
+    assert f["mult"] is None and f["mult_src"] == "legacy"
+
+
+def _write_units(tmp_path, rows):
+    """在 ``{storage}/../ashare_data/qmt-option-1m/<run>/contracts_all.csv`` 放一份合约表。"""
+    import csv as _csv
+    d = tmp_path / "ashare_data" / "qmt-option-1m" / "run_test"
+    d.mkdir(parents=True)
+    p = d / "contracts_all.csv"
+    cols = ["undl", "code", "month", "type", "strike", "expire", "mult",
+            "tick", "open_date", "margin_unit", "settle_px", "opt_unit"]
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in cols})
+    return p
+
+
+def test_sample_once_attaches_mult_from_contracts_all(tmp_path, monkeypatch):
+    """乘数按合约代码 join 合约表 —— 同一到期档 10000/10180 不得混。"""
+    storage = tmp_path / "credentials"
+    storage.mkdir()
+    monkeypatch.setattr(tape.creg, "_get_storage_dir", lambda: str(storage))
+    monkeypatch.setattr(tape, "fetch_spot", lambda undls: {"510050.SH": 2.9})
+    parsed = tape.parse_opt_line(REAL_LINES.split("\n")[0])
+    monkeypatch.setattr(tape, "fetch_quotes",
+                        lambda codes, timeout=12.0: ([dict(parsed)], 0))
+    monkeypatch.setattr(ac, "contracts", lambda storage, force=False, today=None: {
+        "items": [{"code": "10012437", "name": "x", "undl": "510050.SH",
+                    "right": "C", "month": 11, "strike": 2.8, "expire": "20261125"}],
+        "source": "cache", "fetched_at": 1, "error": ""})
+    monkeypatch.setattr(tape, "now_cn",
+                        lambda: datetime(2026, 11, 20, 15, 0, tzinfo=tape.CN))
+    monkeypatch.setattr(tape, "_UNIT_CACHE", {"key": None, "units": None, "source": ""})
+    _write_units(tmp_path, [{"undl": "510050.SH", "code": "10012437.SHO",
+                             "month": 202612, "type": "C", "strike": 2.8,
+                             "expire": 20261223, "mult": 10180, "tick": 0.0001,
+                             "margin_unit": 4091.8, "opt_unit": 10000.0}])
+
+    rec = tape.sample_once(tape.DEFAULT_TAPE, persist=False, force=True)
+    assert rec["v"] == 2
+    assert rec["mult_src"] == "run_test/contracts_all.csv"
+    assert rec["mult_missing"] == 0
+    row = rec["rows"][0]
+    assert row["m"] == 10180 and row["ou"] == 10000.0 and row["ms"] == "contracts_all"
+    assert row["mu"] == pytest.approx(4091.8)
+    f = tape.flatten([rec])[0]
+    assert f["mult"] == 10180 and f["mult_src"] == "contracts_all"
+    assert f["opt_unit"] == 10000.0 and f["margin_unit"] == pytest.approx(4091.8)
+
+
+def test_mult_missing_is_marked_never_default_10000(tmp_path, monkeypatch):
+    """匹配不到合约表 → ``mult=null`` + ``missing`` 并计数，不静默用 10000。"""
+    storage = tmp_path / "credentials"
+    storage.mkdir()
+    monkeypatch.setattr(tape.creg, "_get_storage_dir", lambda: str(storage))
+    monkeypatch.setattr(tape, "fetch_spot", lambda undls: {"510050.SH": 2.9})
+    parsed = tape.parse_opt_line(REAL_LINES.split("\n")[0])
+    monkeypatch.setattr(tape, "fetch_quotes",
+                        lambda codes, timeout=12.0: ([dict(parsed)], 0))
+    monkeypatch.setattr(ac, "contracts", lambda storage, force=False, today=None: {
+        "items": [{"code": "10012437", "name": "x", "undl": "510050.SH",
+                    "right": "C", "month": 11, "strike": 2.8, "expire": "20261125"}],
+        "source": "cache", "fetched_at": 1, "error": ""})
+    monkeypatch.setattr(tape, "now_cn",
+                        lambda: datetime(2026, 11, 20, 15, 0, tzinfo=tape.CN))
+    monkeypatch.setattr(tape, "_UNIT_CACHE", {"key": None, "units": None, "source": ""})
+
+    rec = tape.sample_once(tape.DEFAULT_TAPE, persist=False, force=True)
+    assert rec["mult_error"] == "no_contracts_all"
+    assert rec["mult_missing"] == 1
+    row = rec["rows"][0]
+    assert row["m"] is None and row["ou"] is None and row["ms"] == "missing"
+    f = tape.flatten([rec])[0]
+    assert f["mult"] is None and f["mult_src"] == "missing"
 
 
 # ── 选池 ────────────────────────────────────────────────────

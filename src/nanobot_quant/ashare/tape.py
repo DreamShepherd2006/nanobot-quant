@@ -19,21 +19,36 @@
 **落盘**：``{storage_dir}/ashare_tape/tape_YYYYMMDD.jsonl``，一天一文件、每行一次
 采样（append-only、跨重启保留、可 grep）::
 
-    {"ts": "2026-11-20T07:21:05Z", "ts_ms": 1795160465000,
+    {"v": 2, "ts": "2026-11-20T07:21:05Z", "ts_ms": 1795160465000,
+     "mult_src": "run_20261127_220003_p1120/contracts_all.csv", "mult_missing": 0,
      "cfg": {"underlyings": [...], "expiries": 3, "band_pct": 12.0, "max_per_side": 8},
      "spot": {"510050.SH": 2.9, ...},
      "rows": [{"i": "10012437.SHO", "u": "510050.SH", "r": "C", "k": 2.8,
                "e": "20261125", "b": 0.0662, "a": 0.0666, "bs": 2, "as": 163,
                "last": 0.0666, "iv": 0.3713, "oi": 24162, "vol": 92178,
-               "amt": 44359163.0, "st": "E 00",
+               "amt": 44359163.0, "st": "E 00", "ts": "2026-11-20 15:00:00",
+               "m": 10000, "ou": 10000.0, "mu": 4091.8, "ms": "contracts_all",
                "bids": [[0.0662, 2], ...5 档], "asks": [[0.0666, 163], ...5 档]}]}
 
 ``b``/``a`` 取自五档数组的最优档（新浪的 ``[1]/[2]`` 在个别合约上是旧值，
 例如 500ETF 沽 6500 的 ``[2]`` 等于买一，不能用）；无报价记 ``null``。
+
+**v2（2026-11-28）两个字段为什么必须落盘**：
+
+1. ``rows[].ts`` = **合约自身报价时间**（新浪字段 ``[32]``，北京时间），与采样时间
+   ``rec.ts`` 是两件事。旧版 ``flatten()`` 只输出采样时刻，于是 300s 采样一次也看不出
+   该合约是刚更新还是几分钟前的旧报价；现在按 ``sample_ts`` / ``quote_ts`` /
+   ``quote_age_s`` 三个字段分开给出。**解析失败一律记 null，绝不拿采样时间顶替。**
+2. ``rows[].m`` = 合约乘数（份/张），来自 ``contracts_all.csv``。510500 同一到期档并存
+   10000 与 10180 两种（202612：10000×36 + 10180×28），**不允许按到期月推断、也不允许
+   默认 10000**；匹配不到记 ``m=null`` + ``ms="missing"`` 并计入 ``mult_missing``。
+
+旧文件没有 ``v`` 字段 ⇒ 读出来按 ``v=1`` 处理（``mult_src="legacy"``），与 v2 明确区分。
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -48,6 +63,8 @@ from . import contracts as ac
 CN = timezone(timedelta(hours=8))          # 中国无 DST，固定 +8 避免依赖 tzdata
 TAPE_DIR_NAME = "ashare_tape"
 PARAMS_NAME = "ashare_params.json"
+SCHEMA_VERSION = 2                          # v2 = rows 带合约自身报价时间 + 合约乘数
+QUOTE_TS_FMT = "%Y-%m-%d %H:%M:%S"          # 新浪 [32] 的格式（北京时间）
 
 DEFAULT_INTERVAL_S = 60
 INTERVAL_RANGE = (10, 1800)
@@ -198,11 +215,130 @@ def tape_stats(day: str | None = None) -> dict:
     return st
 
 
+# ── 合约乘数（v2） ───────────────────────────────────────
+
+_UNIT_CACHE: dict = {"key": None, "units": None, "source": ""}
+
+
+def contract_unit_sources() -> list[Path]:
+    """乘数来源候选，按优先级：
+
+    1. ``{storage_dir}/ashare_tape/contracts_all.csv``（手工抽查/临时补齐用）；
+    2. ``{data_root}/ashare_data/qmt-option-1m/<run>/contracts_all.csv``，新的 run 优先。
+
+    都拿不到就返回空表——调用方必须标 ``missing``，**不得默认 10000**。
+    """
+    out: list[Path] = []
+    local = tape_dir() / "contracts_all.csv"
+    if local.is_file():
+        out.append(local)
+    root = Path(creg._get_storage_dir()).parent / "ashare_data"
+    try:
+        runs = [p for p in root.glob("qmt-option-1m/*/contracts_all.csv") if p.is_file()]
+    except OSError:
+        runs = []
+    runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    out.extend(runs)
+    return out
+
+
+def load_contract_units() -> dict:
+    """合约代码 → ``{mult, opt_unit, margin_unit}``；返回 ``{units, source, error}``。
+
+    key 用不带 ``.SHO`` 后缀的代码（与行情行的 ``i`` 同源）。``mult`` 非正的条目直接跳过，
+    宁可让下游看到 ``missing``，也不拿一个不可信的乘数去算名义金额。
+    """
+    src = contract_unit_sources()
+    if not src:
+        return {"units": {}, "source": "", "error": "no_contracts_all"}
+    p = src[0]
+    try:
+        st = p.stat()
+    except OSError as e:
+        return {"units": {}, "source": "", "error": f"{type(e).__name__}: {e}"}
+    label = f"{p.parent.name}/contracts_all.csv"
+    key = (str(p), st.st_mtime, st.st_size)
+    if _UNIT_CACHE.get("key") == key and _UNIT_CACHE.get("units") is not None:
+        return {"units": _UNIT_CACHE["units"], "source": _UNIT_CACHE["source"],
+                "error": ""}
+    units: dict = {}
+    try:
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                code = str(row.get("code") or "").strip().split(".")[0]
+                if not code:
+                    continue
+                try:
+                    mult = int(float(row.get("mult") or 0))
+                except (TypeError, ValueError):
+                    mult = 0
+                if mult <= 0:
+                    continue
+                units[code] = {
+                    "mult": mult,
+                    "opt_unit": _opt_float(row.get("opt_unit")),
+                    "margin_unit": _opt_float(row.get("margin_unit")),
+                }
+    except (OSError, csv.Error) as e:
+        return {"units": {}, "source": "", "error": f"{type(e).__name__}: {e}"}
+    _UNIT_CACHE.update({"key": key, "units": units, "source": label})
+    return {"units": units, "source": label, "error": ""}
+
+
+def _opt_float(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def attach_contract_units(rows: list[dict], units: dict) -> int:
+    """给行情行挂上乘数/原始合约单位/保证金快照；返回未匹配条数。
+
+    匹配不到时 ``m/ou/mu`` 全写 ``None`` + ``ms="missing"``——**不写默认 10000**。
+    """
+    missing = 0
+    for r in rows:
+        code = str(r.get("i") or "").split(".")[0]
+        u = units.get(code) if units else None
+        if u:
+            r["m"] = u.get("mult")
+            r["ou"] = u.get("opt_unit")
+            r["mu"] = u.get("margin_unit")
+            r["ms"] = "contracts_all"
+        else:
+            r["m"] = None
+            r["ou"] = None
+            r["mu"] = None
+            r["ms"] = "missing"
+            missing += 1
+    return missing
+
+
+def parse_quote_ts(raw) -> datetime | None:
+    """新浪 ``[32]`` → 带 CN 时区的 datetime；解析不了返回 ``None``（不做回退）。"""
+    try:
+        return datetime.strptime(str(raw or "").strip(), QUOTE_TS_FMT).replace(tzinfo=CN)
+    except (TypeError, ValueError):
+        return None
+
+
+# ── 展开 ────────────────────────────────────
+
 def flatten(samples: list[dict]) -> list[dict]:
-    """采样记录 → 每条报价一行（分析/导出复用）。"""
+    """采样记录 → 每条报价一行（分析/导出复用）。
+
+    v2 字段：``sample_ts``（采样时刻）/ ``quote_ts``（合约自身报价时刻）/ ``quote_age_s``
+    （两者差，秒）/ ``mult`` / ``mult_src`` / ``opt_unit`` / ``margin_unit``。
+    ``ts`` 保留 = ``sample_ts``（旧调用方向后兼容）。
+    """
     out: list[dict] = []
     for rec in samples or []:
         spots = rec.get("spot") or {}
+        sample_ts = rec.get("ts")
+        sample_ms = rec.get("ts_ms")
+        ver = int(rec.get("v") or 1)
         for r in rec.get("rows") or []:
             bid, ask = r.get("b"), r.get("a")
             mid = spread = None
@@ -210,14 +346,30 @@ def flatten(samples: list[dict]) -> list[dict]:
                 mid = round((bid + ask) / 2.0, 8)
                 if mid > 0:
                     spread = round((ask - bid) / mid, 6)
+            q = parse_quote_ts(r.get("ts"))
+            quote_ts = (
+                q.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if q else None
+            )
+            quote_age_s = None
+            if q is not None and sample_ms:
+                try:
+                    quote_age_s = int(int(sample_ms) / 1000 - q.timestamp())
+                except (TypeError, ValueError):
+                    quote_age_s = None
             out.append({
-                "ts": rec.get("ts"), "ts_ms": rec.get("ts_ms"),
+                "v": ver,
+                "ts": sample_ts, "sample_ts": sample_ts, "ts_ms": sample_ms,
+                "quote_ts": quote_ts, "quote_ts_raw": (r.get("ts") or None),
+                "quote_age_s": quote_age_s,
                 "code": r.get("i"), "undl": r.get("u"), "right": r.get("r"),
                 "strike": r.get("k"), "expire": r.get("e"),
                 "spot": spots.get(r.get("u")),
                 "bid": bid, "ask": ask, "bid_sz": r.get("bs"), "ask_sz": r.get("as"),
                 "iv": r.get("iv"), "oi": r.get("oi"), "vol": r.get("vol"),
                 "mid": mid, "spread_pct": spread,
+                "mult": r.get("m"),
+                "mult_src": r.get("ms") or ("legacy" if ver < 2 else "missing"),
+                "opt_unit": r.get("ou"), "margin_unit": r.get("mu"),
                 "bids": r.get("bids"), "asks": r.get("asks"),
             })
     return out
@@ -394,7 +546,8 @@ def sample_once(cfg: dict | None = None, persist: bool = True,
     """采一次。``force=True`` 忽略交易时段与陈旧检查（页面「立即采样」调试用）。"""
     cfg = _normalize(cfg or tape_config())
     now = now_cn()
-    res: dict = {"ts": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    res: dict = {"v": SCHEMA_VERSION,
+                 "ts": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                  "ts_ms": int(now.timestamp() * 1000),
                  "cfg": {k: cfg[k] for k in ("underlyings", "expiries",
                                              "band_pct", "max_per_side")},
@@ -434,6 +587,14 @@ def sample_once(cfg: dict | None = None, persist: bool = True,
             r["r"] = m["right"]
             r["k"] = m["strike"]
     res["rows"] = [r for r in rows if "u" in r]
+
+    # v2：把合约乘数/原始合约单位/保证金快照落进每条行情行。匹配不到宁可标 missing，
+    # 也不默认 10000——510500 同一到期档并存 10000 与 10180（名义差 1.8%）。
+    units_res = load_contract_units()
+    res["mult_src"] = units_res.get("source") or ""
+    if units_res.get("error"):
+        res["mult_error"] = units_res["error"]
+    res["mult_missing"] = attach_contract_units(res["rows"], units_res.get("units") or {})
 
     if not force and not _fresh(res["rows"], now):
         res["skipped"] = "stale"
@@ -529,8 +690,11 @@ def state() -> dict:
 
 __all__ = [
     "TAPE_DIR_NAME", "DEFAULT_TAPE", "DEFAULT_INTERVAL_S", "INTERVAL_RANGE",
+    "SCHEMA_VERSION",
     "tape_config", "save_tape_config", "tape_dir", "sample_path", "load_tape",
     "tape_stats", "flatten", "in_session", "now_cn", "parse_opt_line",
+    "parse_quote_ts", "contract_unit_sources", "load_contract_units",
+    "attach_contract_units",
     "fetch_spot", "fetch_quotes", "pick_contracts", "sample_once", "sample_now",
     "sync", "stop", "state",
 ]
