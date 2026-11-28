@@ -318,7 +318,11 @@ $('btn-sample').onclick = async () => {
   $('msg').textContent = '采样中…';
   try {
     const j = await api('/config/ashare/sample', {persist: false});
-    $('msg').innerHTML = '<span class="ok">采样完成：' + j.rows + ' 条</span>';
+    const src = j.mult_src || '—';
+    const miss = (j.mult_missing === null || j.mult_missing === undefined) ? '—' : j.mult_missing;
+    $('msg').innerHTML = '<span class="ok">采样完成：' + j.rows + ' 条</span>'
+      + '　<span style="color:#8b98a8">v' + (j.v ?? '?') + ' · 乘数源 ' + src
+      + ' · 未匹配 ' + miss + (j.mult_error ? ' · ' + j.mult_error : '') + '</span>';
     renderPreview(j);
   } catch (e) { $('msg').innerHTML = '<span class="bad">' + e.message + '</span>'; }
 };
@@ -345,12 +349,16 @@ function renderPreview(j) {
   const spot = Object.entries(j.spot || {}).map(([k, v]) => `${k}=${v}`).join('　');
   let html = `<div>时间 <b>${j.ts}</b>　合约 <b>${j.picked || 0}</b> 个　现货 ${spot}</div>`;
   html += '<table><thead><tr><th class="l">合约</th><th class="l">标的</th><th>方向</th><th>行权价</th>'
-        + '<th>买一</th><th>买量</th><th>卖一</th><th>卖量</th><th>最新</th><th>IV</th><th>持仓量</th></tr></thead><tbody>';
+        + '<th>买一</th><th>买量</th><th>卖一</th><th>卖量</th><th>最新</th><th>IV</th><th>持仓量</th>'
+        + '<th>报价时间 · 陈旧</th></tr></thead><tbody>';
   rows.forEach(r => {
+    const qt = r.qt ? r.qt.slice(0, 16).replace('T', ' ') : '—';
+    const qa = (r.qa === null || r.qa === undefined) ? '' : ' · ' + r.qa + 's';
     html += `<tr><td class="l mono">${r.i}</td><td class="l">${r.u || ''}</td><td>${r.r || ''}</td>`
           + `<td>${fmtNum(r.k, 3)}</td><td>${fmtNum(r.b, 4)}</td><td>${r.bs ?? '—'}</td>`
           + `<td>${fmtNum(r.a, 4)}</td><td>${r.as ?? '—'}</td><td>${fmtNum(r.last, 4)}</td>`
-          + `<td>${fmtPct(r.iv)}</td><td>${r.oi ?? '—'}</td></tr>`;
+          + `<td>${fmtPct(r.iv)}</td><td>${r.oi ?? '—'}</td>`
+          + `<td>${qt}${qa}</td></tr>`;
   });
   html += '</tbody></table>';
   $('preview').innerHTML = html;
